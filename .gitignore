@@ -1,0 +1,9 @@
+dist/
+release/
+temp/
+__pycache__/
+*.py[cod]
+*.log
+*.zip
+*.exe
+
