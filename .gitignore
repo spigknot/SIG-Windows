@@ -1,9 +1,18 @@
-dist/
-release/
-temp/
 __pycache__/
 *.py[cod]
-*.log
+.venv/
+venv/
+build/
+dist/
+release/
 *.zip
+*.7z
 *.exe
+*.dll
+*.pyd
+*.pem
+*.key
+settings.json
+.idea/
+.vscode/
 

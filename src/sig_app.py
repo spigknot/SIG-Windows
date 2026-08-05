@@ -7,6 +7,7 @@ from collections import deque
 import html
 import http.client
 import json
+import math
 import mimetypes
 import os
 import queue
@@ -42,7 +43,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260802_014"
+APP_VERSION = "20260805_001"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -72,6 +73,8 @@ VIDEO_QUALITY_MENU_LABELS = {
     "Média": "Média",
     "Econômica": "Econômica",
 }
+# API keys are supplied by the user in Settings and are never shipped in source.
+IMEI_API_KEY = ""
 DEFAULT_SETTINGS = {
     "convert_parallel": 8,
     "transcribe_parallel": 16,
@@ -89,6 +92,7 @@ DEFAULT_SETTINGS = {
     "parts_proxy_provider": "grok",
     "grok_api_key": "",
     "deepseek_api_key": "",
+    "imei_api_key": IMEI_API_KEY,
 }
 GROK_API_NAME = "Grok STT"
 GROK_STT_URL = "https://api.x.ai/v1/stt"
@@ -98,7 +102,7 @@ LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
 GROK_TEXT_URL = "https://api.x.ai/v1/responses"
 DEEPSEEK_TEXT_URL = "https://api.deepseek.com/chat/completions"
 GROK_TEXT_NAME = "grok-4.5"
-DEEPSEEK_TEXT_NAME = "deepseek-v4-pro"
+DEEPSEEK_TEXT_NAME = "deepseek-v4-flash"
 IA_PROXY_NAME = "IA-Proxy"
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
 IA_PROXY_FALLBACK_URL = "http://avare:8500"
@@ -119,34 +123,8 @@ TAGUAI_TRANSCRIPTION_SERVER_CONTENT = (
 )
 TRANSCRIPTION_SERVER_MIGRATION_MARKER = "#sig:taguai-speech-v1"
 AVARE_PLUS_AR_MIGRATION_MARKER = "#sig:avare-plus-ar-v1"
-TEXT_MODEL_CONFIGS = {
-    "Avare-llama": {
-        "url": "http://avare:8400/api/generate",
-        "parameters": {
-            "model": "mannix/llama3.1-8b-abliterated",
-            "temperature": 0.0,
-            "max_tokens": 10000,
-            "reasoning": {"effort": "none"},
-            "seed": 1,
-        },
-    },
-    "Avare-gemma3": {
-        "url": "http://avare:8400/api/generate",
-        "parameters": {
-            "model": "gemma3:12B",
-            "temperature": 0.0,
-            "max_tokens": 10000,
-            "reasoning": {"effort": "none"},
-            "seed": 1,
-        },
-    },
-}
-DEFAULT_TEXT_MODEL_SERVER_CONTENT = "\n".join(
-    (
-        'Avare-llama\t\thttp://avare:8400/api/generate\t\t"model": "mannix/llama3.1-8b-abliterated"\t\t"temperature": 0.0\t\t"max_tokens": 10000\t\t"reasoning": {"effort": "none"}\t\t"seed": 1',
-        'Avare-gemma3\t\thttp://avare:8400/api/generate\t\t"model": "gemma3:12B"\t\t"temperature": 0.0\t\t"max_tokens": 10000\t\t"reasoning": {"effort": "none"}\t\t"seed": 1',
-    )
-) + "\n"
+TEXT_MODEL_CONFIGS = {}
+DEFAULT_TEXT_MODEL_SERVER_CONTENT = ""
 PARTS_EXTRACTION_LABELS = {
     "uppercase": "Palavras em maiúsculas",
     "name_database": "Base de nomes",
@@ -166,7 +144,6 @@ LIVE_INTERVAL_VALUES_MS = (
 )
 GROK_RECONNECT_MAX_ATTEMPTS = 8
 GROK_RECONNECT_BUFFER_MILLIS = 8000
-IMEI_API_KEY = "AC98-7B2E-E1DC-48A0-0F34-46VN"
 IMEI_HISTORY_FILE = "imei_history.txt"
 IMEI_HISTORY_COLLAPSED_LIMIT = 10
 MIME_TYPES = {
@@ -274,7 +251,15 @@ def resource_path(relative: str) -> Path:
 
 def app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        executable_dir = Path(sys.executable).resolve().parent
+        # Uma atualização antiga pode ter deixado o executável dentro de uma
+        # subpasta (por exemplo, dist/g). O diretório principal é identificado
+        # pelos recursos que o SIG precisa para funcionar.
+        runtime_markers = ("ffmpeg.exe", "ffplay.exe", "vad_deps")
+        for candidate in (executable_dir, *executable_dir.parents[:4]):
+            if any((candidate / marker).exists() for marker in runtime_markers):
+                return candidate
+        return executable_dir
     return Path(__file__).resolve().parents[1]
 
 
@@ -438,6 +423,7 @@ class MediaProfile:
     audio_rate: int
     audio_channels: int
     audio_layout: str
+    has_video: bool = True
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -552,6 +538,134 @@ class RangeTimeline(Canvas):
     def _format_time(value: float) -> str:
         total = max(0, int(value))
         return f"{total // 60}:{total % 60:02d}"
+
+
+class InsertAudioTimeline(Canvas):
+    """Timeline da inserção, dividida em ondas do áudio principal e inserido."""
+
+    def __init__(self, parent, on_seek, **kwargs):
+        super().__init__(parent, height=96, highlightthickness=0, background="#ffffff", **kwargs)
+        self.on_seek = on_seek
+        self.main_name = ""
+        self.inserted_name = ""
+        self.main_duration = 0.0
+        self.inserted_duration = 0.0
+        self.insertion = 0.0
+        self.position = 0.0
+        self.dragging = False
+        self.bind("<Configure>", lambda _event: self.draw())
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.draw()
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.main_duration + self.inserted_duration)
+
+    def configure_media(self, main_name: str, main_duration: float, inserted_name: str = "", inserted_duration: float = 0.0, insertion: float = 0.0) -> None:
+        self.main_name = main_name
+        self.inserted_name = inserted_name
+        self.main_duration = max(0.0, main_duration)
+        self.inserted_duration = max(0.0, inserted_duration)
+        self.insertion = max(0.0, min(insertion, self.main_duration))
+        self.position = max(0.0, min(self.position, self.duration))
+        self.draw()
+
+    def set_position(self, position: float) -> None:
+        self.position = max(0.0, min(position, self.duration))
+        self.draw()
+
+    def composite_to_main(self, position: float) -> float:
+        if self.inserted_duration <= 0:
+            return max(0.0, min(position, self.main_duration))
+        if position < self.insertion:
+            return max(0.0, min(position, self.main_duration))
+        if position < self.insertion + self.inserted_duration:
+            return self.insertion
+        return max(0.0, min(position - self.inserted_duration, self.main_duration))
+
+    def _left(self) -> float:
+        return 16.0
+
+    def _right(self) -> float:
+        return max(self._left() + 1.0, float(self.winfo_width() - 16))
+
+    def _x_for(self, seconds: float) -> float:
+        if self.duration <= 0:
+            return self._left()
+        return self._left() + (self._right() - self._left()) * seconds / self.duration
+
+    def _time_for(self, x: float) -> float:
+        if self.duration <= 0:
+            return 0.0
+        fraction = (x - self._left()) / max(1.0, self._right() - self._left())
+        return max(0.0, min(self.duration, fraction * self.duration))
+
+    def draw(self) -> None:
+        self.delete("all")
+        left, right = self._left(), self._right()
+        top, bottom = 12.0, max(30.0, float(self.winfo_height() - 24))
+        self.create_rectangle(left, top, right, bottom, outline="#aebbb7", width=1)
+        if self.duration <= 0:
+            self.create_text(self.winfo_width() / 2, (top + bottom) / 2, text="Selecione o áudio principal", fill="#667371", font=("Segoe UI", 9))
+            return
+        first_end = self._x_for(self.insertion)
+        inserted_end = self._x_for(self.insertion + self.inserted_duration)
+        self._draw_wave(left, first_end if self.inserted_duration else right, top + 4, bottom - 4, "#5edaf2", self._seed(self.main_name))
+        if self.inserted_duration > 0:
+            self._draw_wave(first_end, inserted_end, top + 4, bottom - 4, "#ffc24a", self._seed(self.inserted_name))
+            self._draw_wave(inserted_end, right, top + 4, bottom - 4, "#5edaf2", self._seed(self.main_name) + 7919)
+            self.create_line(first_end, top, first_end, bottom, fill="#596966", width=1)
+            self.create_line(inserted_end, top, inserted_end, bottom, fill="#596966", width=1)
+        marker = self._x_for(self.position)
+        self.create_line(marker, top - 3, marker, bottom + 3, fill="#e0a72e", width=2)
+        self.create_polygon(marker, top - 3, marker - 5, top - 10, marker + 5, top - 10, fill="#e0a72e", outline="")
+        self.create_text(left, bottom + 12, text="0:00.000", anchor="w", fill="#667371", font=("Consolas", 8))
+        self.create_text(right, bottom + 12, text=self._format_time(self.duration), anchor="e", fill="#667371", font=("Consolas", 8))
+        if self.inserted_duration > 0:
+            self.create_text((first_end + inserted_end) / 2, top + 2, text="áudio inserido", anchor="s", fill="#9a741f", font=("Segoe UI", 8))
+
+    def _draw_wave(self, left: float, right: float, top: float, bottom: float, color: str, seed: int) -> None:
+        if right - left < 2:
+            return
+        center = (top + bottom) / 2
+        count = max(2, int((right - left) / 5))
+        gap = (right - left) / count
+        value = seed or 1
+        for index in range(count):
+            value = (value * 1103515245 + 12345) & 0x7FFFFFFF
+            amplitude = (bottom - top) * (0.10 + (value % 1000) / 1000 * 0.38)
+            x = left + gap * (index + 0.5)
+            self.create_line(x, center - amplitude, x, center + amplitude, fill=color, width=2)
+
+    @staticmethod
+    def _seed(value: str) -> int:
+        return sum((index + 1) * ord(char) for index, char in enumerate(value)) or 1
+
+    @staticmethod
+    def _format_time(value: float) -> str:
+        milliseconds = max(0, int(value * 1000))
+        total, millis = divmod(milliseconds, 1000)
+        return f"{total // 60}:{total % 60:02d}.{millis:03d}"
+
+    def _press(self, event) -> None:
+        if self.duration <= 0:
+            return
+        self.dragging = True
+        self._apply_position(event.x)
+
+    def _drag(self, event) -> None:
+        if self.dragging:
+            self._apply_position(event.x)
+
+    def _release(self, _event) -> None:
+        self.dragging = False
+
+    def _apply_position(self, x: float) -> None:
+        self.position = self._time_for(x)
+        self.draw()
+        self.on_seek(self.position)
 
 
 class EmbeddedMediaPlayer:
@@ -728,6 +842,34 @@ class FfmpegToolsPanel:
         "circleopen",
         "circleclose",
     )
+    AUDIO_TRANSITIONS = (
+        ("No transition", "none"),
+        ("Fade in/out", "fade"),
+        ("Linear slope (tri)", "tri"),
+        ("Quarter sine wave (qsin)", "qsin"),
+        ("Exponential sine wave (esin)", "esin"),
+        ("Half sine wave (hsin)", "hsin"),
+        ("Logarithmic (log)", "log"),
+        ("Inverted parabola (ipar)", "ipar"),
+        ("Quadratic (qua)", "qua"),
+        ("Cubic (cub)", "cub"),
+        ("Square root (squ)", "squ"),
+        ("Cubic root (cbr)", "cbr"),
+        ("Parabola (par)", "par"),
+        ("Exponential (exp)", "exp"),
+        ("Inverted quarter sine wave (iqsin)", "iqsin"),
+        ("Inverted half sine wave (ihsin)", "ihsin"),
+        ("Double-exponential seat (dese)", "dese"),
+        ("Double-exponential sigmoid (desi)", "desi"),
+        ("Logistic sigmoid (losi)", "losi"),
+        ("Sine cardinal function (sinc)", "sinc"),
+        ("Inverted sine cardinal function (isinc)", "isinc"),
+        ("Quartic (quat)", "quat"),
+        ("Quartic root (quatr)", "quatr"),
+        ("Squared quarter sine wave (qsin2)", "qsin2"),
+        ("Squared half sine wave (hsin2)", "hsin2"),
+        ("No fade (nofade)", "nofade"),
+    )
 
     def __init__(self, parent, app: "SigApp"):
         import tkinter as tk
@@ -783,12 +925,28 @@ class FfmpegToolsPanel:
         self.rotate_parallel_var = BooleanVar(value=False)
         self.rotate_segments_var = StringVar(value="")
         self.rotate_current_var = StringVar(value="0:00")
+        self.rotate_start_var = StringVar(value="0")
+        self.rotate_end_var = StringVar(value="")
 
         self.join_inputs: list[Path] = []
         self.join_reencode_var = BooleanVar(value=False)
         self.join_smart_var = BooleanVar(value=False)
         self.join_transition_var = StringVar(value="Fade in/out")
         self.join_seconds_var = StringVar(value="0.5")
+
+        self.insert_main_input: Path | None = None
+        self.insert_secondary_input: Path | None = None
+        self.insert_main_var = StringVar(value="Selecione o áudio principal")
+        self.insert_secondary_var = StringVar(value="Nenhum áudio para inserir")
+        self.insert_current_var = StringVar(value="0:00.000")
+        self.insert_time_var = StringVar(value="0:00.000")
+        self.insert_reencode_var = BooleanVar(value=False)
+        self.insert_smart_var = BooleanVar(value=False)
+        self.insert_transition_var = StringVar(value="No transition")
+        self.insert_seconds_var = StringVar(value="0.5")
+        self.insert_preview_context: dict | None = None
+        self.insert_preview_phase_end = 0.0
+        self.insert_preview_composite_start = 0.0
 
         self.clean_input: Path | None = None
         self.clean_input_var = StringVar(value="Nenhum áudio selecionado")
@@ -874,7 +1032,8 @@ class FfmpegToolsPanel:
             ("Cortar", 15),
             ("Extrair áudio", 15),
             ("Girar vídeo", 15),
-            ("Juntar vídeos", 15),
+            ("Juntar áudios/vídeos", 20),
+            ("Inserir áudio", 15),
             ("Limpar áudio", 15),
         )
         for name, width in tab_specs:
@@ -898,12 +1057,14 @@ class FfmpegToolsPanel:
         self.extract_tab = ttk.Frame(self.tool_content, padding=12)
         self.rotate_tab = ttk.Frame(self.tool_content, padding=12)
         self.join_tab = ttk.Frame(self.tool_content, padding=12)
+        self.insert_tab = ttk.Frame(self.tool_content, padding=12)
         self.clean_tab = ttk.Frame(self.tool_content, padding=12)
         self.ffmpeg_tool_frames = {
             "Cortar": self.cut_tab,
             "Extrair áudio": self.extract_tab,
             "Girar vídeo": self.rotate_tab,
-            "Juntar vídeos": self.join_tab,
+            "Juntar áudios/vídeos": self.join_tab,
+            "Inserir áudio": self.insert_tab,
             "Limpar áudio": self.clean_tab,
         }
 
@@ -911,6 +1072,7 @@ class FfmpegToolsPanel:
         self._build_extract_tab()
         self._build_rotate_tab()
         self._build_join_tab()
+        self._build_insert_tab()
         self._build_clean_tab()
         self._select_ffmpeg_tool("Cortar")
 
@@ -1056,7 +1218,7 @@ class FfmpegToolsPanel:
         extract_end_entry.bind("<FocusOut>", lambda _event: self._sync_extract_range_from_entries())
 
     def _build_rotate_tab(self) -> None:
-        self._section_title(self.rotate_tab, "Girar vídeo", "Gira a imagem, aplica espelhamento opcional e preserva o áudio. A opção de metadados evita reencodar.")
+        self._section_title(self.rotate_tab, "Girar e cortar vídeo", "Gira a imagem, permite recortar o intervalo e preserva o áudio. A opção de metadados evita reencodar a imagem.")
         self._file_row(self.rotate_tab, self.rotate_input_var, self.select_rotate_input, "Selecionar vídeo")
         self.rotate_preview = self._create_stable_preview(self.rotate_tab, "Selecione um vídeo para visualizar")
         self.rotate_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.rotate_preview))
@@ -1068,6 +1230,16 @@ class FfmpegToolsPanel:
         self.rotate_play_button.pack(side=LEFT)
         self._add_preview_speed_controls(rotate_playback)
         ttk.Label(rotate_playback, textvariable=self.rotate_current_var, style="Muted.TLabel").pack(side=LEFT, padx=(10, 0))
+        trim = ttk.Frame(self.rotate_tab)
+        trim.pack(anchor="w", pady=(0, 10))
+        ttk.Label(trim, text="Início (segundos):").grid(row=0, column=0, sticky="w")
+        rotate_start_entry = ttk.Entry(trim, textvariable=self.rotate_start_var, width=12)
+        rotate_start_entry.grid(row=0, column=1, padx=(6, 18))
+        ttk.Label(trim, text="Fim (segundos):").grid(row=0, column=2, sticky="w")
+        rotate_end_entry = ttk.Entry(trim, textvariable=self.rotate_end_var, width=12)
+        rotate_end_entry.grid(row=0, column=3, padx=(6, 0))
+        rotate_start_entry.bind("<FocusOut>", lambda _event: self._sync_rotate_range_from_entries())
+        rotate_end_entry.bind("<FocusOut>", lambda _event: self._sync_rotate_range_from_entries())
         row = ttk.Frame(self.rotate_tab)
         row.pack(anchor="w")
         ttk.Label(row, text="Giro:").pack(side=LEFT)
@@ -1114,10 +1286,10 @@ class FfmpegToolsPanel:
         self._update_rotate_control_state()
 
     def _build_join_tab(self) -> None:
-        self._section_title(self.join_tab, "Juntar vídeos", "Smart Join tenta a junção sem perda quando não há transição. As transições normalizam os vídeos para uma saída consistente.")
+        self._section_title(self.join_tab, "Juntar áudios/vídeos", "Junta arquivos do mesmo tipo. Smart Join preserva trechos compatíveis; as transições geram uma saída consistente.")
         controls = ttk.Frame(self.join_tab)
         controls.pack(fill=X)
-        ttk.Button(controls, text="Adicionar vídeos", command=self.add_join_inputs).pack(side=LEFT)
+        ttk.Button(controls, text="Adicionar áudios/vídeos", command=self.add_join_inputs).pack(side=LEFT)
         ttk.Button(controls, text="Remover", command=self.remove_join_input).pack(side=LEFT, padx=(8, 0))
         ttk.Button(controls, text="Subir", command=lambda: self.move_join_input(-1)).pack(side=LEFT, padx=(8, 0))
         ttk.Button(controls, text="Descer", command=lambda: self.move_join_input(1)).pack(side=LEFT, padx=(8, 0))
@@ -1154,6 +1326,80 @@ class FfmpegToolsPanel:
         self.join_seconds_entry.grid(row=0, column=3, padx=(6, 0))
         self._update_join_controls()
 
+    def _build_insert_tab(self) -> None:
+        self._section_title(
+            self.insert_tab,
+            "Inserir áudio",
+            "Insere um segundo áudio no ponto escolhido do áudio principal. Smart Insert preserva o máximo possível do áudio original; Reencodar libera transições e cortes precisos.",
+        )
+        select_row = ttk.Frame(self.insert_tab)
+        select_row.pack(anchor="w", pady=(0, 6))
+        self.insert_main_button = ttk.Button(select_row, text="+ Áudio principal", command=self.select_insert_main_input)
+        self.insert_main_button.pack(side=LEFT)
+        self.insert_secondary_button = ttk.Button(select_row, text="+ Inserir áudio", command=self.select_insert_secondary_input, state="disabled")
+        self.insert_secondary_button.pack(side=LEFT, padx=(10, 0))
+        names = ttk.Frame(self.insert_tab)
+        names.pack(fill=X, pady=(0, 8))
+        ttk.Label(names, textvariable=self.insert_main_var, style="Muted.TLabel", wraplength=780).pack(anchor="w")
+        self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=780)
+        self.insert_secondary_label.pack(anchor="w", pady=(2, 0))
+
+        self.insert_timeline = InsertAudioTimeline(self.insert_tab, self._insert_timeline_changed)
+        self.insert_timeline.pack(fill=X, pady=(2, 4))
+        playback = ttk.Frame(self.insert_tab)
+        playback.pack(anchor="w", pady=(0, 8))
+        self.insert_play_button = ttk.Button(playback, text=">", width=3, command=self._toggle_preview)
+        self.insert_play_button.pack(side=LEFT)
+        self._add_preview_speed_controls(playback)
+        ttk.Label(playback, textvariable=self.insert_current_var, style="Muted.TLabel").pack(side=LEFT, padx=(10, 0))
+
+        time_row = ttk.Frame(self.insert_tab)
+        time_row.pack(anchor="w", pady=(0, 8))
+        ttk.Label(time_row, text="Ponto de inserção no áudio principal:").pack(side=LEFT)
+        self.insert_time_entry = ttk.Entry(time_row, textvariable=self.insert_time_var, width=14)
+        self.insert_time_entry.pack(side=LEFT, padx=(8, 0))
+        self.insert_time_entry.bind("<FocusOut>", lambda _event: self._apply_insert_time())
+        self.insert_time_entry.bind("<Return>", lambda _event: self._apply_insert_time())
+
+        self.insert_options_frame = ttk.Frame(self.insert_tab)
+        self.insert_options_frame.pack(anchor="w", pady=(4, 0))
+        transition_row = ttk.Frame(self.insert_options_frame)
+        transition_row.pack(anchor="w")
+        ttk.Label(transition_row, text="Transição:").pack(side=LEFT)
+        self.insert_transition_combo = ttk.Combobox(
+            transition_row,
+            textvariable=self.insert_transition_var,
+            values=tuple(label for label, _value in self.AUDIO_TRANSITIONS),
+            state="disabled",
+            width=30,
+        )
+        self.insert_transition_combo.pack(side=LEFT, padx=(6, 12))
+        ttk.Label(transition_row, text="Tempo (s):").pack(side=LEFT)
+        self.insert_seconds_entry = ttk.Entry(transition_row, textvariable=self.insert_seconds_var, width=7, state="disabled")
+        self.insert_seconds_entry.pack(side=LEFT, padx=(6, 0))
+        checks = ttk.Frame(self.insert_options_frame)
+        checks.pack(anchor="w", pady=(8, 0))
+        self.insert_reencode_check = ttk.Checkbutton(
+            checks,
+            text="Reencodar",
+            variable=self.insert_reencode_var,
+            command=self._update_insert_controls,
+        )
+        self.insert_reencode_check.pack(side=LEFT)
+        self.insert_smart_check = ttk.Checkbutton(
+            checks,
+            text="Smart Insert",
+            variable=self.insert_smart_var,
+            command=self._enable_insert_smart,
+        )
+        self.insert_smart_check.pack(side=LEFT, padx=(18, 0))
+        ttk.Label(
+            self.insert_options_frame,
+            text="Sem reencodar, a operação tenta manter os codecs originais e não aplica transições.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(8, 0))
+        self.insert_options_frame.pack_forget()
+
     def _build_clean_tab(self) -> None:
         self._section_title(self.clean_tab, "Limpar áudio", "Gera WAV mono, 16 kHz e 16-bit. Equilibrado usa afftdn; Forte usa anlmdn.")
         self._file_row(self.clean_tab, self.clean_input_var, self.select_clean_input)
@@ -1179,7 +1425,7 @@ class FfmpegToolsPanel:
         self._refresh_encoder_control_state()
 
     def _refresh_encoder_control_state(self) -> None:
-        uses_video_encoder = self.active_tool_var.get() in {"Cortar", "Girar vídeo", "Juntar vídeos"}
+        uses_video_encoder = self.active_tool_var.get() in {"Cortar", "Girar vídeo", "Juntar áudios/vídeos"}
         has_encoder = bool(self.available_accelerations)
         if not uses_video_encoder or not has_encoder:
             self.acceleration_combo.configure(state="disabled")
@@ -1268,6 +1514,28 @@ class FfmpegToolsPanel:
         else:
             self.join_transition_combo.configure(values=self.TRANSITIONS)
 
+    def _update_insert_controls(self) -> None:
+        enabled = bool(self.insert_reencode_var.get()) and not self.running and self.insert_secondary_input is not None
+        self.insert_smart_check.configure(state="normal" if self.insert_reencode_var.get() and not self.running else "disabled")
+        self.insert_transition_combo.configure(state="readonly" if enabled else "disabled")
+        self.insert_seconds_entry.configure(state="normal" if enabled else "disabled")
+        if not self.insert_reencode_var.get():
+            self.insert_smart_var.set(False)
+            self.insert_transition_var.set("No transition")
+
+    def _enable_insert_smart(self) -> None:
+        if self.insert_smart_var.get():
+            self.insert_reencode_var.set(True)
+        self._update_insert_controls()
+
+    def _show_insert_options(self, visible: bool) -> None:
+        if visible:
+            if not self.insert_options_frame.winfo_ismapped():
+                self.insert_options_frame.pack(anchor="w", pady=(4, 0))
+        else:
+            self.insert_options_frame.pack_forget()
+        self._update_insert_controls()
+
     @staticmethod
     def _clock(seconds: float) -> str:
         milliseconds = max(0, int(seconds * 1000))
@@ -1324,6 +1592,9 @@ class FfmpegToolsPanel:
         context = self.preview_context
         if not context or context["duration"] <= 0:
             return
+        if context.get("tool") == "insert_audio":
+            self._toggle_insert_preview()
+            return
         if self.preview_playing:
             self.preview_player.pause()
             self._terminate_preview_process(self.external_preview_process)
@@ -1353,6 +1624,118 @@ class FfmpegToolsPanel:
             self.preview_playing = True
             context["button"].configure(text="||")
             self._preview_tick()
+
+    def _toggle_insert_preview(self) -> None:
+        context = self.preview_context
+        if not context or not self.insert_main_input:
+            return
+        if self.preview_playing:
+            self.preview_generation += 1
+            if self.preview_after_id:
+                try:
+                    self.root.after_cancel(self.preview_after_id)
+                except Exception:
+                    pass
+                self.preview_after_id = None
+            self._terminate_preview_process(self.external_preview_process)
+            self.external_preview_process = None
+            self.preview_playing = False
+            context["button"].configure(text=">")
+            return
+        position = max(0.0, min(self.insert_timeline.position, self.insert_timeline.duration))
+        if position >= self.insert_timeline.duration - 0.01:
+            position = 0.0
+            self.insert_timeline.set_position(position)
+        self._start_insert_preview_segment(context, position)
+
+    def _start_insert_preview_segment(self, context: dict, composite_position: float) -> None:
+        self.preview_generation += 1
+        generation = self.preview_generation
+        self._terminate_preview_process(self.external_preview_process)
+        self.external_preview_process = None
+        timeline = self.insert_timeline
+        inserted_duration = timeline.inserted_duration
+        insertion = timeline.insertion
+        total = timeline.duration
+        inserted = self.insert_secondary_input
+        if inserted and inserted_duration > 0 and composite_position < insertion:
+            source = self.insert_main_input
+            source_offset = composite_position
+            phase_end = insertion
+        elif inserted and inserted_duration > 0 and composite_position < insertion + inserted_duration:
+            source = inserted
+            source_offset = composite_position - insertion
+            phase_end = insertion + inserted_duration
+        else:
+            source = self.insert_main_input
+            source_offset = composite_position - inserted_duration if inserted and composite_position >= insertion + inserted_duration else composite_position
+            phase_end = total
+        remaining = max(0.02, (phase_end - composite_position) / max(0.01, self.preview_speed))
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            self.external_preview_process = subprocess.Popen(
+                [
+                    str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
+                    "-ss", self._fmt_seconds(max(0.0, source_offset)), "-t", self._fmt_seconds(remaining),
+                    "-af", f"atempo={self.preview_speed}", str(source),
+                ],
+                creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+            )
+        except Exception as exc:
+            messagebox.showerror("sig", f"Não foi possível reproduzir a inserção:\n{exc}")
+            return
+        self.insert_preview_composite_start = composite_position
+        self.insert_preview_phase_end = phase_end
+        self.external_preview_started_at = time.monotonic()
+        self.preview_playing = True
+        context["button"].configure(text="||")
+        self._insert_preview_tick(context, generation)
+
+    def _insert_preview_tick(self, context: dict, generation: int) -> None:
+        if (
+            not self.preview_playing
+            or context is not self.preview_context
+            or generation != self.preview_generation
+        ):
+            return
+        elapsed = (time.monotonic() - self.external_preview_started_at) * self.preview_speed
+        position = min(self.insert_preview_phase_end, self.insert_preview_composite_start + elapsed)
+        self.insert_timeline.set_position(position)
+        main_position = self.insert_timeline.composite_to_main(position)
+        context["current_var"].set(self._clock(main_position))
+        context["timeline"].set_position(position)
+        process = self.external_preview_process
+        if process is not None and process.poll() is not None:
+            if position < self.insert_timeline.duration - 0.03:
+                self._start_insert_preview_segment(context, position)
+                return
+            self._finish_insert_preview(context)
+            return
+        if position >= self.insert_preview_phase_end - 0.03:
+            if position < self.insert_timeline.duration - 0.03:
+                self._start_insert_preview_segment(context, position)
+            else:
+                self._finish_insert_preview(context)
+            return
+        self.preview_after_id = self.root.after(60, lambda: self._insert_preview_tick(context, generation))
+
+    def _finish_insert_preview(self, context: dict) -> None:
+        self._terminate_preview_process(self.external_preview_process)
+        self.external_preview_process = None
+        self.preview_playing = False
+        self.insert_timeline.set_position(self.insert_timeline.duration)
+        context["current_var"].set(self._clock(self.insert_timeline.composite_to_main(self.insert_timeline.duration)))
+        context["button"].configure(text=">")
+
+    def _jump_to_insert_preview_position(self, composite_position: float) -> None:
+        if not self.preview_context or self.preview_context.get("tool") != "insert_audio":
+            return
+        self.insert_timeline.set_position(composite_position)
+        main_position = self.insert_timeline.composite_to_main(composite_position)
+        self.insert_current_var.set(self._clock(main_position))
+        self.insert_time_var.set(self._clock(main_position))
+        if self.preview_playing:
+            self._start_insert_preview_segment(self.preview_context, composite_position)
 
     def _preview_tick(self) -> None:
         context = self.preview_context
@@ -1625,8 +2008,12 @@ class FfmpegToolsPanel:
             self.extract_end_var.set(self._fmt_seconds(seconds))
         self._timeline_changed(target, seconds, self.extract_current_var)
 
-    def _rotate_timeline_changed(self, _target: str, seconds: float) -> None:
-        self._timeline_changed("position", seconds, self.rotate_current_var)
+    def _rotate_timeline_changed(self, target: str, seconds: float) -> None:
+        if target == "start":
+            self.rotate_start_var.set(self._fmt_seconds(seconds))
+        elif target == "end":
+            self.rotate_end_var.set(self._fmt_seconds(seconds))
+        self._timeline_changed(target, seconds, self.rotate_current_var)
         if not self.preview_player.opened and self.rotate_input:
             self._show_video_thumbnail(self.rotate_preview, self.rotate_input, seconds, self._rotate_preview_filter())
 
@@ -1649,6 +2036,17 @@ class FfmpegToolsPanel:
             end = self._seconds(self.extract_end_var.get(), "Fim", True)
             if start is not None and end is not None and end > start:
                 self.extract_timeline.set_range(start, end)
+        except RuntimeError:
+            pass
+
+    def _sync_rotate_range_from_entries(self) -> None:
+        if self.rotate_timeline.duration <= 0:
+            return
+        try:
+            start = self._seconds(self.rotate_start_var.get(), "Início") or 0.0
+            end = self._seconds(self.rotate_end_var.get(), "Fim")
+            if end is not None and end > start:
+                self.rotate_timeline.set_range(start, end)
         except RuntimeError:
             pass
 
@@ -1743,6 +2141,8 @@ class FfmpegToolsPanel:
             self.rotate_input = Path(selected)
             self.rotate_input_var.set(self.rotate_input.name)
             self._activate_preview(self.rotate_input, self.rotate_preview, self.rotate_timeline, self.rotate_current_var, self.rotate_play_button, "rotate")
+            self.rotate_start_var.set("0")
+            self.rotate_end_var.set(self._fmt_seconds(self.rotate_timeline.duration))
 
     def select_clean_input(self) -> None:
         selected = filedialog.askopenfilename(title="Selecionar áudio", filetypes=self._filetypes())
@@ -1750,8 +2150,119 @@ class FfmpegToolsPanel:
             self.clean_input = Path(selected)
             self.clean_input_var.set(self.clean_input.name)
 
+    def select_insert_main_input(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Selecionar áudio principal",
+            filetypes=[("Áudios", "*.wav *.mp3 *.m4a *.ogg *.opus *.flac *.aac *.wma"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        source = Path(selected)
+        media = self._probe_media(source)
+        if not media.has_audio:
+            messagebox.showerror("sig", "O arquivo selecionado não contém uma faixa de áudio.")
+            return
+        self._stop_preview()
+        self.insert_main_input = source
+        self.insert_secondary_input = None
+        self.insert_main_var.set(source.name)
+        self.insert_secondary_var.set("Nenhum áudio para inserir")
+        self.insert_timeline.configure_media(source.name, media.duration)
+        self.insert_timeline.configure(state="normal")
+        self.insert_current_var.set(self._clock(0.0))
+        self.insert_time_var.set(self._clock(0.0))
+        self.insert_secondary_button.configure(state="normal")
+        self._show_insert_options(False)
+        self._set_insert_preview_context()
+
+    def select_insert_secondary_input(self) -> None:
+        if not self.insert_main_input:
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecionar áudio para inserir",
+            filetypes=[("Áudios", "*.wav *.mp3 *.m4a *.ogg *.opus *.flac *.aac *.wma"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        source = Path(selected)
+        media = self._probe_media(source)
+        if not media.has_audio:
+            messagebox.showerror("sig", "O arquivo selecionado não contém uma faixa de áudio.")
+            return
+        insertion = self.insert_timeline.composite_to_main(self.insert_timeline.position)
+        self._stop_preview()
+        self.insert_secondary_input = source
+        self.insert_secondary_var.set(f"Inserir: {source.name}")
+        main_media = self._probe_media(self.insert_main_input)
+        self.insert_timeline.configure_media(source.name, main_media.duration, source.name, media.duration, insertion)
+        self.insert_timeline.set_position(insertion)
+        self.insert_current_var.set(self._clock(insertion))
+        self.insert_time_var.set(self._clock(insertion))
+        self._show_insert_options(True)
+        self._set_insert_preview_context()
+
+    def _set_insert_preview_context(self) -> None:
+        if not self.insert_main_input:
+            self.preview_context = None
+            return
+        self.preview_context = {
+            "source": self.insert_main_input,
+            "main_source": self.insert_main_input,
+            "inserted_source": self.insert_secondary_input,
+            "timeline": self.insert_timeline,
+            "current_var": self.insert_current_var,
+            "button": self.insert_play_button,
+            "duration": self.insert_timeline.duration,
+            "audio_only": True,
+            "tool": "insert_audio",
+            "insertion": self.insert_timeline.insertion,
+            "inserted_duration": self.insert_timeline.inserted_duration,
+        }
+
+    def _insert_timeline_changed(self, composite_position: float) -> None:
+        if not self.preview_context or self.preview_context.get("tool") != "insert_audio":
+            return
+        main_position = self.insert_timeline.composite_to_main(composite_position)
+        self.insert_current_var.set(self._clock(main_position))
+        self.insert_time_var.set(self._clock(main_position))
+        if self.preview_playing:
+            self._jump_to_insert_preview_position(composite_position)
+
+    def _apply_insert_time(self) -> None:
+        if not self.insert_main_input:
+            return
+        raw = self.insert_time_var.get().strip().replace(",", ".")
+        try:
+            parts = raw.split(":")
+            if len(parts) == 1:
+                seconds = float(parts[0])
+            elif len(parts) == 2:
+                seconds = float(parts[0]) * 60 + float(parts[1])
+            elif len(parts) == 3:
+                seconds = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+            else:
+                raise ValueError
+        except ValueError as exc:
+            self.insert_time_var.set(self._clock(self.insert_timeline.composite_to_main(self.insert_timeline.position)))
+            messagebox.showerror("sig", "O ponto de inserção deve ser um número ou um tempo no formato HH:MM:SS.mmm")
+            return
+        main_position = max(0.0, min(seconds, self.insert_timeline.main_duration))
+        self.insert_timeline.configure_media(
+            self.insert_main_input.name,
+            self.insert_timeline.main_duration,
+            self.insert_secondary_input.name if self.insert_secondary_input else "",
+            self.insert_timeline.inserted_duration,
+            main_position,
+        )
+        self.insert_timeline.set_position(main_position)
+        self.insert_current_var.set(self._clock(main_position))
+        self.insert_time_var.set(self._clock(main_position))
+        self._set_insert_preview_context()
+        if self.preview_playing:
+            self._jump_to_insert_preview_position(main_position)
+
     def add_join_inputs(self) -> None:
-        selected = filedialog.askopenfilenames(title="Selecionar vídeos", filetypes=[("Vídeos", "*.mp4 *.mov *.mkv *.avi *.webm"), ("Todos os arquivos", "*.*")])
+        selected = filedialog.askopenfilenames(title="Selecionar áudios ou vídeos", filetypes=self._filetypes())
         if selected:
             self.join_inputs.extend(Path(item) for item in selected)
             self._refresh_join_list()
@@ -1800,6 +2311,10 @@ class FfmpegToolsPanel:
         self.running = running
         self.run_button.configure(state="disabled" if running else "normal")
         self.cancel_button.configure(state="normal" if running else "disabled")
+        if hasattr(self, "insert_main_button"):
+            self.insert_main_button.configure(state="disabled" if running else "normal")
+            self.insert_secondary_button.configure(state="disabled" if running or not self.insert_main_input else "normal")
+            self._update_insert_controls()
 
     def _append_log(self, message: str) -> None:
         # Diagnóstico completo continua salvo nos arquivos de erro; a UI usa apenas etapas.
@@ -1827,7 +2342,8 @@ class FfmpegToolsPanel:
             "Cortar": self._cut_worker,
             "Extrair áudio": self._extract_worker,
             "Girar vídeo": self._rotate_worker,
-            "Juntar vídeos": self._join_worker,
+            "Juntar áudios/vídeos": self._join_worker,
+            "Inserir áudio": self._insert_worker,
             "Limpar áudio": self._clean_worker,
         }
         worker = workers.get(tool)
@@ -2375,10 +2891,22 @@ class FfmpegToolsPanel:
             degrees = int(self.rotate_degrees_var.get())
         except ValueError as exc:
             raise RuntimeError("Selecione um giro válido") from exc
-        output = self._safe_output(self.output_dir, f"{source.stem}_girado", ".mp4")
+        media = self._probe_media(source)
+        start = self._seconds(self.rotate_start_var.get(), "Início") or 0.0
+        end = self._seconds(self.rotate_end_var.get(), "Fim")
+        if end is None:
+            end = media.duration
+        if start < 0 or end <= start or (media.duration > 0 and end > media.duration + 0.05):
+            raise RuntimeError("O intervalo de recorte é inválido")
+        has_trim = start > 0.001 or (media.duration > 0 and end < media.duration - 0.05)
+        trim_duration = end - start
+        suffix = f"{source.stem}_girado_cortado" if has_trim else f"{source.stem}_girado"
+        output = self._safe_output(self.output_dir, suffix, ".mp4")
+        seek_args = ["-ss", self._fmt_seconds(start)] if has_trim else []
+        duration_args = ["-t", self._fmt_seconds(trim_duration)] if has_trim else []
         if self.rotate_metadata_var.get():
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={degrees % 360}", str(output)]
-            self._execute(command, "Atualizando metadados de rotação", 1, 1)
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={degrees % 360}", str(output)]
+            self._execute(command, "Cortando e atualizando rotação" if has_trim else "Atualizando metadados de rotação", 1, 1, trim_duration)
             return
         filters: list[str] = []
         if degrees == -90:
@@ -2392,13 +2920,12 @@ class FfmpegToolsPanel:
         if self.rotate_vflip_var.get():
             filters.append("vflip")
         if not filters:
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-c", "copy", str(output)]
-            self._execute(command, "Copiando vídeo", 1, 1)
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-c", "copy", str(output)]
+            self._execute(command, "Cortando vídeo" if has_trim else "Copiando vídeo", 1, 1, trim_duration)
             return
         filter_text = ",".join(filters)
 
-        media = self._probe_media(source)
-        duration = media.duration
+        duration = trim_duration
         requested_segments: int | None = None
         requested_text = self.rotate_segments_var.get().strip()
         if requested_text:
@@ -2408,7 +2935,7 @@ class FfmpegToolsPanel:
                 raise RuntimeError("Trechos deve ser um número inteiro positivo ou ficar vazio") from exc
             if requested_segments < 1:
                 raise RuntimeError("Trechos deve ser maior que zero")
-        if self.rotate_parallel_var.get() and duration >= 6:
+        if self.rotate_parallel_var.get() and not has_trim and duration >= 6:
             keyframes = [value for value in self._extract_keyframes(source) if 0.1 < value < duration - 0.1]
             if keyframes:
                 try:
@@ -2420,8 +2947,8 @@ class FfmpegToolsPanel:
                     self._append_log(f"Giro paralelo não concluiu ({exc}); repetindo em um único processo.")
         def build(profile):
             input_args, filter_args = self._filter_for_profile(filter_text, profile)
-            return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, "-i", str(source), "-map", "0:v:0", "-map", "0:a?", *filter_args, *self._video_args(profile, media.video_bitrate), "-c:a", "copy", "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart", str(output)]
-        self._execute_video("Girando vídeo", build)
+            return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, *seek_args, "-i", str(source), *duration_args, "-map", "0:v:0", "-map", "0:a?", *filter_args, *self._video_args(profile, media.video_bitrate), "-c:a", "copy", "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart", str(output)]
+        self._execute_video("Girando e cortando vídeo" if has_trim else "Girando vídeo", build, duration_seconds=trim_duration)
 
     def _rotate_video_parallel(
         self,
@@ -2565,13 +3092,79 @@ class FfmpegToolsPanel:
         return MediaProfile(
             duration, bool(audio_line), width - width % 2, height - height % 2, fps,
             video_bitrate, audio_bitrate, audio_rate, audio_channels, audio_layout,
+            bool(video_line),
         )
+
+    def _join_audio_worker(self, clips: list[MediaProfile]) -> None:
+        try:
+            transition_seconds = float(self.join_seconds_var.get().replace(",", "."))
+        except ValueError as exc:
+            raise RuntimeError("Tempo de transição inválido") from exc
+        if transition_seconds < 0:
+            raise RuntimeError("Tempo de transição não pode ser negativo")
+
+        copy_only = not self.join_reencode_var.get() or (self.join_smart_var.get() and transition_seconds == 0)
+        if copy_only:
+            extension = self.join_inputs[0].suffix.lower() or ".m4a"
+            output = self._safe_output(self.output_dir, "audios_juntos", extension)
+            list_file = self.output_dir / f"join_audio_{uuid.uuid4().hex}.txt"
+            list_file.write_text(
+                "\n".join(f"file '{str(path.resolve()).replace(chr(92), '/')}'" for path in self.join_inputs),
+                encoding="utf-8",
+            )
+            try:
+                command = [
+                    str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(list_file), "-c", "copy", str(output),
+                ]
+                self._execute(command, "Juntando áudios sem reencodar", 1, 1, sum(item.duration for item in clips))
+                return
+            finally:
+                list_file.unlink(missing_ok=True)
+
+        shortest = min(item.duration for item in clips)
+        transition_seconds = min(transition_seconds, max(0.0, shortest - 0.05))
+        output = self._safe_output(self.output_dir, "audios_juntos", ".m4a")
+        command = [str(self._ffmpeg()), "-hide_banner", "-y"]
+        for path in self.join_inputs:
+            command += ["-i", str(path)]
+        if transition_seconds > 0:
+            filters: list[str] = []
+            previous = "0:a"
+            for index in range(1, len(self.join_inputs)):
+                output_label = f"a{index}out"
+                filters.append(
+                    f"[{previous}][{index}:a]acrossfade=d={self._fmt_seconds(transition_seconds)}"
+                    f":c1=tri:c2=tri[{output_label}]"
+                )
+                previous = output_label
+            filter_text = ";".join(filters)
+            command += ["-filter_complex", filter_text, "-map", f"[{previous}]"]
+        else:
+            inputs = "".join(f"[{index}:a]" for index in range(len(self.join_inputs)))
+            command += [
+                "-filter_complex", f"{inputs}concat=n={len(self.join_inputs)}:v=0:a=1[aout]",
+                "-map", "[aout]",
+            ]
+        first = clips[0]
+        command += [
+            "-c:a", "aac", "-b:a", first.audio_bitrate, "-ar", str(first.audio_rate),
+            "-ac", str(first.audio_channels), "-movflags", "+faststart", str(output),
+        ]
+        total_duration = sum(item.duration for item in clips) - transition_seconds * (len(clips) - 1)
+        self._execute(command, "Aplicando transições e juntando áudios", 1, 1, max(0.1, total_duration))
 
     def _join_worker(self) -> None:
         if len(self.join_inputs) < 2:
-            raise RuntimeError("Selecione pelo menos dois vídeos")
+            raise RuntimeError("Selecione pelo menos dois áudios ou vídeos")
         if any(not path.exists() for path in self.join_inputs):
-            raise RuntimeError("Um dos vídeos selecionados não foi encontrado")
+            raise RuntimeError("Uma das mídias selecionadas não foi encontrada")
+        clips = [self._probe_media(path) for path in self.join_inputs]
+        if all(not item.has_video and item.has_audio for item in clips):
+            self._join_audio_worker(clips)
+            return
+        if any(not item.has_video for item in clips):
+            raise RuntimeError("Junte somente áudios ou somente vídeos na mesma tarefa")
         output = self._safe_output(self.output_dir, "videos_juntos", ".mp4")
         if not self.join_reencode_var.get():
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
@@ -2610,7 +3203,6 @@ class FfmpegToolsPanel:
                 return
             finally:
                 list_file.unlink(missing_ok=True)
-        clips = [self._probe_media(path) for path in self.join_inputs]
         if any(duration <= 0 for duration, *_rest in clips):
             raise RuntimeError("Não consegui identificar a duração de um dos vídeos")
         shortest = min(duration for duration, *_rest in clips)
@@ -2972,6 +3564,218 @@ class FfmpegToolsPanel:
         parts.append(f"[{last_video}]copy[vout]")
         parts.append(f"[{last_audio}]acopy[aout]")
         return ";".join(parts)
+
+    def _insert_worker(self) -> None:
+        main = self.insert_main_input
+        inserted = self.insert_secondary_input
+        if not main or not main.exists():
+            raise RuntimeError("Selecione o áudio principal")
+        if not inserted or not inserted.exists():
+            raise RuntimeError("Selecione o áudio que será inserido")
+        main_profile = self._probe_media(main)
+        inserted_profile = self._probe_media(inserted)
+        if not main_profile.has_audio or not inserted_profile.has_audio:
+            raise RuntimeError("Os dois arquivos precisam conter áudio")
+        insertion = max(0.0, min(self.insert_timeline.insertion, main_profile.duration))
+        transition_code = dict(self.AUDIO_TRANSITIONS).get(self.insert_transition_var.get(), "none")
+        try:
+            transition_seconds = float(self.insert_seconds_var.get().replace(",", "."))
+        except ValueError as exc:
+            raise RuntimeError("Tempo de transição inválido") from exc
+        if transition_seconds < 0:
+            raise RuntimeError("Tempo de transição não pode ser negativo")
+
+        full_reencode = self.insert_reencode_var.get() and (
+            not self.insert_smart_var.get() or transition_code != "none"
+        )
+        extension = ".m4a" if full_reencode else (main.suffix.lower() if main.suffix.lower() in AUDIO_EXTENSIONS else ".m4a")
+        output = self._safe_output(self.output_dir, f"{main.stem}_com_audio", extension)
+        total_duration = main_profile.duration + inserted_profile.duration
+        mode = "Reencodificação com transição" if full_reencode else ("Smart Insert" if self.insert_smart_var.get() else "Sem reencodar")
+        self._set_status(f"Inserindo áudio ({mode})", 0)
+        self._append_log(
+            f"Inserção: ponto {self._clock(insertion)}, áudio principal {main_profile.audio_rate} Hz/"
+            f"{main_profile.audio_channels} canal(is), inserido {inserted_profile.audio_rate} Hz/"
+            f"{inserted_profile.audio_channels} canal(is)."
+        )
+        if full_reencode:
+            command = self._insert_full_reencode_arguments(
+                main, inserted, output, main_profile, insertion, transition_seconds, transition_code
+            )
+            self._execute(command, "Inserindo áudio com reencodificação", 1, 1, total_duration)
+            return
+        if self.insert_smart_var.get():
+            self._insert_smart_worker(main, inserted, output, main_profile, insertion, total_duration)
+            return
+        self._insert_copy_worker(main, inserted, output, insertion, total_duration)
+
+    def _insert_copy_worker(self, main: Path, inserted: Path, output: Path, insertion: float, total_duration: float) -> None:
+        work_dir = self.output_dir / f"insert_copy_{uuid.uuid4().hex}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        extension = output.suffix or ".m4a"
+        pieces: list[Path] = []
+        try:
+            if insertion > 0.001:
+                left = work_dir / f"000{extension}"
+                self._execute(
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
+                    "Preparando trecho inicial",
+                    1,
+                    4,
+                    insertion,
+                )
+                pieces.append(left)
+            middle = work_dir / f"{len(pieces):03d}{extension}"
+            self._execute(
+                [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(middle)],
+                "Preparando áudio inserido",
+                2 if insertion > 0.001 else 1,
+                4,
+                self._get_duration_only(inserted),
+            )
+            pieces.append(middle)
+            main_duration = self._get_duration_only(main)
+            if insertion < main_duration - 0.001:
+                right = work_dir / f"{len(pieces):03d}{extension}"
+                self._execute(
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(right)],
+                    "Preparando trecho final",
+                    3,
+                    4,
+                    max(0.1, main_duration - insertion),
+                )
+                pieces.append(right)
+            self._concat_insert_pieces(pieces, output, "Juntando áudio inserido", 4, 4, total_duration)
+        finally:
+            for path in work_dir.glob("*"):
+                path.unlink(missing_ok=True)
+            work_dir.rmdir()
+
+    def _insert_smart_worker(self, main: Path, inserted: Path, output: Path, profile: MediaProfile, insertion: float, total_duration: float) -> None:
+        work_dir = self.output_dir / f"smart_insert_{uuid.uuid4().hex}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        extension = output.suffix or ".m4a"
+        pieces: list[Path] = []
+        try:
+            step = 0
+            if insertion > 0.001:
+                step += 1
+                left = work_dir / f"{len(pieces):03d}{extension}"
+                self._execute(
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
+                    "Smart Insert: trecho inicial",
+                    step,
+                    4,
+                    insertion,
+                )
+                pieces.append(left)
+            step += 1
+            middle = work_dir / f"{len(pieces):03d}{extension}"
+            self._execute(
+                [
+                    str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0",
+                    "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
+                    *self._audio_codec_args(extension, profile.audio_bitrate), str(middle),
+                ],
+                "Smart Insert: compatibilizando áudio inserido",
+                step,
+                4,
+                self._get_duration_only(inserted),
+            )
+            pieces.append(middle)
+            main_duration = self._get_duration_only(main)
+            if insertion < main_duration - 0.001:
+                step += 1
+                right = work_dir / f"{len(pieces):03d}{extension}"
+                self._execute(
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(right)],
+                    "Smart Insert: trecho final",
+                    step,
+                    4,
+                    max(0.1, main_duration - insertion),
+                )
+                pieces.append(right)
+            self._concat_insert_pieces(pieces, output, "Smart Insert: juntando áudio", 4, 4, total_duration)
+        finally:
+            for path in work_dir.glob("*"):
+                path.unlink(missing_ok=True)
+            work_dir.rmdir()
+
+    def _concat_insert_pieces(self, pieces: list[Path], output: Path, label: str, progress: int, total: int, duration: float) -> None:
+        if not pieces:
+            raise RuntimeError("Nenhum trecho foi criado para a inserção")
+        list_file = output.parent / f"{output.stem}_pieces_{uuid.uuid4().hex}.txt"
+        list_file.write_text(
+            "\n".join(f"file '{str(piece.resolve()).replace(chr(92), '/')}'" for piece in pieces),
+            encoding="utf-8",
+        )
+        try:
+            self._execute(
+                [str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-avoid_negative_ts", "make_zero", str(output)],
+                label,
+                progress,
+                total,
+                duration,
+            )
+        finally:
+            list_file.unlink(missing_ok=True)
+
+    def _insert_full_reencode_arguments(
+        self,
+        main: Path,
+        inserted: Path,
+        output: Path,
+        profile: MediaProfile,
+        insertion: float,
+        transition_seconds: float,
+        transition_code: str,
+    ) -> list[str]:
+        main_end = profile.duration
+        inserted_duration = self._get_duration_only(inserted)
+        neighbors = [inserted_duration]
+        if insertion > 0:
+            neighbors.append(insertion)
+        if main_end > insertion:
+            neighbors.append(main_end - insertion)
+        effective = min(transition_seconds, max(0.0, min(neighbors) / 2 if neighbors else 0.0))
+        has_left = insertion > 0.001
+        has_right = main_end - insertion > 0.001
+        use_fade = transition_code == "fade" and effective > 0
+        use_crossfade = transition_code not in {"none", "fade"} and effective > 0
+        layout = profile.audio_layout
+        normalize = f"aresample={profile.audio_rate},aformat=sample_fmts=fltp:sample_rates={profile.audio_rate}:channel_layouts={layout}"
+        filters: list[str] = []
+        labels: list[str] = []
+        if has_left:
+            fade_out = f",afade=t=out:st={self._fmt_seconds(max(0.0, insertion - effective))}:d={self._fmt_seconds(effective)}" if use_fade else ""
+            filters.append(f"[0:a]atrim=start=0:end={self._fmt_seconds(insertion)},{normalize}{fade_out},asetpts=PTS-STARTPTS[a0]")
+            labels.append("a0")
+        inserted_fades = ""
+        if use_fade and has_left:
+            inserted_fades += f",afade=t=in:st=0:d={self._fmt_seconds(effective)}"
+        if use_fade and has_right:
+            inserted_fades += f",afade=t=out:st={self._fmt_seconds(max(0.0, inserted_duration - effective))}:d={self._fmt_seconds(effective)}"
+        filters.append(f"[1:a]atrim=start=0:end={self._fmt_seconds(inserted_duration)},{normalize}{inserted_fades},asetpts=PTS-STARTPTS[a1]")
+        labels.append("a1")
+        if has_right:
+            fade_in = f",afade=t=in:st=0:d={self._fmt_seconds(effective)}" if use_fade else ""
+            filters.append(f"[0:a]atrim=start={self._fmt_seconds(insertion)}:end={self._fmt_seconds(main_end)},{normalize}{fade_in},asetpts=PTS-STARTPTS[a2]")
+            labels.append("a2")
+        if use_crossfade and len(labels) > 1:
+            previous = labels[0]
+            for index in range(1, len(labels)):
+                output_label = f"ax{index}"
+                filters.append(f"[{previous}][{labels[index]}]acrossfade=d={self._fmt_seconds(effective)}:c1={transition_code}:c2={transition_code}[{output_label}]")
+                previous = output_label
+            filters.append(f"[{previous}]anull[aout]")
+        else:
+            filters.append("".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
+        return [
+            str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-i", str(inserted),
+            "-filter_complex", ";".join(filters), "-map", "[aout]", "-vn",
+            "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
+            *self._audio_codec_args("m4a", profile.audio_bitrate), "-map_metadata", "-1", str(output),
+        ]
 
     def _clean_worker(self) -> None:
         source = self.clean_input
@@ -3439,6 +4243,7 @@ def normalize_settings(data: dict) -> dict:
     )
     clean["grok_api_key"] = str(data.get("grok_api_key") or "").strip()
     clean["deepseek_api_key"] = str(data.get("deepseek_api_key") or "").strip()
+    clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     if clean["parts_model"] == GROK_TEXT_NAME and not plausible_xai_api_key(clean["grok_api_key"]):
         clean["parts_model"] = IA_PROXY_NAME
     if clean["parts_model"] == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
@@ -3570,10 +4375,10 @@ def format_imei_history_item(record: dict) -> str:
     )
 
 
-def fetch_imei_info_record(imei: str) -> dict:
+def fetch_imei_info_record(imei: str, api_key: str) -> dict:
     url = (
         "https://alpha.imeicheck.com/api/free_with_key/modelBrandName"
-        f"?key={quote(IMEI_API_KEY)}&imei={quote(imei)}&format=json"
+        f"?key={quote(api_key)}&imei={quote(imei)}&format=json"
     )
     parsed = urlparse(url)
     connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
@@ -3687,12 +4492,91 @@ def mode_label_from_value(mode: str) -> str:
     return labels.get(mode, "Enviar pronto")
 
 
-def extract_text_from_response(raw: bytes) -> str:
+@dataclass(frozen=True)
+class ParsedTranscription:
+    text: str
+    timestamped_text: str = ""
+
+
+def _format_transcription_timestamp(seconds: float) -> str:
+    millis = max(0, int(round(seconds * 1000)))
+    hours, remainder = divmod(millis, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _timed_entry(value) -> tuple[str, float, float] | None:
+    if not isinstance(value, dict):
+        return None
+    text = next((str(value.get(key) or "").strip() for key in ("text", "word", "transcript") if str(value.get(key) or "").strip()), "")
+    if not text:
+        return None
+    timestamp = value.get("timestamp")
+    start = value.get("start", value.get("start_time"))
+    end = value.get("end", value.get("end_time"))
+    if isinstance(timestamp, list) and len(timestamp) >= 2:
+        start = timestamp[0] if start is None else start
+        end = timestamp[1] if end is None else end
+    try:
+        start_value = float(start)
+        if end is None and value.get("duration") is not None:
+            end = start_value + float(value["duration"])
+        end_value = float(end)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(start_value) or not math.isfinite(end_value) or start_value < 0 or end_value < start_value:
+        return None
+    return text, start_value, end_value
+
+
+def _timestamped_text_from_json(value) -> str:
+    if isinstance(value, dict):
+        for key, group_words in (("segments", False), ("words", True)):
+            items = value.get(key)
+            if not isinstance(items, list):
+                continue
+            entries = [entry for item in items if (entry := _timed_entry(item))]
+            if not entries:
+                continue
+            if group_words:
+                phrases: list[tuple[str, float, float]] = []
+                words: list[str] = []
+                phrase_start = entries[0][1]
+                phrase_end = entries[0][2]
+                for index, (word, _start, end) in enumerate(entries):
+                    if words and not re.fullmatch(r"[,.;:!?]", word):
+                        words.append(" ")
+                    words.append(word)
+                    phrase_end = end
+                    if re.search(r"[.!?]$", word) or index == len(entries) - 1:
+                        phrases.append(("".join(words).strip(), phrase_start, phrase_end))
+                        words = []
+                        if index < len(entries) - 1:
+                            phrase_start = entries[index + 1][1]
+                entries = phrases
+            return "\n".join(
+                f"[{_format_transcription_timestamp(start)} -> {_format_transcription_timestamp(end)}] {text}"
+                for text, start, end in entries
+            )
+        direct = _timed_entry(value)
+        if direct:
+            text, start, end = direct
+            return f"[{_format_transcription_timestamp(start)} -> {_format_transcription_timestamp(end)}] {text}"
+        found = [_timestamped_text_from_json(item) for item in value.values()]
+        return "\n".join(item for item in found if item)
+    if isinstance(value, list):
+        found = [_timestamped_text_from_json(item) for item in value]
+        return "\n".join(item for item in found if item)
+    return ""
+
+
+def parse_transcription_response(raw: bytes) -> ParsedTranscription:
     text = raw.decode("utf-8-sig", errors="replace")
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return text.strip()
+        return ParsedTranscription(text.strip())
 
     def collect(value):
         if value is None:
@@ -3728,8 +4612,15 @@ def extract_text_from_response(raw: bytes) -> str:
 
     pieces = collect(payload)
     if pieces:
-        return "\n".join(pieces).strip()
-    return text.strip()
+        return ParsedTranscription(
+            "\n".join(pieces).strip(),
+            _timestamped_text_from_json(payload).strip(),
+        )
+    return ParsedTranscription(text.strip(), _timestamped_text_from_json(payload).strip())
+
+
+def extract_text_from_response(raw: bytes) -> str:
+    return parse_transcription_response(raw).text
 
 
 def selected_text_model(settings: dict) -> dict:
@@ -4266,6 +5157,17 @@ class GraniteUploader:
         status, raw, _headers = self.post_file_raw(url, file_path, mime_type, raw_path, form_fields)
         return status, extract_text_from_response(raw)
 
+    def post_file_parsed(
+        self,
+        url: str,
+        file_path: Path,
+        mime_type: str,
+        raw_path: Path,
+        form_fields: dict | None = None,
+    ) -> tuple[int, ParsedTranscription]:
+        status, raw, _headers = self.post_file_raw(url, file_path, mime_type, raw_path, form_fields)
+        return status, parse_transcription_response(raw)
+
     def post_file_raw(
         self,
         url: str,
@@ -4519,6 +5421,8 @@ class SigApp:
         self.live_committed_text = ""
         self.live_draft_text = ""
         self.last_live_transcript_text = ""
+        self.live_plain_transcript_text = ""
+        self.live_timestamped_transcript_text = ""
         self.live_secondary_active = False
         self.live_secondary_audio_queue: queue.Queue[bytes] | None = None
         self.live_secondary_thread: threading.Thread | None = None
@@ -4541,6 +5445,7 @@ class SigApp:
         self.live_language_var = StringVar(value="pt")
         self.live_language_label_var = StringVar(value="Idioma: Português")
         self.live_diarize_var = BooleanVar(value=False)
+        self.live_timestamps_var = BooleanVar(value=False)
         self.assistant_cancel_event = threading.Event()
         self.assistant_client: TextModelClient | None = None
         self.assistant_thread: threading.Thread | None = None
@@ -4609,6 +5514,7 @@ class SigApp:
         self.paste_icon = self._make_paste_icon()
         self.copy_icon = self._make_copy_icon()
         self.clear_icon = self._make_clear_icon()
+        self.recover_icon = self._make_recover_icon()
         self._build_menu()
         self._build_ui()
         self.status_var.trace_add("write", lambda *_args: self._append_activity_log(self.status_var.get()))
@@ -4632,8 +5538,9 @@ class SigApp:
         style.configure("TButton", font=("Segoe UI", 10), padding=(8, -1))
         style.configure("TMenubutton", font=("Segoe UI", 10), padding=(8, -1))
         style.configure("Execute.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(8, -1))
-        style.configure("Action.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(8, -1))
-        style.configure("Action.TMenubutton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(8, -1))
+        style.configure("Action.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
+        style.configure("Action.TMenubutton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
+        style.configure("Recover.TButton", padding=(0, -1))
         style.configure(
             "Update.TButton",
             foreground="#ffffff",
@@ -4692,6 +5599,15 @@ class SigApp:
         return ImageTk.PhotoImage(image)
 
     @staticmethod
+    def _make_recover_icon():
+        image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        color = "#263735"
+        draw.arc((2, 2, 18, 18), start=45, end=315, fill=color, width=2)
+        draw.polygon(((16, 4), (16, 8), (12, 5)), fill=color)
+        return ImageTk.PhotoImage(image)
+
+    @staticmethod
     def _make_editor_icon_button(parent, image, tooltip, command):
         button = ttk.Button(parent, image=image, width=3, command=command)
         create_tooltip(button, tooltip)
@@ -4718,11 +5634,12 @@ class SigApp:
             self.activity_log.tag_configure("vad_total", foreground="#0a7a2f")
         if "warning" not in self.activity_log.tag_names():
             self.activity_log.tag_configure("warning", foreground="#a65300")
-        line = f"{time.strftime('%H:%M:%S')}  {message}\n"
-        if tag:
-            self.activity_log.insert(END, line, tag)
-        else:
-            self.activity_log.insert(END, line)
+        for part in message.splitlines():
+            line = f"{time.strftime('%H:%M:%S')}  {part}\n"
+            if tag:
+                self.activity_log.insert(END, line, tag)
+            else:
+                self.activity_log.insert(END, line)
         self.activity_log.see(END)
         self.activity_log.configure(state="disabled")
 
@@ -4881,9 +5798,8 @@ class SigApp:
             if not (staging_dir / "sig.exe").is_file():
                 raise RuntimeError("o pacote não contém sig.exe")
 
-            script_path = update_root / "apply_update.ps1"
-            script_path.write_text(self._update_script_text(), encoding="utf-8-sig")
-            self._queue("update_ready", script_path, staging_dir, version)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            self._queue("update_ready", zip_path, version)
         except Exception as exc:
             self._queue("update_error", str(exc))
 
@@ -4900,6 +5816,29 @@ $ErrorActionPreference = "Stop"
 $logParent = Split-Path -Parent $LogPath
 New-Item -ItemType Directory -Path $logParent -Force | Out-Null
 Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Atualizador iniciado."
+function Resolve-SigInstallDir([string]$Candidate) {
+    $original = [IO.Path]::GetFullPath($Candidate)
+    $current = $original
+    for ($level = 0; $level -lt 6; $level++) {
+        $hasRuntime = (
+            (Test-Path -LiteralPath (Join-Path $current "ffmpeg.exe") -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $current "ffplay.exe") -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $current "vad_deps") -PathType Container)
+        )
+        if ($hasRuntime) {
+            return $current
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ieq $current) {
+            break
+        }
+        $current = $parent
+    }
+    return $original
+}
+$receivedTargetDir = $TargetDir
+$TargetDir = Resolve-SigInstallDir $TargetDir
+Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Destino recebido=$receivedTargetDir; destino resolvido=$TargetDir; origem=$SourceDir"
 $targetExe = Join-Path $TargetDir $ExeName
 $deadline = [DateTime]::UtcNow.AddSeconds(120)
 while (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
@@ -4928,26 +5867,29 @@ $backupDir = Join-Path ([IO.Path]::GetTempPath()) ("sig_backup_" + [Guid]::NewGu
 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 $copied = New-Object System.Collections.Generic.List[string]
 $replacedDirectories = New-Object System.Collections.Generic.List[string]
-function Start-SigAfterDelay([string]$Executable, [string]$LogFile) {
-    $launcher = Join-Path ([IO.Path]::GetTempPath()) ("sig_launch_" + [Guid]::NewGuid().ToString("N") + ".cmd")
-    $quote = [char]34
+function Start-SigDetached([string]$Executable, [string]$LogFile) {
     $workDirectory = Split-Path -Parent $Executable
-    $launcherLines = @(
-        "@echo off",
-        "set _PYI_APPLICATION_HOME_DIR=",
-        "set _PYI_ARCHIVE_FILE=",
-        "set _PYI_PARENT_PROCESS_LEVEL=",
-        "set _PYI_SPLASH_IPC=",
-        ("cd /d " + $quote + $workDirectory + $quote),
-        "timeout /t 3 /nobreak >nul",
-        ("echo [%date% %time%] Iniciando SIG atualizado>>" + $quote + $LogFile + $quote),
-        ("start " + $quote + $quote + " /wait " + $quote + $Executable + $quote),
-        ("echo [%date% %time%] SIG atualizado encerrou com codigo %errorlevel%>>" + $quote + $LogFile + $quote),
-        ("del " + $quote + "%~f0" + $quote)
-    )
-    Set-Content -LiteralPath $launcher -Value $launcherLines -Encoding ascii
-    $launcherProcess = Start-Process -FilePath "$env:ComSpec" -ArgumentList @("/d", "/c", $launcher) -WindowStyle Hidden -PassThru
-    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) Launcher independente agendado (PID $($launcherProcess.Id))."
+    $process = Start-Process -FilePath $Executable -WorkingDirectory $workDirectory -WindowStyle Hidden -PassThru
+    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) SIG iniciado (PID $($process.Id))."
+    return $process
+}
+function Start-SigAndVerify([string]$Executable, [string]$LogFile) {
+    $workDirectory = Split-Path -Parent $Executable
+    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) Iniciando SIG atualizado diretamente."
+    $process = Start-Process -FilePath $Executable -WorkingDirectory $workDirectory -WindowStyle Hidden -PassThru
+    # O primeiro boot de um onefile pode precisar extrair o Python para %TEMP%.
+    # Aguarde essa etapa e confirme que o processo permaneceu vivo antes de
+    # apagar o backup que permite voltar à versão anterior.
+    Start-Sleep -Seconds 12
+    if ($process.HasExited) {
+        throw "O SIG atualizado encerrou durante a inicialização (código $($process.ExitCode))."
+    }
+    $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+    if (-not $running) {
+        throw "O SIG atualizado não permaneceu em execução após a inicialização."
+    }
+    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) SIG atualizado confirmado em execução (PID $($process.Id))."
+    return $process
 }
 function Install-FileWithRetry([string]$Source, [string]$Target) {
     $lastError = $null
@@ -4963,14 +5905,31 @@ function Install-FileWithRetry([string]$Source, [string]$Target) {
     }
     throw "Não foi possível substituir $Target após 20 tentativas: $($lastError.Message)"
 }
+function Write-TargetDiagnostics([string]$Label) {
+    $stamp = Get-Date -Format s
+    $target = Get-Item -LiteralPath $targetExe -ErrorAction SilentlyContinue
+    if ($target) {
+        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: executável=$($target.FullName), tamanho=$($target.Length) bytes"
+    } else {
+        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: executável ausente=$targetExe"
+    }
+    $internal = Join-Path $TargetDir "_internal"
+    if (Test-Path -LiteralPath $internal -PathType Container) {
+        $pythonDll = Join-Path $internal "python311.dll"
+        $vcDll = Join-Path $internal "vcruntime140.dll"
+        $vc1Dll = Join-Path $internal "vcruntime140_1.dll"
+        $fileCount = @(Get-ChildItem -LiteralPath $internal -Recurse -File -ErrorAction SilentlyContinue).Count
+        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: onedir=_internal presente, arquivos=$fileCount, python311.dll=$([bool](Test-Path -LiteralPath $pythonDll -PathType Leaf)), vcruntime140.dll=$([bool](Test-Path -LiteralPath $vcDll -PathType Leaf)), vcruntime140_1.dll=$([bool](Test-Path -LiteralPath $vc1Dll -PathType Leaf))"
+    } else {
+        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: onedir=_internal ausente"
+    }
+}
 try {
-    # Dependency bundles must be replaced as a unit so removed libraries do not
-    # remain installed after a leaner release.
-    foreach ($relativeDir in @("vad_deps")) {
-        $sourceDirectory = Join-Path $SourceDir $relativeDir
-        if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
-            continue
-        }
+    $newProcess = $null
+    # Copy top-level directories as units. This avoids deriving relative paths
+    # from mixed Windows short/long names (JOOPAU~1 versus João Paulo).
+    foreach ($sourceDirectory in @(Get-ChildItem -LiteralPath $SourceDir -Directory -Force)) {
+        $relativeDir = $sourceDirectory.Name
         $targetDirectory = Join-Path $TargetDir $relativeDir
         if (Test-Path -LiteralPath $targetDirectory) {
             $backupDirectory = Join-Path $backupDir $relativeDir
@@ -4978,16 +5937,13 @@ try {
             Remove-Item -LiteralPath $targetDirectory -Recurse -Force
         }
         $replacedDirectories.Add($relativeDir)
+        Copy-Item -LiteralPath $sourceDirectory.FullName -Destination $TargetDir -Recurse -Force
     }
-    $sourcePrefix = $SourceDir.TrimEnd('\') + '\'
-    Get-ChildItem -LiteralPath $SourceDir -Recurse -File | ForEach-Object {
-        $relative = $_.FullName.Substring($sourcePrefix.Length)
+    Get-ChildItem -LiteralPath $SourceDir -File -Force | ForEach-Object {
+        $relative = $_.Name
         $target = Join-Path $TargetDir $relative
-        $targetParent = Split-Path -Parent $target
-        New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
         if (Test-Path -LiteralPath $target) {
             $backup = Join-Path $backupDir $relative
-            New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force | Out-Null
             Copy-Item -LiteralPath $target -Destination $backup -Force
         }
         $temporaryTarget = "$target.sig-new"
@@ -4998,13 +5954,28 @@ try {
     if (-not (Test-Path -LiteralPath $targetExe -PathType Leaf)) {
         throw "Executável atualizado não encontrado: $targetExe"
     }
-    Start-SigAfterDelay $targetExe $LogPath
-    Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Atualização aplicada; SIG será aberto pelo launcher."
+    Write-TargetDiagnostics "Estrutura após a cópia"
+    $sourceInternal = Join-Path $SourceDir "_internal"
+    if (Test-Path -LiteralPath $sourceInternal -PathType Container) {
+        foreach ($requiredDll in @("python311.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+            $requiredPath = Join-Path $TargetDir (Join-Path "_internal" $requiredDll)
+            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+                throw "Dependência onedir ausente após a cópia: $requiredPath"
+            }
+        }
+    }
+    $newProcess = Start-SigAndVerify $targetExe $LogPath
+    Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Atualização aplicada e validada."
     Remove-Item -LiteralPath $SourceDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
     exit 0
 } catch {
     Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Falha na atualização: $($_.Exception.Message)"
+    Write-TargetDiagnostics "Estrutura no momento da falha"
+    if ($newProcess -and -not $newProcess.HasExited) {
+        Stop-Process -Id $newProcess.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+    }
     foreach ($relativeDir in $replacedDirectories) {
         $targetDirectory = Join-Path $TargetDir $relativeDir
         $backupDirectory = Join-Path $backupDir $relativeDir
@@ -5017,50 +5988,78 @@ try {
         $backup = Join-Path $backupDir $relative
         $target = Join-Path $TargetDir $relative
         if (Test-Path -LiteralPath $backup) {
-            Copy-Item -LiteralPath $backup -Destination $target -Force
+            Install-FileWithRetry $backup $target
         }
     }
     $targetExe = Join-Path $TargetDir $ExeName
     if (Test-Path -LiteralPath $targetExe -PathType Leaf) {
-        Start-SigAfterDelay $targetExe $LogPath
-        Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) SIG original/revertido será aberto pelo launcher."
+        Start-SigDetached $targetExe $LogPath
+        Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) SIG original/revertido será aberto."
     }
     exit 1
 }
 '''
 
-    def _launch_prepared_update(self, script_path: Path, staging_dir: Path, version: str) -> None:
+    def _launch_prepared_update(self, zip_path: Path, version: str) -> None:
         log_path = settings_path().parent / "updater.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(
+                f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                "Preparando o atualizador independente.\n"
+            )
+        updater_path = app_base_dir() / "SigUpdater.exe"
+        if not updater_path.is_file():
+            detail = (
+                "SigUpdater.exe não foi encontrado ao lado do SIG. "
+                "É necessária uma instalação completa para habilitar "
+                "as atualizações automáticas."
+            )
+            self.update_installing = False
+            self.update_button.configure(state="normal")
+            self.update_button_var.set("Atualização disponível")
+            self._append_activity_log(f"Falha ao iniciar o atualizador: {detail}", "warning")
+            messagebox.showerror("Atualização do SIG", detail)
+            return
+        temporary_updater = (
+            Path(tempfile.gettempdir()) /
+            f"SigUpdater-{uuid.uuid4().hex}.exe"
+        )
         flags = 0
         if os.name == "nt":
-            # CREATE_NO_WINDOW mantém o helper invisível, sem encerrá-lo junto
-            # com o processo gráfico que está sendo atualizado.
-            flags = subprocess.CREATE_NO_WINDOW
-        subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-File",
-                str(script_path),
-                "-ProcessId",
-                str(os.getpid()),
-                "-SourceDir",
-                str(staging_dir),
-                "-TargetDir",
-                str(app_base_dir()),
-                "-ExeName",
-                "sig.exe",
-                "-LogPath",
-                str(log_path),
-            ],
-            creationflags=flags,
-            close_fds=True,
-        )
+            flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        try:
+            shutil.copy2(updater_path, temporary_updater)
+            subprocess.Popen(
+                [
+                    str(temporary_updater),
+                    "--zip",
+                    str(zip_path),
+                    "--target",
+                    str(app_base_dir()),
+                    "--pid",
+                    str(os.getpid()),
+                    "--log",
+                    str(log_path),
+                ],
+                creationflags=flags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} Falha ao iniciar o processo auxiliar: {exc}\n")
+            self.update_installing = False
+            self.update_button.configure(state="normal")
+            self.update_button_var.set("Atualização disponível")
+            self._append_activity_log(f"Falha ao iniciar o atualizador: {exc}", "warning")
+            messagebox.showerror("Atualização do SIG", f"Não foi possível iniciar o atualizador:\n{exc}")
+            return
         self._append_activity_log(f"Atualização {version} pronta. Reiniciando o SIG...")
         self.root.after(250, self.root.destroy)
 
@@ -5230,6 +6229,14 @@ try {
         self.live_interval_entry.bind("<<ComboboxSelected>>", lambda _event: self._apply_live_interval_entry())
         self.live_interval_plus = ttk.Button(live_top, text="+", width=3, command=lambda: self._change_live_interval(1))
         self.live_interval_plus.pack(side=LEFT, padx=(6, 8))
+        self.live_timestamps_check = ttk.Checkbutton(
+            live_top,
+            text="Timestamps",
+            variable=self.live_timestamps_var,
+            command=self._toggle_live_timestamps,
+            state="disabled",
+        )
+        self.live_timestamps_check.pack(side=LEFT, padx=(0, 10))
         self.live_grok_controls = ttk.Frame(live_top)
         ttk.Checkbutton(
             self.live_grok_controls,
@@ -5271,9 +6278,11 @@ try {
         self.live_transcript_actions.pack(fill=X, pady=(4, 10))
         self.live_recover_button = ttk.Button(
             self.live_transcript_actions,
-            text="Recuperar transcrição",
+            image=self.recover_icon,
+            style="Recover.TButton",
             command=self.recover_live_transcript,
         )
+        create_tooltip(self.live_recover_button, "Recuperar transcrição")
         self.live_history_button = ttk.Button(
             self.live_transcript_actions,
             text="Histórico",
@@ -5297,9 +6306,11 @@ try {
         self.live_transcript_actions_2.pack(fill=X, pady=(4, 10))
         self.live_recover_button_2 = ttk.Button(
             self.live_transcript_actions_2,
-            text="Recuperar transcrição",
+            image=self.recover_icon,
+            style="Recover.TButton",
             command=self.recover_live_transcript_2,
         )
+        create_tooltip(self.live_recover_button_2, "Recuperar transcrição")
         self.live_history_button_2 = ttk.Button(
             self.live_transcript_actions_2,
             text="Histórico",
@@ -5336,7 +6347,7 @@ try {
             actions = ttk.Frame(parent)
             actions.pack(fill=X, pady=(4, 10))
             parts_button = ttk.Menubutton(
-                actions, textvariable=part_var, width=18, style="Action.TMenubutton"
+                actions, textvariable=part_var, style="Action.TMenubutton"
             )
             parts_menu = tk.Menu(parts_button, tearoff=False)
             parts_button.configure(menu=parts_menu)
@@ -5416,14 +6427,12 @@ try {
         self.assistant_history_button = ttk.Button(
             assistant_actions,
             text="Histórico",
-            width=18,
             command=self.request_assistant_history,
         )
         self.assistant_history_button.pack(side=LEFT, padx=(0, 8))
         self.assistant_parts_button = ttk.Menubutton(
             assistant_actions,
             textvariable=self.assistant_part_var,
-            width=18,
         )
         self.assistant_parts_menu = tk.Menu(self.assistant_parts_button, tearoff=False)
         self.assistant_parts_button.configure(menu=self.assistant_parts_menu)
@@ -5431,7 +6440,6 @@ try {
         self.assistant_statement_button = ttk.Button(
             assistant_actions,
             text="Oitiva",
-            width=18,
             command=self.request_assistant_statement,
         )
         self.assistant_statement_button.pack(side=LEFT)
@@ -5878,7 +6886,10 @@ try {
 
     def _imei_lookup_worker(self, generation: int, imei: str):
         try:
-            record = fetch_imei_info_record(imei)
+            record = fetch_imei_info_record(
+                imei,
+                str(self.settings.get("imei_api_key") or "").strip(),
+            )
             append_imei_history(record)
             self._queue("imei_result", generation, imei, record)
         except (ConnectionError, LookupError, ValueError) as exc:
@@ -6158,6 +7169,36 @@ try {
             if self.assistant_target == "live"
             else self.assistant_progress_var
         )
+        multi_live = bool(
+            self.assistant_target == "live"
+            and self.multi_text_model_var.get()
+            and self.multi_text_secondary
+            and self.assistant_phase in ("history", "statement")
+        )
+        if multi_live:
+            task_label = "histórico" if self.assistant_phase == "history" else "oitiva"
+            rendered = []
+            for index, model_label in enumerate(self.assistant_multi_model_labels, start=1):
+                key = (self.assistant_phase, index)
+                if key in self.assistant_multi_errors:
+                    rendered.append(f"ERRO Redigindo {task_label} - {model_label}")
+                elif key in self.assistant_multi_results:
+                    elapsed = self.assistant_multi_elapsed.get(key)
+                    suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
+                    rendered.append(f"100% Redigindo {task_label} - {model_label}{suffix}")
+                else:
+                    rendered.append(f"0% Redigindo {task_label} - {model_label}")
+            if self.assistant_phase == "history":
+                names_state = self.assistant_task_states["names"]
+                rendered.append(
+                    "100% Identificando partes"
+                    if names_state == "done"
+                    else "ERRO Identificando partes"
+                    if names_state == "error"
+                    else "0% Identificando partes"
+                )
+            progress_var.set("\n".join(rendered))
+            return
         if self.assistant_phase == "history":
             entries = (
                 ("Redigindo histórico", "history"),
@@ -6228,9 +7269,23 @@ try {
         self.assistant_phase = phase
         self.assistant_target = target
         self.assistant_multi_results: set[tuple[str, int]] = set()
+        self.assistant_multi_elapsed: dict[tuple[str, int], float] = {}
+        self.assistant_multi_errors: dict[tuple[str, int], str] = {}
         self._set_assistant_buttons_state("disabled")
         self._refresh_live_editors_state()
         self.settings = load_settings()
+        secondary_name = str(self.multi_text_secondary or "")
+        if target == "live" and self.multi_text_model_var.get() and secondary_name:
+            primary_config = selected_text_model(self.settings)
+            secondary_config = selected_text_model(
+                settings_for_text_model(self.settings, secondary_name, secondary=True)
+            )
+            self.assistant_multi_model_labels = (
+                str(primary_config.get("name") or "Modelo 1"),
+                str(secondary_config.get("name") or "Modelo 2"),
+            )
+        else:
+            self.assistant_multi_model_labels = ("Modelo 1", "Modelo 2")
         self._refresh_assistant_model_label()
         return generation, self.settings.copy()
 
@@ -6263,7 +7318,16 @@ try {
         self._set_assistant_target_names(target, [])
         self.assistant_task_states.update(history="running", names="running", statement="idle")
         self.assistant_task_elapsed.update(history=None, names=None, statement=None)
-        status_var.set("Gerando histórico e identificando partes...")
+        if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
+            labels = self.assistant_multi_model_labels
+            status_message = (
+                f"Redigindo histórico - {labels[0]}\n"
+                f"Redigindo histórico - {labels[1]}"
+            )
+            status_var.set(status_message)
+            self._append_activity_log(status_message)
+        else:
+            status_var.set("Gerando histórico e identificando partes...")
         self._render_assistant_progress()
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_thread = threading.Thread(
@@ -6434,7 +7498,16 @@ try {
         generation, settings = self._begin_assistant_request("statement", target)
         self.assistant_task_states.update(history="idle", names="idle", statement="running")
         self.assistant_task_elapsed.update(history=None, names=None, statement=None)
-        status_var.set("Redigindo oitiva...")
+        if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
+            labels = self.assistant_multi_model_labels
+            status_message = (
+                f"Redigindo oitiva - {labels[0]}\n"
+                f"Redigindo oitiva - {labels[1]}"
+            )
+            status_var.set(status_message)
+            self._append_activity_log(status_message)
+        else:
+            status_var.set("Redigindo oitiva...")
         self._render_assistant_progress()
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_thread = threading.Thread(
@@ -6866,9 +7939,14 @@ try {
                 {"Authorization": f"Bearer {self.settings['grok_api_key']}"} if grok else {},
                 "file" if grok else "files",
             )
-            status, text = uploader.post_file(GROK_STT_URL if grok else transcribe_url(self.settings), wav_path, "audio/wav", wav_path.with_suffix(".raw"))
+            status, parsed = uploader.post_file_parsed(
+                GROK_STT_URL if grok else transcribe_url(self.settings),
+                wav_path,
+                "audio/wav",
+                wav_path.with_suffix(".raw"),
+            )
             if status != 200: raise RuntimeError(f"HTTP {status}")
-            self._queue("live_display", text)
+            self._queue("live_payload", parsed.text, parsed.timestamped_text)
             self._queue("status", "Transcrição concluída.")
         except Exception as exc:
             self._queue("status", f"Erro na gravação: {exc}")
@@ -7086,6 +8164,34 @@ try {
             copy.pack(side=RIGHT, padx=(0, 4))
             clear.pack(side=RIGHT, padx=(0, 4))
             history.pack(side=LEFT, expand=True)
+
+    def _set_live_timestamp_payload(self, plain: str, timestamped: str = ""):
+        self.live_plain_transcript_text = (plain or "").strip()
+        self.live_timestamped_transcript_text = (timestamped or "").strip()
+        if not self.live_timestamped_transcript_text:
+            self.live_timestamps_var.set(False)
+        self.live_timestamps_check.configure(
+            state="normal" if self.live_timestamped_transcript_text else "disabled"
+        )
+        displayed = (
+            self.live_timestamped_transcript_text
+            if self.live_timestamps_var.get() and self.live_timestamped_transcript_text
+            else self.live_plain_transcript_text
+        )
+        self.last_live_transcript_text = displayed
+        self._set_live_text(displayed)
+
+    def _toggle_live_timestamps(self):
+        if self.live_timestamps_var.get() and not self.live_timestamped_transcript_text:
+            self.live_timestamps_var.set(False)
+            return
+        displayed = (
+            self.live_timestamped_transcript_text
+            if self.live_timestamps_var.get()
+            else self.live_plain_transcript_text
+        )
+        self.last_live_transcript_text = displayed
+        self._set_live_text(displayed)
 
     def _convert_only_changed(self):
         if self.convert_only_var.get() and self.mode_var.get() == "as_is":
@@ -7363,6 +8469,7 @@ try {
         parts_model_labels: dict[str, str] = {}
         grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
+        imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         grok_chunk_ms_var = StringVar(value=str(self.settings.get("grok_chunk_ms", 100)))
 
         import tkinter as tk
@@ -7422,6 +8529,13 @@ try {
             deepseek_key_entry,
             "Obrigatória para selecionar DeepSeek V4 Flash ou DeepSeek V4 Pro.",
         )
+
+        imei_key_row = deepseek_key_row + 1
+        ttk.Label(api_frame, text="Chave API do IMEI Check").grid(
+            row=imei_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        imei_key_entry = ttk.Entry(api_frame, textvariable=imei_api_key_var, show="*", width=44)
+        imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=5)
 
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
@@ -7990,6 +9104,7 @@ try {
             selected_text_2 = text_model_2_labels.get(text_model_2_var.get(), "")
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
+            imei_api_key = imei_api_key_var.get().strip()
             if api_key and not plausible_xai_api_key(api_key):
                 messagebox.showerror(
                     "sig",
@@ -8077,6 +9192,7 @@ try {
                     "parts_proxy_provider": parts_proxy_provider_var.get(),
                     "grok_api_key": api_key,
                     "deepseek_api_key": deepseek_api_key,
+                    "imei_api_key": imei_api_key,
 
                 }
             )
@@ -8436,6 +9552,10 @@ try {
             self.live_draft_text = ""
             self.live_draft_generation = 0
         self.last_live_transcript_text = ""
+        self.live_plain_transcript_text = ""
+        self.live_timestamped_transcript_text = ""
+        self.live_timestamps_var.set(False)
+        self.live_timestamps_check.configure(state="disabled")
         self.live_secondary_active = secondary_settings is not None
         if self.live_secondary_active:
             self.live_secondary_done_event.clear()
@@ -9145,7 +10265,7 @@ try {
                 write_wav_from_pcm_file(wav_path, pcm_path)
                 definitive_settings = load_settings()
                 self.live_uploader = create_transcription_uploader(self.live_abort_event, definitive_settings)
-                status, definitive = self.live_uploader.post_file(
+                status, parsed = self.live_uploader.post_file_parsed(
                     transcribe_url(definitive_settings),
                     wav_path,
                     "audio/wav",
@@ -9154,14 +10274,14 @@ try {
                 if status != 200:
                     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
                     raise RuntimeError(f"HTTP {status}\n{raw}")
-                definitive = definitive.strip()
+                definitive = parsed.text.strip()
                 if not definitive:
                     raise RuntimeError("A transcrição definitiva voltou vazia.")
                 with self.live_lock:
                     self.live_committed_text = definitive
                     self.live_draft_text = ""
                     display = self._current_live_text_locked()
-                self._queue("live_display", display)
+                self._queue("live_payload", display, parsed.timestamped_text)
                 self._queue("status", "Transcrição definitiva concluída.")
             except Exception as exc:
                 self._queue("status", f"Não consegui gerar a transcrição definitiva. Mantive o texto parcial. Detalhe: {exc}")
@@ -10336,7 +11456,10 @@ try {
                     self._draw_save_button()
                 elif kind == "live_display":
                     self.last_live_transcript_text = message[1]
+                    self.live_plain_transcript_text = message[1]
                     self._set_live_text(message[1])
+                elif kind == "live_payload":
+                    self._set_live_timestamp_payload(message[1], message[2])
                 elif kind == "live_display_2":
                     self.last_live_transcript_text_2 = message[1]
                     self._set_live_editor("transcript2", message[1])
@@ -10367,6 +11490,7 @@ try {
                         editor = task if index == 1 else f"{task}2"
                         self._set_live_editor(editor, text)
                         self.assistant_multi_results.add((task, index))
+                        self.assistant_multi_elapsed[(task, index)] = elapsed
                         if (task, 1) in self.assistant_multi_results and (task, 2) in self.assistant_multi_results:
                             self.assistant_task_states[task] = "done"
                         self.assistant_task_elapsed[task] = elapsed
@@ -10377,6 +11501,7 @@ try {
                 elif kind == "assistant_multi_error":
                     generation, task, index, detail = message[1:]
                     if generation == self.assistant_generation:
+                        self.assistant_multi_errors[(task, index)] = detail
                         self.status_var.set(
                             f"Erro no modelo {index} ao gerar "
                             f"{'histórico' if task == 'history' else 'oitiva'}: {detail}"
@@ -10460,7 +11585,7 @@ try {
                     messagebox.showerror("Atualização do SIG", f"Não foi possível atualizar:\n{detail}")
                 elif kind == "update_ready":
                     self.update_button_var.set("Reiniciando...")
-                    self._launch_prepared_update(Path(message[1]), Path(message[2]), str(message[3]))
+                    self._launch_prepared_update(Path(message[1]), str(message[2]))
                 elif kind == "done":
                     self.running = False
                     self._set_controls_state("normal")
@@ -10507,5 +11632,4 @@ def main():
 
 
 if __name__ == "__main__":
-    _clean_project_root()
     main()

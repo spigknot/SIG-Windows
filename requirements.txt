@@ -1,0 +1,4 @@
+Pillow>=10.0
+sounddevice>=0.4
+websocket-client>=1.7
+pyinstaller>=6.0

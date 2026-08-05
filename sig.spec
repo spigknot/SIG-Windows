@@ -1,13 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import sys
+
 from PyInstaller.utils.hooks import collect_data_files
+
+
+python_runtime = Path(sys.base_prefix)
+runtime_binaries = [
+    (str(path), ".")
+    for name in ("vcruntime140.dll", "vcruntime140_1.dll")
+    for path in [python_runtime / name]
+    if path.exists()
+]
 
 sounddevice_datas = collect_data_files('_sounddevice_data')
 
 a = Analysis(
     ['src/sig_app.py'],
     pathex=[],
-    binaries=[],
+    binaries=runtime_binaries,
     datas=[
         ('assets/appwin.jpg', 'assets'),
         ('assets/appwin.png', 'assets'),
@@ -49,7 +61,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # Evita falhas de carregamento do python311.dll em máquinas que rejeitam
+    # DLLs comprimidas ou que ainda não têm o runtime VC instalado.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
