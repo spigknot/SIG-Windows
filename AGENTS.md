@@ -15,7 +15,10 @@ Estas regras sao obrigatorias para futuras alteracoes, compilacoes e publicacoes
   `C:\Users\Gustavo\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe`
 - Antes de compilar nesse ambiente, confirmar:
   `python -c "import sounddevice"`
+- Tambem confirmar:
+  `python -c "import websocket"`
 - O build precisa incluir `sounddevice`, `_sounddevice_data` e as DLLs do PortAudio.
+- O build precisa incluir o pacote `websocket-client`, importado pelo aplicativo como `websocket`.
 - Testar o executavel abrindo por pelo menos alguns segundos e confirmar a existencia de:
   `_internal\python311.dll`
   `_internal\_sounddevice_data\portaudio-binaries\libportaudio64bit.dll`
