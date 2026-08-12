@@ -46,7 +46,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260812_002"
+APP_VERSION = "20260812_003"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -4958,20 +4958,45 @@ def parse_qualification_json(
         value = str(value).strip()
         if value:
             normalized[field_id] = value
+    known_ids = {field_id for field_id, _label in field_order}
+    for field_id in allowed_ids:
+        if field_id in known_ids or field_id not in payload:
+            continue
+        value = payload[field_id]
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        value = str(value).strip()
+        if value:
+            normalized[field_id] = value
     return normalized
 
 
 def format_qualification_fields(
     payload: dict[str, str],
+    field_order: tuple[tuple[str, str], ...],
     selected_ids: set[str] | None = None,
 ) -> str:
     """Exibe os campos como uma única linha filtrável pelas checkboxes."""
+    known_ids = {field_id for field_id, _label in field_order}
     items = [
-        f"{field_id}: {value}"
-        for field_id, value in payload.items()
-        if selected_ids is None or field_id in selected_ids
+        f"{label}: {payload[field_id]}"
+        for field_id, label in field_order
+        if field_id in payload
+        and (selected_ids is None or field_id in selected_ids)
     ]
+    items.extend(
+        f"{qualification_display_label(field_id)}: {value}"
+        for field_id, value in payload.items()
+        if field_id not in known_ids
+    )
     return f"{', '.join(items)}." if items else ""
+
+
+def qualification_display_label(field_id: str) -> str:
+    """Converte um ID personalizado em um rótulo legível para a saída."""
+    return " ".join(part.capitalize() for part in str(field_id).split("_") if part)
 
 
 def parse_assistant_names(raw_text: str) -> list[str]:
@@ -5809,12 +5834,34 @@ class SigApp:
             ("cidade", "Cidade"),
             ("telefone", "Telefone"),
         )
+        self.qualification_output_fields = (
+            ("nome", "Nome"),
+            ("nascimento", "Data de Nascimento"),
+            ("rg", "RG"),
+            ("cpf", "CPF"),
+            ("naturalidade", "Naturalidade"),
+            ("sexo", "Sexo"),
+            ("estado_civil", "Estado Civil"),
+            ("profissao", "Profissão"),
+            ("altura", "Altura"),
+            ("pele", "Pele"),
+            ("olhos", "Olhos"),
+            ("cabelo", "Cabelo"),
+            ("pai", "Pai"),
+            ("mae", "Mãe"),
+            ("instrucao", "Grau de Instrução"),
+            ("endereco", "Endereço"),
+            ("bairro", "Bairro"),
+            ("cidade", "Cidade"),
+            ("telefone", "Telefone"),
+        )
         self.qualification_field_vars = {
             field_id: BooleanVar(value=True)
             for field_id, _label in self.qualification_fields
         }
         self.qualification_select_all_var = BooleanVar(value=True)
         self.qualification_result_fields: dict[str, str] = {}
+        self.qualification_other_ids_var = StringVar()
 
         self._build_style()
         self.paste_icon = self._make_paste_icon()
@@ -7213,6 +7260,23 @@ try {
             check.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=(0, 4))
             self.qualification_field_checks.append(check)
 
+        other_data_frame = ttk.Frame(fields_frame)
+        other_data_frame.grid(row=0, column=4, rowspan=5, sticky="n", padx=(14, 0))
+        ttk.Label(other_data_frame, text="Outros dados:").pack(side=LEFT)
+        self.qualification_other_ids_entry = ttk.Entry(
+            other_data_frame,
+            textvariable=self.qualification_other_ids_var,
+            width=30,
+        )
+        self.qualification_other_ids_entry.pack(side=LEFT, padx=(6, 4))
+        self.qualification_other_help_button = ttk.Button(
+            other_data_frame,
+            text="?",
+            width=2,
+            command=self._show_qualification_other_help,
+        )
+        self.qualification_other_help_button.pack(side=LEFT)
+
         self.qualification_input_text = self._make_live_editor(
             frame, "Texto", "qualification_input", width=900
         )
@@ -7258,7 +7322,11 @@ try {
             return
         selected_ids = set(self._selected_qualification_field_ids())
         self._set_qualification_output(
-            format_qualification_fields(self.qualification_result_fields, selected_ids)
+            format_qualification_fields(
+                self.qualification_result_fields,
+                self.qualification_output_fields,
+                selected_ids,
+            )
         )
 
     def _make_qualification_editor_buttons(self, parent, target: str) -> None:
@@ -7300,6 +7368,8 @@ try {
         state = "disabled" if self.assistant_busy else "normal"
         self.qualification_input_text.configure(state=state)
         self.qualification_output_text.configure(state=state)
+        self.qualification_other_ids_entry.configure(state=state)
+        self.qualification_other_help_button.configure(state=state)
         self.qualification_organize_button.configure(
             state="disabled" if self.assistant_busy else "normal"
         )
@@ -7313,6 +7383,21 @@ try {
             for field_id, _label in self.qualification_fields
             if self.qualification_field_vars[field_id].get()
         ]
+
+    def _qualification_other_ids(self) -> list[str]:
+        return [
+            item.strip()
+            for item in self.qualification_other_ids_var.get().split(",")
+            if item.strip()
+        ]
+
+    def _show_qualification_other_help(self) -> None:
+        messagebox.showinfo(
+            "Outros dados",
+            "Use este campo para solicitar outros atributos além das opções padrão. "
+            "Digite os IDs desejados separados por vírgula, por exemplo: nome_social, placa, observacao.",
+            parent=self.root,
+        )
 
     def _clear_qualification_text(self, target: str) -> None:
         if self.assistant_busy:
@@ -7359,7 +7444,8 @@ try {
         if not raw_text:
             self.status_var.set("Digite ou cole um texto para organizar.")
             return
-        field_ids = self._selected_qualification_field_ids()
+        field_ids = self._selected_qualification_field_ids() + self._qualification_other_ids()
+        field_ids = list(dict.fromkeys(field_ids))
         if not field_ids:
             messagebox.showinfo(
                 "sig",
