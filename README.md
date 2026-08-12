@@ -12,17 +12,21 @@ Aplicativo desktop do SIG para transcricao, processamento local com FFmpeg e fer
 
 As chaves de API sao fornecidas pelo usuario nas configuracoes e nao fazem parte do codigo-fonte.
 
-## Executavel completo
+## Pacotes
 
-O pacote completo publicado nas releases inclui `sig.exe`, `SigUpdater.exe`, `ffmpeg.exe`, `ffplay.exe`, `_internal` e `vad_deps`. O executavel sozinho nao substitui esse pacote em uma instalacao nova.
+As releases do GitHub sempre incluem um pacote **full** para instalação do zero:
+`sig.exe`, `SigUpdater.exe`, `ffmpeg.exe`, `ffplay.exe`, `_internal`, `vad_deps` e `vad_worker.py`.
+
+As atualizações automáticas do aplicativo usam pacotes incrementais publicados no Google Drive. Eles contêm o `sig.exe`, `_internal`, `SigUpdater.exe` e o `build-info.json`; os recursos grandes já presentes na instalação são preservados.
 
 ## Compilacao
 
-Com Python 3.11 e as dependencias `Pillow`, `sounddevice`, `websocket-client` e `pyinstaller` instaladas:
+Com Python 3.11 e as dependencias `Pillow`, `sounddevice`, `websocket-client`, `cryptography` e `pyinstaller` instaladas, use o gate oficial:
 
 ```powershell
-pyinstaller --noconfirm --clean sig.spec
+python scripts\release.py tests
+python scripts\release.py updater-v2-test --package-zip <pacote-full.zip> --updater <SigUpdater.exe>
+python scripts\release.py release --version <APP_VERSION>
 ```
 
-Para uma instalacao completa, copie tambem os binarios FFmpeg/FFplay e a pasta `vad_deps` para a pasta de distribuicao. O `SigUpdater.exe` e publicado como componente precompilado junto do pacote completo.
-
+O comando de release faz um build onedir limpo, recompila o updater a partir de `updater_v2/updater.py`, valida as dependências e gera o pacote full. Para uma instalação completa, não use apenas o `sig.exe`.

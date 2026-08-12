@@ -39,7 +39,7 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 
 ## Atualizacao incremental pelo Drive
 
-- Pasta sincronizada: `X:\Meu Drive\Updater\Sig`
+- Publicar exclusivamente pela API do Google Drive. Nao copiar nem sincronizar o pacote pela unidade montada `X:`.
 - Pasta Drive: `1-yrsmFu_lAe0dMPo4sK70QRYGqMFcHJK`
 - Manifesto: `latest.json`
 - ID do manifesto: `1Gompo26SsyhSdliBGNaedLhEfidB244E`
@@ -52,8 +52,8 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 - O manifesto deve conter `schema`, `version`, `zip_file_id`, `zip_name`, `sha256`, `size`, `created_at` e `signature`.
 - Assinar usando `release\sign_manifest.py` e a chave privada local.
 - Nunca enviar `release\update_private_key.pem` ao GitHub ou ao Drive.
-- Depois de fazer upload, conferir se o ZIP e o `latest.json` sincronizaram na unidade X.
-- Atualizar o manifesto existente no Drive; nao criar duas copias de `latest.json` nem reenviar o mesmo ZIP.
+- Depois do upload, conferir o ZIP e o `latest.json` pela API usando os IDs retornados.
+- Atualizar o manifesto existente no Drive pela API; nao criar duas copias de `latest.json` nem reenviar o mesmo ZIP.
 
 ## Seguranca
 
@@ -81,3 +81,20 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 - Se o log disser que `_internal` e `sig.exe` foram instalados, mas a versao nao mudou, verificar primeiro `APP_VERSION` antes de culpar a copia.
 - Se o log parar em `aguardando validacao`, aguardar a linha final de validacao e conferir o processo; nao publicar outra tentativa sem diagnosticar.
 - Testar o executavel instalado com o diretorio de trabalho apontando para a pasta que contem `ffmpeg.exe`, `ffplay.exe`, `vad_deps` e `_internal`.
+
+## Gate oficial de build e release
+
+- Nenhuma versao pode ser considerada concluida ou publicavel sem passar pelo comando oficial em `scripts\release.py`.
+- A sequencia minima obrigatoria, executada no mesmo Python que contem PyInstaller, e:
+  `python scripts\release.py tests`
+  `python scripts\release.py validate --warn-path build\sig\warn-sig.txt`
+  `python scripts\release.py updater-test`
+- Para gerar uma release, usar somente:
+  `python scripts\release.py release --version <APP_VERSION> --zip-file-id <ID_DO_ZIP_NO_DRIVE>`
+- Esse comando faz clean build isolado, verifica warnings criticos, inspeciona o executavel congelado, valida layout/dependencias, testa o updater real em pasta temporaria, cria o ZIP e assina o manifesto. Se uma etapa falhar, a release nao e aprovada.
+- `--allow-same` existe somente para smoke test local da versao atual e nunca deve ser usado para publicar.
+- O ZIP nunca deve ser criado manualmente a partir de `dist`. O `sig.exe` precisa vir do clean build desta execucao; os assets externos somente podem vir de um `--runtime-root` explicitamente escolhido e passam pelo gate de layout e pelo hash conhecido do `SigUpdater.exe`.
+- O codigo-fonte de producao do `SigUpdater.exe` esta versionado em `updater_v2\updater.py`. Toda release deve recompila-lo em uma pasta limpa, validar seu hash em `scripts\updater_artifact.json` e executar `python scripts\release.py updater-v2-test`.
+- O updater e transacional: valida CRC, caminhos, duplicatas, tamanhos e arquivos essenciais antes da troca; usa diario, lock exclusivo, troca atomica por componentes, rollback e validacao de inicializacao.
+- O SIG usa o `SigUpdater.exe` extraido do pacote quando ele existe. Isso permite migrar instalacoes antigas para o updater endurecido sem depender do helper possivelmente antigo que ja esta instalado.
+- O helper legado esta preservado em `updater_v2\legacy\SigUpdater-legacy-20260806_004.exe` apenas para diagnostico historico; nao e fonte de novas releases.

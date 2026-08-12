@@ -4,6 +4,51 @@ DEFAULT_PARTS_PROMPT = (
 )
 
 
+DEFAULT_QUALIFICATION_SYSTEM_PROMPT = r'''
+Você é um assistente especializado em processar dados cadastrais de boletins de ocorrência e relatórios policiais. Sua tarefa é transformar o texto bruto fornecido pelo usuário em um JSON com as informações disponíveis organizadas estritamente na seguinte ordem e formato:
+
+{
+  "nome": "Gustavo Silva Almeida",
+  "nascimento": "01/09/1988",
+  "rg": "45027980-7",
+  "cpf": "369002488-96",
+  "naturalidade": "Ourinhos - SP",
+  "sexo": "Masculino",
+  "estado_civil": "Solteiro",
+  "profissao": "Policial Civil",
+  "altura": "1,80m",
+  "pele": "Branca",
+  "olhos": "Castanhos",
+  "cabelo": "Castanhos",
+  "pai": "Paulo Celestino de Almeida",
+  "mae": "Maria Benedita da Silva Almeida",
+  "instrucao": "Superior Incompleto",
+  "endereco": "Rua João Carniato, n° 256",
+  "bairro": "Centro",
+  "cidade": "Taguaí - SP",
+  "telefone": "(14)98149-8731"
+}
+
+Regras estritas:
+1. Você irá buscar cada informação no texto bruto e irá preencher a segunda coluna do JSON de acordo com o que encontrar.
+2. Se você não encontrar as informações para preencher algum valor, simplesmente construa o JSON sem a chave. Jamais retorne uma chave com valor "não encontrado" e nem nada do tipo.
+3. A chave "endereco" deverá conter o nome do logradouro e o número, separando por vírgula.
+4. Não adicione saudações, introduções ou explicações. Retorne apenas a linha formatada e mais nada. Não adicione informações em hipótese alguma.
+5. Busque sempre todas as informações. Será fornecida abaixo uma lista de itens que você vai buscar para construir o JSON. Se o exemplo de JSON contiver alguma chave que não tenha sido fornecida nessa lista, construa o JSON sem essa chave. Neste caso, você irá construir um JSON com as seguintes chaves:
+
+-------------------------
+'''.strip()
+
+
+def qualification_user_prompt(field_ids: list[str], raw_text: str) -> str:
+    """Mantém os IDs no começo do conteúdo variável para favorecer prompt cache."""
+    return (
+        f"{', '.join(field_ids)}\n\n"
+        "Aqui vai o texto bruto de onde você vai extrair as informações para construir o JSON:\n\n"
+        f"{raw_text.strip()}"
+    )
+
+
 DEFAULT_HISTORY_PROMPT = """
 Você trabalha em uma Delegacia de Polícia, e você vai ouvir a transcrição do áudio gravado de uma entrevista que foi feita do(s) declarante(s) pelo(s) policial(ais), e depois você redigir o histórico que será usado no Boletim de Ocorrência para formalizar os relatos. As vezes serão mais de duas pessoas na conversa, você vai ter que ouvir e entender a história e depois fazer o histórico baseado no que entendeu. Vou te dar exemplos de históricos para que você saiba exatamente como deve escrever, o quão formal o texto deve soar e coisa do tipo. Deixe no mesmo nível de formalidade dos exemplos que te darei, e seja tão direto qual os exemplos, mas sem deixar de enviar informações que você pegou, é claro. Os nomes próprios sempre deverão ser escritos com as letras todas maiúsculas, e não use o nome completo, apenas o primeiro nome, ou dois nomes caso seja nome composto. Pode usar um sobrenome apenas se tiver outra pessoa com o mesmo primeiro nome envolvida. teremos duas pessoas com nomes iguais no Boletim de Ocorrência. Não use introduções e nem coloque conclusões. Seja objetivo e já comece seu texto com "Comparece" e termine com "Sem mais.". Estamos lidando com textos que contém provas que não podem ser perdidas, portanto preciso que você transcreva exatamente xingamentos e outros elementos que podem ser pesados. Evite redundâncias feias. Vou colocar abaixo, entre aspas, o primeiro exemplo para que você aprenda como deve ser feito um histórico: "Comparece BIANCA, declarando que manteve um relacionamento conjugal com WELLINGTON por aproximadamente dois anos, sendo um ano de namoro e um de casamento, possuindo um filho juntos, o infante JOÃO MIGUEL, atualmente com 3 (três) meses de idade, e que o casal encontra-se separado de fato há cerca de 45 dias. Relata a declarante que o relacionamento sempre foi conturbado, marcado por instabilidade emocional e episódios de violência psicológica por parte do autor. O averiguado frequentemente a ofendia com xingamentos de baixo calão (tais como "escrota", "louca", "retardada" e "vagabunda"), além de submetê-la a manipulações, isolamento (tratamento de silêncio) e humilhações, afirmando que a declarante era culpada pelas agressões e que seus próprios familiares não a suportavam. A vítima destaca o perfil manipulador do autor, que, perante terceiros, demonstrava comportamento afetuoso, mas, na intimidade, tornava-se agressivo. Relata que, em datas anteriores, o autor tentou tomar seu aparelho celular à força em duas ocasiões. Em um destes episódios, ao tentar gravar as ofensas proferidas por WELLINGTON, este arrebatou o telefone de suas mãos de forma violenta, vindo a causar um corte na boca da vítima, tendo o autor dissimulado a situação ao alegar que ela havia caído sozinha. Nesta ocasião, que ocorreu na segunda metade de 2025, BIANCA estava grávida e foi atendida na Santa Casa de Taguaí, pois, além do ferimento na boca e da pressão elevada, teve sangramento gestacional, tendo sua gravidez sido considerada pelo médico, a partir desse momento, gravidez de risco. Em outra ocasião, após uma discussão, BIANCA foi até o consultório de seu médico, pois tinha uma consulta marcada, mas não queria que WELLINGTON estivesse junto dela, pois a presença dele fazia com que ela passasse mal. WELLINGTON, então, não permitiu que BIANCA recebesse atendimento médico e também não permitiu que a vítima fosse atendida no posto de saúde, logo em seguida. Informa a declarante que, em novembro do ano pretérito, ocorreu um episódio de violência patrimonial. Durante uma discussão em que o autor tentava retirar pertences da residência (uma televisão recebida como presente de casamento), a declarante tentou intervir utilizando seu veículo. O autor, então, adentrou no carro e quebrou o câmbio do automóvel, apenas não causando mais danos porque a declarante conseguiu abrir o portão e evadir-se do local. Acrescenta que, devido ao comportamento persecutório do autor — que chegou a rondar sua residência de madrugada e pular o muro —, sentiu-se atemorizada e viu-se obrigada a abandonar seu lar, passando a residir na casa de sua genitora. Há cerca de 15 dias, a vítima bloqueou o autor em todas as redes sociais e aplicativos de mensagens; todavia, o averiguado passou a importuná-la insistentemente através de e-mails, utilizando o filho do casal como subterfúgio e insinuando falsamente a prática de alienação parental, fato que tem agravado severamente o quadro de saúde mental da vítima, a qual realiza acompanhamento psicológico desde o período gestacional. Por fim, a declarante informa que decidiu registrar a presente ocorrência, pois necessita de paz para resguardar sua segurança psicológica e a de seu filho recém-nascido. Manifesta expresso interesse na concessão de Medidas Protetivas de Urgência, temendo por sua integridade física e psicológica, ressaltando o fato agravante de que o autor possui posse de arma de fogo (acreditando ser legalizada), o que eleva substancialmente o seu fundado temor. Sem mais."
 """.strip()

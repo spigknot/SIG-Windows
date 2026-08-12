@@ -3,6 +3,7 @@ import concurrent.futures
 import ctypes
 import hashlib
 import importlib
+from array import array
 from collections import deque
 import html
 import http.client
@@ -29,7 +30,7 @@ import wave
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from tkinter import BOTH, END, LEFT, RIGHT, X, Y, BooleanVar, Button, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
+from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Button, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, urlencode, urlparse
 
@@ -38,12 +39,14 @@ from PIL import Image, ImageDraw, ImageTk
 from assistant_prompts import (
     DEFAULT_HISTORY_PROMPT,
     DEFAULT_PARTS_PROMPT,
+    DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+    qualification_user_prompt,
     statement_prompt,
 )
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260806_004"
+APP_VERSION = "20260812_001"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -79,6 +82,7 @@ DEFAULT_SETTINGS = {
     "convert_parallel": 8,
     "transcribe_parallel": 16,
     "grok_chunk_ms": 100,
+    "grok_rest_requests": False,
     "transcription_server": "avare",
     "transcription_server_2": "",
     "text_model": "IA-Proxy",
@@ -728,6 +732,104 @@ class EmbeddedMediaPlayer:
         self.opened = False
 
 
+class PreviewIconButton(Canvas):
+    """Controle compacto de prévia, desenhado para lembrar o player Android."""
+
+    def __init__(self, parent, kind: str, command, width: int, height: int, **kwargs):
+        self.kind = kind
+        self.command = command
+        self.playing = False
+        self.hovered = False
+        background = kwargs.pop("background", "#f4f7f6")
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            highlightthickness=0,
+            borderwidth=0,
+            background=background,
+            cursor="hand2",
+            **kwargs,
+        )
+        self._background = background
+        self.bind("<Button-1>", lambda _event: self.command())
+        self.bind("<Enter>", lambda _event: self._set_hover(True))
+        self.bind("<Leave>", lambda _event: self._set_hover(False))
+        self._draw()
+
+    def configure(self, cnf=None, **kwargs):
+        text = kwargs.pop("text", None)
+        if isinstance(cnf, dict):
+            text = cnf.pop("text", text)
+        if text is not None and self.kind == "play":
+            self.playing = text in {"||", "pause", "paused"}
+            self._draw()
+        return super().configure(cnf, **kwargs)
+
+    config = configure
+
+    def _set_hover(self, hovered: bool) -> None:
+        self.hovered = hovered
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        width = max(1, self.winfo_reqwidth())
+        height = max(1, self.winfo_reqheight())
+        color = "#16833a" if self.hovered else "#536565"
+        if self.kind == "play":
+            center_x, center_y = width / 2, height / 2
+            radius = min(width, height) * 0.34
+            self.create_oval(
+                center_x - radius,
+                center_y - radius,
+                center_x + radius,
+                center_y + radius,
+                outline=color,
+                width=3,
+            )
+            if self.playing:
+                bar_height = radius * 0.82
+                self.create_line(center_x - 6, center_y - bar_height / 2, center_x - 6, center_y + bar_height / 2, fill=color, width=4, capstyle="round")
+                self.create_line(center_x + 6, center_y - bar_height / 2, center_x + 6, center_y + bar_height / 2, fill=color, width=4, capstyle="round")
+            else:
+                self.create_polygon(
+                    center_x - 6,
+                    center_y - 12,
+                    center_x + 13,
+                    center_y,
+                    center_x - 6,
+                    center_y + 12,
+                    fill=color,
+                    outline="",
+                )
+            return
+        direction = -1 if self.kind == "slower" else 1
+        center_x, center_y = width / 2, height / 2
+        chevron_width = 15
+        gap = 8
+        for offset in (-gap, gap):
+            if direction < 0:
+                points = (
+                    center_x + offset + chevron_width / 2,
+                    center_y - 13,
+                    center_x + offset - chevron_width / 2,
+                    center_y,
+                    center_x + offset + chevron_width / 2,
+                    center_y + 13,
+                )
+            else:
+                points = (
+                    center_x + offset - chevron_width / 2,
+                    center_y - 13,
+                    center_x + offset + chevron_width / 2,
+                    center_y,
+                    center_x + offset - chevron_width / 2,
+                    center_y + 13,
+                )
+            self.create_line(*points, fill=color, width=3, capstyle="round", joinstyle="round")
+
+
 class FfmpegTaskTracker:
     """Versão Tk do rastreador de etapas usado pelas ferramentas FFmpeg do Android."""
 
@@ -993,26 +1095,22 @@ class FfmpegToolsPanel:
         self.ffmpeg_scroll_canvas.bind("<Enter>", lambda _event: self.ffmpeg_scroll_canvas.bind_all("<MouseWheel>", self._scroll_ffmpeg_panel))
         self.ffmpeg_scroll_canvas.bind("<Leave>", lambda _event: self.ffmpeg_scroll_canvas.unbind_all("<MouseWheel>"))
 
-        heading = ttk.Frame(frame)
-        heading.pack(fill=X, pady=(0, 8))
-        ttk.Label(heading, text="FFmpeg", font=("Segoe UI Semibold", 16)).pack(side=LEFT)
-        ttk.Label(
-            heading,
-            text="Processamento local com aceleração automática quando disponível.",
-            style="Muted.TLabel",
-        ).pack(side=LEFT, padx=(10, 0), pady=(4, 0))
-        self.acceleration_label = ttk.Label(heading, text="Encoder de vídeo:", style="Muted.TLabel")
-        self.acceleration_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
+        tool_tab_bar = self.tk.Frame(frame, background="#f4f7f6")
+        tool_tab_bar.pack(fill=X, pady=(0, 8))
+
+        # Pack right-to-left so the encoder label is visually before its selector.
         self.acceleration_combo = ttk.Combobox(
-            heading,
+            tool_tab_bar,
             textvariable=self.acceleration_var,
             state="disabled",
             width=20,
         )
-        self.acceleration_combo.pack(side=RIGHT, pady=(2, 0))
-        self.quality_help_button = ttk.Button(heading, text="?", width=3, command=self._show_video_quality_help)
+        self.acceleration_combo.pack(side=RIGHT, padx=(0, 4), pady=(2, 0))
+        self.acceleration_label = ttk.Label(tool_tab_bar, text="Encoder de vídeo:", style="Muted.TLabel")
+        self.acceleration_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
+        self.quality_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_quality_help)
         self.quality_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
-        self.quality_menu_button = ttk.Menubutton(heading, textvariable=self.video_quality_var, width=11)
+        self.quality_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_quality_var, width=11)
         self.quality_menu = self.tk.Menu(self.quality_menu_button, tearoff=False)
         for quality in VIDEO_QUALITY_LEVELS:
             self.quality_menu.add_radiobutton(
@@ -1022,25 +1120,24 @@ class FfmpegToolsPanel:
             )
         self.quality_menu_button.configure(menu=self.quality_menu)
         self.quality_menu_button.pack(side=RIGHT, pady=(2, 0))
-        self.quality_label = ttk.Label(heading, text="Qualidade:", style="Muted.TLabel")
+        self.quality_label = ttk.Label(tool_tab_bar, text="Qualidade:", style="Muted.TLabel")
         self.quality_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
 
-        tool_tab_bar = self.tk.Frame(frame, background="#f4f7f6")
-        tool_tab_bar.pack(fill=X)
         self.ffmpeg_tab_buttons = {}
+        ffmpeg_tab_width = len("Inserir") + 1
         tab_specs = (
-            ("Cortar", 15),
-            ("Extrair áudio", 15),
-            ("Girar vídeo", 15),
-            ("Juntar áudios/vídeos", 20),
-            ("Inserir áudio", 15),
-            ("Limpar áudio", 15),
+            ("Cortar", "Cortar"),
+            ("Extrair áudio", "Extrair"),
+            ("Girar vídeo", "Girar"),
+            ("Juntar áudios/vídeos", "Juntar"),
+            ("Inserir áudio", "Inserir"),
+            ("Limpar áudio", "Limpar"),
         )
-        for name, width in tab_specs:
+        for name, display_name in tab_specs:
             button = self.tk.Label(
                 tool_tab_bar,
-                text=name,
-                width=width,
+                text=display_name,
+                width=ffmpeg_tab_width,
                 height=1,
                 borderwidth=1,
                 relief="solid",
@@ -1126,13 +1223,50 @@ class FfmpegToolsPanel:
         canvas.create_text(size // 2, size // 2, text=message, fill="#667371", font=("Segoe UI", 10))
         return canvas
 
-    def _add_preview_speed_controls(self, parent) -> None:
-        ttk.Button(parent, text="-", width=3, command=lambda: self._change_preview_speed(-1)).pack(side=LEFT, padx=(10, 3))
-        ttk.Label(parent, textvariable=self.preview_speed_var, style="Muted.TLabel", width=5).pack(side=LEFT)
-        ttk.Button(parent, text="+", width=3, command=lambda: self._change_preview_speed(1)).pack(side=LEFT, padx=(3, 0))
+    def _add_preview_speed_controls(self, parent):
+        """Monta o conjunto de controles comum aos players de áudio e vídeo."""
+        controls = self.tk.Frame(parent, background="#f4f7f6")
+        controls.pack(fill=X, pady=(0, 3))
+        icon_row = self.tk.Frame(controls, background="#f4f7f6")
+        icon_row.pack(anchor="center")
+
+        slower = PreviewIconButton(
+            icon_row,
+            "slower",
+            lambda: self._change_preview_speed(-1),
+            width=58,
+            height=48,
+        )
+        slower.pack(side=LEFT, padx=(0, 18))
+        play = PreviewIconButton(
+            icon_row,
+            "play",
+            self._toggle_preview,
+            width=76,
+            height=60,
+        )
+        play.pack(side=LEFT)
+        faster = PreviewIconButton(
+            icon_row,
+            "faster",
+            lambda: self._change_preview_speed(1),
+            width=58,
+            height=48,
+        )
+        faster.pack(side=LEFT, padx=(18, 0))
+        create_tooltip(slower, "Diminuir velocidade")
+        create_tooltip(play, "Reproduzir ou pausar")
+        create_tooltip(faster, "Aumentar velocidade")
+
+        ttk.Label(controls, textvariable=self.preview_speed_var, style="Muted.TLabel").pack(anchor="center", pady=(0, 2))
+        return play
+
+    @staticmethod
+    def _add_preview_time_label(parent, current_var: StringVar) -> None:
+        ttk.Label(parent, textvariable=current_var, style="Muted.TLabel").pack(anchor="center", pady=(0, 8))
 
     def _change_preview_speed(self, direction: int) -> None:
-        values = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+        values = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
         index = min(range(len(values)), key=lambda item: abs(values[item] - self.preview_speed))
         self.preview_speed = values[max(0, min(len(values) - 1, index + direction))]
         self.preview_speed_var.set(f"{self.preview_speed:.2g}x")
@@ -1145,14 +1279,10 @@ class FfmpegToolsPanel:
         self._file_row(self.cut_tab, self.cut_input_var, self.select_cut_input)
         self.cut_preview = self._create_stable_preview(self.cut_tab, "Selecione uma mídia para visualizar")
         self.cut_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.cut_preview))
+        self.cut_play_button = self._add_preview_speed_controls(self.cut_tab)
         self.cut_timeline = RangeTimeline(self.cut_tab, self._cut_timeline_changed)
         self.cut_timeline.pack(fill=X, pady=(0, 4))
-        cut_playback = ttk.Frame(self.cut_tab)
-        cut_playback.pack(anchor="w", pady=(0, 10))
-        self.cut_play_button = ttk.Button(cut_playback, text=">", width=3, command=self._toggle_preview)
-        self.cut_play_button.pack(side=LEFT)
-        self._add_preview_speed_controls(cut_playback)
-        ttk.Label(cut_playback, textvariable=self.cut_current_var, style="Muted.TLabel").pack(side=LEFT, padx=(10, 0))
+        self._add_preview_time_label(self.cut_tab, self.cut_current_var)
         values = ttk.Frame(self.cut_tab)
         values.pack(anchor="w")
         ttk.Label(values, text="Início (segundos):").grid(row=0, column=0, sticky="w")
@@ -1170,14 +1300,10 @@ class FfmpegToolsPanel:
         self._file_row(self.extract_tab, self.extract_summary_var, self.select_extract_inputs, "Selecionar arquivos")
         self.extract_preview = self._create_stable_preview(self.extract_tab, "Escolha um arquivo para visualizar ou ouvir")
         self.extract_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.extract_preview))
+        self.extract_play_button = self._add_preview_speed_controls(self.extract_tab)
         self.extract_timeline = RangeTimeline(self.extract_tab, self._extract_timeline_changed)
         self.extract_timeline.pack(fill=X, pady=(0, 4))
-        extract_playback = ttk.Frame(self.extract_tab)
-        extract_playback.pack(anchor="w", pady=(0, 10))
-        self.extract_play_button = ttk.Button(extract_playback, text=">", width=3, command=self._toggle_preview)
-        self.extract_play_button.pack(side=LEFT)
-        self._add_preview_speed_controls(extract_playback)
-        ttk.Label(extract_playback, textvariable=self.extract_current_var, style="Muted.TLabel").pack(side=LEFT, padx=(10, 0))
+        self._add_preview_time_label(self.extract_tab, self.extract_current_var)
         presets = ttk.Frame(self.extract_tab)
         presets.pack(anchor="w", pady=(0, 10))
         ttk.Checkbutton(
@@ -1222,14 +1348,10 @@ class FfmpegToolsPanel:
         self._file_row(self.rotate_tab, self.rotate_input_var, self.select_rotate_input, "Selecionar vídeo")
         self.rotate_preview = self._create_stable_preview(self.rotate_tab, "Selecione um vídeo para visualizar")
         self.rotate_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.rotate_preview))
+        self.rotate_play_button = self._add_preview_speed_controls(self.rotate_tab)
         self.rotate_timeline = RangeTimeline(self.rotate_tab, self._rotate_timeline_changed)
         self.rotate_timeline.pack(fill=X, pady=(0, 4))
-        rotate_playback = ttk.Frame(self.rotate_tab)
-        rotate_playback.pack(anchor="w", pady=(0, 10))
-        self.rotate_play_button = ttk.Button(rotate_playback, text=">", width=3, command=self._toggle_preview)
-        self.rotate_play_button.pack(side=LEFT)
-        self._add_preview_speed_controls(rotate_playback)
-        ttk.Label(rotate_playback, textvariable=self.rotate_current_var, style="Muted.TLabel").pack(side=LEFT, padx=(10, 0))
+        self._add_preview_time_label(self.rotate_tab, self.rotate_current_var)
         trim = ttk.Frame(self.rotate_tab)
         trim.pack(anchor="w", pady=(0, 10))
         ttk.Label(trim, text="Início (segundos):").grid(row=0, column=0, sticky="w")
@@ -1344,14 +1466,10 @@ class FfmpegToolsPanel:
         self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=780)
         self.insert_secondary_label.pack(anchor="w", pady=(2, 0))
 
+        self.insert_play_button = self._add_preview_speed_controls(self.insert_tab)
         self.insert_timeline = InsertAudioTimeline(self.insert_tab, self._insert_timeline_changed)
         self.insert_timeline.pack(fill=X, pady=(2, 4))
-        playback = ttk.Frame(self.insert_tab)
-        playback.pack(anchor="w", pady=(0, 8))
-        self.insert_play_button = ttk.Button(playback, text=">", width=3, command=self._toggle_preview)
-        self.insert_play_button.pack(side=LEFT)
-        self._add_preview_speed_controls(playback)
-        ttk.Label(playback, textvariable=self.insert_current_var, style="Muted.TLabel").pack(side=LEFT, padx=(10, 0))
+        self._add_preview_time_label(self.insert_tab, self.insert_current_var)
 
         time_row = ttk.Frame(self.insert_tab)
         time_row.pack(anchor="w", pady=(0, 8))
@@ -1648,6 +1766,23 @@ class FfmpegToolsPanel:
             self.insert_timeline.set_position(position)
         self._start_insert_preview_segment(context, position)
 
+    def _preview_atempo_filter(self) -> str:
+        """Converte a velocidade escolhida em uma cadeia aceita pelo atempo.
+
+        O filtro aceita apenas fatores entre 0.5 e 2.0 por instância; por isso
+        3x e 4x são compostos por mais de uma etapa.
+        """
+        target = max(0.5, min(4.0, float(self.preview_speed)))
+        factors: list[float] = []
+        while target > 2.0:
+            factors.append(2.0)
+            target /= 2.0
+        while target < 0.5:
+            factors.append(0.5)
+            target /= 0.5
+        factors.append(target)
+        return ",".join(f"atempo={factor:.6g}" for factor in factors)
+
     def _start_insert_preview_segment(self, context: dict, composite_position: float) -> None:
         self.preview_generation += 1
         generation = self.preview_generation
@@ -1677,7 +1812,7 @@ class FfmpegToolsPanel:
                 [
                     str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
                     "-ss", self._fmt_seconds(max(0.0, source_offset)), "-t", self._fmt_seconds(remaining),
-                    "-af", f"atempo={self.preview_speed}", str(source),
+                    "-af", self._preview_atempo_filter(), str(source),
                 ],
                 creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
             )
@@ -1796,7 +1931,7 @@ class FfmpegToolsPanel:
             self.external_preview_process = subprocess.Popen(
                 [
                     str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
-                    "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(play_duration), "-af", f"atempo={self.preview_speed}", str(context["source"]),
+                    "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(play_duration), "-af", self._preview_atempo_filter(), str(context["source"]),
                 ],
                 creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
             )
@@ -1831,7 +1966,7 @@ class FfmpegToolsPanel:
             creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
         )
         audio_command = [
-            str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(play_duration), "-af", f"atempo={self.preview_speed}", str(context["source"]),
+            str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(play_duration), "-af", self._preview_atempo_filter(), str(context["source"]),
         ]
         self.external_preview_process = subprocess.Popen(
             audio_command,
@@ -4139,6 +4274,12 @@ def normalize_settings(data: dict) -> dict:
     clean["convert_parallel"] = max(1, clamp_int(data.get("convert_parallel"), 1, 256, DEFAULT_SETTINGS["convert_parallel"]))
     clean["transcribe_parallel"] = max(1, clamp_int(data.get("transcribe_parallel"), 1, 256, DEFAULT_SETTINGS["transcribe_parallel"]))
     clean["grok_chunk_ms"] = clamp_int(data.get("grok_chunk_ms"), 20, 2000, DEFAULT_SETTINGS["grok_chunk_ms"])
+    rest_value = data.get("grok_rest_requests", DEFAULT_SETTINGS["grok_rest_requests"])
+    clean["grok_rest_requests"] = (
+        rest_value
+        if isinstance(rest_value, bool)
+        else str(rest_value).strip().casefold() in {"1", "true", "yes", "on"}
+    )
     server_names = {server["name"] for server in read_transcription_servers()}
     transcription_server = str(
         data.get("transcription_server") or DEFAULT_SETTINGS["transcription_server"]
@@ -4530,13 +4671,77 @@ def _timed_entry(value) -> tuple[str, float, float] | None:
     return text, start_value, end_value
 
 
+def _timed_word_entries(items, total_duration=None) -> list[tuple[str, float, float]]:
+    """Normalize Grok word timestamps, whose final word often lacks ``end``."""
+    candidates = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = next(
+            (
+                str(item.get(key) or "").strip()
+                for key in ("text", "word", "transcript")
+                if str(item.get(key) or "").strip()
+            ),
+            "",
+        )
+        if not text:
+            continue
+        timestamp = item.get("timestamp")
+        start = item.get("start", item.get("start_time"))
+        end = item.get("end", item.get("end_time"))
+        if isinstance(timestamp, list) and timestamp:
+            start = timestamp[0] if start is None else start
+            if len(timestamp) >= 2:
+                end = timestamp[1] if end is None else end
+        try:
+            start_value = float(start)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start_value) or start_value < 0:
+            continue
+        try:
+            end_value = float(end) if end is not None else None
+        except (TypeError, ValueError):
+            end_value = None
+        if end_value is not None and (
+            not math.isfinite(end_value) or end_value < start_value
+        ):
+            end_value = None
+        candidates.append([text, start_value, end_value])
+
+    try:
+        duration_value = float(total_duration)
+        if not math.isfinite(duration_value) or duration_value < 0:
+            duration_value = None
+    except (TypeError, ValueError):
+        duration_value = None
+
+    normalized = []
+    for index, (text, start_value, end_value) in enumerate(candidates):
+        if end_value is None and index + 1 < len(candidates):
+            next_start = candidates[index + 1][1]
+            if next_start > start_value:
+                end_value = next_start
+        if end_value is None and duration_value is not None and duration_value > start_value:
+            end_value = duration_value
+        if end_value is None:
+            end_value = start_value + max(0.08, min(0.6, len(text) * 0.08))
+        normalized.append((text, start_value, max(start_value, end_value)))
+    return normalized
+
+
 def _timestamped_text_from_json(value) -> str:
     if isinstance(value, dict):
         for key, group_words in (("segments", False), ("words", True)):
             items = value.get(key)
             if not isinstance(items, list):
                 continue
-            entries = [entry for item in items if (entry := _timed_entry(item))]
+            entries = (
+                _timed_word_entries(items, value.get("duration"))
+                if group_words
+                else [entry for item in items if (entry := _timed_entry(item))]
+            )
             if not entries:
                 continue
             if group_words:
@@ -4720,6 +4925,36 @@ def extract_content_text(content) -> str:
         if isinstance(text, str) and text.strip():
             return text.strip()
     return ""
+
+
+def parse_qualification_json(raw_text: str, allowed_ids: list[str], field_order: tuple[tuple[str, str], ...]) -> str:
+    """Extrai e normaliza o JSON da IA, sem exibir campos não solicitados."""
+    clean = str(raw_text or "").strip()
+    clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s*```$", "", clean).strip()
+    start, end = clean.find("{"), clean.rfind("}")
+    if start < 0 or end <= start:
+        raise RuntimeError("A IA não devolveu um JSON válido.")
+    try:
+        payload = json.loads(clean[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"A IA devolveu um JSON inválido: {exc.msg}.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("A IA não devolveu um objeto JSON.")
+    allowed = set(allowed_ids)
+    normalized = {}
+    for field_id, _label in field_order:
+        if field_id not in allowed or field_id not in payload:
+            continue
+        value = payload[field_id]
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        value = str(value).strip()
+        if value:
+            normalized[field_id] = value
+    return json.dumps(normalized, ensure_ascii=False, indent=2)
 
 
 def parse_assistant_names(raw_text: str) -> list[str]:
@@ -5384,6 +5619,8 @@ class SigApp:
         self._apply_window_icon()
         self.root.geometry("1260x960")
         self.root.minsize(1220, 820)
+        if os.name == "nt":
+            self.root.state("zoomed")
         self.settings = load_settings()
         self.selected_paths: list[Path] = []
         self.ui_queue: queue.Queue = queue.Queue()
@@ -5407,12 +5644,21 @@ class SigApp:
         self.live_uploader: GraniteUploader | None = None
         self.live_full_pcm_path: Path | None = None
         self.live_uses_grok_websocket = False
+        self.live_grok_settings: dict | None = None
+        self.live_grok_language = "pt"
+        self.live_grok_diarize = False
         self.grok_ws_app = None
         self.grok_ws_thread: threading.Thread | None = None
         self.grok_ws_ready_event = threading.Event()
         self.grok_ws_done_event = threading.Event()
         self.grok_ws_lost_event = threading.Event()
         self.grok_ws_intentional_close = False
+        self.live_was_grok_websocket = False
+        self.live_audio_recovery_available = False
+        self.live_recovery_thread: threading.Thread | None = None
+        self.live_recovery_cancel_event = threading.Event()
+        self.live_capture_finish_waiting = False
+        self.live_output_finished = False
         self.live_started_at = 0.0
         self.live_paused_at = 0.0
         self.live_paused_total = 0.0
@@ -5421,6 +5667,10 @@ class SigApp:
         self.live_committed_text = ""
         self.live_draft_text = ""
         self.last_live_transcript_text = ""
+        self.last_live_history_text = ""
+        self.last_live_history_text_2 = ""
+        self.last_live_statement_text = ""
+        self.last_live_statement_text_2 = ""
         self.live_plain_transcript_text = ""
         self.live_timestamped_transcript_text = ""
         self.live_secondary_active = False
@@ -5441,6 +5691,11 @@ class SigApp:
         self.normal_record_grok = False
         self.normal_record_language = "pt"
         self.normal_record_diarize = False
+        self.normal_record_paused = False
+        self.live_waveform_lock = threading.Lock()
+        # Keep roughly one envelope sample per visible pixel for a denser waveform.
+        self.live_waveform_levels = deque([0.0] * 168, maxlen=168)
+        self.live_waveform_last_capture_at = 0.0
 
         self.live_language_var = StringVar(value="pt")
         self.live_language_label_var = StringVar(value="Idioma: Português")
@@ -5460,6 +5715,12 @@ class SigApp:
             "names": None,
             "statement": None,
         }
+        self.assistant_task_started_at: dict[str, float | None] = {
+            "history": None,
+            "names": None,
+            "statement": None,
+        }
+        self.assistant_multi_started_at: dict[tuple[str, int], float] = {}
         self.assistant_phase = "idle"
         self.imei_generation = 0
         self.imei_thread: threading.Thread | None = None
@@ -5509,17 +5770,45 @@ class SigApp:
         self.imei_status_var = StringVar(value="")
         self.imei_history_var = StringVar(value="")
         self.imei_toggle_var = StringVar(value="")
+        self.qualification_status_var = StringVar(value="")
+        self.qualification_fields = (
+            ("nome", "Nome Completo"),
+            ("nascimento", "Data de Nascimento"),
+            ("rg", "RG"),
+            ("cpf", "CPF"),
+            ("naturalidade", "Naturalidade"),
+            ("sexo", "Sexo"),
+            ("estado_civil", "Estado Civil"),
+            ("profissao", "Profissão"),
+            ("altura", "Altura"),
+            ("pele", "Pele"),
+            ("olhos", "Olhos"),
+            ("cabelo", "Cabelo"),
+            ("pai", "Pai"),
+            ("mae", "Mãe"),
+            ("instrucao", "Grau de Instrução"),
+            ("endereco", "Endereço"),
+            ("bairro", "Bairro"),
+            ("cidade", "Cidade"),
+            ("telefone", "Telefone"),
+        )
+        self.qualification_field_vars = {
+            field_id: BooleanVar(value=True)
+            for field_id, _label in self.qualification_fields
+        }
 
         self._build_style()
         self.paste_icon = self._make_paste_icon()
         self.copy_icon = self._make_copy_icon()
         self.clear_icon = self._make_clear_icon()
         self.recover_icon = self._make_recover_icon()
+        self.recover_audio_icon = self._make_recover_icon("#d39b00")
         self._build_menu()
         self._build_ui()
         self.status_var.trace_add("write", lambda *_args: self._append_activity_log(self.status_var.get()))
         self._refresh_server_label()
         self.root.after(100, self._poll_ui_queue)
+        self.root.after(100, self._refresh_assistant_progress_clock)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -5599,12 +5888,11 @@ class SigApp:
         return ImageTk.PhotoImage(image)
 
     @staticmethod
-    def _make_recover_icon():
-        image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    def _make_recover_icon(color="#263735"):
+        image = Image.new("RGBA", (17, 17), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        color = "#263735"
-        draw.arc((2, 2, 18, 18), start=45, end=315, fill=color, width=2)
-        draw.polygon(((16, 4), (16, 8), (12, 5)), fill=color)
+        draw.arc((2, 2, 15, 15), start=45, end=315, fill=color, width=2)
+        draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
         return ImageTk.PhotoImage(image)
 
     @staticmethod
@@ -5770,9 +6058,29 @@ class SigApp:
                 shutil.rmtree(staging_dir)
             staging_dir.mkdir(parents=True, exist_ok=True)
             total_uncompressed = 0
+            seen_members = set()
+            max_entries = 10_000
+            max_total_uncompressed = 4 * 1024 * 1024 * 1024
+            max_member_uncompressed = 1 * 1024 * 1024 * 1024
+            required_members = {
+                "sig.exe",
+                "_internal/base_library.zip",
+                "_internal/python311.dll",
+                "_internal/vcruntime140.dll",
+                "_internal/vcruntime140_1.dll",
+                "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
+                "SigUpdater.exe",
+            }
             with zipfile.ZipFile(zip_path, "r") as archive:
-                for member in archive.infolist():
-                    pure_path = PurePosixPath(member.filename)
+                corrupt_member = archive.testzip()
+                if corrupt_member is not None:
+                    raise RuntimeError(f"entrada corrompida no pacote: {corrupt_member}")
+                members = archive.infolist()
+                if len(members) > max_entries:
+                    raise RuntimeError("o pacote excede o limite de entradas")
+                for member in members:
+                    normalized_name = member.filename.replace("\\", "/").rstrip("/")
+                    pure_path = PurePosixPath(normalized_name)
                     if (
                         pure_path.is_absolute()
                         or ".." in pure_path.parts
@@ -5780,13 +6088,35 @@ class SigApp:
                         or member.flag_bits & 0x1
                     ):
                         raise RuntimeError(f"entrada inválida no pacote: {member.filename}")
+                    if any(
+                        "\x00" in part
+                        or ":" in part
+                        or part.endswith((" ", "."))
+                        or part.casefold() in {"g", "dist"}
+                        or part.casefold().startswith("_mei")
+                        for part in pure_path.parts
+                    ):
+                        raise RuntimeError(f"nome incompatível no pacote: {member.filename}")
+                    key = normalized_name.casefold()
+                    if key in seen_members:
+                        raise RuntimeError(f"entrada duplicada no pacote: {member.filename}")
+                    seen_members.add(key)
                     if (member.external_attr >> 16) & 0o170000 == 0o120000:
                         raise RuntimeError(f"link simbólico não permitido: {member.filename}")
+                    if member.file_size > max_member_uncompressed:
+                        raise RuntimeError(f"entrada individual grande demais: {member.filename}")
                     total_uncompressed += member.file_size
-                    if total_uncompressed > 4 * 1024 * 1024 * 1024:
+                    if total_uncompressed > max_total_uncompressed:
                         raise RuntimeError("o pacote descompactado excede o limite permitido")
-                for member in archive.infolist():
-                    target = (staging_dir / Path(*PurePosixPath(member.filename).parts)).resolve()
+                missing = sorted(
+                    item for item in required_members
+                    if item.casefold() not in seen_members
+                )
+                if missing:
+                    raise RuntimeError("componentes obrigatórios ausentes: " + ", ".join(missing))
+                for member in members:
+                    normalized_name = member.filename.replace("\\", "/").rstrip("/")
+                    target = (staging_dir / Path(*PurePosixPath(normalized_name).parts)).resolve()
                     if not target.is_relative_to(staging_dir.resolve()):
                         raise RuntimeError(f"destino inválido no pacote: {member.filename}")
                     if member.is_dir():
@@ -5795,12 +6125,13 @@ class SigApp:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(member, "r") as source, target.open("wb") as destination:
                         shutil.copyfileobj(source, destination, length=1024 * 256)
-            if not (staging_dir / "sig.exe").is_file():
-                raise RuntimeError("o pacote não contém sig.exe")
-
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            for required in required_members:
+                required_path = staging_dir / Path(*PurePosixPath(required).parts)
+                if not required_path.is_file() or required_path.stat().st_size <= 0:
+                    raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
             self._queue("update_ready", zip_path, version)
         except Exception as exc:
+            shutil.rmtree(update_root, ignore_errors=True)
             self._queue("update_error", str(exc))
 
     @staticmethod
@@ -6008,7 +6339,8 @@ try {
                 f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
                 "Preparando o atualizador independente.\n"
             )
-        updater_path = app_base_dir() / "SigUpdater.exe"
+        staged_updater = zip_path.parent / "staging" / "SigUpdater.exe"
+        updater_path = staged_updater if staged_updater.is_file() else app_base_dir() / "SigUpdater.exe"
         if not updater_path.is_file():
             detail = (
                 "SigUpdater.exe não foi encontrado ao lado do SIG. "
@@ -6033,6 +6365,12 @@ try {
             )
         try:
             shutil.copy2(updater_path, temporary_updater)
+            with log_path.open("a", encoding="utf-8") as log_file:
+                source_label = "pacote baixado" if updater_path == staged_updater else "instalação atual"
+                log_file.write(
+                    f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                    f"Usando SigUpdater.exe da {source_label}.\n"
+                )
             subprocess.Popen(
                 [
                     str(temporary_updater),
@@ -6131,54 +6469,70 @@ try {
 
         tab_bar = tk.Frame(outer, background="#f4f7f6")
         tab_bar.pack(fill=X, pady=(12, 0))
+        tab_font = ("Segoe UI Semibold", 10)
+        tab_width = len("Transcrição") + 1
         self.live_tab_button = tk.Label(
             tab_bar,
-            text="STT Remoto",
-            width=22,
+            text="Streaming",
+            width=tab_width,
             height=1,
             borderwidth=1,
             relief="solid",
-            font=("Segoe UI Semibold", 10),
+            font=tab_font,
             cursor="hand2",
         )
         self.files_tab_button = tk.Label(
             tab_bar,
-            text="Transcrição de arquivos",
-            width=22,
+            text="Transcrição",
+            width=tab_width,
             height=1,
             borderwidth=1,
             relief="solid",
-            font=("Segoe UI Semibold", 10),
+            font=tab_font,
             cursor="hand2",
         )
         self.imei_tab_button = tk.Label(
             tab_bar,
             text="IMEI",
-            width=22,
+            width=tab_width,
             height=1,
             borderwidth=1,
             relief="solid",
-            font=("Segoe UI Semibold", 10),
+            font=tab_font,
             cursor="hand2",
         )
         self.ffmpeg_tab_button = tk.Label(
             tab_bar,
             text="FFmpeg",
-            width=22,
+            width=tab_width,
             height=1,
             borderwidth=1,
             relief="solid",
-            font=("Segoe UI Semibold", 10),
+            font=tab_font,
+            cursor="hand2",
+        )
+        self.qualification_tab_button = tk.Label(
+            tab_bar,
+            text="Qualificação",
+            width=tab_width,
+            height=1,
+            borderwidth=1,
+            relief="solid",
+            font=tab_font,
             cursor="hand2",
         )
         self.live_tab_button.pack(side=LEFT)
         self.files_tab_button.pack(side=LEFT, padx=(4, 0))
         self.imei_tab_button.pack(side=LEFT, padx=(4, 0))
+        self.qualification_tab_button.pack(side=LEFT, padx=(4, 0))
         self.ffmpeg_tab_button.pack(side=LEFT, padx=(4, 0))
         self.live_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("live"))
         self.files_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("files"))
         self.imei_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("imei"))
         self.ffmpeg_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("ffmpeg"))
+        self.qualification_tab_button.bind(
+            "<Button-1>", lambda _event: self.select_main_tab("qualification")
+        )
         self.root.after_idle(self._align_multi_controls)
 
         workspace = ttk.Frame(outer)
@@ -6192,9 +6546,23 @@ try {
         activity_panel = ttk.Frame(workspace, width=activity_width)
         activity_panel.pack(side=RIGHT, fill=Y, expand=False, padx=(14, 0))
         activity_panel.pack_propagate(False)
-        ttk.Label(activity_panel, text="Log / passo a passo", font=("Segoe UI Semibold", 11)).pack(anchor="w")
+        self.live_waveform_canvas = Canvas(
+            activity_panel,
+            width=168,
+            height=44,
+            highlightthickness=0,
+            background="#f4f7f6",
+        )
+        self.live_waveform_canvas.pack(side=TOP, anchor="center")
+        create_tooltip(self.live_waveform_canvas, "Nível de áudio captado pelo microfone")
+        self.live_waveform_canvas.bind(
+            "<Configure>", lambda _event: self._draw_live_waveform(), add="+"
+        )
+        self._draw_live_waveform()
+        self.root.after(50, self._refresh_live_waveform)
         activity_box = ttk.Frame(activity_panel)
-        activity_box.pack(fill=BOTH, expand=True, pady=(8, 0))
+        activity_box.pack(fill=BOTH, expand=True, pady=(10, 0))
+        self.activity_box = activity_box
         self.activity_log = Text(activity_box, width=1, wrap="word", state="disabled", font=("Consolas", 8), background="#ffffff", foreground="#33403e", relief="solid", borderwidth=1, padx=7, pady=7)
         activity_scroll = ttk.Scrollbar(activity_box, orient="vertical", command=self.activity_log.yview)
         self.activity_log.configure(yscrollcommand=activity_scroll.set)
@@ -6206,6 +6574,7 @@ try {
         self.assistant_tab = ttk.Frame(self.tab_content, padding=14)
         self.imei_tab = ttk.Frame(self.tab_content, padding=14)
         self.ffmpeg_tab = ttk.Frame(self.tab_content, padding=14)
+        self.qualification_tab = ttk.Frame(self.tab_content, padding=14)
 
         # The live workflow intentionally keeps transcript, history and statement together,
         # matching the Android screen.  The old assistant frame remains internal only.
@@ -6213,6 +6582,8 @@ try {
         live_frame.pack(fill=X, anchor="n")
         live_top = ttk.Frame(live_frame)
         live_top.pack(fill=X)
+        self.live_top = live_top
+        live_top.bind("<Configure>", self._on_live_top_configure, add="+")
 
         self.live_interval_minus = ttk.Button(live_top, text="-", width=3, command=lambda: self._change_live_interval(-1))
         self.live_interval_minus.pack(side=LEFT)
@@ -6262,10 +6633,34 @@ try {
         self.live_pause_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
         self.live_pause_canvas.pack(side=LEFT, padx=(0, 8))
         self.live_pause_canvas.bind("<Button-1>", lambda _event: self.toggle_live_mic())
-        self.live_mic_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
-        self.live_mic_canvas.pack(side=LEFT, padx=(0, 8))
+        # Keep the red live microphone at its original row height. The optional
+        # integral-audio recovery button is overlaid at the far right below.
+        self.live_mic_stack = ttk.Frame(live_top, width=44, height=44)
+        self.live_mic_stack.pack(side=LEFT, padx=(0, 8))
+        self.live_mic_stack.pack_propagate(False)
+        self.live_recover_audio_button = ttk.Button(
+            live_top,
+            image=self.recover_audio_icon,
+            style="Recover.TButton",
+            command=self.recover_live_integral_audio,
+        )
+        create_tooltip(
+            self.live_recover_audio_button,
+            "Reenviar o áudio integral ao Grok por REST",
+        )
+        self.live_mic_canvas = Canvas(
+            self.live_mic_stack,
+            width=44,
+            height=44,
+            highlightthickness=0,
+            background="#f4f7f6",
+        )
+        self.live_mic_canvas.place(x=0, y=0)
         self.live_mic_canvas.bind("<Button-1>", lambda _event: self.start_live_mic() if self.live_state == "idle" else self.stop_live_mic())
-        ttk.Label(live_top, textvariable=self.live_timer_var, style="Muted.TLabel").pack(side=LEFT)
+        self.live_timer_label = ttk.Label(
+            live_top, textvariable=self.live_timer_var, style="Muted.TLabel"
+        )
+        self.live_timer_label.pack(side=LEFT)
 
         self.live_transcript_area = ttk.Frame(live_frame, width=900)
         self.live_transcript_area.pack(fill=X)
@@ -6287,6 +6682,7 @@ try {
             self.live_transcript_actions,
             text="Histórico",
             style="Action.TButton",
+            width=9,
             command=self.request_live_history,
         )
         self.live_clear_button = self._make_editor_icon_button(
@@ -6315,6 +6711,7 @@ try {
             self.live_transcript_actions_2,
             text="Histórico",
             style="Action.TButton",
+            width=9,
             command=self.request_live_history_2,
         )
         self.live_clear_button_2 = self._make_editor_icon_button(
@@ -6326,6 +6723,13 @@ try {
         self.live_paste_button_2 = self._make_editor_icon_button(
             self.live_transcript_actions_2, self.paste_icon, "Colar", lambda: self.paste_live_editor("transcript2")
         )
+        for actions in (self.live_transcript_actions, self.live_transcript_actions_2):
+            actions.bind("<Configure>", lambda _event: self._position_live_parts_button(), add="+")
+        for part_var in (self.live_assistant_part_var, self.live_assistant_part_var_2):
+            part_var.trace_add(
+                "write",
+                lambda *_args: self.root.after_idle(self._position_live_parts_buttons),
+            )
         self._refresh_primary_transcript_actions(False)
 
         self.live_history_area = ttk.Frame(live_frame, width=900)
@@ -6346,13 +6750,24 @@ try {
         def build_history_actions(parent, suffix: str, statement_command, part_var: StringVar):
             actions = ttk.Frame(parent)
             actions.pack(fill=X, pady=(4, 10))
+            recover_button = ttk.Button(
+                actions,
+                image=self.recover_icon,
+                style="Recover.TButton",
+                command=lambda kind=suffix: self.recover_live_assistant_text(kind),
+            )
+            create_tooltip(recover_button, "Recuperar histórico")
             parts_button = ttk.Menubutton(
-                actions, textvariable=part_var, style="Action.TMenubutton"
+                actions,
+                textvariable=part_var,
+                style="Action.TMenubutton",
+                width=6,
+                padding=(5, -1),
             )
             parts_menu = tk.Menu(parts_button, tearoff=False)
             parts_button.configure(menu=parts_menu)
             statement_button = ttk.Button(
-                actions, text="Oitiva", style="Action.TButton", command=statement_command
+                actions, text="Oitiva", style="Action.TButton", width=9, command=statement_command
             )
             statement_button.place(relx=0.5, y=0, anchor="n")
             self._make_editor_icon_button(
@@ -6361,16 +6776,29 @@ try {
             self._make_editor_icon_button(
                 actions, self.copy_icon, "Copiar", lambda: self.copy_live_editor(suffix)
             ).pack(side=RIGHT, padx=(0, 4))
-            self._make_editor_icon_button(
+            clear_button = self._make_editor_icon_button(
                 actions, self.clear_icon, "Limpar", lambda: self.clear_live_editor(suffix)
-            ).pack(side=RIGHT, padx=(0, 4))
+            )
+            clear_button.pack(side=RIGHT, padx=(0, 4))
             actions.bind("<Configure>", lambda _event: self._position_live_parts_buttons(), add="+")
-            return parts_button, parts_menu, statement_button
+            return recover_button, parts_button, parts_menu, statement_button, clear_button
 
-        self.live_parts_button, self.live_parts_menu, self.live_statement_button = build_history_actions(
+        (
+            self.live_history_recover_button,
+            self.live_parts_button,
+            self.live_parts_menu,
+            self.live_statement_button,
+            self.live_history_clear_button,
+        ) = build_history_actions(
             self.live_history_primary_pane, "history", self.request_live_statement, self.live_assistant_part_var
         )
-        self.live_parts_button_2, self.live_parts_menu_2, self.live_statement_button_2 = build_history_actions(
+        (
+            self.live_history_recover_button_2,
+            self.live_parts_button_2,
+            self.live_parts_menu_2,
+            self.live_statement_button_2,
+            self.live_history_clear_button_2,
+        ) = build_history_actions(
             self.live_history_secondary_pane, "history2", self.request_live_statement_2, self.live_assistant_part_var_2
         )
 
@@ -6392,6 +6820,14 @@ try {
         def build_statement_actions(parent, suffix: str, show_progress: bool = False):
             actions = ttk.Frame(parent)
             actions.pack(fill=X, pady=(4, 6))
+            recover_button = ttk.Button(
+                actions,
+                image=self.recover_icon,
+                style="Recover.TButton",
+                command=lambda kind=suffix: self.recover_live_assistant_text(kind),
+            )
+            recover_button.place(x=0, y=0)
+            create_tooltip(recover_button, "Recuperar oitiva")
             self._make_editor_icon_button(
                 actions, self.paste_icon, "Colar", lambda: self.paste_live_editor(suffix)
             ).pack(side=RIGHT)
@@ -6405,9 +6841,14 @@ try {
                 ttk.Label(
                     actions, textvariable=self.live_assistant_progress_var, style="Muted.TLabel"
                 ).pack(side=RIGHT)
+            return recover_button
 
-        build_statement_actions(self.live_statement_primary_pane, "statement", True)
-        build_statement_actions(self.live_statement_secondary_pane, "statement2")
+        self.live_statement_recover_button = build_statement_actions(
+            self.live_statement_primary_pane, "statement", True
+        )
+        self.live_statement_recover_button_2 = build_statement_actions(
+            self.live_statement_secondary_pane, "statement2"
+        )
         self._refresh_multi_text_visibility()
 
         self._draw_live_mic_button()
@@ -6585,6 +7026,7 @@ try {
         self.refresh_imei_history()
 
         self.ffmpeg_tools = FfmpegToolsPanel(self.ffmpeg_tab, self)
+        self._build_qualification_tab()
 
         file_top = ttk.Frame(self.files_tab)
         file_top.pack(fill=X)
@@ -6714,7 +7156,254 @@ try {
         self.progress = ttk.Progressbar(progress_row, maximum=100, variable=self.progress_var)
         self.progress.pack(side=LEFT, fill=X, expand=True)
         ttk.Label(bottom, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        self.root.after_idle(self._align_activity_log)
         self.select_main_tab("live")
+
+    def _build_qualification_tab(self) -> None:
+        """Monta a área de entrada e saída da ferramenta Qualificação."""
+        frame = ttk.Frame(self.qualification_tab, width=900)
+        frame.pack(fill=X, anchor="n")
+        ttk.Label(frame, text="Qualificação", font=("Segoe UI Semibold", 16)).pack(anchor="w")
+
+        self.qualification_input_text = self._make_live_editor(
+            frame, "Texto", "qualification_input", width=900
+        )
+        input_actions = ttk.Frame(frame)
+        input_actions.pack(fill=X, pady=(4, 10))
+        self.qualification_organize_button = ttk.Button(
+            input_actions,
+            text="Organizar",
+            style="Action.TButton",
+            width=9,
+            command=self._organize_qualification,
+        )
+        self.qualification_organize_button.place(relx=0.5, y=0, anchor="n")
+        self._make_qualification_editor_buttons(input_actions, "input")
+
+        self.qualification_output_text = self._make_live_editor(
+            frame, "Texto organizado", "qualification_output", width=900
+        )
+        output_actions = ttk.Frame(frame)
+        output_actions.pack(fill=X, pady=(4, 10))
+        self._make_qualification_editor_buttons(output_actions, "output")
+
+        fields_frame = ttk.Frame(frame)
+        fields_frame.pack(anchor="w", pady=(0, 8))
+        self.qualification_fields_frame = fields_frame
+        self.qualification_field_checks = []
+        for column in range(4):
+            fields_frame.columnconfigure(column, minsize=180)
+        for index, (field_id, label) in enumerate(self.qualification_fields):
+            row, column = divmod(index, 4)
+            check = ttk.Checkbutton(
+                fields_frame,
+                text=label,
+                variable=self.qualification_field_vars[field_id],
+            )
+            check.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=(0, 4))
+            self.qualification_field_checks.append(check)
+        ttk.Label(
+            frame,
+            textvariable=self.qualification_status_var,
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 8))
+
+    def _make_qualification_editor_buttons(self, parent, target: str) -> None:
+        self._make_editor_icon_button(
+            parent,
+            self.paste_icon,
+            "Colar",
+            lambda selected=target: self._paste_qualification_text(selected),
+        ).pack(side=RIGHT)
+        self._make_editor_icon_button(
+            parent,
+            self.copy_icon,
+            "Copiar",
+            lambda selected=target: self._copy_qualification_text(selected),
+        ).pack(side=RIGHT, padx=(0, 4))
+        self._make_editor_icon_button(
+            parent,
+            self.clear_icon,
+            "Limpar",
+            lambda selected=target: self._clear_qualification_text(selected),
+        ).pack(side=RIGHT, padx=(0, 4))
+
+    def _qualification_editor(self, target: str):
+        return self.qualification_input_text if target == "input" else self.qualification_output_text
+
+    def _qualification_editor_value(self, target: str) -> str:
+        return self._qualification_editor(target).get("1.0", END).strip()
+
+    def _set_qualification_output(self, text: str) -> None:
+        editor = self.qualification_output_text
+        editor.configure(state="normal")
+        editor.delete("1.0", END)
+        if text:
+            editor.insert("1.0", text)
+        if self.assistant_busy:
+            editor.configure(state="disabled")
+
+    def _refresh_qualification_editors_state(self) -> None:
+        state = "disabled" if self.assistant_busy else "normal"
+        self.qualification_input_text.configure(state=state)
+        self.qualification_output_text.configure(state=state)
+        self.qualification_organize_button.configure(
+            state="disabled" if self.assistant_busy else "normal"
+        )
+        for check in self.qualification_field_checks:
+            check.configure(state=state)
+
+    def _selected_qualification_field_ids(self) -> list[str]:
+        return [
+            field_id
+            for field_id, _label in self.qualification_fields
+            if self.qualification_field_vars[field_id].get()
+        ]
+
+    def _clear_qualification_text(self, target: str) -> None:
+        if self.assistant_busy:
+            return
+        editor = self._qualification_editor(target)
+        if self._qualification_editor_value(target) and not messagebox.askyesno(
+            "sig", "Deseja limpar o texto atual?", parent=self.root
+        ):
+            return
+        editor.delete("1.0", END)
+        self.status_var.set(f"Caixa de {('entrada' if target == 'input' else 'saída')} da qualificação limpa.")
+
+    def _copy_qualification_text(self, target: str) -> None:
+        text = self._qualification_editor_value(target)
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.status_var.set(f"Texto da qualificação ({'entrada' if target == 'input' else 'saída'}) copiado.")
+
+    def _paste_qualification_text(self, target: str) -> None:
+        if self.assistant_busy:
+            return
+        try:
+            pasted = self.root.clipboard_get().strip()
+        except Exception:
+            return
+        if not pasted:
+            return
+        if self._qualification_editor_value(target) and not messagebox.askyesno(
+            "sig", "Deseja sobrescrever o texto atual?", parent=self.root
+        ):
+            return
+        editor = self._qualification_editor(target)
+        editor.delete("1.0", END)
+        editor.insert("1.0", pasted)
+        self.status_var.set(f"Texto colado na qualificação ({'entrada' if target == 'input' else 'saída'}).")
+
+    def _organize_qualification(self) -> None:
+        raw_text = self._qualification_editor_value("input")
+        if not raw_text:
+            self.status_var.set("Digite ou cole um texto para organizar.")
+            return
+        field_ids = self._selected_qualification_field_ids()
+        if not field_ids:
+            messagebox.showinfo(
+                "sig",
+                "Selecione pelo menos uma informação para extrair.",
+                parent=self.root,
+            )
+            return
+        if self.running or self.live_state != "idle" or self.assistant_busy:
+            messagebox.showinfo(
+                "sig",
+                "Conclua a tarefa em andamento antes de organizar a qualificação.",
+                parent=self.root,
+            )
+            return
+        self.settings = load_settings()
+        generation, settings = self._begin_assistant_request("qualification", "qualification")
+        self.qualification_status_var.set("Organizando qualificação...")
+        self.status_var.set("Enviando texto para organizar a qualificação...")
+        self._set_qualification_output("")
+        self.assistant_thread = threading.Thread(
+            target=self._qualification_worker,
+            args=(generation, settings, raw_text, field_ids),
+            daemon=True,
+        )
+        self.assistant_thread.start()
+
+    def _qualification_worker(
+        self,
+        generation: int,
+        settings: dict,
+        raw_text: str,
+        field_ids: list[str],
+    ) -> None:
+        client = self.assistant_client
+        if not client:
+            return
+        started = time.monotonic()
+        try:
+            result = client.post(
+                selected_text_model(settings),
+                DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+                qualification_user_prompt(field_ids, raw_text),
+            )
+            self._queue(
+                "qualification_result",
+                generation,
+                result,
+                field_ids,
+                time.monotonic() - started,
+            )
+        except Cancelled:
+            pass
+        except Exception as exc:
+            self._queue(
+                "qualification_error",
+                generation,
+                str(exc),
+                time.monotonic() - started,
+            )
+        finally:
+            self._queue("assistant_finished", generation)
+
+    def _align_activity_log(self):
+        activity_box = getattr(self, "activity_box", None)
+        live_top = getattr(self, "live_top", None)
+        waveform = getattr(self, "live_waveform_canvas", None)
+        if not activity_box or not live_top or not waveform:
+            return
+        try:
+            live_top.update_idletasks()
+            waveform.update_idletasks()
+            waveform_height = max(0, waveform.winfo_reqheight())
+            live_top_height = max(0, live_top.winfo_reqheight())
+            # The live tab has 2 px of top padding and the transcript frame has 8 px.
+            extra = max(0, live_top_height - waveform_height)
+            activity_box.pack_configure(pady=(10 + extra, 0))
+            self._position_live_audio_recovery_button()
+        except Exception:
+            pass
+
+    def _on_live_top_configure(self, _event=None):
+        self._align_activity_log()
+        self._position_live_audio_recovery_button()
+
+    def _position_live_audio_recovery_button(self):
+        button = getattr(self, "live_recover_audio_button", None)
+        timer_label = getattr(self, "live_timer_label", None)
+        live_top = getattr(self, "live_top", None)
+        if not button or not timer_label or not live_top:
+            return
+        try:
+            if not button.winfo_ismapped():
+                return
+            live_top.update_idletasks()
+            timer_label.update_idletasks()
+            button.update_idletasks()
+            button_width = max(1, button.winfo_reqwidth())
+            desired_x = timer_label.winfo_x() + timer_label.winfo_width() + 6
+            max_x = max(0, live_top.winfo_width() - button_width - 4)
+            button.place(x=min(max(0, desired_x), max_x), y=0, anchor="nw")
+        except Exception:
+            pass
 
     def select_main_tab(self, tab_name: str):
         active_bg = "#ffffff"
@@ -6727,6 +7416,7 @@ try {
             getattr(self, "assistant_tab", None),
             getattr(self, "imei_tab", None),
             getattr(self, "ffmpeg_tab", None),
+            getattr(self, "qualification_tab", None),
         ):
             if frame is not None:
                 frame.pack_forget()
@@ -6736,24 +7426,35 @@ try {
             self.files_tab_button.configure(background=active_bg, foreground=active_fg)
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "imei":
             self.imei_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.files_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.imei_tab_button.configure(background=active_bg, foreground=active_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "ffmpeg":
             self.ffmpeg_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.files_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=active_bg, foreground=active_fg)
+            self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+        elif tab_name == "qualification":
+            self.qualification_tab.pack(fill=BOTH, expand=True)
+            self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.files_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qualification_tab_button.configure(background=active_bg, foreground=active_fg)
         else:
             self.live_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=active_bg, foreground=active_fg)
             self.files_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.root.after_idle(self._position_live_parts_button)
 
     def _refresh_assistant_model_label(self):
@@ -7108,13 +7809,77 @@ try {
 
     def _position_live_parts_buttons(self):
         pairs = (
-            (getattr(self, "live_parts_button", None), getattr(self, "live_statement_button", None)),
-            (getattr(self, "live_parts_button_2", None), getattr(self, "live_statement_button_2", None)),
+            (
+                getattr(self, "live_history_recover_button", None),
+                getattr(self, "live_history_button", None),
+                getattr(self, "live_parts_button", None),
+                getattr(self, "live_assistant_part_var", None),
+                getattr(self, "live_statement_button", None),
+                getattr(self, "live_history_clear_button", None),
+            ),
+            (
+                getattr(self, "live_history_recover_button_2", None),
+                getattr(self, "live_history_button_2", None),
+                getattr(self, "live_parts_button_2", None),
+                getattr(self, "live_assistant_part_var_2", None),
+                getattr(self, "live_statement_button_2", None),
+                getattr(self, "live_history_clear_button_2", None),
+            ),
         )
-        for parts_button, statement_button in pairs:
-            if not parts_button or not statement_button or not statement_button.winfo_exists():
+        for (
+            recover_button,
+            history_button,
+            parts_button,
+            part_var,
+            statement_button,
+            clear_button,
+        ) in pairs:
+            if (
+                not recover_button
+                or not history_button
+                or not parts_button
+                or not part_var
+                or not statement_button
+                or not clear_button
+                or not statement_button.winfo_exists()
+            ):
                 continue
-            parts_button.place(x=0, y=0)
+            actions = statement_button.master
+            actions.update_idletasks()
+            transcript_actions = history_button.master
+            transcript_actions.update_idletasks()
+            part_label = part_var.get().strip() or "Partes"
+            # Menubutton reserves part of its character width for the arrow;
+            # long labels need one extra character beyond the normal margin.
+            desired_part_width = max(
+                6, len(part_label) + (2 if len(part_label) > 6 else 0)
+            )
+            if int(parts_button.cget("width")) != desired_part_width:
+                parts_button.configure(width=desired_part_width)
+                actions.update_idletasks()
+            recover_button.place(x=0, y=0)
+            parts_button.place(x=recover_button.winfo_reqwidth() + 4, y=0)
+            left_edge = parts_button.winfo_x() + parts_button.winfo_width()
+            right_edge = clear_button.winfo_x()
+            statement_half = statement_button.winfo_reqwidth() / 2
+            midpoint = (left_edge + right_edge) / 2
+            midpoint = min(
+                max(statement_half, midpoint),
+                max(statement_half, actions.winfo_width() - statement_half),
+            )
+            statement_button.place_forget()
+            statement_button.place(x=midpoint, y=0, anchor="n")
+            statement_center = statement_button.winfo_x() + (statement_button.winfo_width() / 2)
+            target_width = max(1, transcript_actions.winfo_width())
+            source_width = max(1, actions.winfo_width())
+            history_center = statement_center * target_width / source_width
+            history_half = history_button.winfo_reqwidth() / 2
+            history_center = min(
+                max(history_half, history_center),
+                max(history_half, target_width - history_half),
+            )
+            history_button.place_forget()
+            history_button.place(x=history_center, y=0, anchor="n")
 
     def _position_live_parts_button(self):
         self._position_live_parts_buttons()
@@ -7180,29 +7945,37 @@ try {
             rendered = []
             for index, model_label in enumerate(self.assistant_multi_model_labels, start=1):
                 key = (self.assistant_phase, index)
+                elapsed = self.assistant_multi_elapsed.get(key)
+                if elapsed is None:
+                    started = self.assistant_multi_started_at.get(key)
+                    elapsed = max(0.0, time.monotonic() - started) if started is not None else None
+                suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
                 if key in self.assistant_multi_errors:
-                    rendered.append(f"ERRO Redigindo {task_label} - {model_label}")
+                    rendered.append(f"ERRO Redigindo {task_label} - {model_label}{suffix}")
                 elif key in self.assistant_multi_results:
-                    elapsed = self.assistant_multi_elapsed.get(key)
-                    suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
                     rendered.append(f"100% Redigindo {task_label} - {model_label}{suffix}")
                 else:
-                    rendered.append(f"0% Redigindo {task_label} - {model_label}")
+                    rendered.append(f"0% Redigindo {task_label} - {model_label}{suffix}")
             if self.assistant_phase == "history":
                 names_state = self.assistant_task_states["names"]
+                names_elapsed = self.assistant_task_elapsed.get("names")
+                if names_elapsed is None:
+                    started = self.assistant_task_started_at.get("names")
+                    names_elapsed = max(0.0, time.monotonic() - started) if started is not None else None
+                names_suffix = f" ({names_elapsed:.1f}s)" if names_elapsed is not None else ""
                 rendered.append(
-                    "100% Identificando partes"
+                    f"100% Extraindo partes{names_suffix}"
                     if names_state == "done"
-                    else "ERRO Identificando partes"
+                    else f"ERRO Extraindo partes{names_suffix}"
                     if names_state == "error"
-                    else "0% Identificando partes"
+                    else f"0% Extraindo partes{names_suffix}"
                 )
             progress_var.set("\n".join(rendered))
             return
         if self.assistant_phase == "history":
             entries = (
                 ("Redigindo histórico", "history"),
-                ("Identificando partes", "names"),
+                ("Extraindo partes", "names"),
             )
         elif self.assistant_phase == "statement":
             entries = (("Redigindo oitiva", "statement"),)
@@ -7213,14 +7986,26 @@ try {
         for label, task in entries:
             state = self.assistant_task_states[task]
             elapsed = self.assistant_task_elapsed[task]
+            if elapsed is None:
+                started = self.assistant_task_started_at.get(task)
+                elapsed = max(0.0, time.monotonic() - started) if started is not None else None
+            suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
             if state == "done":
-                suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
                 rendered.append(f"100% {label}{suffix}")
             elif state == "error":
-                rendered.append(f"ERRO {label}")
+                rendered.append(f"ERRO {label}{suffix}")
             else:
-                rendered.append(f"0% {label}")
+                rendered.append(f"0% {label}{suffix}")
         progress_var.set("  |  ".join(rendered))
+
+    def _refresh_assistant_progress_clock(self):
+        """Refresh active text-task timers without adding repeated log entries."""
+        if self.assistant_busy:
+            self._render_assistant_progress()
+        try:
+            self.root.after(100, self._refresh_assistant_progress_clock)
+        except self.tk.TclError:
+            pass
 
     def _set_assistant_buttons_state(self, state: str):
         for button_name in (
@@ -7234,6 +8019,11 @@ try {
             button = getattr(self, button_name, None)
             if button is not None:
                 button.configure(state=state)
+        if hasattr(self, "qualification_organize_button"):
+            self.qualification_organize_button.configure(state=state)
+        if hasattr(self, "qualification_field_checks"):
+            for check in self.qualification_field_checks:
+                check.configure(state=state)
 
     def _assistant_target_text_value(self, target: str) -> str:
         return self._live_text_value() if target == "live" else self._assistant_text_value()
@@ -7271,8 +8061,10 @@ try {
         self.assistant_multi_results: set[tuple[str, int]] = set()
         self.assistant_multi_elapsed: dict[tuple[str, int], float] = {}
         self.assistant_multi_errors: dict[tuple[str, int], str] = {}
+        self.assistant_multi_started_at = {}
         self._set_assistant_buttons_state("disabled")
         self._refresh_live_editors_state()
+        self._refresh_qualification_editors_state()
         self.settings = load_settings()
         secondary_name = str(self.multi_text_secondary or "")
         if target == "live" and self.multi_text_model_var.get() and secondary_name:
@@ -7318,8 +8110,16 @@ try {
         self._set_assistant_target_names(target, [])
         self.assistant_task_states.update(history="running", names="running", statement="idle")
         self.assistant_task_elapsed.update(history=None, names=None, statement=None)
+        request_started = time.monotonic()
+        self.assistant_task_started_at.update(
+            history=request_started,
+            names=request_started,
+            statement=None,
+        )
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             labels = self.assistant_multi_model_labels
+            self.assistant_multi_started_at[("history", 1)] = request_started
+            self.assistant_multi_started_at[("history", 2)] = request_started
             status_message = (
                 f"Redigindo histórico - {labels[0]}\n"
                 f"Redigindo histórico - {labels[1]}"
@@ -7498,8 +8298,16 @@ try {
         generation, settings = self._begin_assistant_request("statement", target)
         self.assistant_task_states.update(history="idle", names="idle", statement="running")
         self.assistant_task_elapsed.update(history=None, names=None, statement=None)
+        request_started = time.monotonic()
+        self.assistant_task_started_at.update(
+            history=None,
+            names=None,
+            statement=request_started,
+        )
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             labels = self.assistant_multi_model_labels
+            self.assistant_multi_started_at[("statement", 1)] = request_started
+            self.assistant_multi_started_at[("statement", 2)] = request_started
             status_message = (
                 f"Redigindo oitiva - {labels[0]}\n"
                 f"Redigindo oitiva - {labels[1]}"
@@ -7611,7 +8419,9 @@ try {
         self.assistant_busy = False
         self._set_assistant_buttons_state("normal")
         self._refresh_live_editors_state()
+        self._refresh_qualification_editors_state()
         self._assistant_target_status(self.assistant_target).set("Tarefa de texto cancelada.")
+        self.qualification_status_var.set("Organização cancelada.")
 
     def _draw_action_button(self):
         canvas = self.action_canvas
@@ -7710,13 +8520,37 @@ try {
             canvas.create_arc(13, 18, 31, 34, start=200, extent=140, outline="#ff4b4b", width=3, style="arc")
             canvas.create_line(16, 34, 28, 34, fill="#ff4b4b", width=3, capstyle="round")
 
+    def _set_live_audio_recovery_visible(self, visible: bool):
+        button = getattr(self, "live_recover_audio_button", None)
+        if button is None or not button.winfo_exists():
+            return
+        button.place_forget()
+        if visible and self.live_audio_recovery_available:
+            # This placement does not participate in geometry management, so
+            # showing the button cannot move the microphone row or timer.
+            button.place(x=0, y=0, anchor="nw")
+            self._position_live_audio_recovery_button()
+
+    def _clear_live_integral_audio(self):
+        self.live_audio_recovery_available = False
+        self._set_live_audio_recovery_visible(False)
+        path = self.live_full_pcm_path
+        if path:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        self.live_full_pcm_path = None
+
     def _draw_live_pause_button(self):
         canvas = self.live_pause_canvas
         canvas.delete("all")
-        if self.live_state not in ("listening", "paused"):
+        normal_active = self.normal_recording
+        if self.live_state not in ("listening", "paused") and not normal_active:
             return
         canvas.create_oval(4, 4, 40, 40, fill="#f2cf37", outline="#c49d00", width=2)
-        if self.live_state == "listening":
+        is_paused = self.live_state == "paused" or (normal_active and self.normal_record_paused)
+        if not is_paused:
             canvas.create_rectangle(15, 13, 19, 31, fill="#1b5b92", outline="")
             canvas.create_rectangle(25, 13, 29, 31, fill="#1b5b92", outline="")
         else:
@@ -7734,6 +8568,106 @@ try {
         canvas.create_oval(17, 10, 27, 26, fill="#536565", outline="")
         canvas.create_line(22, 26, 22, 33, fill="#536565", width=3, capstyle="round")
         canvas.create_arc(13, 18, 31, 34, start=200, extent=140, outline="#536565", width=3, style="arc")
+
+    def _reset_live_waveform(self):
+        with self.live_waveform_lock:
+            self.live_waveform_levels.clear()
+            self.live_waveform_levels.extend([0.0] * 168)
+            self.live_waveform_last_capture_at = 0.0
+
+    def _push_live_waveform_chunk(self, chunk: bytes):
+        if not chunk:
+            return
+        try:
+            usable = chunk[: len(chunk) - (len(chunk) % 2)]
+            samples = array("h")
+            samples.frombytes(usable)
+            if sys.byteorder != "little":
+                samples.byteswap()
+            if not samples:
+                return
+            # Break each callback into short envelopes so the display has more
+            # detail than one bar per audio callback.
+            target_samples = max(160, LIVE_SAMPLE_RATE // 40)  # about 25 ms
+            bin_count = max(1, min(8, math.ceil(len(samples) / target_samples)))
+            bin_size = max(1, math.ceil(len(samples) / bin_count))
+            levels = []
+            for start in range(0, len(samples), bin_size):
+                window = samples[start : start + bin_size]
+                if not window:
+                    continue
+                peak = max(abs(value) for value in window)
+                rms = math.sqrt(sum(value * value for value in window) / len(window))
+                # A little RMS gain keeps quieter speech visibly moving while
+                # the peak still preserves consonants and transient sounds.
+                raw_level = max(peak * 0.90, rms * 2.20) / 16384.0
+                levels.append(min(1.0, raw_level) ** 0.62)
+            if not levels:
+                return
+            with self.live_waveform_lock:
+                self.live_waveform_levels.extend(levels)
+                self.live_waveform_last_capture_at = time.monotonic()
+        except Exception:
+            # The waveform is only diagnostic; a malformed block must never stop capture.
+            pass
+
+    def _draw_live_waveform(self):
+        canvas = getattr(self, "live_waveform_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        width = max(40, canvas.winfo_width())
+        height = max(24, canvas.winfo_height())
+        center = height / 2
+        with self.live_waveform_lock:
+            levels = list(self.live_waveform_levels)
+            active = (
+                self.live_state == "listening"
+                or (
+                    self.normal_recording
+                    and not self.normal_record_paused
+                    and not self.normal_record_stop_event.is_set()
+                )
+            )
+            if not active or time.monotonic() - self.live_waveform_last_capture_at > 0.15:
+                self.live_waveform_levels.append(0.0)
+                levels = list(self.live_waveform_levels)
+        canvas.delete("all")
+        canvas.create_line(4, center, width - 4, center, fill="#c6d2d0", width=1)
+        color = "#3f948b" if active else "#a8b8b5"
+        usable_width = max(1, width - 8)
+        upper_points = []
+        lower_points = []
+        for index, level in enumerate(levels):
+            x = 4 + usable_width * index / max(1, len(levels) - 1)
+            amplitude = (
+                min(center - 3, max(1.0, (level ** 0.75) * (height - 8) * 0.62))
+                if level
+                else 0.0
+            )
+            upper_points.append((x, center - amplitude))
+            lower_points.append((x, center + amplitude))
+        if len(upper_points) > 1:
+            polygon_points = upper_points + list(reversed(lower_points))
+            polygon_coords = [value for point in polygon_points for value in point]
+            canvas.create_polygon(
+                *polygon_coords,
+                fill="#b7ddd4" if active else "#d5dfdd",
+                outline="",
+            )
+            upper_coords = [value for point in upper_points for value in point]
+            lower_coords = [value for point in lower_points for value in point]
+            canvas.create_line(*upper_coords, fill=color, width=2, smooth=True)
+            canvas.create_line(*lower_coords, fill=color, width=2, smooth=True)
+
+    def _refresh_live_waveform(self):
+        try:
+            self._draw_live_waveform()
+        except Exception:
+            pass
+        try:
+            self.root.after(50, self._refresh_live_waveform)
+        except Exception:
+            pass
 
     def _make_live_editor(self, parent, _label: str, _kind: str, width: int = 900):
         frame = ttk.Frame(parent, width=width, height=180)
@@ -7777,6 +8711,12 @@ try {
         else:
             widget.yview_moveto(top)
 
+    def _remember_live_assistant_result(self, task: str, index: int, text: str):
+        if task not in ("history", "statement"):
+            return
+        kind = task if index == 1 else f"{task}2"
+        setattr(self, f"last_live_{kind}_text", (text or "").strip())
+
     def _refresh_live_editors_state(self):
         state = "disabled" if self.live_state != "idle" or self.assistant_busy else "normal"
         for kind in ("transcript", "transcript2", "history", "history2", "statement", "statement2"):
@@ -7818,6 +8758,17 @@ try {
                     self.live_secondary_draft_text = ""
             self.status_var.set(f"Texto colado em {self._live_editor_label(kind)}.")
 
+    def recover_live_assistant_text(self, kind: str):
+        saved = getattr(self, f"last_live_{kind}_text", "")
+        if self.live_state != "idle" or self.assistant_busy or not saved:
+            return
+        if self._live_editor_value(kind) and not messagebox.askyesno(
+            "sig", "Deseja sobrescrever o texto atual?"
+        ):
+            return
+        self._set_live_editor(kind, saved)
+        self.status_var.set(f"Último {self._live_editor_label(kind)} recuperado.")
+
     def recover_live_transcript(self):
         if self.live_state != "idle" or self.assistant_busy or not self.last_live_transcript_text:
             return
@@ -7825,6 +8776,85 @@ try {
             return
         self._replace_live_text(self.last_live_transcript_text)
         self.status_var.set("Última transcrição recuperada.")
+
+    def recover_live_integral_audio(self):
+        if (
+            self.live_state != "idle"
+            or self.assistant_busy
+            or not self.live_audio_recovery_available
+            or not self.live_full_pcm_path
+            or not self.live_full_pcm_path.exists()
+        ):
+            return
+        confirmed = messagebox.askyesno(
+            "Reenviar áudio integral",
+            "O áudio integral gravado durante o streaming será enviado ao Grok por REST.\n\n"
+            "A transcrição atual da caixa de texto será substituída pela resposta dessa nova requisição.\n\n"
+            "Deseja continuar?",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        pcm_path = self.live_full_pcm_path
+        self.live_audio_recovery_available = False
+        self._set_live_audio_recovery_visible(False)
+        self._replace_live_text("")
+        self.live_recovery_cancel_event.clear()
+        self._set_live_state("finalizing")
+        self.status_var.set("Enviando áudio integral do streaming ao Grok por REST...")
+        self.live_recovery_thread = threading.Thread(
+            target=self._recover_live_integral_audio_worker,
+            args=(pcm_path,),
+            daemon=True,
+        )
+        self.live_recovery_thread.start()
+
+    def _recover_live_integral_audio_worker(self, pcm_path: Path):
+        temp_live = app_base_dir() / "temp" / "live"
+        raw_dir = temp_live / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = temp_live / f"live_grok_integral_{int(time.time() * 1000)}.wav"
+        raw_path = raw_dir / f"{wav_path.stem}.json"
+        try:
+            if not pcm_path.exists() or pcm_path.stat().st_size < 1024:
+                raise RuntimeError("o áudio integral não está disponível")
+            settings = (self.live_grok_settings or load_settings()).copy()
+            api_key = str(settings.get("grok_api_key") or "").strip()
+            if not api_key:
+                raise RuntimeError("chave API do Grok não configurada")
+            write_wav_from_pcm_file(wav_path, pcm_path)
+            fields = {
+                "language": self.live_grok_language or "pt",
+                "format": "true",
+                "filler_words": "false",
+            }
+            if self.live_grok_diarize:
+                fields["diarize"] = "true"
+            uploader = GraniteUploader(
+                self.live_recovery_cancel_event,
+                fields,
+                {"Authorization": f"Bearer {api_key}"},
+                "file",
+            )
+            status, parsed = uploader.post_file_parsed(
+                GROK_STT_URL,
+                wav_path,
+                "audio/wav",
+                raw_path,
+            )
+            if status != 200:
+                raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
+                raise RuntimeError(f"HTTP {status}\n{raw}")
+            if not parsed.text.strip():
+                raise RuntimeError("o Grok retornou uma transcrição vazia")
+            self._queue("live_recovery_result", parsed.text, parsed.timestamped_text)
+            self._queue("status", "Transcrição do áudio integral concluída.")
+        except Cancelled:
+            self._queue("live_recovery_error", "Envio do áudio integral cancelado.")
+        except Exception as exc:
+            self._queue("live_recovery_error", f"Não foi possível transcrever o áudio integral: {exc}")
+        finally:
+            wav_path.unlink(missing_ok=True)
 
     def recover_live_transcript_2(self):
         if self.live_state != "idle" or self.assistant_busy or not self.last_live_transcript_text_2:
@@ -7893,7 +8923,9 @@ try {
             self.normal_record_stop_event.set()
             self.status_var.set("Enviando a gravação para transcrição...")
             return
-        if self.running or self.live_state != "idle" or self.assistant_busy:
+        if self.normal_recording:
+            self.normal_record_stop_event.set()
+        if self.running or self.live_state != "idle" or self.normal_recording or self.assistant_busy:
             messagebox.showinfo("sig", "Conclua a tarefa em andamento antes de gravar.")
             return
         self.settings = load_settings()
@@ -7903,11 +8935,14 @@ try {
         self.normal_record_grok = is_grok_transcription(self.settings)
         self.normal_record_language = self.live_language_var.get().strip() or "pt"
         self.normal_record_diarize = self.normal_record_grok and bool(self.live_diarize_var.get())
+        self.normal_record_paused = False
         self.normal_recording = True
         self.normal_record_stop_event.clear()
+        self._reset_live_waveform()
         temp = app_base_dir() / "temp" / "live"; temp.mkdir(parents=True, exist_ok=True)
         self.normal_record_pcm_path = temp / f"gravacao_{int(time.time() * 1000)}.pcm"
         self._draw_normal_live_mic_button()
+        self._draw_live_pause_button()
         self.status_var.set("Gravando. Clique novamente no microfone branco para enviar.")
         self.normal_record_thread = threading.Thread(target=self._normal_live_record_worker, daemon=True)
         self.normal_record_thread.start()
@@ -7920,7 +8955,10 @@ try {
                 return
             with pcm_path.open("wb") as output:
                 def callback(indata, *_args):
-                    if not self.normal_record_stop_event.is_set(): output.write(bytes(indata))
+                    if not self.normal_record_stop_event.is_set() and not self.normal_record_paused:
+                        chunk = bytes(indata)
+                        self._push_live_waveform_chunk(chunk)
+                        output.write(chunk)
                 with sd.RawInputStream(samplerate=LIVE_SAMPLE_RATE, channels=1, dtype="int16", callback=callback):
                     while not self.normal_record_stop_event.wait(.1):
                         pass
@@ -7946,18 +8984,23 @@ try {
                 wav_path.with_suffix(".raw"),
             )
             if status != 200: raise RuntimeError(f"HTTP {status}")
-            self._queue("live_payload", parsed.text, parsed.timestamped_text)
+            self._queue("live_payload", parsed.text, parsed.timestamped_text, grok)
             self._queue("status", "Transcrição concluída.")
         except Exception as exc:
             self._queue("status", f"Erro na gravação: {exc}")
         finally:
             self.normal_recording = False
+            self.normal_record_paused = False
             self.root.after(0, self._draw_normal_live_mic_button)
+            self.root.after(0, self._draw_live_pause_button)
 
     def _set_live_state(self, state: str):
         self.live_state = state
         self._draw_live_mic_button()
         self._draw_live_pause_button()
+        self._set_live_audio_recovery_visible(
+            state == "idle" and self.live_audio_recovery_available
+        )
         locked = state != "idle"
         interval_state = "disabled" if locked else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
@@ -8159,15 +9202,22 @@ try {
         for recover, history, clear, copy, paste in action_sets:
             for button in (recover, history, clear, copy, paste):
                 button.pack_forget()
+                button.place_forget()
             recover.pack(side=LEFT)
             paste.pack(side=RIGHT)
             copy.pack(side=RIGHT, padx=(0, 4))
             clear.pack(side=RIGHT, padx=(0, 4))
-            history.pack(side=LEFT, expand=True)
 
-    def _set_live_timestamp_payload(self, plain: str, timestamped: str = ""):
+    def _set_live_timestamp_payload(
+        self, plain: str, timestamped: str = "", allow_timestamps: bool = False
+    ):
         self.live_plain_transcript_text = (plain or "").strip()
-        self.live_timestamped_transcript_text = (timestamped or "").strip()
+        if allow_timestamps:
+            parsed_timestamped = (timestamped or "").strip()
+            if parsed_timestamped:
+                self.live_timestamped_transcript_text = parsed_timestamped
+        else:
+            self.live_timestamped_transcript_text = ""
         if not self.live_timestamped_transcript_text:
             self.live_timestamps_var.set(False)
         self.live_timestamps_check.configure(
@@ -8180,6 +9230,16 @@ try {
         )
         self.last_live_transcript_text = displayed
         self._set_live_text(displayed)
+
+    def _set_live_timestamp_data(self, timestamped: str):
+        timestamped = (timestamped or "").strip()
+        if not timestamped:
+            return
+        self.live_timestamped_transcript_text = timestamped
+        self.live_timestamps_check.configure(state="normal")
+        if self.live_timestamps_var.get():
+            self.last_live_transcript_text = timestamped
+            self._set_live_text(timestamped)
 
     def _toggle_live_timestamps(self):
         if self.live_timestamps_var.get() and not self.live_timestamped_transcript_text:
@@ -8471,6 +9531,7 @@ try {
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         grok_chunk_ms_var = StringVar(value=str(self.settings.get("grok_chunk_ms", 100)))
+        grok_rest_var = BooleanVar(value=bool(self.settings.get("grok_rest_requests", False)))
 
         import tkinter as tk
         sections = []
@@ -8693,23 +9754,58 @@ try {
         chunk_help.pack(side=LEFT, padx=(5, 0))
         chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=5)
 
+        rest_controls = ttk.Frame(transcription_frame)
+
+        def confirm_grok_rest():
+            if not grok_rest_var.get():
+                return
+            confirmed = messagebox.askyesno(
+                "Requisições REST do Grok",
+                "Esta opção desativa o streaming WebSocket do Grok e envia o áudio em janelas REST, "
+                "como no Granite NAR.\n\n"
+                "Os rascunhos seguirão o intervalo t= selecionado, mas a atualização poderá ter mais atraso "
+                "e o consumo de requisições será maior.\n\n"
+                "Tem certeza que deseja usar Requisições REST?",
+                parent=win,
+            )
+            if not confirmed:
+                grok_rest_var.set(False)
+
+        rest_check = ttk.Checkbutton(
+            rest_controls,
+            text="Requisições REST",
+            variable=grok_rest_var,
+            command=confirm_grok_rest,
+        )
+        rest_check.pack(side=LEFT)
+
         def refresh_chunk_visibility(*_args):
             selected_name = transcription_labels.get(transcription_server_var.get(), "")
             selected_name_2 = transcription_server_2_labels.get(transcription_server_2_var.get(), "")
             if selected_name == GROK_API_NAME:
-                chunk_controls.grid_configure(row=transcription_server_2_row)
-                transcription_server_2_label.grid_configure(row=chunk_size_row)
-                transcription_server_2_combo.grid_configure(row=chunk_size_row)
+                chunk_row = transcription_server_2_row
+                rest_row = chunk_row + 1
+                secondary_row = rest_row + 1
+                chunk_controls.grid_configure(row=chunk_row)
+                rest_controls.grid_configure(row=rest_row)
+                transcription_server_2_label.grid_configure(row=secondary_row)
+                transcription_server_2_combo.grid_configure(row=secondary_row)
                 chunk_controls.grid()
+                rest_controls.grid()
             elif selected_name_2 == GROK_API_NAME:
-                chunk_controls.grid_configure(row=chunk_size_row)
+                chunk_row = chunk_size_row
+                rest_row = chunk_row + 1
+                chunk_controls.grid_configure(row=chunk_row)
+                rest_controls.grid_configure(row=rest_row)
                 transcription_server_2_label.grid_configure(row=transcription_server_2_row)
                 transcription_server_2_combo.grid_configure(row=transcription_server_2_row)
                 chunk_controls.grid()
+                rest_controls.grid()
             else:
                 transcription_server_2_label.grid_configure(row=transcription_server_2_row)
                 transcription_server_2_combo.grid_configure(row=transcription_server_2_row)
                 chunk_controls.grid_remove()
+                rest_controls.grid_remove()
 
         refresh_transcription_servers()
         transcription_server_var.trace_add("write", primary_server_changed)
@@ -9179,6 +10275,7 @@ try {
                     "convert_parallel": conv_var.get(),
                     "transcribe_parallel": req_var.get(),
                     "grok_chunk_ms": grok_chunk_ms,
+                    "grok_rest_requests": bool(grok_rest_var.get()),
                     "transcription_server": selected_transcription,
                     "transcription_server_2": selected_transcription_2,
                     "text_model": selected_text,
@@ -9489,6 +10586,12 @@ try {
             self.start_run()
 
     def toggle_live_mic(self):
+        if self.normal_recording:
+            if self.normal_record_paused:
+                self.resume_normal_live_recording()
+            else:
+                self.pause_normal_live_recording()
+            return
         if self.live_state == "idle":
             self.start_live_mic()
         elif self.live_state == "listening":
@@ -9499,6 +10602,9 @@ try {
             self.status_var.set("Aguarde a transcrição definitiva terminar.")
 
     def start_live_mic(self):
+        if self.normal_recording:
+            messagebox.showinfo("sig", "Finalize a gravação do microfone branco antes de iniciar o streaming.")
+            return
         if self.running:
             messagebox.showinfo("sig", "Pare a transcrição de arquivos antes de usar o microfone ao vivo.")
             return
@@ -9537,7 +10643,12 @@ try {
             return
         self.live_stop_event.clear()
         self.live_abort_event.clear()
-        self.live_uses_grok_websocket = is_grok_transcription(self.settings)
+        self.live_uses_grok_websocket = is_grok_transcription(self.settings) and not self.settings.get(
+            "grok_rest_requests", False
+        )
+        self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
+        self.live_grok_language = self.live_language_var.get().strip() or "pt"
+        self.live_grok_diarize = bool(self.live_diarize_var.get()) if self.live_uses_grok_websocket else False
         self.grok_ws_ready_event.clear()
         self.grok_ws_done_event.clear()
         self.grok_ws_lost_event.clear()
@@ -9546,7 +10657,12 @@ try {
         self.live_uploader = None if self.live_uses_grok_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
         temp_live = app_base_dir() / "temp" / "live"
         temp_live.mkdir(parents=True, exist_ok=True)
-        self.live_full_pcm_path = None if self.live_uses_grok_websocket else temp_live / f"live_full_{int(time.time() * 1000)}.pcm"
+        self._clear_live_integral_audio()
+        self.live_full_pcm_path = temp_live / f"live_full_{int(time.time() * 1000)}.pcm"
+        self.live_was_grok_websocket = self.live_uses_grok_websocket
+        self.live_recovery_cancel_event.clear()
+        self.live_capture_finish_waiting = False
+        self.live_output_finished = False
         with self.live_lock:
             self.live_committed_text = ""
             self.live_draft_text = ""
@@ -9568,6 +10684,7 @@ try {
             self.live_secondary_generation = 0
         self.last_live_transcript_text_2 = ""
         self.live_finish_waiting = False
+        self._reset_live_waveform()
         self.live_started_at = time.time()
         self.live_paused_at = 0.0
         self.live_paused_total = 0.0
@@ -9605,6 +10722,21 @@ try {
         self._set_live_state("listening")
         self.status_var.set("Ouvindo e transcrevendo ao vivo...")
 
+    def pause_normal_live_recording(self):
+        if not self.normal_recording or self.normal_record_paused:
+            return
+        self.normal_record_paused = True
+        self._draw_live_pause_button()
+        self._draw_live_waveform()
+        self.status_var.set("Gravação do microfone pausada.")
+
+    def resume_normal_live_recording(self):
+        if not self.normal_recording or not self.normal_record_paused:
+            return
+        self.normal_record_paused = False
+        self._draw_live_pause_button()
+        self.status_var.set("Gravando pelo microfone branco...")
+
     def stop_live_mic(self):
         if self.live_state not in ("listening", "paused"):
             return
@@ -9625,6 +10757,7 @@ try {
                 # websocket-client returns the number of bytes sent, which may be 0/None
                 # depending on the transport. An exception, not that return value, means failure.
                 app.send(json.dumps({"type": "audio.done"}))
+                threading.Thread(target=self._wait_for_grok_final_event, daemon=True).start()
             except Exception:
                 # The user deliberately stopped the stream. Keep the partial text and finish
                 # cleanly instead of routing this through the cancellation/error path.
@@ -9644,11 +10777,32 @@ try {
         self.live_finalize_thread = threading.Thread(target=self._finish_live_transcription, daemon=True)
         self.live_finalize_thread.start()
 
+    def _wait_for_grok_final_event(self):
+        if self.grok_ws_done_event.wait(20):
+            return
+        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
+            self.grok_ws_intentional_close = True
+            app = self.grok_ws_app
+            if app:
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self._queue(
+                "status",
+                "O Grok não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
+            )
+            self._finish_live_output()
+
     def cancel_live_mic(self):
         if self.live_state == "idle":
             return
         self.live_stop_event.set()
         self.live_abort_event.set()
+        self.live_recovery_cancel_event.set()
+        self.live_audio_recovery_available = False
+        self.live_output_finished = True
+        self._set_live_audio_recovery_visible(False)
         self.grok_ws_intentional_close = True
         if self.live_uploader:
             self.live_uploader.cancel()
@@ -9688,7 +10842,7 @@ try {
 
     def _secondary_live_worker(self, settings: dict):
         try:
-            if is_grok_transcription(settings):
+            if is_grok_transcription(settings) and not settings.get("grok_rest_requests", False):
                 self._secondary_grok_live_worker(settings)
             else:
                 self._secondary_http_live_worker(settings)
@@ -9932,6 +11086,8 @@ try {
         buffered_bytes = 0
         buffer_limit = pcm_bytes_for_millis(GROK_RECONNECT_BUFFER_MILLIS)
         buffer_lock = threading.Lock()
+        full_pcm_lock = threading.Lock()
+        full_pcm = None
 
         def remember(chunk: bytes) -> None:
             nonlocal buffered_bytes
@@ -9962,8 +11118,12 @@ try {
                 text = self._format_grok_diarized_transcript(event, str(event.get("text") or "").strip())
                 if text:
                     self._update_live_transcript_window(text, bool(event.get("is_final")), self.live_draft_generation)
+                timestamped = _timestamped_text_from_json(event).strip()
+                if timestamped:
+                    self._queue("live_timestamp_data", timestamped)
             elif event_type == "transcript.done":
                 text = self._format_grok_diarized_transcript(event, str(event.get("text") or "").strip())
+                timestamped = _timestamped_text_from_json(event).strip()
                 if not text:
                     with self.live_lock:
                         text = self._current_live_text_locked().strip()
@@ -9976,6 +11136,8 @@ try {
                 self.grok_ws_app = None
                 self.live_uses_grok_websocket = False
                 self._queue("live_display", text)
+                if timestamped:
+                    self._queue("live_payload", text, timestamped, True)
                 self._queue("status", "Transcrição definitiva concluída.")
                 self._finish_live_output()
             elif event_type == "error":
@@ -10049,7 +11211,11 @@ try {
             if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
                 return
             chunk = bytes(indata)
+            self._push_live_waveform_chunk(chunk)
             self._queue_secondary_audio(chunk)
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.write(chunk)
             remember(chunk)
             try:
                 audio_queue.put_nowait(chunk)
@@ -10062,6 +11228,11 @@ try {
                     pass
 
         try:
+            pcm_path = self.live_full_pcm_path
+            if not pcm_path:
+                raise RuntimeError("não foi possível criar o áudio integral do streaming")
+            pcm_path.parent.mkdir(parents=True, exist_ok=True)
+            full_pcm = pcm_path.open("wb")
             with sd.RawInputStream(
                 samplerate=LIVE_SAMPLE_RATE,
                 channels=LIVE_CHANNELS,
@@ -10101,6 +11272,11 @@ try {
         except Exception as exc:
             if not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
                 self._queue("live_error", f"Falhou: erro no microfone ao vivo: {exc}")
+        finally:
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.close()
+                    full_pcm = None
 
     def _live_capture_loop(self, settings: dict):
         try:
@@ -10115,6 +11291,7 @@ try {
             if self.live_stop_event.is_set() or self.live_abort_event.is_set():
                 return
             chunk = bytes(indata)
+            self._push_live_waveform_chunk(chunk)
             self._queue_secondary_audio(chunk)
             audio_queue.put(chunk)
 
@@ -10281,7 +11458,12 @@ try {
                     self.live_committed_text = definitive
                     self.live_draft_text = ""
                     display = self._current_live_text_locked()
-                self._queue("live_payload", display, parsed.timestamped_text)
+                self._queue(
+                    "live_payload",
+                    display,
+                    parsed.timestamped_text,
+                    is_grok_transcription(definitive_settings),
+                )
                 self._queue("status", "Transcrição definitiva concluída.")
             except Exception as exc:
                 self._queue("status", f"Não consegui gerar a transcrição definitiva. Mantive o texto parcial. Detalhe: {exc}")
@@ -10300,19 +11482,43 @@ try {
             self.live_full_pcm_path = None
 
     def _finish_live_output(self):
+        if self.live_output_finished:
+            return
+        live_thread = self.live_thread
+        if live_thread and live_thread is not threading.current_thread() and live_thread.is_alive():
+            if not self.live_capture_finish_waiting:
+                self.live_capture_finish_waiting = True
+                threading.Thread(target=self._wait_for_live_capture, daemon=True).start()
+            return
+        self.live_capture_finish_waiting = False
         if self.live_secondary_active and not self.live_secondary_done_event.is_set():
             if not self.live_finish_waiting:
                 self.live_finish_waiting = True
                 threading.Thread(target=self._wait_for_secondary_live_output, daemon=True).start()
             return
         self.live_finish_waiting = False
+        self.live_audio_recovery_available = bool(
+            self.live_was_grok_websocket
+            and self.live_full_pcm_path
+            and self.live_full_pcm_path.exists()
+            and self.live_full_pcm_path.stat().st_size >= 1024
+        )
+        self.live_output_finished = True
         self._queue("live_state", "idle")
         self._queue("status", "Transcrição ao vivo finalizada.")
+
+    def _wait_for_live_capture(self):
+        live_thread = self.live_thread
+        if live_thread and live_thread is not threading.current_thread():
+            live_thread.join()
+        self.live_capture_finish_waiting = False
+        if not self.live_abort_event.is_set():
+            self._finish_live_output()
 
     def _wait_for_secondary_live_output(self):
         self.live_secondary_done_event.wait(45)
         self.live_finish_waiting = False
-        self._queue("live_state", "idle")
+        self._finish_live_output()
         if self.live_secondary_done_event.is_set():
             self._queue("status", "Transcrição ao vivo finalizada nos dois modelos.")
         else:
@@ -11458,8 +12664,31 @@ try {
                     self.last_live_transcript_text = message[1]
                     self.live_plain_transcript_text = message[1]
                     self._set_live_text(message[1])
+                elif kind == "live_timestamp_data":
+                    self._set_live_timestamp_data(message[1])
                 elif kind == "live_payload":
-                    self._set_live_timestamp_payload(message[1], message[2])
+                    allow_timestamps = len(message) > 3 and bool(message[3])
+                    self._set_live_timestamp_payload(
+                        message[1], message[2], allow_timestamps
+                    )
+                elif kind == "live_recovery_result":
+                    self._set_live_timestamp_payload(message[1], message[2], True)
+                    self.live_audio_recovery_available = bool(
+                        self.live_full_pcm_path
+                        and self.live_full_pcm_path.exists()
+                        and self.live_full_pcm_path.stat().st_size >= 1024
+                    )
+                    self.live_output_finished = True
+                    self._set_live_state("idle")
+                elif kind == "live_recovery_error":
+                    self.live_audio_recovery_available = bool(
+                        self.live_full_pcm_path
+                        and self.live_full_pcm_path.exists()
+                        and self.live_full_pcm_path.stat().st_size >= 1024
+                    )
+                    self.live_output_finished = True
+                    self._set_live_state("idle")
+                    self.status_var.set(message[1])
                 elif kind == "live_display_2":
                     self.last_live_transcript_text_2 = message[1]
                     self._set_live_editor("transcript2", message[1])
@@ -11472,6 +12701,8 @@ try {
                     generation, target, task, text, elapsed = message[1:]
                     if generation == self.assistant_generation:
                         self._set_assistant_target_text(target, text)
+                        if target == "live":
+                            self._remember_live_assistant_result(task, 1, text)
                         self.assistant_task_states[task] = "done"
                         self.assistant_task_elapsed[task] = elapsed
                         status_var = self._assistant_target_status(target)
@@ -11484,11 +12715,36 @@ try {
                             if target == "live":
                                 self.status_var.set("Histórico gerado.")
                         self._render_assistant_progress()
+                elif kind == "qualification_result":
+                    generation, raw_result, allowed_ids, elapsed = message[1:]
+                    if generation == self.assistant_generation:
+                        try:
+                            formatted = parse_qualification_json(
+                                raw_result,
+                                allowed_ids,
+                                self.qualification_fields,
+                            )
+                            self._set_qualification_output(formatted)
+                            self.qualification_status_var.set(
+                                f"Qualificação concluída em {float(elapsed):.1f}s."
+                            )
+                            self.status_var.set("Qualificação organizada.")
+                        except Exception as exc:
+                            self.qualification_status_var.set(f"Resposta inválida: {exc}")
+                            self.status_var.set(f"Não consegui organizar a qualificação: {exc}")
+                elif kind == "qualification_error":
+                    generation, detail, elapsed = message[1:]
+                    if generation == self.assistant_generation:
+                        self.qualification_status_var.set(
+                            f"Falha após {float(elapsed):.1f}s: {detail}"
+                        )
+                        self.status_var.set(f"Não consegui organizar a qualificação: {detail}")
                 elif kind == "assistant_multi_text_result":
                     generation, task, index, text, elapsed = message[1:]
                     if generation == self.assistant_generation:
                         editor = task if index == 1 else f"{task}2"
                         self._set_live_editor(editor, text)
+                        self._remember_live_assistant_result(task, index, text)
                         self.assistant_multi_results.add((task, index))
                         self.assistant_multi_elapsed[(task, index)] = elapsed
                         if (task, 1) in self.assistant_multi_results and (task, 2) in self.assistant_multi_results:
@@ -11542,6 +12798,7 @@ try {
                         self.assistant_client = None
                         self._set_assistant_buttons_state("normal")
                         self._refresh_live_editors_state()
+                        self._refresh_qualification_editors_state()
                         self._render_assistant_progress()
                 elif kind == "imei_result":
                     generation, imei, record = message[1:]
@@ -11606,6 +12863,15 @@ try {
                 pass
 
     def _on_close(self):
+        self.live_recovery_cancel_event.set()
+        self.live_audio_recovery_available = False
+        self._set_live_audio_recovery_visible(False)
+        path = self.live_full_pcm_path
+        if path and self.live_state == "idle":
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
         if getattr(self, "ffmpeg_tools", None):
             self.ffmpeg_tools.shutdown()
         if self.running or self.live_state != "idle" or self.assistant_busy:

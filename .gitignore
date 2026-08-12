@@ -12,7 +12,7 @@ release/
 *.pyd
 *.pem
 *.key
+
 settings.json
 .idea/
 .vscode/
-
