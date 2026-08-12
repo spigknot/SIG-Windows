@@ -46,7 +46,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260812_001"
+APP_VERSION = "20260812_002"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -4927,7 +4927,11 @@ def extract_content_text(content) -> str:
     return ""
 
 
-def parse_qualification_json(raw_text: str, allowed_ids: list[str], field_order: tuple[tuple[str, str], ...]) -> str:
+def parse_qualification_json(
+    raw_text: str,
+    allowed_ids: list[str],
+    field_order: tuple[tuple[str, str], ...],
+) -> dict[str, str]:
     """Extrai e normaliza o JSON da IA, sem exibir campos não solicitados."""
     clean = str(raw_text or "").strip()
     clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
@@ -4954,7 +4958,20 @@ def parse_qualification_json(raw_text: str, allowed_ids: list[str], field_order:
         value = str(value).strip()
         if value:
             normalized[field_id] = value
-    return json.dumps(normalized, ensure_ascii=False, indent=2)
+    return normalized
+
+
+def format_qualification_fields(
+    payload: dict[str, str],
+    selected_ids: set[str] | None = None,
+) -> str:
+    """Exibe os campos como uma única linha filtrável pelas checkboxes."""
+    items = [
+        f"{field_id}: {value}"
+        for field_id, value in payload.items()
+        if selected_ids is None or field_id in selected_ids
+    ]
+    return f"{', '.join(items)}." if items else ""
 
 
 def parse_assistant_names(raw_text: str) -> list[str]:
@@ -5796,6 +5813,8 @@ class SigApp:
             field_id: BooleanVar(value=True)
             for field_id, _label in self.qualification_fields
         }
+        self.qualification_select_all_var = BooleanVar(value=True)
+        self.qualification_result_fields: dict[str, str] = {}
 
         self._build_style()
         self.paste_icon = self._make_paste_icon()
@@ -5844,6 +5863,12 @@ class SigApp:
         )
         style.configure("TRadiobutton", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
         style.configure("TCheckbutton", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
+        style.configure(
+            "SelectAll.TCheckbutton",
+            background="#f4f7f6",
+            foreground="#16833a",
+            font=("Segoe UI Semibold", 10),
+        )
         style.configure("TNotebook", background="#f4f7f6", borderwidth=0)
         style.configure("TNotebook.Tab", font=("Segoe UI Semibold", 10), padding=(18, 8))
         style.configure("Treeview", font=("Segoe UI", 10), rowheight=28)
@@ -6523,8 +6548,8 @@ try {
         )
         self.live_tab_button.pack(side=LEFT)
         self.files_tab_button.pack(side=LEFT, padx=(4, 0))
-        self.imei_tab_button.pack(side=LEFT, padx=(4, 0))
         self.qualification_tab_button.pack(side=LEFT, padx=(4, 0))
+        self.imei_tab_button.pack(side=LEFT, padx=(4, 0))
         self.ffmpeg_tab_button.pack(side=LEFT, padx=(4, 0))
         self.live_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("live"))
         self.files_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("files"))
@@ -6933,8 +6958,6 @@ try {
 
         imei_frame = ttk.Frame(self.imei_tab)
         imei_frame.pack(fill=BOTH, expand=True)
-        imei_title = ttk.Label(imei_frame, text="Dígito IMEI", font=("Segoe UI Semibold", 16))
-        imei_title.pack(anchor="w")
         ttk.Label(imei_frame, text="IMEI", style="Muted.TLabel").pack(anchor="w", pady=(16, 4))
 
         imei_inputs = ttk.Frame(imei_frame, width=900)
@@ -7163,7 +7186,32 @@ try {
         """Monta a área de entrada e saída da ferramenta Qualificação."""
         frame = ttk.Frame(self.qualification_tab, width=900)
         frame.pack(fill=X, anchor="n")
-        ttk.Label(frame, text="Qualificação", font=("Segoe UI Semibold", 16)).pack(anchor="w")
+
+        self.qualification_select_all_check = ttk.Checkbutton(
+            frame,
+            text="Selecionar todas",
+            variable=self.qualification_select_all_var,
+            command=self._toggle_qualification_select_all,
+            style="SelectAll.TCheckbutton",
+        )
+        self.qualification_select_all_check.pack(anchor="w", pady=(0, 4))
+
+        fields_frame = ttk.Frame(frame)
+        fields_frame.pack(anchor="w", pady=(0, 8))
+        self.qualification_fields_frame = fields_frame
+        self.qualification_field_checks = []
+        for column in range(4):
+            fields_frame.columnconfigure(column, minsize=180)
+        for index, (field_id, label) in enumerate(self.qualification_fields):
+            row, column = divmod(index, 4)
+            check = ttk.Checkbutton(
+                fields_frame,
+                text=label,
+                variable=self.qualification_field_vars[field_id],
+                command=self._qualification_field_changed,
+            )
+            check.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=(0, 4))
+            self.qualification_field_checks.append(check)
 
         self.qualification_input_text = self._make_live_editor(
             frame, "Texto", "qualification_input", width=900
@@ -7187,26 +7235,31 @@ try {
         output_actions.pack(fill=X, pady=(4, 10))
         self._make_qualification_editor_buttons(output_actions, "output")
 
-        fields_frame = ttk.Frame(frame)
-        fields_frame.pack(anchor="w", pady=(0, 8))
-        self.qualification_fields_frame = fields_frame
-        self.qualification_field_checks = []
-        for column in range(4):
-            fields_frame.columnconfigure(column, minsize=180)
-        for index, (field_id, label) in enumerate(self.qualification_fields):
-            row, column = divmod(index, 4)
-            check = ttk.Checkbutton(
-                fields_frame,
-                text=label,
-                variable=self.qualification_field_vars[field_id],
-            )
-            check.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=(0, 4))
-            self.qualification_field_checks.append(check)
         ttk.Label(
             frame,
             textvariable=self.qualification_status_var,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(0, 8))
+
+    def _toggle_qualification_select_all(self) -> None:
+        selected = bool(self.qualification_select_all_var.get())
+        for field_var in self.qualification_field_vars.values():
+            field_var.set(selected)
+        self._refresh_qualification_output_from_fields()
+
+    def _qualification_field_changed(self) -> None:
+        self.qualification_select_all_var.set(
+            all(field_var.get() for field_var in self.qualification_field_vars.values())
+        )
+        self._refresh_qualification_output_from_fields()
+
+    def _refresh_qualification_output_from_fields(self) -> None:
+        if not self.qualification_result_fields:
+            return
+        selected_ids = set(self._selected_qualification_field_ids())
+        self._set_qualification_output(
+            format_qualification_fields(self.qualification_result_fields, selected_ids)
+        )
 
     def _make_qualification_editor_buttons(self, parent, target: str) -> None:
         self._make_editor_icon_button(
@@ -7250,6 +7303,7 @@ try {
         self.qualification_organize_button.configure(
             state="disabled" if self.assistant_busy else "normal"
         )
+        self.qualification_select_all_check.configure(state=state)
         for check in self.qualification_field_checks:
             check.configure(state=state)
 
@@ -7269,6 +7323,8 @@ try {
         ):
             return
         editor.delete("1.0", END)
+        if target == "output":
+            self.qualification_result_fields = {}
         self.status_var.set(f"Caixa de {('entrada' if target == 'input' else 'saída')} da qualificação limpa.")
 
     def _copy_qualification_text(self, target: str) -> None:
@@ -7294,6 +7350,8 @@ try {
         editor = self._qualification_editor(target)
         editor.delete("1.0", END)
         editor.insert("1.0", pasted)
+        if target == "output":
+            self.qualification_result_fields = {}
         self.status_var.set(f"Texto colado na qualificação ({'entrada' if target == 'input' else 'saída'}).")
 
     def _organize_qualification(self) -> None:
@@ -7320,6 +7378,7 @@ try {
         generation, settings = self._begin_assistant_request("qualification", "qualification")
         self.qualification_status_var.set("Organizando qualificação...")
         self.status_var.set("Enviando texto para organizar a qualificação...")
+        self.qualification_result_fields = {}
         self._set_qualification_output("")
         self.assistant_thread = threading.Thread(
             target=self._qualification_worker,
@@ -8024,6 +8083,8 @@ try {
         if hasattr(self, "qualification_field_checks"):
             for check in self.qualification_field_checks:
                 check.configure(state=state)
+        if hasattr(self, "qualification_select_all_check"):
+            self.qualification_select_all_check.configure(state=state)
 
     def _assistant_target_text_value(self, target: str) -> str:
         return self._live_text_value() if target == "live" else self._assistant_text_value()
@@ -12719,12 +12780,13 @@ try {
                     generation, raw_result, allowed_ids, elapsed = message[1:]
                     if generation == self.assistant_generation:
                         try:
-                            formatted = parse_qualification_json(
+                            fields = parse_qualification_json(
                                 raw_result,
                                 allowed_ids,
                                 self.qualification_fields,
                             )
-                            self._set_qualification_output(formatted)
+                            self.qualification_result_fields = fields
+                            self._refresh_qualification_output_from_fields()
                             self.qualification_status_var.set(
                                 f"Qualificação concluída em {float(elapsed):.1f}s."
                             )
