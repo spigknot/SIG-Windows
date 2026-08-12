@@ -35,6 +35,7 @@ Regras estritas:
 3. A chave "endereco" deverá conter o nome do logradouro e o número, separando por vírgula, com n° antes do número (exemplo: Rua dos Expedicionários, n° 256).
 4. Não adicione saudações, introduções ou explicações. Retorne apenas a linha formatada e mais nada. Não adicione informações em hipótese alguma.
 5. Busque sempre todas as informações. Será fornecida abaixo uma lista de itens que você vai buscar para construir o JSON. Se o exemplo de JSON contiver alguma chave que não tenha sido fornecida nessa lista, construa o JSON sem essa chave. Neste caso, você irá construir um JSON com as seguintes chaves:
+6. Preencha os valores do JSON sempre com capitalização correta: maiúscula na primeira letra e minúsculas no restante, exceto quando for uma sigla (como a sigla de um Estado, por exemplo). Palavras como "de", "da", "n°" e outras semelhantes também são exceções.
 
 -------------------------
 '''.strip()
