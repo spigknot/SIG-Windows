@@ -52,6 +52,8 @@ ALLOWED_TOP_LEVEL_NAMES = {
     "ffplay.exe",
     "vad_worker.py",
     "vad_deps",
+    "prompts",
+    "modelos",
     "build-info.json",
     # These directories are created by the running application and are not
     # part of an update package.

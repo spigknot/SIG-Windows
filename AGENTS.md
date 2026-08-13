@@ -2,6 +2,29 @@
 
 Estas regras sao obrigatorias para futuras alteracoes, compilacoes e publicacoes.
 
+## Codigo-fonte e prompts
+
+- Todos os prompts editáveis ficam em `prompts\`, um arquivo `.txt` por prompt:
+  `historico.txt`, `oitiva_system.txt`, `oitiva_user.txt`, `partes_system.txt`,
+  `quaficacao_system.txt` e `qualificacao_user.txt`.
+- `src\assistant_prompts.py` deve permanecer apenas como carregador e montador das
+  partes variáveis. Não voltar a colocar os textos completos dos prompts nesse
+  módulo.
+- O build empacota uma cópia em `_internal\prompts` e o pacote full também leva
+  `prompts\` ao lado de `sig.exe`; a pasta externa tem prioridade para permitir
+  edição sem recompilação.
+- Os modelos Word editáveis ficam em `modelos\`, no mesmo nível de `prompts\`:
+  `modelo_declaracoes.docx` e `modelo_depoimento.docx`. O build deve sempre
+  empacotar ambos em `_internal\modelos`; em execução, a cópia externa ao lado
+  do SIG tem prioridade e nunca deve ser sobrescrita se já existir.
+- A cópia rica dos documentos deve exportar o DOCX pelo Word para RTF
+  (`SaveAs2`, formato 6) e HTML filtrado (`SaveAs2`, formato 10). O RTF deve ir
+  para o clipboard como bytes, sem passar por `Clipboard.GetData()` nem ser
+  decodificado/recodificado como texto. O HTML deve respeitar o charset do
+  arquivo de origem e ser convertido uma única vez para CF_HTML UTF-8 com
+  offsets calculados em bytes. Sempre testar acentos como `mês`, `São Paulo`,
+  `João`, `n°` e aspas tipográficas, além de negrito e justificação.
+
 ## Build do aplicativo
 
 - O SIG Windows deve ser compilado em modo **onedir**.

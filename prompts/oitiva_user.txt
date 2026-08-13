@@ -1,0 +1,3 @@
+A oitiva conterá os fatos do ponto de vista de {{NOME_SELECIONADO}}, colocando na oitiva dele(a) as coisas que ele(a) presenciou e sabe, pois essa será a oitiva dele(a). A seguir, texto:
+
+{{{INSERIR_AQUI_O_CONTEUDO_DA_CAIXA_DE_TEXTO_DO_HISTORICO}}}

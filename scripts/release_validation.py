@@ -35,8 +35,16 @@ REQUIRED_FULL_FILES = (
     "ffmpeg.exe",
     "ffplay.exe",
     "vad_worker.py",
+    "prompts/historico.txt",
+    "prompts/oitiva_system.txt",
+    "prompts/oitiva_user.txt",
+    "prompts/partes_system.txt",
+    "prompts/quaficacao_system.txt",
+    "prompts/qualificacao_user.txt",
+    "modelos/modelo_declaracoes.docx",
+    "modelos/modelo_depoimento.docx",
 )
-REQUIRED_FULL_DIRECTORIES = ("_internal", "vad_deps")
+REQUIRED_FULL_DIRECTORIES = ("_internal", "vad_deps", "prompts", "modelos")
 RUNTIME_ASSET_FILES = ("ffmpeg.exe", "ffplay.exe")
 RUNTIME_ASSET_DIRECTORIES = ("vad_deps",)
 
@@ -63,7 +71,10 @@ def sha256_tree(path: Path) -> str:
     digest = hashlib.sha256()
     for child in sorted(path.rglob("*")):
         if child.is_file():
-            relative = child.relative_to(path).as_posix()
+            relative_path = child.relative_to(path)
+            if "__pycache__" in relative_path.parts or child.suffix.casefold() in {".pyc", ".pyo"}:
+                continue
+            relative = relative_path.as_posix()
             digest.update(relative.encode("utf-8"))
             digest.update(b"\0")
             digest.update(child.read_bytes())
@@ -115,6 +126,14 @@ def source_fingerprint(repo_root: Path) -> str:
         "updater_v2/updater.py",
         "sig.spec",
         "requirements.txt",
+        "prompts/historico.txt",
+        "prompts/oitiva_system.txt",
+        "prompts/oitiva_user.txt",
+        "prompts/partes_system.txt",
+        "prompts/quaficacao_system.txt",
+        "prompts/qualificacao_user.txt",
+        "modelos/modelo_declaracoes.docx",
+        "modelos/modelo_depoimento.docx",
     ):
         path = repo_root / relative
         if not path.is_file():

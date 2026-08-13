@@ -52,6 +52,30 @@ class UpdaterV2ValidationTests(unittest.TestCase):
             self._zip_directory(root, zip_path)
             validate_zip(zip_path)
 
+    def test_prompts_directory_is_allowed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            root.mkdir()
+            self._make_package(root)
+            (root / "prompts").mkdir()
+            (root / "prompts" / "historico.txt").write_text("prompt", encoding="utf-8")
+            validate_install_tree(root)
+            zip_path = Path(temporary) / "package-with-prompts.zip"
+            self._zip_directory(root, zip_path)
+            validate_zip(zip_path)
+
+    def test_models_directory_is_allowed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            root.mkdir()
+            self._make_package(root)
+            (root / "modelos").mkdir()
+            (root / "modelos" / "modelo_declaracoes.docx").write_bytes(b"fixture")
+            validate_install_tree(root)
+            zip_path = Path(temporary) / "package-with-models.zip"
+            self._zip_directory(root, zip_path)
+            validate_zip(zip_path)
+
     def test_missing_internal_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "package"

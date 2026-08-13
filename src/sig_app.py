@@ -3,6 +3,7 @@ import concurrent.futures
 import ctypes
 import hashlib
 import importlib
+from datetime import date, datetime
 from array import array
 from collections import deque
 import html
@@ -42,11 +43,12 @@ from assistant_prompts import (
     DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
     qualification_user_prompt,
     statement_prompt,
+    statement_user_prompt,
 )
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260812_005"
+APP_VERSION = "20260813_006"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -89,28 +91,52 @@ DEFAULT_SETTINGS = {
     "text_model_2": "",
     "text_reasoning": "low",
     "text_reasoning_2": "low",
+    "ia_proxy_model": "grok-4.6",
+    "ia_proxy_model_2": "grok-4.6",
     "ia_proxy_provider": "grok",
     "ia_proxy_provider_2": "grok",
     "parts_extraction": "uppercase",
     "parts_model": "IA-Proxy",
+    "parts_proxy_model": "grok-4.6",
     "parts_proxy_provider": "grok",
     "grok_api_key": "",
     "deepseek_api_key": "",
     "imei_api_key": IMEI_API_KEY,
+    "police_name": "",
+    "police_role": "",
+    "police_station": "",
+    "police_delegate": "",
+    "police_city": "",
 }
 GROK_API_NAME = "Grok STT"
 GROK_STT_URL = "https://api.x.ai/v1/stt"
 GROK_STT_WEBSOCKET_URL = "wss://api.x.ai/v1/stt"
 LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
+LIVE_QUALIFICATION_FIELD_IDS = (
+    "nome",
+    "rg",
+    "cpf",
+    "nascimento",
+    "naturalidade",
+    "profissao",
+    "pai",
+    "mae",
+    "endereco",
+    "bairro",
+    "cidade",
+    "telefone",
+)
 
 GROK_TEXT_URL = "https://api.x.ai/v1/responses"
 DEEPSEEK_TEXT_URL = "https://api.deepseek.com/chat/completions"
-GROK_TEXT_NAME = "grok-4.5"
+GROK_TEXT_NAME = "grok-4.6"
+GROK_NON_REASONING_TEXT_NAME = "grok-4.20-0309-non-reasoning"
+GROK_NON_REASONING_LEGACY_NAME = "grok-4.20-non-reasoning"
 DEEPSEEK_TEXT_NAME = "deepseek-v4-flash"
 IA_PROXY_NAME = "IA-Proxy"
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
 IA_PROXY_FALLBACK_URL = "http://avare:8500"
-GROK_TEXT_API_NAMES = {GROK_TEXT_NAME}
+GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
 DEEPSEEK_API_NAMES = {DEEPSEEK_TEXT_NAME}
 DEFAULT_TRANSCRIPTION_SERVER_CONTENT = (
     '*avare\t\t'
@@ -265,6 +291,438 @@ def app_base_dir() -> Path:
                 return candidate
         return executable_dir
     return Path(__file__).resolve().parents[1]
+
+
+DOCUMENT_TEMPLATE_NAMES = {
+    "declarations": "modelo_declaracoes.docx",
+    "deposition": "modelo_depoimento.docx",
+}
+
+
+def build_cf_html(html_text: str | bytes) -> bytes:
+    """Build a Windows CF_HTML payload using UTF-8 byte offsets."""
+    if isinstance(html_text, bytes):
+        source_bytes = html_text.rstrip(b"\x00")
+        charset_match = re.search(
+            br"charset\s*=\s*[\"']?([A-Za-z0-9._-]+)",
+            source_bytes[:4096],
+            flags=re.IGNORECASE,
+        )
+        source_encoding = (
+            charset_match.group(1).decode("ascii", errors="replace")
+            if charset_match
+            else "utf-8"
+        )
+        try:
+            raw_html = source_bytes.decode(source_encoding)
+        except (LookupError, UnicodeDecodeError):
+            raw_html = source_bytes.decode("utf-8", errors="replace")
+    else:
+        raw_html = html_text or ""
+    raw_html = raw_html.replace("\x00", "").lstrip("\ufeff")
+    html_start = raw_html.lower().find("<html")
+    if html_start >= 0:
+        raw_html = raw_html[html_start:]
+    elif not raw_html.strip():
+        raise RuntimeError("O Word não forneceu o conteúdo no formato HTML.")
+    else:
+        raw_html = f"<html><body>{raw_html}</body></html>"
+    raw_html = re.sub(
+        r"(charset\s*=\s*[\"']?)[A-Za-z0-9._-]+",
+        r"\1utf-8",
+        raw_html,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    start_marker = "<!--StartFragment-->"
+    end_marker = "<!--EndFragment-->"
+    if start_marker not in raw_html:
+        body_match = re.search(r"<body\b[^>]*>", raw_html, flags=re.IGNORECASE)
+        marker_at = body_match.end() if body_match else 0
+        raw_html = raw_html[:marker_at] + start_marker + raw_html[marker_at:]
+    if end_marker not in raw_html:
+        body_end = raw_html.lower().rfind("</body>")
+        marker_at = body_end if body_end >= 0 else len(raw_html)
+        raw_html = raw_html[:marker_at] + end_marker + raw_html[marker_at:]
+
+    html_bytes = raw_html.encode("utf-8")
+    start_marker_bytes = start_marker.encode("ascii")
+    end_marker_bytes = end_marker.encode("ascii")
+    fragment_start_in_html = html_bytes.index(start_marker_bytes) + len(start_marker_bytes)
+    fragment_end_in_html = html_bytes.index(end_marker_bytes, fragment_start_in_html)
+
+    header_template = (
+        "Version:1.0\r\n"
+        "StartHTML:{start_html:010d}\r\n"
+        "EndHTML:{end_html:010d}\r\n"
+        "StartFragment:{start_fragment:010d}\r\n"
+        "EndFragment:{end_fragment:010d}\r\n"
+    )
+    placeholder_header = header_template.format(
+        start_html=0,
+        end_html=0,
+        start_fragment=0,
+        end_fragment=0,
+    ).encode("ascii")
+    start_html = len(placeholder_header)
+    end_html = start_html + len(html_bytes)
+    header = header_template.format(
+        start_html=start_html,
+        end_html=end_html,
+        start_fragment=start_html + fragment_start_in_html,
+        end_fragment=start_html + fragment_end_in_html,
+    ).encode("ascii")
+    return header + html_bytes
+
+
+def set_windows_document_clipboard(
+    rtf: bytes,
+    html_text: str | bytes,
+    plain_text: str,
+) -> None:
+    if os.name != "nt":
+        raise RuntimeError("A cópia formatada está disponível somente no Windows.")
+    if not rtf:
+        raise RuntimeError("O Word não forneceu o conteúdo no formato RTF.")
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_bool
+    user32.CloseClipboard.restype = ctypes.c_bool
+    user32.EmptyClipboard.restype = ctypes.c_bool
+    user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+    user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_bool
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+
+    for _attempt in range(40):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.1)
+    else:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    def put(format_id: int, data: bytes) -> None:
+        memory = kernel32.GlobalAlloc(0x0002, len(data))
+        if not memory:
+            raise ctypes.WinError(ctypes.get_last_error())
+        target = kernel32.GlobalLock(memory)
+        if not target:
+            kernel32.GlobalFree(memory)
+            raise ctypes.WinError(ctypes.get_last_error())
+        ctypes.memmove(target, data, len(data))
+        kernel32.GlobalUnlock(memory)
+        if not user32.SetClipboardData(format_id, memory):
+            kernel32.GlobalFree(memory)
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        if not user32.EmptyClipboard():
+            raise ctypes.WinError(ctypes.get_last_error())
+        rtf_format = user32.RegisterClipboardFormatW("Rich Text Format")
+        html_format = user32.RegisterClipboardFormatW("HTML Format")
+        put(rtf_format, rtf.rstrip(b"\0") + b"\0")
+        put(html_format, build_cf_html(html_text) + b"\0")
+        put(13, plain_text.encode("utf-16-le") + b"\0\0")
+    finally:
+        user32.CloseClipboard()
+
+
+def export_docx_to_pdf_with_word(document_path: Path, output_path: Path) -> None:
+    if os.name != "nt":
+        raise RuntimeError("A exportação fiel para PDF está disponível somente no Windows.")
+    document_path = Path(document_path).resolve()
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.unlink(missing_ok=True)
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$word = $null
+$document = $null
+$doNotSaveChanges = 0
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $word.DisplayAlerts = 0
+    $document = $word.Documents.Open($env:SIG_PDF_SOURCE, $false, $true)
+    $document.ExportAsFixedFormat($env:SIG_PDF_OUTPUT, 17)
+    $document.Close([ref]$doNotSaveChanges)
+    [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($document)
+    $document = $null
+    $word.Quit([ref]$doNotSaveChanges)
+    [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($word)
+    $word = $null
+} finally {
+    if ($null -ne $document) {
+        try { $document.Close([ref]$doNotSaveChanges) } catch {}
+        try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($document) } catch {}
+    }
+    if ($null -ne $word) {
+        try { $word.Quit([ref]$doNotSaveChanges) } catch {}
+        try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($word) } catch {}
+    }
+}
+"""
+    env = os.environ.copy()
+    env.update(
+        {
+            "SIG_PDF_SOURCE": str(document_path),
+            "SIG_PDF_OUTPUT": str(output_path),
+        }
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Sta", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=60,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "falha desconhecida").strip()
+        raise RuntimeError(detail)
+    if not output_path.is_file() or output_path.stat().st_size <= 0:
+        raise RuntimeError("O Word não gerou o arquivo PDF.")
+
+
+PORTUGUESE_MONTHS = (
+    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+)
+PORTUGUESE_CARDINALS = {
+    0: "zero", 1: "um", 2: "dois", 3: "três", 4: "quatro",
+    5: "cinco", 6: "seis", 7: "sete", 8: "oito", 9: "nove",
+    10: "dez", 11: "onze", 12: "doze", 13: "treze", 14: "quatorze",
+    15: "quinze", 16: "dezesseis", 17: "dezessete", 18: "dezoito",
+    19: "dezenove", 20: "vinte", 30: "trinta", 40: "quarenta",
+    50: "cinquenta", 60: "sessenta", 70: "setenta", 80: "oitenta",
+    90: "noventa", 100: "cem", 200: "duzentos", 300: "trezentos",
+    400: "quatrocentos", 500: "quinhentos", 600: "seiscentos",
+    700: "setecentos", 800: "oitocentos", 900: "novecentos",
+    1000: "mil", 2000: "dois mil",
+}
+
+
+def portuguese_number_words(value: int) -> str:
+    value = int(value)
+    if value in PORTUGUESE_CARDINALS:
+        return PORTUGUESE_CARDINALS[value]
+    if not 0 <= value <= 9999:
+        return str(value)
+    if value >= 1000:
+        thousands, remainder = divmod(value, 1000)
+        prefix = "mil" if thousands == 1 else f"{portuguese_number_words(thousands)} mil"
+        return prefix if remainder == 0 else f"{prefix} e {portuguese_number_words(remainder)}"
+    if value > 100:
+        hundreds, remainder = divmod(value, 100)
+        prefix = "cento" if hundreds == 1 else PORTUGUESE_CARDINALS[hundreds * 100]
+        return prefix if remainder == 0 else f"{prefix} e {portuguese_number_words(remainder)}"
+    tens, remainder = divmod(value, 10)
+    prefix = PORTUGUESE_CARDINALS[tens * 10]
+    return prefix if remainder == 0 else f"{prefix} e {PORTUGUESE_CARDINALS[remainder]}"
+
+
+WORD_PARAGRAPH_RE = re.compile(r"<w:p(?:\s[^>]*)?>.*?</w:p>", re.DOTALL)
+WORD_TEXT_RE = re.compile(r"(<w:t(?:\s[^>]*)?>)(.*?)(</w:t>)", re.DOTALL)
+WORD_FLOW_BREAK_RE = re.compile(
+    r"<w:(?:br|cr|tab|lastRenderedPageBreak)\b",
+    re.IGNORECASE,
+)
+
+
+def _replace_word_paragraph_markers(
+    paragraph_xml: str,
+    replacements: dict[str, str],
+) -> tuple[str, int]:
+    matches = list(WORD_TEXT_RE.finditer(paragraph_xml))
+    if not matches:
+        return paragraph_xml, 0
+    text_values = [html.unescape(match.group(2)) for match in matches]
+    aliases = []
+    for marker, replacement in replacements.items():
+        aliases.extend(
+            (
+                (f"{{{{{marker}}}}}", replacement),
+                (f"{{{{{{{marker}}}}}}}", replacement),
+            )
+        )
+    aliases.sort(key=lambda item: len(item[0]), reverse=True)
+    changed = 0
+    while True:
+        joined = "".join(text_values)
+        match = None
+        for marker, replacement in aliases:
+            offset = joined.find(marker)
+            if offset >= 0 and (match is None or offset > match[0]):
+                match = (offset, marker, str(replacement or ""))
+        if match is None:
+            break
+        start, marker, replacement = match
+        end = start + len(marker)
+        spans = []
+        cursor = 0
+        for node_text in text_values:
+            spans.append((cursor, cursor + len(node_text)))
+            cursor += len(node_text)
+        first_index = next(
+            index for index, (node_start, node_end) in enumerate(spans)
+            if node_start <= start < node_end
+        )
+        last_position = max(start, end - 1)
+        last_index = next(
+            index for index, (node_start, node_end) in enumerate(spans)
+            if node_start <= last_position < node_end
+        )
+        first_start, _first_end = spans[first_index]
+        last_start, _last_end = spans[last_index]
+        prefix = text_values[first_index][: start - first_start]
+        suffix = text_values[last_index][end - last_start :]
+        preceding_character = joined[start - 1 : start] if start else ""
+        following_character = joined[end : end + 1]
+        preceding_is_adjacent = True
+        if preceding_character and start == first_start:
+            previous_index = next(
+                (
+                    index
+                    for index in range(first_index - 1, -1, -1)
+                    if text_values[index]
+                ),
+                None,
+            )
+            if previous_index is not None:
+                bridge = paragraph_xml[
+                    matches[previous_index].end() : matches[first_index].start()
+                ]
+                preceding_is_adjacent = not WORD_FLOW_BREAK_RE.search(bridge)
+        following_is_adjacent = True
+        if following_character and end - last_start == len(text_values[last_index]):
+            next_index = next(
+                (
+                    index
+                    for index in range(last_index + 1, len(text_values))
+                    if text_values[index]
+                ),
+                None,
+            )
+            if next_index is not None:
+                bridge = paragraph_xml[
+                    matches[last_index].end() : matches[next_index].start()
+                ]
+                following_is_adjacent = not WORD_FLOW_BREAK_RE.search(bridge)
+        if (
+            preceding_is_adjacent
+            and preceding_character.isalnum()
+            and replacement[:1].isalnum()
+        ):
+            replacement = " " + replacement
+        if (
+            following_is_adjacent
+            and replacement[-1:].isalnum()
+            and following_character.isalnum()
+        ):
+            replacement += " "
+        if first_index == last_index:
+            text_values[first_index] = prefix + replacement + suffix
+        else:
+            text_values[first_index] = prefix + replacement
+            for index in range(first_index + 1, last_index):
+                text_values[index] = ""
+            text_values[last_index] = suffix
+        changed += 1
+    if changed == 0:
+        return paragraph_xml, 0
+    pieces = []
+    previous_end = 0
+    for match, value in zip(matches, text_values):
+        pieces.append(paragraph_xml[previous_end:match.start()])
+        opening_tag = match.group(1)
+        if (value[:1].isspace() or value[-1:].isspace()) and "xml:space=" not in opening_tag:
+            opening_tag = opening_tag[:-1] + ' xml:space="preserve">'
+        pieces.append(opening_tag)
+        pieces.append(html.escape(value, quote=False))
+        pieces.append(match.group(3))
+        previous_end = match.end()
+    pieces.append(paragraph_xml[previous_end:])
+    return "".join(pieces), changed
+
+
+def generate_docx_from_template(
+    template_path: Path,
+    output_path: Path,
+    replacements: dict[str, str],
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    total_changes = 0
+    unresolved: list[str] = []
+    with zipfile.ZipFile(template_path, "r") as source:
+        with zipfile.ZipFile(output_path, "w") as destination:
+            for item in source.infolist():
+                data = source.read(item.filename)
+                if item.filename.startswith("word/") and item.filename.endswith(".xml"):
+                    try:
+                        xml_text = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        xml_text = ""
+                    if xml_text and "<w:t" in xml_text:
+                        changes = 0
+
+                        def replace_paragraph(match):
+                            nonlocal changes
+                            updated, count = _replace_word_paragraph_markers(
+                                match.group(0),
+                                replacements,
+                            )
+                            changes += count
+                            return updated
+
+                        xml_text = WORD_PARAGRAPH_RE.sub(replace_paragraph, xml_text)
+                        if changes:
+                            data = xml_text.encode("utf-8")
+                            total_changes += changes
+                        remaining_text = "".join(
+                            html.unescape(match.group(2))
+                            for match in WORD_TEXT_RE.finditer(xml_text)
+                        )
+                        unresolved.extend(
+                            marker
+                            for marker in re.findall(r"\{\{\{?[^{}]+\}\}\}?", remaining_text)
+                            if marker not in unresolved
+                        )
+                destination.writestr(item, data)
+    if unresolved:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("Marcadores sem valor no modelo: " + ", ".join(unresolved))
+    if total_changes == 0:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("O modelo não contém marcadores reconhecidos.")
+    return total_changes
+
+
+def ensure_document_templates() -> dict[str, Path]:
+    external_dir = app_base_dir() / "modelos"
+    external_dir.mkdir(parents=True, exist_ok=True)
+    resolved: dict[str, Path] = {}
+    for template_kind, filename in DOCUMENT_TEMPLATE_NAMES.items():
+        external_path = external_dir / filename
+        bundled_path = resource_path(f"modelos/{filename}")
+        if not external_path.exists() and bundled_path.exists():
+            shutil.copy2(bundled_path, external_path)
+        if not external_path.exists():
+            raise FileNotFoundError(f"Modelo não encontrado: {external_path}")
+        resolved[template_kind] = external_path
+    return resolved
 
 
 def project_root() -> Path:
@@ -4097,7 +4555,7 @@ def text_models_path() -> Path:
 def normalize_text_models_content(content: str) -> str:
     legacy_grok_model = "grok-4." + "3"
     lines = [
-        line.replace(f'"model": "{legacy_grok_model}"', '"model": "grok-4.5"')
+        line.replace(f'"model": "{legacy_grok_model}"', '"model": "grok-4.6"')
         .replace('"max_tokens": 5000', '"max_tokens": 10000')
         for line in content.splitlines()
     ]
@@ -4168,6 +4626,20 @@ def read_text_models() -> list[dict]:
                 "temperature": 0.0,
                 "max_output_tokens": 10000,
                 "reasoning": {"effort": "low"},
+            },
+            "selected": False,
+            "provider": "xai",
+            "is_grok_api": True,
+            "is_deepseek_api": False,
+            "is_xai_proxy": False,
+        },
+        {
+            "name": GROK_NON_REASONING_TEXT_NAME,
+            "url": GROK_TEXT_URL,
+            "parameters": {
+                "model": GROK_NON_REASONING_TEXT_NAME,
+                "temperature": 0.0,
+                "max_output_tokens": 10000,
             },
             "selected": False,
             "provider": "xai",
@@ -4307,65 +4779,69 @@ def normalize_settings(data: dict) -> dict:
         else ""
     )
     text_model_names = {model["name"] for model in read_text_models()}
+
+    def proxy_model(value, provider):
+        candidate = str(value or "").strip()
+        if candidate in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME}:
+            return candidate
+        return DEEPSEEK_TEXT_NAME if str(provider or "").casefold() == "deepseek" else GROK_TEXT_NAME
+
+    def normalize_reasoning(value, model_name):
+        candidate = str(value or "").casefold()
+        if not model_name:
+            return ""
+        if model_name == GROK_NON_REASONING_TEXT_NAME:
+            return ""
+        if model_name == DEEPSEEK_TEXT_NAME:
+            return candidate if candidate in {"none", "low", "high", "max"} else "none"
+        return candidate if candidate in {"low", "medium", "high", "xhigh"} else "low"
+
     text_model = str(data.get("text_model") or DEFAULT_SETTINGS["text_model"])
     legacy_text_model = text_model.casefold()
-    reasoning = str(data.get("text_reasoning") or "").casefold()
-    match = re.search(r"\((none|low|medium|high)\)$", legacy_text_model)
-    if match:
-        reasoning = match.group(1)
-    elif not reasoning:
-        reasoning = match.group(1) if match else DEFAULT_SETTINGS["text_reasoning"]
     if legacy_text_model in {"avare-grok", "taguai-grok", "grok (api)"}:
         text_model = IA_PROXY_NAME if "api" not in legacy_text_model else GROK_TEXT_NAME
-    elif legacy_text_model.startswith("grok-4.5"):
+    elif legacy_text_model in {GROK_NON_REASONING_LEGACY_NAME, GROK_NON_REASONING_TEXT_NAME}:
+        text_model = GROK_NON_REASONING_TEXT_NAME
+    elif legacy_text_model.startswith("grok-4."):
         text_model = GROK_TEXT_NAME
     elif legacy_text_model.startswith("deepseek-v4-") or legacy_text_model.startswith("deepseek v4"):
         text_model = DEEPSEEK_TEXT_NAME
-    clean["text_model"] = (
-        text_model
-        if text_model in text_model_names
-        else selected_text_model_config({})["name"]
-    )
+    clean["text_model"] = text_model if text_model in text_model_names else selected_text_model_config({})["name"]
+
     text_model_2 = str(data.get("text_model_2") or "")
+    if text_model_2.casefold() in {GROK_NON_REASONING_LEGACY_NAME, GROK_NON_REASONING_TEXT_NAME}:
+        text_model_2 = GROK_NON_REASONING_TEXT_NAME
+    elif text_model_2.casefold().startswith("grok-4."):
+        text_model_2 = GROK_TEXT_NAME
+    elif text_model_2.casefold().startswith("deepseek-v4-") or text_model_2.casefold().startswith("deepseek v4"):
+        text_model_2 = DEEPSEEK_TEXT_NAME
     clean["text_model_2"] = (
         text_model_2
         if text_model_2 in text_model_names
         and (text_model_2 != clean["text_model"] or text_model_2 == IA_PROXY_NAME)
         else ""
     )
-    proxy_provider = str(data.get("ia_proxy_provider") or DEFAULT_SETTINGS["ia_proxy_provider"]).casefold()
-    clean["ia_proxy_provider"] = proxy_provider if proxy_provider in {"grok", "deepseek"} else "grok"
-    selected_provider = (
-        clean["ia_proxy_provider"]
-        if clean["text_model"] == IA_PROXY_NAME
-        else "deepseek" if clean["text_model"] == DEEPSEEK_TEXT_NAME else "grok"
+
+    proxy_model_1 = proxy_model(
+        data.get("ia_proxy_model"), data.get("ia_proxy_provider") or DEFAULT_SETTINGS["ia_proxy_provider"]
     )
-    if selected_provider == "deepseek":
-        clean["text_reasoning"] = "high" if reasoning in {"medium", "high"} else "none"
-    else:
-        clean["text_reasoning"] = "high" if reasoning in {"medium", "high"} else "low"
-    proxy_provider_2 = str(
-        data.get("ia_proxy_provider_2") or DEFAULT_SETTINGS["ia_proxy_provider_2"]
-    ).casefold()
-    clean["ia_proxy_provider_2"] = proxy_provider_2 if proxy_provider_2 in {"grok", "deepseek"} else "grok"
+    proxy_model_2 = proxy_model(
+        data.get("ia_proxy_model_2"), data.get("ia_proxy_provider_2") or DEFAULT_SETTINGS["ia_proxy_provider_2"]
+    )
+    clean["ia_proxy_model"] = proxy_model_1
+    clean["ia_proxy_model_2"] = proxy_model_2
+    clean["ia_proxy_provider"] = "deepseek" if proxy_model_1 == DEEPSEEK_TEXT_NAME else "grok"
+    clean["ia_proxy_provider_2"] = "deepseek" if proxy_model_2 == DEEPSEEK_TEXT_NAME else "grok"
     if (
         clean["text_model"] == IA_PROXY_NAME
         and clean["text_model_2"] == IA_PROXY_NAME
-        and clean["ia_proxy_provider"] == clean["ia_proxy_provider_2"]
+        and clean["ia_proxy_model"] == clean["ia_proxy_model_2"]
     ):
         clean["text_model_2"] = ""
-    reasoning_2 = str(
-        data.get("text_reasoning_2") or DEFAULT_SETTINGS["text_reasoning_2"]
-    ).casefold()
-    selected_provider_2 = (
-        clean["ia_proxy_provider_2"]
-        if clean["text_model_2"] == IA_PROXY_NAME
-        else "deepseek" if clean["text_model_2"] == DEEPSEEK_TEXT_NAME else "grok"
-    )
-    if selected_provider_2 == "deepseek":
-        clean["text_reasoning_2"] = "high" if reasoning_2 in {"medium", "high"} else "none"
-    else:
-        clean["text_reasoning_2"] = "high" if reasoning_2 in {"medium", "high"} else "low"
+    actual_model = proxy_model_1 if clean["text_model"] == IA_PROXY_NAME else clean["text_model"]
+    actual_model_2 = proxy_model_2 if clean["text_model_2"] == IA_PROXY_NAME else clean["text_model_2"]
+    clean["text_reasoning"] = normalize_reasoning(data.get("text_reasoning"), actual_model)
+    clean["text_reasoning_2"] = normalize_reasoning(data.get("text_reasoning_2"), actual_model_2)
     extraction = str(data.get("parts_extraction") or DEFAULT_SETTINGS["parts_extraction"])
     clean["parts_extraction"] = (
         extraction if extraction in PARTS_EXTRACTION_LABELS else DEFAULT_SETTINGS["parts_extraction"]
@@ -4373,19 +4849,42 @@ def normalize_settings(data: dict) -> dict:
     parts_model = str(data.get("parts_model") or DEFAULT_SETTINGS["parts_model"])
     clean["parts_model"] = (
         parts_model
-        if parts_model in {IA_PROXY_NAME, GROK_TEXT_NAME, DEEPSEEK_TEXT_NAME}
+        if parts_model in {
+            IA_PROXY_NAME,
+            GROK_NON_REASONING_TEXT_NAME,
+            GROK_TEXT_NAME,
+            DEEPSEEK_TEXT_NAME,
+        }
         else DEFAULT_SETTINGS["parts_model"]
     )
     parts_proxy_provider = str(
         data.get("parts_proxy_provider") or DEFAULT_SETTINGS["parts_proxy_provider"]
     ).casefold()
+    clean["parts_proxy_model"] = proxy_model(
+        data.get("parts_proxy_model"), parts_proxy_provider
+    )
     clean["parts_proxy_provider"] = (
-        parts_proxy_provider if parts_proxy_provider in {"grok", "deepseek"} else "grok"
+        "deepseek"
+        if clean["parts_proxy_model"] == DEEPSEEK_TEXT_NAME
+        else "grok"
     )
     clean["grok_api_key"] = str(data.get("grok_api_key") or "").strip()
     clean["deepseek_api_key"] = str(data.get("deepseek_api_key") or "").strip()
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
-    if clean["parts_model"] == GROK_TEXT_NAME and not plausible_xai_api_key(clean["grok_api_key"]):
+    clean["police_name"] = str(data.get("police_name") or "").strip()
+    clean["police_role"] = str(data.get("police_role") or "").strip()
+    clean["police_station"] = str(data.get("police_station") or "").strip()
+    clean["police_delegate"] = str(data.get("police_delegate") or "").strip()
+    clean["police_city"] = str(data.get("police_city") or "").strip()
+    if clean["text_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
+        clean["text_model"] = IA_PROXY_NAME
+    if clean["text_model_2"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
+        clean["text_model_2"] = ""
+    if clean["text_model"] in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
+        clean["text_model"] = IA_PROXY_NAME
+    if clean["text_model_2"] in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
+        clean["text_model_2"] = ""
+    if clean["parts_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
         clean["parts_model"] = IA_PROXY_NAME
     if clean["parts_model"] == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
         clean["parts_model"] = IA_PROXY_NAME
@@ -4399,6 +4898,9 @@ def settings_for_text_model(settings: dict, model_name: str, secondary: bool = F
     if secondary:
         selected["text_reasoning"] = str(settings.get("text_reasoning_2") or "low")
         selected["ia_proxy_provider"] = str(settings.get("ia_proxy_provider_2") or "grok")
+        selected["ia_proxy_model"] = str(
+            settings.get("ia_proxy_model_2") or settings.get("ia_proxy_model") or GROK_TEXT_NAME
+        )
     return selected
 
 
@@ -4406,9 +4908,16 @@ def selected_parts_model(settings: dict) -> dict:
     model_name = str(settings.get("parts_model") or IA_PROXY_NAME)
     selected = dict(settings)
     selected["text_model"] = model_name
-    proxy_provider = str(settings.get("parts_proxy_provider") or "grok").casefold()
+    proxy_model = str(
+        settings.get("parts_proxy_model")
+        or (
+            DEEPSEEK_TEXT_NAME
+            if str(settings.get("parts_proxy_provider") or "grok").casefold() == "deepseek"
+            else GROK_TEXT_NAME
+        )
+    )
     uses_deepseek = model_name == DEEPSEEK_TEXT_NAME or (
-        model_name == IA_PROXY_NAME and proxy_provider == "deepseek"
+        model_name == IA_PROXY_NAME and proxy_model == DEEPSEEK_TEXT_NAME
     )
     if uses_deepseek:
         selected["text_reasoning"] = "none"
@@ -4416,6 +4925,7 @@ def selected_parts_model(settings: dict) -> dict:
         selected["text_reasoning"] = "low"
     if model_name == IA_PROXY_NAME:
         selected["ia_proxy_provider"] = "deepseek" if uses_deepseek else "grok"
+        selected["ia_proxy_model"] = proxy_model
     return selected_text_model(selected)
 
 
@@ -4831,31 +5341,37 @@ def extract_text_from_response(raw: bytes) -> str:
 def selected_text_model(settings: dict) -> dict:
     config = selected_text_model_config(settings)
     is_proxy = config["name"] == IA_PROXY_NAME
-    provider = (
-        str(settings.get("ia_proxy_provider") or "grok").casefold()
+    request_model = (
+        str(settings.get("ia_proxy_model") or GROK_TEXT_NAME)
         if is_proxy
-        else str(config.get("provider") or "").casefold()
+        else config["name"]
     )
+    if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME}:
+        request_model = GROK_TEXT_NAME
+    provider = "deepseek" if request_model == DEEPSEEK_TEXT_NAME else "xai"
     reasoning = str(settings.get("text_reasoning") or "").casefold()
-    if provider == "deepseek":
-        reasoning = "high" if reasoning == "high" else "none"
+    if request_model == DEEPSEEK_TEXT_NAME:
+        reasoning = reasoning if reasoning in {"none", "low", "high", "max"} else "none"
         parameters = {
             "model": DEEPSEEK_TEXT_NAME,
             "temperature": 0.0,
             "max_tokens": 10000,
             "reasoning_effort": reasoning,
         }
-    elif provider == "xai" or is_proxy:
-        provider = "xai"
-        reasoning = "high" if reasoning == "high" else "low"
+    elif request_model == GROK_NON_REASONING_TEXT_NAME:
+        parameters = {
+            "model": GROK_NON_REASONING_TEXT_NAME,
+            "temperature": 0.0,
+            "max_output_tokens": 10000,
+        }
+    else:
+        reasoning = reasoning if reasoning in {"low", "medium", "high", "xhigh"} else "low"
         parameters = {
             "model": GROK_TEXT_NAME,
             "temperature": 0.0,
             "max_output_tokens": 10000,
             "reasoning": {"effort": reasoning},
         }
-    else:
-        parameters = json.loads(json.dumps(config["parameters"], ensure_ascii=False))
     is_grok_api = bool(config.get("is_grok_api", False)) and not is_proxy
     is_deepseek_api = bool(config.get("is_deepseek_api", False)) and not is_proxy
     return {
@@ -4867,6 +5383,7 @@ def selected_text_model(settings: dict) -> dict:
         "is_grok_api": is_grok_api,
         "is_deepseek_api": is_deepseek_api,
         "is_xai_proxy": is_proxy,
+        "request_model": request_model,
         "api_key": str(
             settings.get("deepseek_api_key" if is_deepseek_api else "grok_api_key") or ""
         ).strip(),
@@ -4973,6 +5490,89 @@ def parse_qualification_json(
     return normalized
 
 
+def _qualification_age_in_years(value: str, today: date | None = None) -> int | None:
+    """Calcula a idade completa a partir das datas mais comuns devolvidas pela IA."""
+    raw = str(value or "").strip()
+    match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", raw)
+    if match:
+        day, month, year = (int(item) for item in match.groups())
+    else:
+        match = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", raw)
+        if not match:
+            return None
+        year, month, day = (int(item) for item in match.groups())
+    try:
+        born = date(year, month, day)
+    except ValueError:
+        return None
+    current = today or date.today()
+    if born > current:
+        return None
+    return current.year - born.year - ((current.month, current.day) < (born.month, born.day))
+
+
+def format_occurrence_qualification(
+    raw_text: str,
+    field_order: tuple[tuple[str, str], ...],
+) -> str:
+    """Converte o JSON fixo da Ocorrência no texto narrativo usado pelo policial."""
+    fields = parse_qualification_json(raw_text, list(LIVE_QUALIFICATION_FIELD_IDS), field_order)
+    absent_values = {
+        "nao informado",
+        "não informado",
+        "nao encontrada",
+        "não encontrada",
+        "nao encontrado",
+        "não encontrado",
+        "nao disponivel",
+        "não disponível",
+        "n/a",
+        "-",
+    }
+    fields = {
+        field_id: value
+        for field_id, value in fields.items()
+        if str(value).strip().casefold() not in absent_values
+    }
+    parts: list[str] = []
+
+    name = fields.get("nome", "").strip()
+    if name:
+        parts.append(name.upper())
+
+    mother = fields.get("mae", "").strip()
+    father = fields.get("pai", "").strip()
+    if mother and father:
+        parts.append(f"filho(a) de {mother} e {father}")
+    elif mother:
+        parts.append(f"filho(a) de {mother}")
+    elif father:
+        parts.append(f"filho(a) de {father}")
+
+    age = _qualification_age_in_years(fields.get("nascimento", ""))
+    if age is not None:
+        parts.append(f"{age} anos")
+    if fields.get("estado_civil"):
+        parts.append(f"estado civil {fields['estado_civil'].strip()}")
+
+    # Nacionalidade Brasileira é parte fixa do modelo solicitado para esta tela.
+    parts.append("de nacionalidade Brasileira")
+    if fields.get("naturalidade"):
+        parts.append(f"natural de {fields['naturalidade'].strip()}")
+    if fields.get("profissao"):
+        parts.append(f"de profissão {fields['profissao'].strip()}")
+    if fields.get("endereco"):
+        parts.append(f"residente e domiciliado(a) à {fields['endereco'].strip()}")
+    if fields.get("bairro"):
+        parts.append(fields["bairro"].strip())
+    if fields.get("cidade"):
+        parts.append(f"na cidade de {fields['cidade'].strip()}")
+    if fields.get("telefone"):
+        parts.append(f"Telefone: {fields['telefone'].strip()}")
+
+    return f"{', '.join(parts)}." if parts else ""
+
+
 def format_qualification_fields(
     payload: dict[str, str],
     field_order: tuple[tuple[str, str], ...],
@@ -4997,6 +5597,30 @@ def format_qualification_fields(
 def qualification_display_label(field_id: str) -> str:
     """Converte um ID personalizado em um rótulo legível para a saída."""
     return " ".join(part.capitalize() for part in str(field_id).split("_") if part)
+
+
+def history_completion_status(
+    history_state: str,
+    names_state: str,
+    names_count: int,
+) -> str:
+    if history_state == "done" and names_state == "done":
+        if names_count:
+            return (
+                "Histórico e extração de partes concluídos: "
+                f"{names_count} parte(s) identificada(s)."
+            )
+        return "Histórico concluído; nenhuma parte foi identificada."
+    if history_state == "done" and names_state == "running":
+        return "Histórico concluído. Finalizando a identificação das partes..."
+    if history_state == "running" and names_state == "done":
+        if names_count:
+            return (
+                f"Extração de partes concluída: {names_count} parte(s) identificada(s). "
+                "Aguardando o histórico..."
+            )
+        return "Extração de partes concluída. Aguardando o histórico..."
+    return ""
 
 
 def parse_assistant_names(raw_text: str) -> list[str]:
@@ -5562,6 +6186,9 @@ class TextModelClient:
         is_deepseek_api = bool(model_config.get("is_deepseek_api"))
         is_xai_proxy = bool(model_config.get("is_xai_proxy"))
         provider = str(model_config.get("provider") or "").casefold()
+        is_non_reasoning_grok = (
+            model_config.get("request_model") or payload.get("model")
+        ) == GROK_NON_REASONING_TEXT_NAME
         is_xai_request = is_grok_api or (is_xai_proxy and provider == "xai")
         is_deepseek_request = is_deepseek_api or (is_xai_proxy and provider == "deepseek")
         if is_grok_api or is_deepseek_api:
@@ -5570,12 +6197,16 @@ class TextModelClient:
                 provider = "DeepSeek" if is_deepseek_api else "xAI"
                 raise RuntimeError(f"Insira a chave API da {provider} nas configurações.")
         if is_xai_request:
-            payload.setdefault("model", "grok-4.5")
+            payload.setdefault("model", GROK_TEXT_NAME)
             payload.setdefault("temperature", 0.0)
             payload.setdefault("max_output_tokens", 10000)
-            payload.setdefault("reasoning", {"effort": "low"})
-            if str((payload.get("reasoning") or {}).get("effort") or "").casefold() == "none":
-                payload["reasoning"] = {**payload["reasoning"], "effort": "low"}
+            if is_non_reasoning_grok:
+                payload["model"] = GROK_NON_REASONING_TEXT_NAME
+                payload.pop("reasoning", None)
+            else:
+                payload.setdefault("reasoning", {"effort": "low"})
+                if str((payload.get("reasoning") or {}).get("effort") or "").casefold() == "none":
+                    payload["reasoning"] = {**payload["reasoning"], "effort": "low"}
             payload.pop("max_tokens", None)
         if is_deepseek_request:
             payload["messages"] = [
@@ -5664,6 +6295,11 @@ class SigApp:
         if os.name == "nt":
             self.root.state("zoomed")
         self.settings = load_settings()
+        try:
+            self.document_templates = ensure_document_templates()
+        except Exception:
+            # A geração mostra a causa completa se o recurso for acionado.
+            self.document_templates = {}
         self.selected_paths: list[Path] = []
         self.ui_queue: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
@@ -5713,6 +6349,9 @@ class SigApp:
         self.last_live_history_text_2 = ""
         self.last_live_statement_text = ""
         self.last_live_statement_text_2 = ""
+        self.last_live_qualification_text = ""
+        self.last_generated_document_path: Path | None = None
+        self.last_generated_document_preview_path: Path | None = None
         self.live_plain_transcript_text = ""
         self.live_timestamped_transcript_text = ""
         self.live_secondary_active = False
@@ -5862,6 +6501,8 @@ class SigApp:
         self.qualification_select_all_var = BooleanVar(value=True)
         self.qualification_result_fields: dict[str, str] = {}
         self.qualification_other_ids_var = StringVar()
+        self.qualification_declarations_var = BooleanVar(value=True)
+        self.qualification_deposition_var = BooleanVar(value=False)
 
         self._build_style()
         self.paste_icon = self._make_paste_icon()
@@ -5869,6 +6510,9 @@ class SigApp:
         self.clear_icon = self._make_clear_icon()
         self.recover_icon = self._make_recover_icon()
         self.recover_audio_icon = self._make_recover_icon("#d39b00")
+        self.document_copy_icon = self._make_document_action_icon("copy")
+        self.document_preview_icon = self._make_document_action_icon("preview")
+        self.document_save_icon = self._make_document_action_icon("save")
         self._build_menu()
         self._build_ui()
         self.status_var.trace_add("write", lambda *_args: self._append_activity_log(self.status_var.get()))
@@ -5884,9 +6528,27 @@ class SigApp:
             style.theme_use("clam")
         except Exception:
             pass
+        settings_surface = style.lookup("TLabelframe", "background") or "#dcdad5"
         style.configure("TFrame", background="#f4f7f6")
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
         style.configure("TLabel", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
+        # Keep labels inside the settings sections on the same surface as the
+        # label frame instead of inheriting the theme's light label background.
+        style.configure("Settings.TFrame", background=settings_surface)
+        style.configure("Settings.TLabelframe", background=settings_surface)
+        style.configure("Settings.TLabelframe.Label", background=settings_surface)
+        style.configure(
+            "Settings.TLabel",
+            background=settings_surface,
+            foreground="#1d2b2a",
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "Settings.TCheckbutton",
+            background=settings_surface,
+            foreground="#1d2b2a",
+            font=("Segoe UI", 10),
+        )
         style.configure("Muted.TLabel", background="#f4f7f6", foreground="#667371", font=("Segoe UI", 9))
         style.configure("ModelSummary.TLabel", background="#f4f7f6", foreground="#667371", font=("Consolas", 9))
         style.configure("Title.TLabel", background="#f4f7f6", foreground="#10201f", font=("Segoe UI Semibold", 24))
@@ -5896,6 +6558,18 @@ class SigApp:
         style.configure("Action.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
         style.configure("Action.TMenubutton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
         style.configure("Recover.TButton", padding=(0, -1))
+        style.configure(
+            "DocumentAction.TButton",
+            foreground="#1d2b2a",
+            background="#e8ecea",
+            font=("Segoe UI Semibold", 9),
+            padding=(3, 4),
+        )
+        style.map(
+            "DocumentAction.TButton",
+            background=[("active", "#d9e3df"), ("disabled", "#edf0ef")],
+            foreground=[("disabled", "#87918f")],
+        )
         style.configure(
             "Update.TButton",
             foreground="#ffffff",
@@ -5965,6 +6639,58 @@ class SigApp:
         draw = ImageDraw.Draw(image)
         draw.arc((2, 2, 15, 15), start=45, end=315, fill=color, width=2)
         draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
+        return ImageTk.PhotoImage(image)
+
+    @staticmethod
+    def _make_document_action_icon(kind: str):
+        scale = 4
+        size = 36
+        image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        color = "#263735"
+        width = 2 * scale
+
+        def box(coords, radius=2):
+            draw.rounded_rectangle(
+                tuple(value * scale for value in coords),
+                radius=radius * scale,
+                outline=color,
+                width=width,
+            )
+
+        if kind == "copy":
+            box((11, 5, 30, 26), 2)
+            box((5, 11, 24, 32), 2)
+        elif kind == "preview":
+            draw.ellipse(
+                tuple(value * scale for value in (5, 4, 25, 24)),
+                outline=color,
+                width=width,
+            )
+            draw.line(
+                tuple(value * scale for value in (22, 21, 32, 31)),
+                fill=color,
+                width=3 * scale,
+            )
+        elif kind == "save":
+            box((5, 4, 31, 32), 2)
+            draw.rectangle(
+                tuple(value * scale for value in (10, 4, 25, 14)),
+                outline=color,
+                width=width,
+            )
+            draw.rectangle(
+                tuple(value * scale for value in (11, 21, 25, 32)),
+                outline=color,
+                width=width,
+            )
+            draw.rectangle(
+                tuple(value * scale for value in (21, 6, 24, 12)),
+                fill=color,
+            )
+        else:
+            raise ValueError(f"Ícone de documento desconhecido: {kind}")
+        image = image.resize((size, size), Image.Resampling.LANCZOS)
         return ImageTk.PhotoImage(image)
 
     @staticmethod
@@ -6545,7 +7271,7 @@ try {
         tab_width = len("Transcrição") + 1
         self.live_tab_button = tk.Label(
             tab_bar,
-            text="Streaming",
+            text="Ocorrência",
             width=tab_width,
             height=1,
             borderwidth=1,
@@ -6620,12 +7346,12 @@ try {
         activity_panel.pack_propagate(False)
         self.live_waveform_canvas = Canvas(
             activity_panel,
-            width=168,
+            width=activity_width,
             height=44,
             highlightthickness=0,
             background="#f4f7f6",
         )
-        self.live_waveform_canvas.pack(side=TOP, anchor="center")
+        self.live_waveform_canvas.pack(side=TOP, fill=X, anchor="w")
         create_tooltip(self.live_waveform_canvas, "Nível de áudio captado pelo microfone")
         self.live_waveform_canvas.bind(
             "<Configure>", lambda _event: self._draw_live_waveform(), add="+"
@@ -6740,9 +7466,16 @@ try {
         self.live_primary_pane.pack(side=LEFT, fill=X, expand=True)
         self.live_secondary_pane = ttk.Frame(self.live_transcript_area)
 
-        self.live_text = self._make_live_editor(self.live_primary_pane, "Transcrição", "transcript", width=900)
+        self.live_text = self._make_live_editor(
+            self.live_primary_pane,
+            "Transcrição",
+            "transcript",
+            width=900,
+            height=150,
+            vertical_padding=(0, 0),
+        )
         self.live_transcript_actions = ttk.Frame(self.live_primary_pane)
-        self.live_transcript_actions.pack(fill=X, pady=(4, 10))
+        self.live_transcript_actions.pack(fill=X, pady=(4, 4))
         self.live_recover_button = ttk.Button(
             self.live_transcript_actions,
             image=self.recover_icon,
@@ -6768,10 +7501,15 @@ try {
         )
 
         self.live_text_2 = self._make_live_editor(
-            self.live_secondary_pane, "Transcrição 2", "transcript2", width=440
+            self.live_secondary_pane,
+            "Transcrição 2",
+            "transcript2",
+            width=440,
+            height=150,
+            vertical_padding=(0, 0),
         )
         self.live_transcript_actions_2 = ttk.Frame(self.live_secondary_pane)
-        self.live_transcript_actions_2.pack(fill=X, pady=(4, 10))
+        self.live_transcript_actions_2.pack(fill=X, pady=(4, 4))
         self.live_recover_button_2 = ttk.Button(
             self.live_transcript_actions_2,
             image=self.recover_icon,
@@ -6813,15 +7551,25 @@ try {
         self.live_history_primary_pane.grid(row=0, column=0, sticky="ew")
         self.live_history_secondary_pane = ttk.Frame(self.live_history_area)
         self.live_history_text = self._make_live_editor(
-            self.live_history_primary_pane, "Histórico", "history", width=900
+            self.live_history_primary_pane,
+            "Histórico",
+            "history",
+            width=900,
+            height=150,
+            vertical_padding=(0, 0),
         )
         self.live_history_text_2 = self._make_live_editor(
-            self.live_history_secondary_pane, "Histórico 2", "history2", width=440
+            self.live_history_secondary_pane,
+            "Histórico 2",
+            "history2",
+            width=440,
+            height=150,
+            vertical_padding=(0, 0),
         )
 
         def build_history_actions(parent, suffix: str, statement_command, part_var: StringVar):
             actions = ttk.Frame(parent)
-            actions.pack(fill=X, pady=(4, 10))
+            actions.pack(fill=X, pady=(4, 4))
             recover_button = ttk.Button(
                 actions,
                 image=self.recover_icon,
@@ -6883,15 +7631,25 @@ try {
         self.live_statement_primary_pane.grid(row=0, column=0, sticky="ew")
         self.live_statement_secondary_pane = ttk.Frame(self.live_statement_area)
         self.live_statement_text = self._make_live_editor(
-            self.live_statement_primary_pane, "Oitiva", "statement", width=900
+            self.live_statement_primary_pane,
+            "Oitiva",
+            "statement",
+            width=900,
+            height=150,
+            vertical_padding=(0, 0),
         )
         self.live_statement_text_2 = self._make_live_editor(
-            self.live_statement_secondary_pane, "Oitiva 2", "statement2", width=440
+            self.live_statement_secondary_pane,
+            "Oitiva 2",
+            "statement2",
+            width=440,
+            height=150,
+            vertical_padding=(0, 0),
         )
 
         def build_statement_actions(parent, suffix: str, show_progress: bool = False):
             actions = ttk.Frame(parent)
-            actions.pack(fill=X, pady=(4, 6))
+            actions.pack(fill=X, pady=(4, 4))
             recover_button = ttk.Button(
                 actions,
                 image=self.recover_icon,
@@ -6922,6 +7680,159 @@ try {
             self.live_statement_secondary_pane, "statement2"
         )
         self._refresh_multi_text_visibility()
+
+        self.live_qualification_row = ttk.Frame(live_frame, width=900)
+        self.live_qualification_row.pack(fill=X)
+        self.live_qualification_content = ttk.Frame(
+            self.live_qualification_row,
+            width=900,
+        )
+        self.live_qualification_content.pack(fill=X)
+        self.live_qualification_area = ttk.Frame(
+            self.live_qualification_content,
+            width=450,
+        )
+        self.live_qualification_area.pack(side=LEFT, anchor="nw")
+        self.live_qualification_text = self._make_live_editor(
+            self.live_qualification_area,
+            "Qualificação",
+            "qualification",
+            width=450,
+            height=150,
+            vertical_padding=(0, 0),
+        )
+
+        def select_qualification_type(selected: str):
+            if selected == "declarations":
+                if self.qualification_declarations_var.get():
+                    self.qualification_deposition_var.set(False)
+                else:
+                    self.qualification_declarations_var.set(True)
+            else:
+                if self.qualification_deposition_var.get():
+                    self.qualification_declarations_var.set(False)
+                else:
+                    self.qualification_deposition_var.set(True)
+
+        self.live_qualification_type_frame = ttk.Frame(
+            self.live_qualification_content
+        )
+        self.live_qualification_type_frame.pack(
+            side=LEFT,
+            fill=X,
+            expand=True,
+            anchor="n",
+            padx=(18, 0),
+            pady=(12, 0),
+        )
+        self.live_qualification_declarations_check = ttk.Checkbutton(
+            self.live_qualification_type_frame,
+            text="Declarações",
+            variable=self.qualification_declarations_var,
+            command=lambda: select_qualification_type("declarations"),
+        )
+        self.live_qualification_declarations_check.pack(anchor="w")
+        self.live_qualification_deposition_check = ttk.Checkbutton(
+            self.live_qualification_type_frame,
+            text="Depoimento",
+            variable=self.qualification_deposition_var,
+            command=lambda: select_qualification_type("deposition"),
+        )
+        self.live_qualification_deposition_check.pack(anchor="w", pady=(6, 0))
+
+        self.live_qualification_actions = ttk.Frame(
+            self.live_qualification_row,
+            height=78,
+        )
+        self.live_qualification_actions.pack(fill=X, pady=(4, 4))
+        self.live_qualification_actions.pack_propagate(False)
+        self.live_qualification_recover_button = ttk.Button(
+            self.live_qualification_actions,
+            image=self.recover_icon,
+            style="Recover.TButton",
+            command=self.recover_live_qualification,
+        )
+        create_tooltip(
+            self.live_qualification_recover_button,
+            "Recuperar o último texto de qualificação gerado pelo app",
+        )
+        self.live_qualification_clear_button = self._make_editor_icon_button(
+            self.live_qualification_actions,
+            self.clear_icon,
+            "Limpar",
+            lambda: self.clear_live_editor("qualification"),
+        )
+        self.live_qualification_copy_button = self._make_editor_icon_button(
+            self.live_qualification_actions,
+            self.copy_icon,
+            "Copiar",
+            lambda: self.copy_live_editor("qualification"),
+        )
+        self.live_qualification_paste_button = self._make_editor_icon_button(
+            self.live_qualification_actions,
+            self.paste_icon,
+            "Colar",
+            lambda: self.paste_live_editor("qualification"),
+        )
+        self.live_qualification_button = ttk.Button(
+            self.live_qualification_actions,
+            text="Qualificação",
+            style="Action.TButton",
+            width=12,
+            command=self.request_live_qualification,
+        )
+        self.live_document_execute_button = ttk.Button(
+            self.live_qualification_actions,
+            text="Gerar documento",
+            style="Execute.TButton",
+            command=self.generate_occurrence_document,
+        )
+
+        self.live_document_actions_frame = ttk.Frame(
+            self.live_qualification_actions
+        )
+
+        def document_action_button(text, image, command):
+            holder = ttk.Frame(
+                self.live_document_actions_frame,
+                width=78,
+                height=78,
+            )
+            holder.pack(side=LEFT, padx=(8, 0))
+            holder.pack_propagate(False)
+            button = ttk.Button(
+                holder,
+                text=text,
+                image=image,
+                compound=TOP,
+                style="DocumentAction.TButton",
+                command=command,
+            )
+            button.pack(fill=BOTH, expand=True)
+            return button
+
+        self.live_document_copy_button = document_action_button(
+            "Copiar",
+            self.document_copy_icon,
+            self.copy_generated_occurrence_document,
+        )
+        self.live_document_preview_button = document_action_button(
+            "Visualizar",
+            self.document_preview_icon,
+            self.preview_generated_occurrence_document,
+        )
+        self.live_document_save_button = document_action_button(
+            "Salvar",
+            self.document_save_icon,
+            self.save_generated_occurrence_document,
+        )
+        self.live_document_actions_frame.place_forget()
+        self.live_qualification_actions.bind(
+            "<Configure>",
+            lambda _event: self._position_live_document_controls(),
+            add="+",
+        )
+        self.root.after_idle(self._position_live_document_controls)
 
         self._draw_live_mic_button()
         self._draw_live_pause_button()
@@ -7520,9 +8431,16 @@ try {
             waveform.update_idletasks()
             waveform_height = max(0, waveform.winfo_reqheight())
             live_top_height = max(0, live_top.winfo_reqheight())
-            # The live tab has 2 px of top padding and the transcript frame has 8 px.
-            extra = max(0, live_top_height - waveform_height)
-            activity_box.pack_configure(pady=(10 + extra, 0))
+            transcript_area = getattr(self, "live_transcript_area", None)
+            if transcript_area is not None:
+                transcript_area.update_idletasks()
+                # Align the log's top edge with the actual transcript frame,
+                # accounting for the waveform already occupying the panel top.
+                target_top = transcript_area.winfo_rooty() - activity_box.master.winfo_rooty()
+                top_padding = max(0, target_top - waveform_height)
+            else:
+                top_padding = max(0, live_top_height - waveform_height)
+            activity_box.pack_configure(pady=(top_padding, 0))
             self._position_live_audio_recovery_button()
         except Exception:
             pass
@@ -8025,6 +8943,73 @@ try {
             )
             history_button.place_forget()
             history_button.place(x=history_center, y=0, anchor="n")
+        self._position_live_document_controls()
+
+    def _position_live_document_controls(self):
+        actions = getattr(self, "live_qualification_actions", None)
+        if not actions or not actions.winfo_exists():
+            return
+        actions.update_idletasks()
+        width = max(1, actions.winfo_width())
+        center_y = actions.winfo_height() / 2
+
+        x = 0
+        for button in (
+            self.live_qualification_recover_button,
+            self.live_qualification_clear_button,
+            self.live_qualification_copy_button,
+            self.live_qualification_paste_button,
+        ):
+            button.place(x=x, y=center_y, anchor="w")
+            x += button.winfo_reqwidth() + 4
+
+        qualification_center = width * 0.25
+        qualification_area = getattr(self, "live_qualification_area", None)
+        if qualification_area and qualification_area.winfo_ismapped():
+            qualification_center = (
+                qualification_area.winfo_rootx()
+                + qualification_area.winfo_width() / 2
+                - actions.winfo_rootx()
+            )
+        self.live_qualification_button.place(
+            x=qualification_center,
+            y=center_y,
+            anchor="center",
+        )
+
+        aligned_centers = []
+        for button in (
+            getattr(self, "live_statement_button", None),
+            getattr(self, "live_statement_button_2", None),
+        ):
+            if button and button.winfo_exists() and button.winfo_ismapped():
+                aligned_centers.append(
+                    button.winfo_rootx()
+                    + button.winfo_width() / 2
+                    - actions.winfo_rootx()
+                )
+        document_center = (
+            sum(aligned_centers) / len(aligned_centers)
+            if aligned_centers
+            else width / 2
+        )
+        execute_half = self.live_document_execute_button.winfo_reqwidth() / 2
+        document_center = min(
+            max(execute_half, document_center),
+            max(execute_half, width - execute_half),
+        )
+        self.live_document_execute_button.place(
+            x=document_center,
+            y=center_y,
+            anchor="center",
+        )
+
+        if self.live_document_actions_frame.winfo_manager() == "place":
+            self.live_document_actions_frame.place(
+                relx=1.0,
+                rely=0.5,
+                anchor="e",
+            )
 
     def _position_live_parts_button(self):
         self._position_live_parts_buttons()
@@ -8160,6 +9145,7 @@ try {
             "live_history_button_2",
             "live_statement_button",
             "live_statement_button_2",
+            "live_qualification_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -8189,6 +9175,19 @@ try {
 
     def _assistant_target_status(self, target: str) -> StringVar:
         return self.live_assistant_status_var if target == "live" else self.assistant_status_var
+
+    def _refresh_history_completion_status(self, target: str) -> None:
+        names = self.live_assistant_names if target == "live" else self.assistant_names
+        message = history_completion_status(
+            self.assistant_task_states["history"],
+            self.assistant_task_states["names"],
+            len(names),
+        )
+        if not message:
+            return
+        self._assistant_target_status(target).set(message)
+        if target == "live":
+            self.status_var.set(message)
 
     def _assistant_target_part(self, target: str) -> str:
         if target == "live":
@@ -8495,7 +9494,7 @@ try {
             result = client.post(
                 selected_text_model(settings),
                 statement_prompt(selected_name),
-                material,
+                statement_user_prompt(selected_name, material),
             )
             self._queue(
                 "assistant_text_result",
@@ -8537,7 +9536,12 @@ try {
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 future_map = {
-                    executor.submit(client.post, model, statement_prompt(selected_name), material): index
+                    executor.submit(
+                        client.post,
+                        model,
+                        statement_prompt(selected_name),
+                        statement_user_prompt(selected_name, material),
+                    ): index
                     for index, model in enumerate(models, start=1)
                 }
                 for future in concurrent.futures.as_completed(future_map):
@@ -8816,17 +9820,67 @@ try {
         except Exception:
             pass
 
-    def _make_live_editor(self, parent, _label: str, _kind: str, width: int = 900):
-        frame = ttk.Frame(parent, width=width, height=180)
-        frame.pack(fill=X, expand=True, pady=(8, 0))
+    def _make_live_editor(
+        self,
+        parent,
+        _label: str,
+        _kind: str,
+        width: int = 900,
+        height: int = 180,
+        vertical_padding: tuple[int, int] = (8, 0),
+    ):
+        frame = ttk.Frame(parent, width=width, height=height)
+        frame.pack(fill=X, expand=True, pady=vertical_padding)
         frame.pack_propagate(False)
         text = Text(frame, width=1, height=8, wrap="word", undo=True, font=("Segoe UI", 10), background="#ffffff", foreground="#10201f", relief="solid", borderwidth=1, padx=8, pady=7)
+        placeholder_text = {
+            "transcript": "A transcrição da entrevista será gerada aqui.",
+            "transcript2": "A transcrição da entrevista será gerada aqui.",
+            "history": "O histórico do Boletim de Ocorrência será gerado aqui.",
+            "history2": "O histórico do Boletim de Ocorrência será gerado aqui.",
+            "statement": "A oitiva da parte selecionada será gerada aqui.",
+            "statement2": "A oitiva da parte selecionada será gerada aqui.",
+            "qualification": "Cole aqui a qualificação do declarante/depoente.",
+        }.get(_kind)
+        text._placeholder_active = False
+        text._placeholder_text = placeholder_text
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.pack(side=RIGHT, fill=Y)
         text._editor_frame = frame
+        text.bind("<FocusIn>", lambda _event, widget=text: self._clear_live_placeholder(widget), add="+")
+        text.bind("<FocusOut>", lambda _event, widget=text: self._restore_live_placeholder(widget), add="+")
+        self._restore_live_placeholder(text)
         return text
+
+    @staticmethod
+    def _is_live_placeholder(widget) -> bool:
+        return bool(getattr(widget, "_placeholder_active", False))
+
+    def _restore_live_placeholder(self, widget) -> None:
+        placeholder = getattr(widget, "_placeholder_text", None)
+        if not placeholder or widget.get("1.0", END).strip():
+            return
+        state = str(widget.cget("state"))
+        if state == "disabled":
+            widget.configure(state="normal")
+        widget.delete("1.0", END)
+        widget.insert("1.0", placeholder)
+        widget.configure(foreground="#879491")
+        widget._placeholder_active = True
+        if state == "disabled":
+            widget.configure(state="disabled")
+
+    def _clear_live_placeholder(self, widget) -> None:
+        if not self._is_live_placeholder(widget):
+            return
+        state = str(widget.cget("state"))
+        if state == "disabled":
+            return
+        widget.delete("1.0", END)
+        widget.configure(foreground="#10201f")
+        widget._placeholder_active = False
 
     def _live_editor(self, kind: str):
         return {
@@ -8836,10 +9890,14 @@ try {
             "history2": self.live_history_text_2,
             "statement": self.live_statement_text,
             "statement2": self.live_statement_text_2,
+            "qualification": self.live_qualification_text,
         }[kind]
 
     def _live_editor_value(self, kind: str) -> str:
-        return self._live_editor(kind).get("1.0", END).strip()
+        widget = self._live_editor(kind)
+        if self._is_live_placeholder(widget):
+            return ""
+        return widget.get("1.0", END).strip()
 
     def _set_live_editor(self, kind: str, text: str):
         widget = self._live_editor(kind)
@@ -8849,6 +9907,10 @@ try {
         widget.delete("1.0", END)
         if text:
             widget.insert("1.0", text.strip())
+            widget.configure(foreground="#10201f")
+            widget._placeholder_active = False
+        else:
+            self._restore_live_placeholder(widget)
         if self.live_state != "idle" or self.assistant_busy:
             widget.configure(state="disabled")
         if kind in ("transcript", "transcript2") and self.live_state != "idle":
@@ -8866,7 +9928,15 @@ try {
 
     def _refresh_live_editors_state(self):
         state = "disabled" if self.live_state != "idle" or self.assistant_busy else "normal"
-        for kind in ("transcript", "transcript2", "history", "history2", "statement", "statement2"):
+        for kind in (
+            "transcript",
+            "transcript2",
+            "history",
+            "history2",
+            "statement",
+            "statement2",
+            "qualification",
+        ):
             self._live_editor(kind).configure(state=state)
 
     def clear_live_editor(self, kind: str):
@@ -8915,6 +9985,351 @@ try {
             return
         self._set_live_editor(kind, saved)
         self.status_var.set(f"Último {self._live_editor_label(kind)} recuperado.")
+
+    def recover_live_qualification(self):
+        if not self.last_live_qualification_text:
+            self.status_var.set("Ainda não há uma qualificação gerada pelo app.")
+            return
+        self.recover_live_assistant_text("qualification")
+
+    def _occurrence_document_replacements(self) -> dict[str, str]:
+        now = datetime.now()
+        qualification = self._live_editor_value("qualification")
+        statement = self._live_editor_value("statement")
+        first_qualification_item = qualification.split(",", 1)[0].strip()
+        if ":" in first_qualification_item:
+            label, value = first_qualification_item.split(":", 1)
+            if label.strip().casefold() in ("nome", "nome completo"):
+                first_qualification_item = value.strip()
+        year_words = portuguese_number_words(now.year)
+        year_words = year_words[:1].upper() + year_words[1:]
+        replacements = {
+            "dia_do_mes_atual_em_numero": str(now.day),
+            "mês_atual_por_extenso": PORTUGUESE_MONTHS[now.month - 1],
+            # Os modelos originais usam este mesmo marcador com "ę".
+            "męs_atual_por_extenso": PORTUGUESE_MONTHS[now.month - 1],
+            "ano_atual_por_extenso": year_words,
+            "cidade": str(self.settings.get("police_city") or "").strip(),
+            "delegacia": str(self.settings.get("police_station") or "").strip(),
+            "delegado": str(self.settings.get("police_delegate") or "").strip(),
+            "cargo": str(self.settings.get("police_role") or "").strip(),
+            "conteúdo_da_caixa_de_qualificacao": qualification,
+            "conteúdo_da_caixa_de_oitiva": statement,
+            "nome": first_qualification_item,
+            "usuario": str(self.settings.get("police_name") or "").strip(),
+            "usuário": str(self.settings.get("police_name") or "").strip(),
+            "horário_atual_no_formato_12:34:56": now.strftime("%H:%M:%S"),
+            "ano_atual_no_formato_yyyy": str(now.year),
+        }
+        return replacements
+
+    def generate_occurrence_document(self):
+        if self.live_state != "idle" or self.assistant_busy or self.running:
+            return
+        qualification = self._live_editor_value("qualification")
+        statement = self._live_editor_value("statement")
+        missing = []
+        if not qualification:
+            missing.append("qualificação")
+        if not statement:
+            missing.append("oitiva")
+        if missing:
+            messagebox.showwarning(
+                "Gerar documento",
+                "Preencha a caixa de " + " e ".join(missing) + " antes de executar.",
+                parent=self.root,
+            )
+            return
+        document_kind = (
+            "declarations" if self.qualification_declarations_var.get() else "deposition"
+        )
+        try:
+            template_path = ensure_document_templates()[document_kind]
+            output_dir = app_base_dir() / "temp" / "documentos"
+            output_name = (
+                f"{'declaracoes' if document_kind == 'declarations' else 'depoimento'}_"
+                f"{datetime.now():%Y%m%d_%H%M%S}.docx"
+            )
+            output_path = output_dir / output_name
+            marker_count = generate_docx_from_template(
+                template_path,
+                output_path,
+                self._occurrence_document_replacements(),
+            )
+            self.last_generated_document_path = output_path
+            self.last_generated_document_preview_path = None
+            for button in (
+                self.live_document_copy_button,
+                self.live_document_preview_button,
+                self.live_document_save_button,
+            ):
+                button.configure(state="normal")
+            self.live_document_actions_frame.place(
+                relx=1.0,
+                rely=0.5,
+                anchor="e",
+            )
+            self.root.after_idle(self._position_live_document_controls)
+            self.status_var.set(
+                f"Documento gerado: {output_path.name} ({marker_count} campos preenchidos)."
+            )
+            self._append_activity_log(f"Documento pronto para copiar: {output_path}")
+        except Exception as exc:
+            self.last_generated_document_path = None
+            self.last_generated_document_preview_path = None
+            self.live_document_actions_frame.place_forget()
+            messagebox.showerror(
+                "Gerar documento",
+                f"Não consegui gerar o documento.\n\nDetalhe: {exc}",
+                parent=self.root,
+            )
+            self.status_var.set(f"Falha ao gerar documento: {exc}")
+
+    def copy_generated_occurrence_document(self):
+        document_path = self.last_generated_document_path
+        if not document_path or not document_path.exists():
+            messagebox.showwarning(
+                "Copiar documento",
+                "Execute a geração do documento antes de copiar.",
+                parent=self.root,
+            )
+            return
+        self.live_document_copy_button.configure(state="disabled")
+        self.status_var.set("Copiando o documento com a formatação do Word...")
+        threading.Thread(
+            target=self._copy_generated_occurrence_document_worker,
+            args=(document_path,),
+            daemon=True,
+        ).start()
+
+    def _copy_generated_occurrence_document_worker(self, document_path: Path):
+        if os.name != "nt":
+            self._queue(
+                "document_clipboard_error",
+                "A cópia formatada deste documento está disponível no Windows.",
+            )
+            return
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$word = $null
+$document = $null
+$doNotSaveChanges = 0
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $word.DisplayAlerts = 0
+    $document = $word.Documents.Open($env:SIG_GENERATED_DOCX, $false, $true)
+    $plainText = [string]$document.Content.Text
+    $document.SaveAs2($env:SIG_CLIPBOARD_RTF, 6)
+    $document.Close([ref]$doNotSaveChanges)
+    [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($document)
+    $document = $null
+
+    $document = $word.Documents.Open($env:SIG_GENERATED_DOCX, $false, $true)
+    $document.SaveAs2($env:SIG_CLIPBOARD_HTML, 10)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($env:SIG_CLIPBOARD_TEXT, $plainText, $utf8)
+    $document.Close([ref]$doNotSaveChanges)
+    [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($document)
+    $document = $null
+    $word.Quit([ref]$doNotSaveChanges)
+    [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($word)
+    $word = $null
+} finally {
+    if ($null -ne $document) {
+        try { $document.Close([ref]$doNotSaveChanges) } catch {}
+        try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($document) } catch {}
+    }
+    if ($null -ne $word) {
+        try { $word.Quit([ref]$doNotSaveChanges) } catch {}
+        try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($word) } catch {}
+    }
+}
+"""
+        try:
+            with tempfile.TemporaryDirectory(prefix="sig-word-clipboard-") as temporary:
+                clipboard_dir = Path(temporary)
+                rtf_path = clipboard_dir / "document.rtf"
+                html_path = clipboard_dir / "document.htm"
+                text_path = clipboard_dir / "document.txt"
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "SIG_GENERATED_DOCX": str(document_path),
+                        "SIG_CLIPBOARD_RTF": str(rtf_path),
+                        "SIG_CLIPBOARD_HTML": str(html_path),
+                        "SIG_CLIPBOARD_TEXT": str(text_path),
+                    }
+                )
+                result = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-Sta", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=env,
+                    timeout=45,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "falha desconhecida").strip()
+                    raise RuntimeError(detail)
+                set_windows_document_clipboard(
+                    rtf_path.read_bytes(),
+                    html_path.read_bytes(),
+                    text_path.read_text(encoding="utf-8"),
+                )
+            self._queue("document_clipboard_ready", document_path)
+        except Exception as exc:
+            self._queue("document_clipboard_error", str(exc))
+
+    def preview_generated_occurrence_document(self):
+        document_path = self.last_generated_document_path
+        if not document_path or not document_path.exists():
+            messagebox.showwarning(
+                "Visualizar documento",
+                "Gere o documento antes de visualizar.",
+                parent=self.root,
+            )
+            return
+        self.live_document_preview_button.configure(state="disabled")
+        self.status_var.set("Preparando a visualização fiel do documento...")
+        threading.Thread(
+            target=self._preview_generated_occurrence_document_worker,
+            args=(document_path,),
+            daemon=True,
+        ).start()
+
+    def _preview_generated_occurrence_document_worker(self, document_path: Path):
+        try:
+            preview_path = document_path.with_name(
+                f"{document_path.stem}_visualizacao.pdf"
+            )
+            export_docx_to_pdf_with_word(document_path, preview_path)
+            self._queue("document_preview_ready", preview_path)
+        except Exception as exc:
+            self._queue("document_preview_error", str(exc))
+
+    def save_generated_occurrence_document(self):
+        document_path = self.last_generated_document_path
+        if not document_path or not document_path.exists():
+            messagebox.showwarning(
+                "Salvar documento",
+                "Gere o documento antes de salvar.",
+                parent=self.root,
+            )
+            return
+        save_type_var = StringVar(value="Documento do Word")
+        documents_dir = Path.home() / "Documents"
+        if not documents_dir.is_dir():
+            documents_dir = Path.home()
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Salvar documento",
+            initialdir=str(documents_dir),
+            initialfile=document_path.stem,
+            defaultextension=".docx",
+            filetypes=(
+                ("Documento do Word", "*.docx"),
+                ("Documento PDF", "*.pdf"),
+            ),
+            typevariable=save_type_var,
+        )
+        if not destination:
+            return
+        destination_path = Path(destination)
+        desired_suffix = (
+            ".pdf"
+            if "pdf" in save_type_var.get().casefold()
+            else ".docx"
+        )
+        if destination_path.suffix.casefold() != desired_suffix:
+            destination_path = destination_path.with_suffix(desired_suffix)
+        suffix = destination_path.suffix.casefold()
+        if suffix not in {".docx", ".pdf"}:
+            messagebox.showerror(
+                "Salvar documento",
+                "Escolha o tipo Documento do Word (.docx) ou Documento PDF (.pdf).",
+                parent=self.root,
+            )
+            return
+        self.live_document_save_button.configure(state="disabled")
+        self.status_var.set(f"Salvando documento em {destination_path.name}...")
+        threading.Thread(
+            target=self._save_generated_occurrence_document_worker,
+            args=(document_path, destination_path),
+            daemon=True,
+        ).start()
+
+    def _save_generated_occurrence_document_worker(
+        self,
+        document_path: Path,
+        destination_path: Path,
+    ):
+        try:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            if destination_path.suffix.casefold() == ".pdf":
+                with tempfile.TemporaryDirectory(prefix="sig-word-pdf-") as temporary:
+                    temporary_pdf = Path(temporary) / destination_path.name
+                    export_docx_to_pdf_with_word(document_path, temporary_pdf)
+                    shutil.copy2(temporary_pdf, destination_path)
+            elif document_path.resolve() != destination_path.resolve():
+                shutil.copy2(document_path, destination_path)
+            self._queue("document_save_ready", destination_path)
+        except Exception as exc:
+            self._queue("document_save_error", str(exc))
+
+    def request_live_qualification(self):
+        raw_text = self._live_editor_value("qualification")
+        if not raw_text:
+            messagebox.showwarning(
+                "sig",
+                "Não há texto na caixa de qualificação.",
+                parent=self.root,
+            )
+            self.status_var.set("Cole ou digite uma qualificação antes de organizar.")
+            self.live_assistant_status_var.set("Aguardando o texto da qualificação.")
+            return
+        if self.live_state != "idle" or self.assistant_busy or self.running:
+            return
+        generation, settings = self._begin_assistant_request("qualification", "live")
+        self.live_assistant_status_var.set("Organizando qualificação...")
+        self.status_var.set("Enviando qualificação para organizar...")
+        self.assistant_thread = threading.Thread(
+            target=self._live_qualification_worker,
+            args=(generation, settings, raw_text),
+            daemon=True,
+        )
+        self.assistant_thread.start()
+
+    def _live_qualification_worker(self, generation: int, settings: dict, raw_text: str) -> None:
+        client = self.assistant_client
+        if not client:
+            return
+        started = time.monotonic()
+        try:
+            result = client.post(
+                selected_text_model(settings),
+                DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+                qualification_user_prompt(list(LIVE_QUALIFICATION_FIELD_IDS), raw_text),
+            )
+            self._queue(
+                "live_qualification_result",
+                generation,
+                result,
+                time.monotonic() - started,
+            )
+        except Cancelled:
+            pass
+        except Exception as exc:
+            self._queue(
+                "live_qualification_error",
+                generation,
+                str(exc),
+                time.monotonic() - started,
+            )
+        finally:
+            self._queue("assistant_finished", generation)
 
     def recover_live_transcript(self):
         if self.live_state != "idle" or self.assistant_busy or not self.last_live_transcript_text:
@@ -9020,6 +10435,7 @@ try {
             "history2": "histórico 2",
             "statement": "oitiva",
             "statement2": "oitiva 2",
+            "qualification": "qualificação",
         }[kind]
 
     def show_live_diarization_help(self):
@@ -9354,6 +10770,8 @@ try {
             paste.pack(side=RIGHT)
             copy.pack(side=RIGHT, padx=(0, 4))
             clear.pack(side=RIGHT, padx=(0, 4))
+        self.root.after_idle(self._position_live_parts_buttons)
+        self.root.after(50, self._position_live_parts_buttons)
 
     def _set_live_timestamp_payload(
         self, plain: str, timestamped: str = "", allow_timestamps: bool = False
@@ -9665,18 +11083,23 @@ try {
         text_model_2_labels = {"Nenhum": ""}
         text_model_2_var = StringVar(value="Nenhum")
         text_reasoning_var = StringVar(value=self.settings.get("text_reasoning", "low"))
-        proxy_provider_var = StringVar(value=self.settings.get("ia_proxy_provider", "grok"))
+        proxy_model_var = StringVar(value=self.settings.get("ia_proxy_model", GROK_TEXT_NAME))
         text_reasoning_2_var = StringVar(value=self.settings.get("text_reasoning_2", "low"))
-        proxy_provider_2_var = StringVar(value=self.settings.get("ia_proxy_provider_2", "grok"))
+        proxy_model_2_var = StringVar(value=self.settings.get("ia_proxy_model_2", GROK_TEXT_NAME))
         extraction_var = StringVar(value=PARTS_EXTRACTION_LABELS[self.settings["parts_extraction"]])
         parts_model_var = StringVar(value=self.settings.get("parts_model", IA_PROXY_NAME))
-        parts_proxy_provider_var = StringVar(
-            value=self.settings.get("parts_proxy_provider", "grok")
+        parts_proxy_model_var = StringVar(
+            value=self.settings.get("parts_proxy_model", GROK_TEXT_NAME)
         )
         parts_model_labels: dict[str, str] = {}
         grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
+        police_name_var = StringVar(value=self.settings.get("police_name", ""))
+        police_role_var = StringVar(value=self.settings.get("police_role", ""))
+        police_station_var = StringVar(value=self.settings.get("police_station", ""))
+        police_delegate_var = StringVar(value=self.settings.get("police_delegate", ""))
+        police_city_var = StringVar(value=self.settings.get("police_city", ""))
         grok_chunk_ms_var = StringVar(value=str(self.settings.get("grok_chunk_ms", 100)))
         grok_rest_var = BooleanVar(value=bool(self.settings.get("grok_rest_requests", False)))
 
@@ -9689,14 +11112,27 @@ try {
                 ("Transcrição", "transcription"),
                 ("Texto", "text"),
                 ("Extração de partes", "extraction"),
+                ("Policial", "police"),
             )
         ):
-            section = ttk.LabelFrame(frame, text=title, padding=(12, 8))
+            section = ttk.LabelFrame(
+                frame,
+                text=title,
+                padding=(12, 8),
+                style="Settings.TLabelframe",
+            )
             section.grid(row=section_row, column=0, columnspan=4, sticky="ew", pady=(0, 8))
             section.columnconfigure(0, minsize=170)
             section.columnconfigure(1, weight=1)
             sections.append(section)
-        parallel_frame, api_frame, transcription_frame, text_frame, extraction_frame = sections
+        (
+            parallel_frame,
+            api_frame,
+            transcription_frame,
+            text_frame,
+            extraction_frame,
+            police_frame,
+        ) = sections
 
         cpu_count = max(1, os.cpu_count() or 1)
 
@@ -9877,14 +11313,21 @@ try {
             refresh_chunk_visibility()
 
         chunk_size_row = transcription_server_row + 2
-        chunk_controls = ttk.Frame(transcription_frame)
-        chunk_label = ttk.Label(chunk_controls, text="Chunk size:")
-        chunk_label.pack(side=LEFT, padx=(0, 8))
+        chunk_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
+        chunk_label = ttk.Label(
+            chunk_controls,
+            text="Chunk size:",
+            width=12,
+            anchor="w",
+            style="Settings.TLabel",
+        )
+        chunk_label.pack(side=LEFT, padx=(0, 10))
         grok_chunk_entry = ttk.Combobox(
             chunk_controls,
             textvariable=grok_chunk_ms_var,
             values=("50", "100", "200", "500", "1000"),
-            width=12,
+            state="readonly",
+            width=8,
         )
         grok_chunk_entry.pack(side=LEFT)
 
@@ -9901,7 +11344,7 @@ try {
         chunk_help.pack(side=LEFT, padx=(5, 0))
         chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=5)
 
-        rest_controls = ttk.Frame(transcription_frame)
+        rest_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
 
         def confirm_grok_rest():
             if not grok_rest_var.get():
@@ -9923,6 +11366,7 @@ try {
             text="Requisições REST",
             variable=grok_rest_var,
             command=confirm_grok_rest,
+            style="Settings.TCheckbutton",
         )
         rest_check.pack(side=LEFT)
 
@@ -10087,75 +11531,134 @@ try {
                     self.settings = save_settings({**self.settings, "text_model": replacement})
                     self._refresh_assistant_model_label()
 
-        proxy_provider_row = text_model_row + 1
-        proxy_provider_frame = ttk.Frame(text_frame)
-        proxy_provider_label = ttk.Label(proxy_provider_frame, text="Modelo", width=12, anchor="w")
-        proxy_provider_label.pack(side=LEFT, padx=(0, 10))
-        ttk.Radiobutton(
-            proxy_provider_frame, text="grok", value="grok", variable=proxy_provider_var
-        ).pack(side=LEFT, padx=(0, 14))
-        ttk.Radiobutton(
-            proxy_provider_frame, text="deepseek", value="deepseek", variable=proxy_provider_var
-        ).pack(side=LEFT)
+        proxy_model_options = (
+            GROK_NON_REASONING_TEXT_NAME,
+            GROK_TEXT_NAME,
+            DEEPSEEK_TEXT_NAME,
+        )
+
+        def set_menu_value(variable: StringVar, display: StringVar, value: str):
+            variable.set(value)
+            display.set(value)
+
+        def configure_menu(menu, variable: StringVar, display: StringVar, values: tuple[str, ...]):
+            menu.delete(0, tk.END)
+            selected_value = variable.get()
+            if selected_value not in values:
+                selected_value = values[0]
+                variable.set(selected_value)
+            display.set(selected_value)
+            for value in values:
+                menu.add_command(
+                    label=value,
+                    command=lambda selected=value, target=variable, label_var=display: set_menu_value(
+                        target, label_var, selected
+                    ),
+                )
+
+        proxy_model_row = text_model_row + 1
+        proxy_model_frame = ttk.Frame(text_frame, style="Settings.TFrame")
+        ttk.Label(
+            proxy_model_frame,
+            text="Modelo",
+            width=12,
+            anchor="w",
+            style="Settings.TLabel",
+        ).pack(
+            side=LEFT, padx=(0, 10)
+        )
+        proxy_model_display_var = StringVar(value=proxy_model_var.get())
+        proxy_model_button = ttk.Menubutton(
+            proxy_model_frame, textvariable=proxy_model_display_var, width=30
+        )
+        proxy_model_menu = tk.Menu(proxy_model_button, tearoff=False)
+        proxy_model_button.configure(menu=proxy_model_menu)
+        proxy_model_button.pack(side=LEFT)
 
         reasoning_row = text_model_row + 2
-        reasoning_frame = ttk.Frame(text_frame)
-        reasoning_label = ttk.Label(reasoning_frame, text="Raciocínio:", width=12, anchor="w")
+        reasoning_frame = ttk.Frame(text_frame, style="Settings.TFrame")
+        reasoning_label = ttk.Label(
+            reasoning_frame,
+            text="Raciocínio:",
+            width=12,
+            anchor="w",
+            style="Settings.TLabel",
+        )
         reasoning_label.pack(side=LEFT, padx=(0, 10))
+        reasoning_display_var = StringVar(value=text_reasoning_var.get())
+        reasoning_button = ttk.Menubutton(
+            reasoning_frame, textvariable=reasoning_display_var, width=12
+        )
+        reasoning_menu = tk.Menu(reasoning_button, tearoff=False)
+        reasoning_button.configure(menu=reasoning_menu)
+        reasoning_button.pack(side=LEFT)
 
-        proxy_provider_2_row = text_model_2_row + 1
-        proxy_provider_2_frame = ttk.Frame(text_frame)
-        ttk.Label(proxy_provider_2_frame, text="Modelo", width=12, anchor="w").pack(side=LEFT, padx=(0, 10))
-        ttk.Radiobutton(
-            proxy_provider_2_frame, text="grok", value="grok", variable=proxy_provider_2_var
-        ).pack(side=LEFT, padx=(0, 14))
-        ttk.Radiobutton(
-            proxy_provider_2_frame, text="deepseek", value="deepseek", variable=proxy_provider_2_var
-        ).pack(side=LEFT)
+        proxy_model_2_row = text_model_2_row + 1
+        proxy_model_2_frame = ttk.Frame(text_frame, style="Settings.TFrame")
+        ttk.Label(
+            proxy_model_2_frame,
+            text="Modelo",
+            width=12,
+            anchor="w",
+            style="Settings.TLabel",
+        ).pack(
+            side=LEFT, padx=(0, 10)
+        )
+        proxy_model_2_display_var = StringVar(value=proxy_model_2_var.get())
+        proxy_model_2_button = ttk.Menubutton(
+            proxy_model_2_frame, textvariable=proxy_model_2_display_var, width=30
+        )
+        proxy_model_2_menu = tk.Menu(proxy_model_2_button, tearoff=False)
+        proxy_model_2_button.configure(menu=proxy_model_2_menu)
+        proxy_model_2_button.pack(side=LEFT)
 
         reasoning_2_row = text_model_2_row + 2
-        reasoning_2_frame = ttk.Frame(text_frame)
-        reasoning_2_label = ttk.Label(reasoning_2_frame, text="Raciocínio:", width=12, anchor="w")
+        reasoning_2_frame = ttk.Frame(text_frame, style="Settings.TFrame")
+        reasoning_2_label = ttk.Label(
+            reasoning_2_frame,
+            text="Raciocínio:",
+            width=12,
+            anchor="w",
+            style="Settings.TLabel",
+        )
         reasoning_2_label.pack(side=LEFT, padx=(0, 10))
+        reasoning_2_display_var = StringVar(value=text_reasoning_2_var.get())
+        reasoning_2_button = ttk.Menubutton(
+            reasoning_2_frame, textvariable=reasoning_2_display_var, width=12
+        )
+        reasoning_2_menu = tk.Menu(reasoning_2_button, tearoff=False)
+        reasoning_2_button.configure(menu=reasoning_2_menu)
+        reasoning_2_button.pack(side=LEFT)
 
         def refresh_model_reasoning_controls(
             selected_name: str,
-            provider_var: StringVar,
+            proxy_model_var: StringVar,
+            proxy_model_frame,
+            proxy_model_menu,
+            proxy_model_display: StringVar,
             reasoning_var: StringVar,
-            provider_frame,
             current_reasoning_frame,
-            current_reasoning_label,
-            provider_row: int,
+            reasoning_menu,
+            reasoning_display: StringVar,
+            proxy_model_row: int,
             current_reasoning_row: int,
         ):
             is_proxy = selected_name == IA_PROXY_NAME
             if is_proxy:
-                provider_frame.grid(row=provider_row, column=1, columnspan=3, sticky="w", pady=5)
+                proxy_model_frame.grid(row=proxy_model_row, column=1, columnspan=3, sticky="w", pady=5)
+                configure_menu(proxy_model_menu, proxy_model_var, proxy_model_display, proxy_model_options)
+                actual_model = proxy_model_var.get()
             else:
-                provider_frame.grid_remove()
-            provider = (
-                provider_var.get()
-                if is_proxy
-                else "deepseek" if selected_name == DEEPSEEK_TEXT_NAME else "grok"
-            )
-            show_reasoning = is_proxy or selected_name in GROK_TEXT_API_NAMES or selected_name in DEEPSEEK_API_NAMES
-            if not show_reasoning:
+                proxy_model_frame.grid_remove()
+                actual_model = selected_name
+            if actual_model == DEEPSEEK_TEXT_NAME:
+                reasoning_options = ("none", "low", "high", "max")
+            elif actual_model == GROK_TEXT_NAME:
+                reasoning_options = ("low", "medium", "high", "xhigh")
+            else:
                 current_reasoning_frame.grid_remove()
                 return
-            options = (("Nenhum", "none"), ("High", "high")) if provider == "deepseek" else (("Low", "low"), ("High", "high"))
-            valid_values = {value for _label, value in options}
-            if reasoning_var.get() not in valid_values:
-                reasoning_var.set(options[0][1])
-            for child in current_reasoning_frame.winfo_children():
-                if child is not current_reasoning_label:
-                    child.destroy()
-            for index, (label, value) in enumerate(options):
-                ttk.Radiobutton(
-                    current_reasoning_frame,
-                    text=label,
-                    value=value,
-                    variable=reasoning_var,
-                ).pack(side=LEFT, padx=(0, 14) if index == 0 else 0)
+            configure_menu(reasoning_menu, reasoning_var, reasoning_display, reasoning_options)
             current_reasoning_frame.grid(
                 row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=5
             )
@@ -10163,24 +11666,30 @@ try {
         def refresh_text_reasoning_controls(*_args):
             refresh_model_reasoning_controls(
                 text_model_labels.get(text_model_var.get(), ""),
-                proxy_provider_var,
+                proxy_model_var,
+                proxy_model_frame,
+                proxy_model_menu,
+                proxy_model_display_var,
                 text_reasoning_var,
-                proxy_provider_frame,
                 reasoning_frame,
-                reasoning_label,
-                proxy_provider_row,
+                reasoning_menu,
+                reasoning_display_var,
+                proxy_model_row,
                 reasoning_row,
             )
 
         def refresh_text_2_reasoning_controls(*_args):
             refresh_model_reasoning_controls(
                 text_model_2_labels.get(text_model_2_var.get(), ""),
-                proxy_provider_2_var,
+                proxy_model_2_var,
+                proxy_model_2_frame,
+                proxy_model_2_menu,
+                proxy_model_2_display_var,
                 text_reasoning_2_var,
-                proxy_provider_2_frame,
                 reasoning_2_frame,
-                reasoning_2_label,
-                proxy_provider_2_row,
+                reasoning_2_menu,
+                reasoning_2_display_var,
+                proxy_model_2_row,
                 reasoning_2_row,
             )
 
@@ -10191,8 +11700,8 @@ try {
             "<<ComboboxSelected>>",
             lambda _event: refresh_text_models(text_model_labels.get(text_model_var.get(), "")),
         )
-        proxy_provider_var.trace_add("write", refresh_text_reasoning_controls)
-        proxy_provider_2_var.trace_add("write", refresh_text_2_reasoning_controls)
+        proxy_model_var.trace_add("write", refresh_text_reasoning_controls)
+        proxy_model_2_var.trace_add("write", refresh_text_2_reasoning_controls)
         refresh_text_reasoning_controls()
         refresh_text_2_reasoning_controls()
 
@@ -10242,36 +11751,36 @@ try {
         parts_model_combo.grid(row=parts_model_row, column=1, sticky="ew", pady=5)
 
         parts_proxy_row = parts_model_row + 1
-        parts_proxy_frame = ttk.Frame(extraction_frame)
-        ttk.Label(parts_proxy_frame, text="Modelo", width=12, anchor="w").pack(
+        parts_proxy_frame = ttk.Frame(extraction_frame, style="Settings.TFrame")
+        ttk.Label(parts_proxy_frame, text="Modelo", width=12, anchor="w", style="Settings.TLabel").pack(
             side=LEFT, padx=(0, 10)
         )
-        ttk.Radiobutton(
+        parts_proxy_display_var = StringVar(value=parts_proxy_model_var.get())
+        parts_proxy_button = ttk.Menubutton(
             parts_proxy_frame,
-            text="grok",
-            value="grok",
-            variable=parts_proxy_provider_var,
-        ).pack(side=LEFT, padx=(0, 14))
-        ttk.Radiobutton(
-            parts_proxy_frame,
-            text="deepseek",
-            value="deepseek",
-            variable=parts_proxy_provider_var,
-        ).pack(side=LEFT)
+            textvariable=parts_proxy_display_var,
+            width=30,
+        )
+        parts_proxy_menu = tk.Menu(parts_proxy_button, tearoff=False)
+        parts_proxy_button.configure(menu=parts_proxy_menu)
+        parts_proxy_button.pack(side=LEFT)
 
         def refresh_parts_models(*_args):
             nonlocal parts_model_labels
-            model_names = [IA_PROXY_NAME]
-            if plausible_xai_api_key(grok_api_key_var.get()):
-                model_names.append(GROK_TEXT_NAME)
-            if plausible_deepseek_api_key(deepseek_api_key_var.get()):
-                model_names.append(DEEPSEEK_TEXT_NAME)
-            parts_model_labels = {name: name for name in model_names}
+            # Keep the extraction model list identical to the text model list,
+            # including the same API-key filtering and integrated IA-Proxy item.
+            parts_model_labels = dict(text_model_labels)
             parts_model_combo.configure(values=list(parts_model_labels))
             current = parts_model_var.get() or str(self.settings.get("parts_model") or IA_PROXY_NAME)
             target = current if current in parts_model_labels else IA_PROXY_NAME
             if parts_model_var.get() != target:
                 parts_model_var.set(target)
+            configure_menu(
+                parts_proxy_menu,
+                parts_proxy_model_var,
+                parts_proxy_display_var,
+                proxy_model_options,
+            )
 
         def refresh_parts_model_visibility(*_args):
             extraction_key = next(
@@ -10286,7 +11795,7 @@ try {
                 refresh_parts_models()
                 parts_model_label.grid()
                 parts_model_combo.grid()
-                if parts_model_var.get() == IA_PROXY_NAME:
+                if parts_model_labels.get(parts_model_var.get()) == IA_PROXY_NAME:
                     parts_proxy_frame.grid(
                         row=parts_proxy_row, column=1, sticky="w", pady=5
                     )
@@ -10300,6 +11809,80 @@ try {
         extraction_var.trace_add("write", refresh_parts_model_visibility)
         parts_model_var.trace_add("write", refresh_parts_model_visibility)
         refresh_parts_model_visibility()
+
+        ttk.Label(police_frame, text="Nome").grid(
+            row=0, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        ttk.Entry(police_frame, textvariable=police_name_var, width=44).grid(
+            row=0, column=1, sticky="ew", pady=5
+        )
+        ttk.Label(police_frame, text="Cargo").grid(
+            row=1, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        ttk.Entry(police_frame, textvariable=police_role_var, width=44).grid(
+            row=1, column=1, sticky="ew", pady=5
+        )
+        ttk.Label(police_frame, text="Delegacia").grid(
+            row=2, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        police_station_entry = ttk.Entry(
+            police_frame,
+            textvariable=police_station_var,
+            width=44,
+        )
+        police_station_entry.grid(row=2, column=1, sticky="ew", pady=5)
+
+        def restore_station_placeholder(_event=None):
+            if police_station_entry.get().strip():
+                return
+            police_station_entry.insert(0, "Ex: DEL.POL.TAGUAI")
+            police_station_entry.configure(foreground="#879491")
+            police_station_entry._placeholder_active = True
+
+        def clear_station_placeholder(_event=None):
+            if getattr(police_station_entry, "_placeholder_active", False):
+                police_station_entry.delete(0, END)
+                police_station_entry.configure(foreground="#1d2b2a")
+                police_station_entry._placeholder_active = False
+
+        police_station_entry._placeholder_active = False
+        police_station_entry.bind("<FocusIn>", clear_station_placeholder, add="+")
+        police_station_entry.bind("<FocusOut>", restore_station_placeholder, add="+")
+        restore_station_placeholder()
+
+        ttk.Label(police_frame, text="Delegado").grid(
+            row=3, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        ttk.Entry(police_frame, textvariable=police_delegate_var, width=44).grid(
+            row=3, column=1, sticky="ew", pady=5
+        )
+        ttk.Label(police_frame, text="Cidade").grid(
+            row=4, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        police_city_entry = ttk.Entry(
+            police_frame,
+            textvariable=police_city_var,
+            width=44,
+        )
+        police_city_entry.grid(row=4, column=1, sticky="ew", pady=5)
+
+        def restore_city_placeholder(_event=None):
+            if police_city_entry.get().strip():
+                return
+            police_city_entry.insert(0, "Ex: TAGUAI")
+            police_city_entry.configure(foreground="#879491")
+            police_city_entry._placeholder_active = True
+
+        def clear_city_placeholder(_event=None):
+            if getattr(police_city_entry, "_placeholder_active", False):
+                police_city_entry.delete(0, END)
+                police_city_entry.configure(foreground="#1d2b2a")
+                police_city_entry._placeholder_active = False
+
+        police_city_entry._placeholder_active = False
+        police_city_entry.bind("<FocusIn>", clear_city_placeholder, add="+")
+        police_city_entry.bind("<FocusOut>", restore_city_placeholder, add="+")
+        restore_city_placeholder()
 
         def edit_part_name(add: bool):
             dialog = Toplevel(win)
@@ -10338,7 +11921,7 @@ try {
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=5, column=0, columnspan=4, sticky="e", pady=(6, 0))
+        buttons.grid(row=6, column=0, columnspan=4, sticky="e", pady=(6, 0))
 
         def save_and_close():
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
@@ -10348,6 +11931,19 @@ try {
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
             imei_api_key = imei_api_key_var.get().strip()
+            police_name = police_name_var.get().strip()
+            police_role = police_role_var.get().strip()
+            police_station = (
+                ""
+                if getattr(police_station_entry, "_placeholder_active", False)
+                else police_station_var.get().strip()
+            )
+            police_delegate = police_delegate_var.get().strip()
+            police_city = (
+                ""
+                if getattr(police_city_entry, "_placeholder_active", False)
+                else police_city_var.get().strip()
+            )
             if api_key and not plausible_xai_api_key(api_key):
                 messagebox.showerror(
                     "sig",
@@ -10380,11 +11976,11 @@ try {
             if (
                 selected_text == IA_PROXY_NAME
                 and selected_text_2 == IA_PROXY_NAME
-                and proxy_provider_var.get() == proxy_provider_2_var.get()
+                and proxy_model_var.get() == proxy_model_2_var.get()
             ):
                 messagebox.showerror(
                     "sig",
-                    "Ao selecionar IA-Proxy duas vezes, escolha modelos diferentes: Grok em um seletor e DeepSeek no outro.",
+                    "Ao selecionar IA-Proxy duas vezes, escolha modelos diferentes nos dois seletores.",
                     parent=win,
                 )
                 return
@@ -10407,12 +12003,21 @@ try {
             selected_parts_model_name = parts_model_labels.get(
                 parts_model_var.get(), IA_PROXY_NAME
             )
-            if extraction_key == "ai" and selected_parts_model_name == GROK_TEXT_NAME and not plausible_xai_api_key(api_key):
+            selected_parts_proxy_model = parts_proxy_model_var.get()
+            if (
+                extraction_key == "ai"
+                and selected_parts_model_name in GROK_TEXT_API_NAMES
+                and not plausible_xai_api_key(api_key)
+            ):
                 messagebox.showerror(
                     "sig", "Insira uma chave API válida da xAI para usar Grok na extração de partes.", parent=win
                 )
                 return
-            if extraction_key == "ai" and selected_parts_model_name == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(deepseek_api_key):
+            if (
+                extraction_key == "ai"
+                and selected_parts_model_name in DEEPSEEK_API_NAMES
+                and not plausible_deepseek_api_key(deepseek_api_key)
+            ):
                 messagebox.showerror(
                     "sig", "Insira uma chave API válida do Deepseek para usar DeepSeek na extração de partes.", parent=win
                 )
@@ -10429,14 +12034,24 @@ try {
                     "text_model_2": selected_text_2,
                     "text_reasoning": text_reasoning_var.get(),
                     "text_reasoning_2": text_reasoning_2_var.get(),
-                    "ia_proxy_provider": proxy_provider_var.get(),
-                    "ia_proxy_provider_2": proxy_provider_2_var.get(),
+                    "ia_proxy_model": proxy_model_var.get(),
+                    "ia_proxy_model_2": proxy_model_2_var.get(),
                     "parts_extraction": extraction_key,
                     "parts_model": selected_parts_model_name,
-                    "parts_proxy_provider": parts_proxy_provider_var.get(),
+                    "parts_proxy_model": selected_parts_proxy_model,
+                    "parts_proxy_provider": (
+                        "deepseek"
+                        if selected_parts_proxy_model == DEEPSEEK_TEXT_NAME
+                        else "grok"
+                    ),
                     "grok_api_key": api_key,
                     "deepseek_api_key": deepseek_api_key,
                     "imei_api_key": imei_api_key,
+                    "police_name": police_name,
+                    "police_role": police_role,
+                    "police_station": police_station,
+                    "police_delegate": police_delegate,
+                    "police_city": police_city,
 
                 }
             )
@@ -10453,6 +12068,19 @@ try {
 
         ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
         ttk.Button(buttons, text="Salvar", command=save_and_close).pack(side=LEFT)
+
+        def normalize_settings_surface(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, ttk.Label):
+                    child.configure(style="Settings.TLabel")
+                elif isinstance(child, ttk.Checkbutton):
+                    child.configure(style="Settings.TCheckbutton")
+                elif isinstance(child, ttk.Frame):
+                    child.configure(style="Settings.TFrame")
+                normalize_settings_surface(child)
+
+        for section in sections:
+            normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
         win.wait_visibility()
@@ -12858,9 +14486,7 @@ try {
                             if target == "live":
                                 self.status_var.set("Oitiva gerada.")
                         else:
-                            status_var.set("Histórico concluído. Finalizando a identificação das partes...")
-                            if target == "live":
-                                self.status_var.set("Histórico gerado.")
+                            self._refresh_history_completion_status(target)
                         self._render_assistant_progress()
                 elif kind == "qualification_result":
                     generation, raw_result, allowed_ids, elapsed = message[1:]
@@ -12887,6 +14513,93 @@ try {
                             f"Falha após {float(elapsed):.1f}s: {detail}"
                         )
                         self.status_var.set(f"Não consegui organizar a qualificação: {detail}")
+                elif kind == "live_qualification_result":
+                    generation, raw_result, elapsed = message[1:]
+                    if generation == self.assistant_generation:
+                        try:
+                            formatted = format_occurrence_qualification(
+                                raw_result,
+                                self.qualification_fields,
+                            )
+                            if not formatted:
+                                raise ValueError("a IA não devolveu informações utilizáveis")
+                            self.last_live_qualification_text = formatted
+                            self._set_live_editor("qualification", formatted)
+                            self.live_assistant_status_var.set(
+                                f"Qualificação concluída em {float(elapsed):.1f}s."
+                            )
+                            self.status_var.set("Qualificação gerada.")
+                        except Exception as exc:
+                            self.live_assistant_status_var.set(
+                                f"Resposta inválida após {float(elapsed):.1f}s: {exc}"
+                            )
+                            self.status_var.set(f"Não consegui organizar a qualificação: {exc}")
+                elif kind == "live_qualification_error":
+                    generation, detail, elapsed = message[1:]
+                    if generation == self.assistant_generation:
+                        self.live_assistant_status_var.set(
+                            f"Falha após {float(elapsed):.1f}s: {detail}"
+                        )
+                        self.status_var.set(f"Não consegui organizar a qualificação: {detail}")
+                elif kind == "document_clipboard_ready":
+                    self.live_document_copy_button.configure(state="normal")
+                    self.status_var.set(
+                        "Documento formatado copiado. Ele já pode ser colado no Word ou no editor do site."
+                    )
+                elif kind == "document_clipboard_error":
+                    self.live_document_copy_button.configure(state="normal")
+                    detail = str(message[1])
+                    self.status_var.set(f"Não consegui copiar o documento: {detail}")
+                    messagebox.showerror(
+                        "Copiar documento",
+                        "Não consegui copiar mantendo a formatação do Word.\n\n"
+                        f"Detalhe: {detail}",
+                        parent=self.root,
+                    )
+                elif kind == "document_preview_ready":
+                    preview_path = Path(message[1])
+                    self.last_generated_document_preview_path = preview_path
+                    self.live_document_preview_button.configure(state="normal")
+                    try:
+                        preview_url = preview_path.resolve().as_uri() + "#zoom=100"
+                        opened = webbrowser.open_new(preview_url)
+                        if not opened and os.name == "nt":
+                            os.startfile(preview_path)
+                        self.status_var.set(
+                            "Visualização aberta em PDF com zoom de 100%."
+                        )
+                    except Exception as exc:
+                        detail = str(exc)
+                        self.status_var.set(
+                            f"Não consegui abrir a visualização: {detail}"
+                        )
+                        messagebox.showerror(
+                            "Visualizar documento",
+                            f"Não consegui abrir a visualização.\n\nDetalhe: {detail}",
+                            parent=self.root,
+                        )
+                elif kind == "document_preview_error":
+                    self.live_document_preview_button.configure(state="normal")
+                    detail = str(message[1])
+                    self.status_var.set(f"Não consegui gerar a visualização: {detail}")
+                    messagebox.showerror(
+                        "Visualizar documento",
+                        f"Não consegui gerar a visualização.\n\nDetalhe: {detail}",
+                        parent=self.root,
+                    )
+                elif kind == "document_save_ready":
+                    self.live_document_save_button.configure(state="normal")
+                    destination_path = Path(message[1])
+                    self.status_var.set(f"Documento salvo em: {destination_path}")
+                elif kind == "document_save_error":
+                    self.live_document_save_button.configure(state="normal")
+                    detail = str(message[1])
+                    self.status_var.set(f"Não consegui salvar o documento: {detail}")
+                    messagebox.showerror(
+                        "Salvar documento",
+                        f"Não consegui salvar o documento.\n\nDetalhe: {detail}",
+                        parent=self.root,
+                    )
                 elif kind == "assistant_multi_text_result":
                     generation, task, index, text, elapsed = message[1:]
                     if generation == self.assistant_generation:
@@ -12916,15 +14629,7 @@ try {
                         self._set_assistant_target_names(target, names)
                         self.assistant_task_states["names"] = "done"
                         self.assistant_task_elapsed["names"] = elapsed
-                        status_var = self._assistant_target_status(target)
-                        if names:
-                            status_var.set(f"{len(names)} parte(s) identificada(s).")
-                            if target == "live":
-                                self.status_var.set(f"Extração concluída: {len(names)} parte(s) identificada(s).")
-                        else:
-                            status_var.set("Histórico concluído; nenhuma parte foi identificada.")
-                            if target == "live":
-                                self.status_var.set("Extração concluída sem partes identificadas.")
+                        self._refresh_history_completion_status(target)
                         self._render_assistant_progress()
                 elif kind == "assistant_task_error":
                     generation, target, task, detail, elapsed = message[1:]

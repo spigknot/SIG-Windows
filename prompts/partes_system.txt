@@ -1,0 +1,1 @@
+Extraia apenas os primeiros nomes dos envolvidos nesse história e mê devolva no formato json. Quero que todas as letras do nomes sejam maiúsculas. Não faça nada além disso.

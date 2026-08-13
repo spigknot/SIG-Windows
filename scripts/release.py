@@ -15,6 +15,7 @@ bundle for static assets whose source is currently outside Git.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import shutil
@@ -52,6 +53,27 @@ from release_validation import (
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def load_updater_harness(root: Path):
+    root_text = str(root.resolve())
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
+    return importlib.import_module("updater_v2.harness").run
+
+
+def latest_generated_full_package(root: Path) -> Path:
+    candidates = [
+        path
+        for path in (root / "release" / "generated").glob("*/*.zip")
+        if path.is_file() and (path.parent / "package" / "vad_deps").is_dir()
+    ]
+    if not candidates:
+        raise ValidationError(
+            "nenhum pacote full validado foi encontrado em release/generated; "
+            "informe --package-zip ou gere uma release primeiro"
+        )
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def check_build_environment() -> None:
@@ -221,6 +243,8 @@ def build_release(args: argparse.Namespace) -> int:
 
         package_root = output_root / "package"
         shutil.copytree(fresh_pyinstaller_root, package_root)
+        shutil.copytree(root / "prompts", package_root / "prompts")
+        shutil.copytree(root / "modelos", package_root / "modelos")
         copy_runtime_assets(runtime_root, package_root, fresh_updater)
         shutil.copy2(root / "src/vad_worker.py", package_root / "vad_worker.py")
         validate_runtime_assets(package_root, runtime_manifest)
@@ -248,7 +272,7 @@ def build_release(args: argparse.Namespace) -> int:
         # Exercise the exact ZIP and helper that are about to be published.
         # This runs only in the disposable harness and never touches the
         # user's installation.
-        from updater_v2.harness import run as run_updater_test
+        run_updater_test = load_updater_harness(root)
 
         for message in run_updater_test(
             package_root / "SigUpdater.exe",
@@ -336,9 +360,12 @@ def tests_command() -> int:
 
 def updater_test_command(args: argparse.Namespace) -> int:
     root = repo_root()
-    from updater_v2.harness import run
-
-    package_zip = (args.package_zip or root / "SIG-Windows-full-20260806-004-onedir.zip").resolve()
+    run = load_updater_harness(root)
+    package_zip = (
+        args.package_zip.resolve()
+        if args.package_zip
+        else latest_generated_full_package(root).resolve()
+    )
     updater = (args.updater or root / "updater_v2/bin/SigUpdater.exe").resolve()
     for message in run(updater, package_zip, args.timeout):
         print(f"PASS: {message}")
@@ -354,10 +381,12 @@ def updater_v2_test_command(args: argparse.Namespace) -> int:
         raise ValidationError("SigUpdaterV2.exe não corresponde ao artifact.json")
     if sha256_file(root / "updater_v2/updater.py") != str(metadata.get("source_sha256") or "").lower():
         raise ValidationError("updater_v2/updater.py não corresponde ao artifact.json")
-    sys.path.insert(0, str(root / "updater_v2"))
-    from harness import run
-
-    package_zip = (args.package_zip or root / "SIG-Windows-full-20260806-004-onedir.zip").resolve()
+    run = load_updater_harness(root)
+    package_zip = (
+        args.package_zip.resolve()
+        if args.package_zip
+        else latest_generated_full_package(root).resolve()
+    )
     for message in run(updater, package_zip, args.timeout):
         print(f"PASS: {message}")
     return 0

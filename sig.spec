@@ -25,6 +25,8 @@ a = Analysis(
         ('assets/appwin.png', 'assets'),
         ('assets/icon.png', 'assets'),
         ('assets/default_nomes.txt', 'assets'),
+        ('prompts/*.txt', 'prompts'),
+        ('modelos/*.docx', 'modelos'),
     ] + sounddevice_datas,
     hiddenimports=[
         '_cffi_backend',
