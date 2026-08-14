@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from sig_app import (  # noqa: E402
     DOCUMENT_TEMPLATE_NAMES,
+    _crop_preview_page_to_content,
     build_cf_html,
     generate_docx_from_template,
     portuguese_number_words,
@@ -38,6 +39,28 @@ REPLACEMENTS = {
 
 
 class DocumentTemplateTests(unittest.TestCase):
+    def test_preview_keeps_small_vertical_margins_without_side_waste(self):
+        from PIL import Image, ImageDraw
+
+        page = Image.new("RGB", (100, 100), "white")
+        draw = ImageDraw.Draw(page)
+        draw.rectangle((10, 20, 89, 79), fill="black")
+
+        preview = _crop_preview_page_to_content(
+            page,
+            horizontal_padding=2,
+            vertical_padding=12,
+        )
+        try:
+            self.assertEqual(preview.size, (84, 84))
+            self.assertEqual(preview.getpixel((42, 0)), (255, 255, 255))
+            self.assertEqual(preview.getpixel((42, 11)), (255, 255, 255))
+            self.assertEqual(preview.getpixel((42, 12)), (0, 0, 0))
+            self.assertEqual(preview.getpixel((42, 71)), (0, 0, 0))
+            self.assertEqual(preview.getpixel((42, 83)), (255, 255, 255))
+        finally:
+            preview.close()
+
     def test_cf_html_offsets_use_utf8_bytes(self):
         source = (
             "Version:1.0\r\nStartHTML:0000000000\r\n"

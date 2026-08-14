@@ -5,8 +5,9 @@ Estas regras sao obrigatorias para futuras alteracoes, compilacoes e publicacoes
 ## Codigo-fonte e prompts
 
 - Todos os prompts editáveis ficam em `prompts\`, um arquivo `.txt` por prompt:
-  `historico.txt`, `oitiva_system.txt`, `oitiva_user.txt`, `partes_system.txt`,
-  `quaficacao_system.txt` e `qualificacao_user.txt`.
+  `historico_system.txt`, `historico_user.txt`, `oitiva_system.txt`,
+  `oitiva_user.txt`, `partes_system.txt`, `qualificacao_system.txt` e
+  `qualificacao_user.txt`.
 - `src\assistant_prompts.py` deve permanecer apenas como carregador e montador das
   partes variáveis. Não voltar a colocar os textos completos dos prompts nesse
   módulo.
@@ -36,12 +37,20 @@ Estas regras sao obrigatorias para futuras alteracoes, compilacoes e publicacoes
 - Antes de cada publicacao, atualizar `APP_VERSION` em `src\sig_app.py` para a mesma versao do ZIP e do `latest.json`.
 - O PyInstaller e o `sounddevice` devem estar no mesmo ambiente Python. Ambiente usado nesta maquina:
   `C:\Users\Gustavo\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe`
+- O Hermes pode atualizar/regenerar esse ambiente. Antes de compilar, confirme que ele continua usando Python
+  `3.11.0` e PyInstaller `6.21.0`; se a versão do Python mudar (por exemplo, para `3.11.15`), use o fallback local
+  `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe`, que contém o conjunto compatível
+  com o `SigUpdater.exe` validado. Nunca troque o hash aprovado do updater apenas por causa de uma atualização do Hermes.
 - Antes de compilar nesse ambiente, confirmar:
   `python -c "import sounddevice"`
 - Tambem confirmar:
   `python -c "import websocket"`
 - O build precisa incluir `sounddevice`, `_sounddevice_data` e as DLLs do PortAudio.
 - O build precisa incluir o pacote `websocket-client`, importado pelo aplicativo como `websocket`.
+- A prévia embutida dos documentos usa `pypdfium2`; o build precisa incluir
+  `pypdfium2`, `pypdfium2_raw` e a DLL do PDFium fornecida pelo pacote.
+- Depois de alterar a prévia, testar o fluxo DOCX -> PDF -> imagem com um dos
+  modelos reais de `modelos\`, sem modificar o arquivo de modelo durante o teste.
 - Testar o executavel abrindo por pelo menos alguns segundos e confirmar a existencia de:
   `_internal\python311.dll`
   `_internal\_sounddevice_data\portaudio-binaries\libportaudio64bit.dll`
@@ -72,6 +81,7 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 - Para uma instalacao onedir, o ZIP incremental deve conter na raiz `sig.exe` e `_internal\` juntos.
 - Nunca publicar um ZIP contendo apenas um `sig.exe` quando a instalacao de destino for onedir.
 - O ZIP deve ser montado a partir da compilacao recem-gerada, nunca de um `sig.exe` antigo que ja estava em `dist`.
+- A publicacao incremental deve ser gerada pelo modo oficial `--incremental`: ele exclui `ffmpeg.exe`, `ffplay.exe`, `vad_worker.py` e `vad_deps` do ZIP do Drive. O pacote full correspondente fica como `*_full.zip` para a release do GitHub.
 - O manifesto deve conter `schema`, `version`, `zip_file_id`, `zip_name`, `sha256`, `size`, `created_at` e `signature`.
 - Assinar usando `release\sign_manifest.py` e a chave privada local.
 - Nunca enviar `release\update_private_key.pem` ao GitHub ou ao Drive.
@@ -100,6 +110,13 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 ## Diagnostico do updater
 
 - O updater independente `SigUpdater.exe` deve permanecer ao lado do SIG numa instalacao completa.
+- Sem argumentos, `SigUpdater.exe` deve abrir sua interface grafica independente. Com `--zip`, `--target`, `--pid` e `--log`, deve preservar exatamente o contrato silencioso usado pelo SIG.
+- Antes de alterar a pasta em que esta instalado, o modo independente deve copiar e executar a si proprio em `%LOCALAPPDATA%\sig\updater`. Nunca tentar sobrescrever o executavel do updater que estiver em execucao.
+- O modo independente deve aceitar o incremental apenas pelo manifesto assinado do Drive e conferir tamanho e SHA-256. O pacote full deve vir da release mais recente do GitHub e possuir digest SHA-256 publicado pela API.
+- O modo independente deve ignorar uma incremental cuja versao seja igual ou anterior a instalada; nunca oferecer novamente a mesma versao como atualizacao.
+- O pacote full pode instalar em pasta vazia e reparar uma instalacao incompleta. Pastas nao vazias que nao sejam reconhecidas como SIG devem ser recusadas para nao substituir arquivos alheios.
+- Tanto o modo chamado pelo SIG quanto o modo independente devem usar a mesma transacao, lock, validacao de startup e rollback. Nao criar um segundo caminho de copia simplificado.
+- O updater deve ser compilado como `--onefile --windowed`; o SIG continua obrigatoriamente `onedir`.
 - Erro `Failed to load Python DLL ... _MEI...` indica distribuicao one-file ou falha na extracao temporaria; reconstruir em onedir e incluir `_internal` no pacote.
 - Se o log disser que `_internal` e `sig.exe` foram instalados, mas a versao nao mudou, verificar primeiro `APP_VERSION` antes de culpar a copia.
 - Se o log parar em `aguardando validacao`, aguardar a linha final de validacao e conferir o processo; nao publicar outra tentativa sem diagnosticar.
@@ -114,6 +131,7 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
   `python scripts\release.py updater-test`
 - Para gerar uma release, usar somente:
   `python scripts\release.py release --version <APP_VERSION> --zip-file-id <ID_DO_ZIP_NO_DRIVE>`
+- Para uma publicacao incremental no Drive, usar o mesmo comando com `--incremental`. O ZIP sem os recursos grandes e o unico que deve ser enviado ao Drive; o `*_full.zip` deve ser publicado como asset da release correspondente no GitHub.
 - Esse comando faz clean build isolado, verifica warnings criticos, inspeciona o executavel congelado, valida layout/dependencias, testa o updater real em pasta temporaria, cria o ZIP e assina o manifesto. Se uma etapa falhar, a release nao e aprovada.
 - `--allow-same` existe somente para smoke test local da versao atual e nunca deve ser usado para publicar.
 - O ZIP nunca deve ser criado manualmente a partir de `dist`. O `sig.exe` precisa vir do clean build desta execucao; os assets externos somente podem vir de um `--runtime-root` explicitamente escolhido e passam pelo gate de layout e pelo hash conhecido do `SigUpdater.exe`.

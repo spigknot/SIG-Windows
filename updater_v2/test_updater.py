@@ -15,8 +15,13 @@ from updater import (  # noqa: E402
     REQUIRED_UPDATE_FILES,
     REQUIRED_RUNTIME_FILES,
     UpdateError,
+    installed_version,
+    version_key,
+    select_full_release_asset,
+    validate_full_install_destination,
     validate_install_tree,
     validate_zip,
+    verify_update_manifest_signature,
 )
 
 
@@ -58,7 +63,8 @@ class UpdaterV2ValidationTests(unittest.TestCase):
             root.mkdir()
             self._make_package(root)
             (root / "prompts").mkdir()
-            (root / "prompts" / "historico.txt").write_text("prompt", encoding="utf-8")
+            (root / "prompts" / "historico_system.txt").write_text("prompt", encoding="utf-8")
+            (root / "prompts" / "historico_user.txt").write_text("prompt", encoding="utf-8")
             validate_install_tree(root)
             zip_path = Path(temporary) / "package-with-prompts.zip"
             self._zip_directory(root, zip_path)
@@ -145,6 +151,85 @@ class UpdaterV2ValidationTests(unittest.TestCase):
                 archive.writestr(link, b"../../outside")
             with self.assertRaisesRegex(UpdateError, "link simbólico"):
                 validate_zip(zip_path)
+
+    def test_current_incremental_manifest_signature_is_valid(self):
+        manifest = __import__("json").loads(
+            (ROOT / "release" / "latest.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(verify_update_manifest_signature(manifest))
+        manifest["size"] = int(manifest["size"]) + 1
+        self.assertFalse(verify_update_manifest_signature(manifest))
+
+    def test_full_release_prefers_largest_trusted_zip(self):
+        release = {
+            "tag_name": "20260813_006",
+            "assets": [
+                {
+                    "name": "source.zip",
+                    "size": 100,
+                    "digest": "sha256:" + "1" * 64,
+                    "browser_download_url": "https://github.com/example/source.zip",
+                },
+                {
+                    "name": "SIG-full.zip",
+                    "size": 200,
+                    "digest": "sha256:" + "2" * 64,
+                    "browser_download_url": "https://github.com/example/full.zip",
+                },
+            ],
+        }
+        selected = select_full_release_asset(release)
+        self.assertEqual(selected["zip_name"], "SIG-full.zip")
+        self.assertEqual(selected["sha256"], "2" * 64)
+
+    def test_full_release_rejects_untrusted_download_url(self):
+        release = {
+            "tag_name": "20260813_006",
+            "assets": [{
+                "name": "SIG-full.zip",
+                "size": 200,
+                "digest": "sha256:" + "2" * 64,
+                "browser_download_url": "https://example.com/full.zip",
+            }],
+        }
+        with self.assertRaisesRegex(UpdateError, "não confiável"):
+            select_full_release_asset(release)
+
+    def test_full_package_can_target_empty_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "new-install"
+            validate_full_install_destination(target)
+            self.assertTrue(target.is_dir())
+
+    def test_full_package_rejects_unrelated_nonempty_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "documents"
+            target.mkdir()
+            (target / "personal.txt").write_text("keep", encoding="utf-8")
+            with self.assertRaisesRegex(UpdateError, "não parece ser uma instalação"):
+                validate_full_install_destination(target)
+
+    def test_installed_version_reads_build_info(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            (target / "build-info.json").write_text(
+                '{"version":"20260813_010"}', encoding="utf-8"
+            )
+            self.assertEqual(installed_version(target), "20260813_010")
+
+    def test_incremental_zip_rejects_runtime_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            root.mkdir()
+            self._make_package(root)
+            zip_path = Path(temporary) / "incremental-with-runtime.zip"
+            self._zip_directory(root, zip_path)
+            with self.assertRaisesRegex(UpdateError, "recursos de runtime"):
+                validate_zip(zip_path, full=False)
+
+    def test_version_key_orders_release_versions(self):
+        self.assertLess(version_key("20260813_017"), version_key("20260813_018"))
+        self.assertEqual(version_key("invalid"), (0, 0, 0))
 
 
 if __name__ == "__main__":

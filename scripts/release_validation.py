@@ -20,10 +20,10 @@ from typing import Iterable
 
 VERSION_RE = re.compile(r"^\d{8}_\d{3}$")
 CRITICAL_WARNING_RE = re.compile(
-    r"missing module named(?:\s+['\"]?)?\s*(sounddevice|websocket)\b",
+    r"missing module named(?:\s+['\"]?)?\s*(pypdfium2|pypdfium2_raw|sounddevice|websocket)\b",
     re.IGNORECASE,
 )
-CRITICAL_MODULES = {"sounddevice", "websocket"}
+CRITICAL_MODULES = {"pypdfium2", "pypdfium2_raw", "sounddevice", "websocket"}
 REQUIRED_FULL_FILES = (
     "sig.exe",
     "_internal/base_library.zip",
@@ -35,11 +35,12 @@ REQUIRED_FULL_FILES = (
     "ffmpeg.exe",
     "ffplay.exe",
     "vad_worker.py",
-    "prompts/historico.txt",
+    "prompts/historico_system.txt",
+    "prompts/historico_user.txt",
     "prompts/oitiva_system.txt",
     "prompts/oitiva_user.txt",
     "prompts/partes_system.txt",
-    "prompts/quaficacao_system.txt",
+    "prompts/qualificacao_system.txt",
     "prompts/qualificacao_user.txt",
     "modelos/modelo_declaracoes.docx",
     "modelos/modelo_depoimento.docx",
@@ -47,6 +48,18 @@ REQUIRED_FULL_FILES = (
 REQUIRED_FULL_DIRECTORIES = ("_internal", "vad_deps", "prompts", "modelos")
 RUNTIME_ASSET_FILES = ("ffmpeg.exe", "ffplay.exe")
 RUNTIME_ASSET_DIRECTORIES = ("vad_deps",)
+INCREMENTAL_FORBIDDEN_TOP_LEVEL = {
+    "ffmpeg.exe",
+    "ffplay.exe",
+    "vad_worker.py",
+    "vad_deps",
+}
+REQUIRED_INCREMENTAL_FILES = tuple(
+    relative
+    for relative in REQUIRED_FULL_FILES
+    if relative not in {"ffmpeg.exe", "ffplay.exe", "vad_worker.py"}
+)
+REQUIRED_INCREMENTAL_DIRECTORIES = ("_internal", "prompts", "modelos")
 
 
 class ValidationError(RuntimeError):
@@ -126,11 +139,12 @@ def source_fingerprint(repo_root: Path) -> str:
         "updater_v2/updater.py",
         "sig.spec",
         "requirements.txt",
-        "prompts/historico.txt",
+        "prompts/historico_system.txt",
+        "prompts/historico_user.txt",
         "prompts/oitiva_system.txt",
         "prompts/oitiva_user.txt",
         "prompts/partes_system.txt",
-        "prompts/quaficacao_system.txt",
+        "prompts/qualificacao_system.txt",
         "prompts/qualificacao_user.txt",
         "modelos/modelo_declaracoes.docx",
         "modelos/modelo_depoimento.docx",
@@ -313,14 +327,25 @@ def validate_package_layout(package_root: Path, full: bool = True) -> None:
     if not package_root.is_dir():
         raise ValidationError(f"raiz do pacote não encontrada: {package_root}")
     _assert_no_bad_layout(path.relative_to(package_root) for path in package_root.rglob("*"))
-    required_files = REQUIRED_FULL_FILES if full else REQUIRED_FULL_FILES[:1]
-    required_dirs = REQUIRED_FULL_DIRECTORIES if full else ("_internal",)
+    required_files = REQUIRED_FULL_FILES if full else REQUIRED_INCREMENTAL_FILES
+    required_dirs = REQUIRED_FULL_DIRECTORIES if full else REQUIRED_INCREMENTAL_DIRECTORIES
     for relative in required_files:
         if not (package_root / Path(relative)).is_file():
             raise ValidationError(f"componente obrigatório ausente: {relative}")
     for relative in required_dirs:
         if not (package_root / relative).is_dir():
             raise ValidationError(f"diretório obrigatório ausente: {relative}")
+    if not full:
+        forbidden = sorted(
+            child.name
+            for child in package_root.iterdir()
+            if child.name in INCREMENTAL_FORBIDDEN_TOP_LEVEL
+        )
+        if forbidden:
+            raise ValidationError(
+                "pacote incremental contém recursos de runtime proibidos: "
+                + ", ".join(forbidden)
+            )
 
 
 def validate_zip_layout(zip_path: Path, full: bool = True) -> None:
@@ -332,13 +357,26 @@ def validate_zip_layout(zip_path: Path, full: bool = True) -> None:
             _assert_no_bad_layout(names)
             files = {name.rstrip("/") for name in names if not name.endswith("/")}
             dirs = {name.rstrip("/") for name in names if name.endswith("/")}
-            required_files = REQUIRED_FULL_FILES if full else REQUIRED_FULL_FILES[:1]
+            required_files = REQUIRED_FULL_FILES if full else REQUIRED_INCREMENTAL_FILES
             for relative in required_files:
                 if relative not in files:
                     raise ValidationError(f"componente ausente no ZIP: {relative}")
-            for relative in (REQUIRED_FULL_DIRECTORIES if full else ("_internal",)):
+            required_directories = REQUIRED_FULL_DIRECTORIES if full else REQUIRED_INCREMENTAL_DIRECTORIES
+            for relative in required_directories:
                 if not any(name == relative or name.startswith(relative + "/") for name in files | dirs):
                     raise ValidationError(f"diretório ausente no ZIP: {relative}")
+            if not full:
+                forbidden = sorted(
+                    name
+                    for name in files | dirs
+                    if PurePosixPath(name).parts
+                    and PurePosixPath(name).parts[0] in INCREMENTAL_FORBIDDEN_TOP_LEVEL
+                )
+                if forbidden:
+                    raise ValidationError(
+                        "pacote incremental contém recursos de runtime proibidos: "
+                        + ", ".join(forbidden)
+                    )
     except zipfile.BadZipFile as exc:
         raise ValidationError(f"ZIP inválido: {zip_path}") from exc
 
@@ -361,6 +399,9 @@ def validate_frozen_dependencies(package_root: Path) -> None:
     portaudio = package_root / "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll"
     if not portaudio.is_file():
         raise ValidationError(f"DLL do PortAudio ausente: {portaudio}")
+    pdfium = package_root / "_internal/pypdfium2_raw/pdfium.dll"
+    if not pdfium.is_file():
+        raise ValidationError(f"DLL do PDFium ausente: {pdfium}")
 
 
 def validate_pyinstaller_warnings(warn_path: Path) -> None:

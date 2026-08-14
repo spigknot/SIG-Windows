@@ -36,7 +36,7 @@ Com Python 3.11 e as dependencias `Pillow`, `sounddevice`, `websocket-client`, `
 ```powershell
 python scripts\release.py tests
 python scripts\release.py updater-v2-test --package-zip <pacote-full.zip> --updater <SigUpdater.exe>
-python scripts\release.py release --version <APP_VERSION>
+python scripts\release.py release --version <APP_VERSION> --incremental
 ```
 
-O comando de release faz um build onedir limpo, recompila o updater a partir de `updater_v2/updater.py`, valida as dependências e gera o pacote full. Para uma instalação completa, não use apenas o `sig.exe`.
+O comando de release faz um build onedir limpo, recompila o updater a partir de `updater_v2/updater.py`, valida as dependências e gera o pacote incremental para o Drive, além de preservar o pacote full como `<versão>_full.zip` para a release do GitHub. Para uma instalação completa, não use apenas o `sig.exe`.

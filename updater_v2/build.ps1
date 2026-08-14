@@ -29,7 +29,7 @@ try {
         --noconfirm `
         --clean `
         --onefile `
-        --console `
+        --windowed `
         --noupx `
         --name SigUpdater `
         --distpath $Output `

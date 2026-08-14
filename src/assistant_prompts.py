@@ -30,8 +30,11 @@ def _read_prompt(filename: str) -> str:
 
 
 DEFAULT_PARTS_PROMPT = _read_prompt("partes_system.txt")
-DEFAULT_QUALIFICATION_SYSTEM_PROMPT = _read_prompt("quaficacao_system.txt")
-DEFAULT_HISTORY_PROMPT = _read_prompt("historico.txt")
+DEFAULT_PARTS_USER_HISTORY_TEMPLATE = _read_prompt("partes_user_botao_historico.txt")
+DEFAULT_PARTS_USER_DETECT_TEMPLATE = _read_prompt("partes_user_botao_detectar.txt")
+DEFAULT_QUALIFICATION_SYSTEM_PROMPT = _read_prompt("qualificacao_system.txt")
+DEFAULT_HISTORY_SYSTEM_PROMPT = _read_prompt("historico_system.txt")
+DEFAULT_HISTORY_USER_TEMPLATE = _read_prompt("historico_user.txt")
 DEFAULT_STATEMENT_TEMPLATE = _read_prompt("oitiva_system.txt")
 DEFAULT_STATEMENT_USER_TEMPLATE = _read_prompt("oitiva_user.txt")
 
@@ -79,6 +82,30 @@ def qualification_user_prompt(field_ids: list[str], raw_text: str) -> str:
     )
 
 
+def history_user_prompt(transcription: str) -> str:
+    """Monta o prompt variável do histórico com a transcrição atual."""
+    return DEFAULT_HISTORY_USER_TEMPLATE.replace(
+        "{{conteudo_caixa_transcricao}}",
+        transcription.strip(),
+    ).strip()
+
+
+def parts_user_prompt_from_transcription(transcription: str) -> str:
+    """Monta o prompt do botão Histórico a partir da transcrição."""
+    return DEFAULT_PARTS_USER_HISTORY_TEMPLATE.replace(
+        "{{{conteudo_caixa_transcricao}}}",
+        transcription.strip(),
+    ).strip()
+
+
+def parts_user_prompt_from_history(history: str) -> str:
+    """Monta o prompt do botão Detectar a partir do histórico atual."""
+    return DEFAULT_PARTS_USER_DETECT_TEMPLATE.replace(
+        "{{{conteudo_caixa_historico}}}",
+        history.strip(),
+    ).strip()
+
+
 def statement_prompt(selected_name: str | None) -> str:
     return DEFAULT_STATEMENT_TEMPLATE.replace("{{INSTRUCAO_PESSOA}}", "").strip()
 
@@ -89,6 +116,9 @@ def statement_user_prompt(selected_name: str | None, material: str) -> str:
     return (
         DEFAULT_STATEMENT_USER_TEMPLATE
         .replace("{{NOME_SELECIONADO}}", name)
+        .replace("{{{conteudo_caixa_historico}}}", material.strip())
+        # Accept the previous marker too, so an older external prompt keeps
+        # working while users migrate it to the new naming convention.
         .replace("{{{INSERIR_AQUI_O_CONTEUDO_DA_CAIXA_DE_TEXTO_DO_HISTORICO}}}", material.strip())
         .strip()
     )

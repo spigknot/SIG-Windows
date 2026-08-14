@@ -3,7 +3,7 @@
 from pathlib import Path
 import sys
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 
 python_runtime = Path(sys.base_prefix)
@@ -15,11 +15,13 @@ runtime_binaries = [
 ]
 
 sounddevice_datas = collect_data_files('_sounddevice_data')
+pdfium_datas = collect_data_files('pypdfium2') + collect_data_files('pypdfium2_raw')
+pdfium_binaries = collect_dynamic_libs('pypdfium2_raw')
 
 a = Analysis(
     ['src/sig_app.py'],
     pathex=[],
-    binaries=runtime_binaries,
+    binaries=runtime_binaries + pdfium_binaries,
     datas=[
         ('assets/appwin.jpg', 'assets'),
         ('assets/appwin.png', 'assets'),
@@ -27,12 +29,14 @@ a = Analysis(
         ('assets/default_nomes.txt', 'assets'),
         ('prompts/*.txt', 'prompts'),
         ('modelos/*.docx', 'modelos'),
-    ] + sounddevice_datas,
+    ] + sounddevice_datas + pdfium_datas,
     hiddenimports=[
         '_cffi_backend',
         '_sounddevice_data',
         'sounddevice',
         'websocket',
+        'pypdfium2',
+        'pypdfium2_raw',
     ],
     hookspath=[],
     hooksconfig={},

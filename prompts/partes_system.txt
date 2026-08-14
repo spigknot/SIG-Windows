@@ -1,1 +1,1 @@
-Extraia apenas os primeiros nomes dos envolvidos nesse história e mê devolva no formato json. Quero que todas as letras do nomes sejam maiúsculas. Não faça nada além disso.
+Extraia apenas os primeiros nomes dos envolvidos nesse história e me devolva no formato JSON. Quero que todos os nomes sejam escritos inteiramente com letras maiúsculas. Não faça nada além disso.

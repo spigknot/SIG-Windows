@@ -63,11 +63,19 @@ def load_updater_harness(root: Path):
 
 
 def latest_generated_full_package(root: Path) -> Path:
-    candidates = [
-        path
-        for path in (root / "release" / "generated").glob("*/*.zip")
-        if path.is_file() and (path.parent / "package" / "vad_deps").is_dir()
-    ]
+    candidates = []
+    for path in (root / "release" / "generated").glob("*/*.zip"):
+        if not path.is_file() or not (path.parent / "package" / "vad_deps").is_dir():
+            continue
+        explicit_full_exists = any(
+            sibling.name.endswith("_full.zip")
+            for sibling in path.parent.glob("*.zip")
+        )
+        if (
+            (explicit_full_exists and path.name.endswith("_full.zip"))
+            or (not explicit_full_exists and path.name == f"{path.parent.name}.zip")
+        ):
+            candidates.append(path)
     if not candidates:
         raise ValidationError(
             "nenhum pacote full validado foi encontrado em release/generated; "
@@ -80,6 +88,7 @@ def check_build_environment() -> None:
     try:
         import PyInstaller  # noqa: F401
         import _sounddevice_data  # noqa: F401
+        import pypdfium2  # noqa: F401
         import sounddevice as sd
         import websocket
     except Exception as exc:
@@ -145,6 +154,34 @@ def zip_directory(source_root: Path, zip_path: Path) -> None:
                 archive.write(path, path.relative_to(source_root).as_posix())
 
 
+INCREMENTAL_EXCLUDED_TOP_LEVEL = {
+    "ffmpeg.exe",
+    "ffplay.exe",
+    "vad_worker.py",
+    "vad_deps",
+}
+
+
+def create_incremental_tree(source_root: Path, destination_root: Path) -> None:
+    """Copy only files that an existing onedir installation may replace.
+
+    Runtime assets are deliberately excluded: they are large, machine-local
+    dependencies and belong to the full GitHub package.  The updater keeps
+    every excluded asset already present at the destination.
+    """
+    if destination_root.exists():
+        raise ValidationError(f"diretório incremental já existe: {destination_root}")
+    destination_root.mkdir(parents=True)
+    for child in sorted(source_root.iterdir(), key=lambda path: path.name.casefold()):
+        if child.name in INCREMENTAL_EXCLUDED_TOP_LEVEL:
+            continue
+        destination = destination_root / child.name
+        if child.is_dir():
+            shutil.copytree(child, destination)
+        else:
+            shutil.copy2(child, destination)
+
+
 def sign_manifest(manifest: dict, key_path: Path, output_path: Path) -> None:
     try:
         from cryptography.hazmat.primitives import hashes, serialization
@@ -192,6 +229,9 @@ def build_release(args: argparse.Namespace) -> int:
         updater_environment = os.environ.copy()
         updater_environment["SOURCE_DATE_EPOCH"] = "946684800"
         updater_environment["PYTHONHASHSEED"] = "0"
+        # Use a stable PyInstaller work/spec path. A random temporary path
+        # changes the one-file binary hash and makes the release gate reject
+        # an otherwise identical updater.
         run_command(
             [
                 sys.executable,
@@ -200,16 +240,16 @@ def build_release(args: argparse.Namespace) -> int:
                 "--noconfirm",
                 "--clean",
                 "--onefile",
-                "--console",
+                "--windowed",
                 "--noupx",
                 "--name",
                 "SigUpdater",
                 "--distpath",
                 str(updater_build_dir),
                 "--workpath",
-                str(updater_work_dir),
+                str(root / "build" / "updater_v2"),
                 "--specpath",
-                str(updater_work_dir),
+                str(root / "build" / "updater_v2"),
                 str(root / "updater_v2" / "updater.py"),
             ],
             root,
@@ -266,9 +306,22 @@ def build_release(args: argparse.Namespace) -> int:
             )
         validate_build_info(package_root, root, version, build_started, runtime_manifest)
 
-        zip_path = output_root / f"{version}.zip"
-        zip_directory(package_root, zip_path)
-        validate_zip_layout(zip_path, full=True)
+        if args.incremental:
+            full_zip_path = output_root / f"{version}_full.zip"
+            zip_directory(package_root, full_zip_path)
+            validate_zip_layout(full_zip_path, full=True)
+            incremental_root = work_root / "incremental-package"
+            create_incremental_tree(package_root, incremental_root)
+            validate_package_layout(incremental_root, full=False)
+            zip_path = output_root / f"{version}.zip"
+            zip_directory(incremental_root, zip_path)
+            validate_zip_layout(zip_path, full=False)
+            print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
+            print(f"PASS: pacote incremental local validado: {zip_path}")
+        else:
+            zip_path = output_root / f"{version}.zip"
+            zip_directory(package_root, zip_path)
+            validate_zip_layout(zip_path, full=True)
         # Exercise the exact ZIP and helper that are about to be published.
         # This runs only in the disposable harness and never touches the
         # user's installation.
@@ -276,7 +329,7 @@ def build_release(args: argparse.Namespace) -> int:
 
         for message in run_updater_test(
             package_root / "SigUpdater.exe",
-            zip_path,
+            full_zip_path if args.incremental else zip_path,
             args.updater_timeout,
         ):
             print(f"PASS: {message}")
@@ -421,6 +474,14 @@ def parser() -> argparse.ArgumentParser:
     release = sub.add_parser("release", help="clean build, gates, ZIP e manifesto")
     release.add_argument("--version", help="deve ser igual a APP_VERSION")
     release.add_argument("--zip-file-id", help="ID do ZIP depois do upload único ao Drive")
+    release.add_argument(
+        "--incremental",
+        action="store_true",
+        help=(
+            "gera o ZIP publicado no Drive sem ffmpeg.exe, ffplay.exe, "
+            "vad_worker.py e vad_deps; o full fica como *_full.zip para o GitHub"
+        ),
+    )
     release.add_argument(
         "--allow-same",
         action="store_true",

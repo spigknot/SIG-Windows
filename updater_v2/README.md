@@ -34,6 +34,20 @@ The existing CLI contract is preserved:
 
 `--zip <package> --target <installation> --pid <SIG PID> --log <log>`
 
+When opened without arguments, `SigUpdater.exe` starts its own graphical mode.
+It relocates a copy of itself to `%LOCALAPPDATA%\sig\updater` before touching
+the installation, so it can safely replace the installed updater too. In this
+mode it can:
+
+- download the signed incremental declared by the Drive manifest;
+- install or repair from the latest full GitHub release;
+- install the full package into an empty folder;
+- close the SIG, apply the same transactional swap, validate startup and roll
+  back automatically if the new build does not remain running.
+
+The full GitHub asset must expose a SHA-256 digest through the Releases API.
+Packages without a trusted digest are rejected before download.
+
 The updater rejects unsafe ZIP paths, duplicate entries, symlinks, incomplete onedir
 layouts, `g`, `_MEI`, nested `dist`, active processes and failed application
 startup. It uses a same-volume transaction and restores the previous

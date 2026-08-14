@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from release_validation import (  # noqa: E402
     REQUIRED_FULL_DIRECTORIES,
     REQUIRED_FULL_FILES,
+    REQUIRED_INCREMENTAL_DIRECTORIES,
+    REQUIRED_INCREMENTAL_FILES,
     ValidationError,
     frozen_app_version,
     read_app_version,
@@ -103,6 +105,20 @@ class ReleaseGateTests(unittest.TestCase):
             if relative not in missing:
                 (root / relative).mkdir(parents=True, exist_ok=True)
 
+    def test_incremental_layout_excludes_runtime_and_keeps_update_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            for relative in REQUIRED_INCREMENTAL_FILES:
+                path = package / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture")
+            for relative in REQUIRED_INCREMENTAL_DIRECTORIES:
+                (package / relative).mkdir(parents=True, exist_ok=True)
+            validate_package_layout(package, full=False)
+            (package / "ffmpeg.exe").write_bytes(b"runtime")
+            with self.assertRaisesRegex(ValidationError, "recursos de runtime proibidos"):
+                validate_package_layout(package, full=False)
+
     def test_missing_sigupdater_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             package = Path(temporary)
@@ -129,7 +145,14 @@ class ReleaseGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             package = Path(temporary)
             (package / "sig.exe").write_bytes(b"fixture")
-            modules = {"sounddevice", "_sounddevice", "_sounddevice_data", "websocket"}
+            modules = {
+                "pypdfium2",
+                "pypdfium2_raw",
+                "sounddevice",
+                "_sounddevice",
+                "_sounddevice_data",
+                "websocket",
+            }
             with patch(
                 "PyInstaller.archive.readers.CArchiveReader",
                 return_value=_FakeReader(modules),
@@ -146,6 +169,31 @@ class ReleaseGateTests(unittest.TestCase):
                 return_value=_FakeReader({"sounddevice", "_sounddevice", "_sounddevice_data"}),
             ):
                 with self.assertRaisesRegex(ValidationError, "websocket"):
+                    validate_frozen_dependencies(package)
+
+    def test_missing_pdfium_is_rejected_from_frozen_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            (package / "sig.exe").write_bytes(b"fixture")
+            portaudio = (
+                package
+                / "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll"
+            )
+            portaudio.parent.mkdir(parents=True)
+            portaudio.write_bytes(b"fixture")
+            modules = {
+                "pypdfium2",
+                "pypdfium2_raw",
+                "sounddevice",
+                "_sounddevice",
+                "_sounddevice_data",
+                "websocket",
+            }
+            with patch(
+                "PyInstaller.archive.readers.CArchiveReader",
+                return_value=_FakeReader(modules),
+            ):
+                with self.assertRaisesRegex(ValidationError, "PDFium"):
                     validate_frozen_dependencies(package)
 
     def test_critical_pyinstaller_warning_is_rejected_but_optional_warning_is_allowed(self):

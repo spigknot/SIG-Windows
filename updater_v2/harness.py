@@ -190,6 +190,7 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
 
         wrong_target = workspace / "wrong-target"
         wrong_target.mkdir()
+        (wrong_target / "personal.txt").write_text("do not replace", encoding="utf-8")
         _assert_rejected(updater, package_zip, wrong_target, workspace, "wrong-target")
 
         # A live process must block the transaction and leave the target byte
@@ -209,7 +210,7 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
 
         # Real success path using the complete current onedir package.
         success_target = workspace / "success-target"
-        shutil.copytree(base, success_target)
+        success_target.mkdir()
         success_source = workspace / "success-source"
         shutil.copytree(base, success_source)
         marker = uuid.uuid4().hex

@@ -31,16 +31,21 @@ import wave
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Button, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
+import tkinter as tk
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Button, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, urlencode, urlparse
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
+import pypdfium2 as pdfium
 
 from assistant_prompts import (
-    DEFAULT_HISTORY_PROMPT,
+    DEFAULT_HISTORY_SYSTEM_PROMPT,
     DEFAULT_PARTS_PROMPT,
     DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+    history_user_prompt,
+    parts_user_prompt_from_history,
+    parts_user_prompt_from_transcription,
     qualification_user_prompt,
     statement_prompt,
     statement_user_prompt,
@@ -48,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260813_006"
+APP_VERSION = "20260814_002"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -495,6 +500,141 @@ try {
         raise RuntimeError(detail)
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("O Word não gerou o arquivo PDF.")
+
+
+def _crop_preview_page_to_content(
+    page: Image.Image,
+    *,
+    horizontal_padding: int = 4,
+    vertical_padding: int = 14,
+) -> Image.Image:
+    """Crop printable whitespace while retaining a small reading margin."""
+    white = Image.new("RGB", page.size, (255, 255, 255))
+    difference = ImageChops.difference(page, white).convert("L")
+    # Ignore PDF rasterization noise in the white page background, but retain
+    # antialiased text and thin document lines.
+    mask = difference.point(lambda value: 255 if value > 8 else 0)
+    bounds = mask.getbbox()
+    mask.close()
+    difference.close()
+    white.close()
+    cropped = page if not bounds else page.crop(bounds)
+    if cropped is not page:
+        page.close()
+    # Keep roughly one blank text line above and below each page.  The
+    # horizontal padding stays intentionally small because the old preview
+    # left too much empty space beside the document.
+    padded = ImageOps.expand(
+        cropped,
+        border=(max(0, horizontal_padding), max(0, vertical_padding)),
+        fill="#ffffff",
+    )
+    if padded is not cropped:
+        cropped.close()
+    return padded
+
+
+def _window_physical_dpi(root) -> int:
+    """DPI físico (painel) do monitor que contém a janela principal.
+
+    O Windows virtualiza o DPI em 96 para processos não-DPI-aware, mas o
+    painel real do monitor tem outro valor (ex.: 102 PPI em 21,5" Full HD).
+    Para o zoom de 100% da prévia mostrar o documento no tamanho físico de
+    impressão, a renderização precisa usar o DPI real do painel — medido
+    diretamente via GetDpiForMonitor(MDT_RAW_DPI), que não é virtualizado.
+    """
+    if os.name != "nt":
+        return 96
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        shcore = ctypes.windll.shcore
+        hwnd = user32.GetParent(root.winfo_id()) or root.winfo_id()
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        dpi_x = wintypes.UINT()
+        dpi_y = wintypes.UINT()
+        # MDT_RAW_DPI = 2: valor físico real do painel, ignorando a
+        # virtualização de DPI do sistema.
+        if shcore.GetDpiForMonitor(monitor, 2, ctypes.byref(dpi_x), ctypes.byref(dpi_y)) == 0:
+            if dpi_x.value:
+                return int(dpi_x.value)
+    except Exception:
+        pass
+    return 96
+
+
+def render_pdf_preview(
+    pdf_path: Path,
+    output_path: Path,
+    zoom_percent: int,
+    dpi: int = 96,
+) -> tuple[int, list[tuple[int, int]]]:
+    """Render pages and return their vertical ranges in the preview image."""
+    zoom = max(25, min(200, int(zoom_percent)))
+    document = pdfium.PdfDocument(str(Path(pdf_path).resolve()))
+    pages: list[Image.Image] = []
+    try:
+        # Com o DPI físico do painel, 100% corresponde ao tamanho real de
+        # impressão: um texto de 15,1 cm no papel ocupa 15,1 cm na tela.
+        scale = (dpi / 72) * (zoom / 100)
+        for page_index in range(len(document)):
+            page = document[page_index]
+            bitmap = None
+            try:
+                bitmap = page.render(scale=scale)
+                rendered_page = bitmap.to_pil().convert("RGB").copy()
+                pages.append(
+                    _crop_preview_page_to_content(
+                        rendered_page,
+                        # Keep only about 0.2 cm of white breathing room at
+                        # 100% (the preview is calibrated to physical size).
+                        horizontal_padding=max(2, round(2 * zoom / 100)),
+                        vertical_padding=max(2, round(2 * zoom / 100)),
+                    )
+                )
+            finally:
+                if bitmap is not None:
+                    bitmap.close()
+                page.close()
+    finally:
+        document.close()
+    if not pages:
+        raise RuntimeError("O PDF não contém páginas para visualizar.")
+    # Keep only the rendered document in the preview image. The page's blank
+    # printable margin is removed per page before this composite is built.
+    # A separação entre páginas ganha respiro: duas linhas em branco antes e
+    # duas depois do traço central, para evidenciar a divisão das páginas.
+    line_spacing = max(4, round(16 * (dpi / 96) * (zoom / 100)))
+    separator_height = line_spacing * 4 + 1
+    width = max(page.width for page in pages)
+    height = sum(page.height for page in pages) + separator_height * (len(pages) - 1)
+    preview = Image.new("RGB", (width, height), "#ffffff")
+    separator_draw = ImageDraw.Draw(preview)
+    page_regions: list[tuple[int, int]] = []
+    y = 0
+    for page_index, page in enumerate(pages):
+        x = 0
+        page_start = y
+        preview.paste(page, (x, y))
+        y += page.height
+        page_regions.append((page_start, y))
+        if page_index < len(pages) - 1:
+            y += line_spacing * 2
+            separator_draw.line(
+                (0, y, width - 1, y),
+                fill="#aeb8b5",
+                width=1,
+            )
+            y += 1 + line_spacing * 2
+        page.close()
+    del separator_draw
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    preview.save(output_path, format="PNG", optimize=True)
+    preview.close()
+    return len(pages), page_regions
 
 
 PORTUGUESE_MONTHS = (
@@ -6352,6 +6492,11 @@ class SigApp:
         self.last_live_qualification_text = ""
         self.last_generated_document_path: Path | None = None
         self.last_generated_document_preview_path: Path | None = None
+        self.last_generated_document_preview_image_path: Path | None = None
+        self.pending_occurrence_document_generation = False
+        self.document_preview_generation = 0
+        self.document_preview_photo = None
+        self.document_preview_visible = False
         self.live_plain_transcript_text = ""
         self.live_timestamped_transcript_text = ""
         self.live_secondary_active = False
@@ -6426,6 +6571,8 @@ class SigApp:
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
+        self._activity_status_suppressed = 0
+        self._activity_steps: dict[str, dict[str, str]] = {}
         self.update_button_var = StringVar(value="Atualização disponível")
         self.server_var = StringVar()
         self.progress_var = IntVar(value=0)
@@ -6503,6 +6650,9 @@ class SigApp:
         self.qualification_other_ids_var = StringVar()
         self.qualification_declarations_var = BooleanVar(value=True)
         self.qualification_deposition_var = BooleanVar(value=False)
+        self.document_preview_zoom_var = StringVar(value="100%")
+        self.document_preview_page_var = StringVar(value="")
+        self.document_preview_page_regions: list[tuple[int, int]] = []
 
         self._build_style()
         self.paste_icon = self._make_paste_icon()
@@ -6511,11 +6661,10 @@ class SigApp:
         self.recover_icon = self._make_recover_icon()
         self.recover_audio_icon = self._make_recover_icon("#d39b00")
         self.document_copy_icon = self._make_document_action_icon("copy")
-        self.document_preview_icon = self._make_document_action_icon("preview")
         self.document_save_icon = self._make_document_action_icon("save")
         self._build_menu()
         self._build_ui()
-        self.status_var.trace_add("write", lambda *_args: self._append_activity_log(self.status_var.get()))
+        self.status_var.trace_add("write", lambda *_args: self._on_status_var_changed())
         self._refresh_server_label()
         self.root.after(100, self._poll_ui_queue)
         self.root.after(100, self._refresh_assistant_progress_clock)
@@ -6550,11 +6699,24 @@ class SigApp:
             font=("Segoe UI", 10),
         )
         style.configure("Muted.TLabel", background="#f4f7f6", foreground="#667371", font=("Segoe UI", 9))
+        style.configure(
+            "DocumentPreview.TLabel",
+            background="#f4f7f6",
+            foreground="#536565",
+            font=("Segoe UI Semibold", 9),
+        )
         style.configure("ModelSummary.TLabel", background="#f4f7f6", foreground="#667371", font=("Consolas", 9))
         style.configure("Title.TLabel", background="#f4f7f6", foreground="#10201f", font=("Segoe UI Semibold", 24))
         style.configure("TButton", font=("Segoe UI", 10), padding=(8, -1))
         style.configure("TMenubutton", font=("Segoe UI", 10), padding=(8, -1))
-        style.configure("Execute.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(8, -1))
+        style.configure(
+            "Execute.TButton",
+            foreground="#16833a",
+            font=("Segoe UI Semibold", 10),
+            padding=(8, -1),
+            anchor="center",
+            justify="center",
+        )
         style.configure("Action.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
         style.configure("Action.TMenubutton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
         style.configure("Recover.TButton", padding=(0, -1))
@@ -6711,8 +6873,138 @@ class SigApp:
         menu.add_command(label="Sobre", command=self.open_about)
         self.root.config(menu=menu)
 
-    def _append_activity_log(self, message: str, tag: str | None = None):
+    def _on_status_var_changed(self):
+        if self._activity_status_suppressed:
+            return
+        self._append_activity_log(self.status_var.get())
+
+    def _set_activity_status(self, message: str, *, log: bool = True):
+        if log:
+            self.status_var.set(message)
+            return
+        self._activity_status_suppressed += 1
+        try:
+            self.status_var.set(message)
+        finally:
+            self._activity_status_suppressed = max(0, self._activity_status_suppressed - 1)
+
+    def _begin_activity_step(self, key: str, label: str):
+        """Insere uma etapa atualizável no log, como as tarefas do FFmpeg."""
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        box.configure(state="normal")
+        for tag, color in (
+            ("activity_step_running", "#33403e"),
+            ("activity_step_done", "#16833a"),
+            ("activity_step_error", "#b3261e"),
+        ):
+            if tag not in box.tag_names():
+                box.tag_configure(tag, foreground=color)
+        mark = f"activity_step_{uuid.uuid4().hex}"
+        started_at = time.strftime("%H:%M:%S")
+        box.insert(END, f"{started_at}  {label}\n", "activity_step_running")
+        box.mark_set(mark, "end-2l linestart")
+        box.mark_gravity(mark, "left")
+        box.see(END)
+        box.configure(state="disabled")
+        self._activity_steps[key] = {"mark": mark, "started_at": started_at, "label": label}
+
+    def _finish_activity_step(
+        self,
+        key: str,
+        elapsed: float,
+        *,
+        error: str | None = None,
+    ):
+        """Atualiza a linha inicial da etapa sem criar uma segunda mensagem."""
+        step = self._activity_steps.pop(key, None)
+        if not step:
+            label = "Etapa"
+            message = f"{label} ERRO ({float(elapsed):.1f}s): {error}" if error else f"{label} ({float(elapsed):.1f}s)"
+            self._append_activity_log(message, "warning" if error else None)
+            return
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        mark = step["mark"]
+        label = step["label"]
+        try:
+            box.configure(state="normal")
+            start = box.index(mark)
+            end = box.index(f"{mark} lineend +1c")
+            box.delete(start, end)
+            if error:
+                text = f"{step['started_at']}  {label} ERRO ({float(elapsed):.1f}s): {str(error).rstrip(' .')}\n"
+                tag = "activity_step_error"
+            else:
+                text = f"{step['started_at']}  {label} ({float(elapsed):.1f}s)\n"
+                tag = "activity_step_done"
+            box.insert(start, text, tag)
+            box.mark_unset(mark)
+            box.see(END)
+            box.configure(state="disabled")
+        except tk.TclError:
+            try:
+                box.configure(state="disabled")
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _compact_activity_message(message: str) -> str:
+        """Mantém o log curto, objetivo e sem duplicar etapas concluídas."""
         message = str(message or "").strip()
+        if not message:
+            return ""
+
+        # Status antigos eram registrados pelo trace de status_var e também
+        # diretamente pelo worker. Oculte a segunda linha redundante.
+        if message in {
+            "Documento e visualização prontos.",
+            "Documento e visualização prontos",
+            "Documento pronto para copiar",
+            "Qualificação gerada.",
+            "Qualificação gerada",
+            "Qualificação organizada.",
+            "Qualificação organizada",
+            "Oitiva gerada.",
+            "Oitiva gerada",
+        } or message.startswith("Documento pronto para copiar:"):
+            return ""
+
+        compact_patterns = (
+            (r"^Requisição de histórico concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Histórico requisitado"),
+            (r"^Requisição de oitiva concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Oitiva requisitada"),
+            (r"^Requisição de qualificação concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Qualificação requisitada"),
+            (r"^Extração de partes concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Partes requisitadas"),
+            (r"^Geração da prévia do documento concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Preview requisitado"),
+            (r"^Geração do DOCX preenchido concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Documento requisitado"),
+            (r"^Cópia formatada para a área de transferência concluída em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Cópia requisitada"),
+            (r"^Salvamento do documento concluído em ([0-9]+(?:\.[0-9]+)?)s\.?$", "Salvamento requisitado"),
+        )
+        for pattern, label in compact_patterns:
+            match = re.match(pattern, message)
+            if match:
+                return f"{label} ({match.group(1)}s)"
+
+        error_patterns = (
+            (r"^Requisição de histórico falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Histórico ERRO"),
+            (r"^Requisição de oitiva falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Oitiva ERRO"),
+            (r"^Requisição de qualificação falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Qualificação ERRO"),
+            (r"^Geração do DOCX preenchido falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Documento ERRO"),
+            (r"^Geração da prévia falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Preview ERRO"),
+            (r"^Cópia formatada falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Cópia ERRO"),
+            (r"^Salvamento do documento falhou após ([0-9]+(?:\.[0-9]+)?)s:\s*(.*)$", "Salvar ERRO"),
+        )
+        for pattern, label in error_patterns:
+            match = re.match(pattern, message)
+            if match:
+                return f"{label} ({match.group(1)}s): {match.group(2).rstrip(' .')}"
+
+        return message.rstrip(".")
+
+    def _append_activity_log(self, message: str, tag: str | None = None):
+        message = self._compact_activity_message(message)
         if not message or not getattr(self, "activity_log", None):
             return
         self.activity_log.configure(state="normal")
@@ -7342,7 +7634,15 @@ try {
         log_sample = "00:21:11  Multi model ativado: Grok STT + servidor."
         activity_width = log_font.measure(log_sample) + 38
         activity_panel = ttk.Frame(workspace, width=activity_width)
-        activity_panel.pack(side=RIGHT, fill=Y, expand=False, padx=(14, 0))
+        # Match the bottom edge of the log with the bottom edge of the live
+        # occurrence controls, which use the live tab's bottom inset.
+        activity_panel.pack(
+            side=RIGHT,
+            fill=Y,
+            expand=False,
+            padx=(14, 0),
+            pady=(0, 14),
+        )
         activity_panel.pack_propagate(False)
         self.live_waveform_canvas = Canvas(
             activity_panel,
@@ -7361,11 +7661,18 @@ try {
         activity_box = ttk.Frame(activity_panel)
         activity_box.pack(fill=BOTH, expand=True, pady=(10, 0))
         self.activity_box = activity_box
-        self.activity_log = Text(activity_box, width=1, wrap="word", state="disabled", font=("Consolas", 8), background="#ffffff", foreground="#33403e", relief="solid", borderwidth=1, padx=7, pady=7)
+        self.activity_log = Text(activity_box, width=1, wrap="none", state="disabled", font=("Consolas", 8), background="#ffffff", foreground="#33403e", relief="solid", borderwidth=1, padx=7, pady=7)
         activity_scroll = ttk.Scrollbar(activity_box, orient="vertical", command=self.activity_log.yview)
-        self.activity_log.configure(yscrollcommand=activity_scroll.set)
-        self.activity_log.pack(side=LEFT, fill=BOTH, expand=True)
-        activity_scroll.pack(side=RIGHT, fill=Y)
+        activity_hscroll = ttk.Scrollbar(activity_box, orient="horizontal", command=self.activity_log.xview)
+        self.activity_log.configure(
+            yscrollcommand=activity_scroll.set,
+            xscrollcommand=activity_hscroll.set,
+        )
+        activity_box.columnconfigure(0, weight=1)
+        activity_box.rowconfigure(0, weight=1)
+        self.activity_log.grid(row=0, column=0, sticky="nsew")
+        activity_scroll.grid(row=0, column=1, sticky="ns")
+        activity_hscroll.grid(row=1, column=0, sticky="ew")
 
         self.live_tab = ttk.Frame(self.tab_content, padding=(14, 2, 14, 14))
         self.files_tab = ttk.Frame(self.tab_content, padding=14)
@@ -7377,7 +7684,7 @@ try {
         # The live workflow intentionally keeps transcript, history and statement together,
         # matching the Android screen.  The old assistant frame remains internal only.
         live_frame = ttk.Frame(self.live_tab, width=900)
-        live_frame.pack(fill=X, anchor="n")
+        live_frame.pack(fill=BOTH, expand=True, anchor="n")
         live_top = ttk.Frame(live_frame)
         live_top.pack(fill=X)
         self.live_top = live_top
@@ -7682,25 +7989,27 @@ try {
         self._refresh_multi_text_visibility()
 
         self.live_qualification_row = ttk.Frame(live_frame, width=900)
-        self.live_qualification_row.pack(fill=X)
-        self.live_qualification_content = ttk.Frame(
-            self.live_qualification_row,
-            width=900,
+        self.live_qualification_row.pack(fill=BOTH, expand=True)
+        self.live_qualification_content = ttk.Frame(self.live_qualification_row)
+        # The lower occurrence workspace must use all remaining height.  Packing
+        # it only at the bottom allowed the A4 preview request to clip the
+        # qualification editor on shorter windows.
+        self.live_qualification_content.pack(fill=BOTH, expand=True)
+        self.live_qualification_content.rowconfigure(0, weight=1)
+        self.live_qualification_content.columnconfigure(
+            0, minsize=640, weight=0
         )
-        self.live_qualification_content.pack(fill=X)
+        self.live_qualification_content.columnconfigure(1, minsize=18, weight=0)
+        self.live_qualification_content.columnconfigure(
+            2, weight=1
+        )
         self.live_qualification_area = ttk.Frame(
             self.live_qualification_content,
-            width=450,
+            width=640,
         )
-        self.live_qualification_area.pack(side=LEFT, anchor="nw")
-        self.live_qualification_text = self._make_live_editor(
-            self.live_qualification_area,
-            "Qualificação",
-            "qualification",
-            width=450,
-            height=150,
-            vertical_padding=(0, 0),
-        )
+        self.live_qualification_area.grid(row=0, column=0, sticky="nsew")
+        self.live_qualification_stack = ttk.Frame(self.live_qualification_area)
+        self.live_qualification_stack.pack(side="bottom", fill=X)
 
         def select_qualification_type(selected: str):
             if selected == "declarations":
@@ -7714,37 +8023,71 @@ try {
                 else:
                     self.qualification_deposition_var.set(True)
 
-        self.live_qualification_type_frame = ttk.Frame(
-            self.live_qualification_content
-        )
-        self.live_qualification_type_frame.pack(
-            side=LEFT,
-            fill=X,
-            expand=True,
-            anchor="n",
-            padx=(18, 0),
-            pady=(12, 0),
-        )
+        self.live_qualification_type_frame = ttk.Frame(self.live_qualification_stack)
+        self.live_qualification_type_frame.pack(fill=X, pady=(0, 4))
         self.live_qualification_declarations_check = ttk.Checkbutton(
             self.live_qualification_type_frame,
             text="Declarações",
             variable=self.qualification_declarations_var,
             command=lambda: select_qualification_type("declarations"),
         )
-        self.live_qualification_declarations_check.pack(anchor="w")
+        self.live_qualification_type_frame.columnconfigure(0, weight=1)
+        self.live_qualification_declarations_check.grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
         self.live_qualification_deposition_check = ttk.Checkbutton(
             self.live_qualification_type_frame,
             text="Depoimento",
             variable=self.qualification_deposition_var,
             command=lambda: select_qualification_type("deposition"),
         )
-        self.live_qualification_deposition_check.pack(anchor="w", pady=(6, 0))
+        self.live_qualification_deposition_check.grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(4, 0),
+        )
+
+        self.live_qualification_text_row = ttk.Frame(self.live_qualification_stack)
+        self.live_qualification_text_row.pack(fill=X)
+        self.live_qualification_editor_host = ttk.Frame(
+            self.live_qualification_text_row,
+            width=346,
+            height=135,
+        )
+        self.live_qualification_editor_host.pack(side=LEFT, fill=Y)
+        self.live_qualification_editor_host.pack_propagate(False)
+        self.live_qualification_text = self._make_live_editor(
+            self.live_qualification_editor_host,
+            "Qualificação",
+            "qualification",
+            width=346,
+            height=135,
+            vertical_padding=(0, 0),
+        )
+        self.live_qualification_generate_host = ttk.Frame(
+            self.live_qualification_text_row,
+            width=92,
+            height=135,
+        )
+        self.live_qualification_generate_host.pack(side=LEFT, padx=(8, 0))
+        self.live_qualification_generate_host.pack_propagate(False)
+        self.live_document_execute_button = ttk.Button(
+            self.live_qualification_generate_host,
+            text="Gerar\ndocumento",
+            style="Execute.TButton",
+            command=self.generate_occurrence_document,
+        )
+        self.live_document_execute_button.pack(anchor="center", expand=True)
 
         self.live_qualification_actions = ttk.Frame(
-            self.live_qualification_row,
-            height=78,
+            self.live_qualification_stack,
+            width=346,
+            height=31,
         )
-        self.live_qualification_actions.pack(fill=X, pady=(4, 4))
+        self.live_qualification_actions.pack(anchor="w", pady=(4, 0))
         self.live_qualification_actions.pack_propagate(False)
         self.live_qualification_recover_button = ttk.Button(
             self.live_qualification_actions,
@@ -7774,29 +8117,109 @@ try {
             "Colar",
             lambda: self.paste_live_editor("qualification"),
         )
-        self.live_qualification_button = ttk.Button(
-            self.live_qualification_actions,
-            text="Qualificação",
-            style="Action.TButton",
-            width=12,
-            command=self.request_live_qualification,
+        self.live_document_preview_panel = ttk.Frame(self.live_qualification_content)
+        self.live_document_preview_panel.grid(row=0, column=2, sticky="nsew")
+        self.live_document_preview_toolbar = ttk.Frame(self.live_document_preview_panel)
+        self.live_document_preview_toolbar.pack(anchor="w")
+        self.live_document_preview_toolbar.pack_propagate(False)
+        # Keep zoom independent from the toolbar. It is positioned below the
+        # player, like the action row below the text editors, so it cannot be
+        # covered when the preview is resized.
+        self.live_document_zoom_frame = ttk.Frame(self.live_document_preview_panel)
+        ttk.Label(
+            self.live_document_zoom_frame,
+            text="Zoom:",
+            style="Muted.TLabel",
+        ).pack(side=LEFT, padx=(0, 4))
+        self.live_document_zoom_combo = ttk.Combobox(
+            self.live_document_zoom_frame,
+            textvariable=self.document_preview_zoom_var,
+            values=("25%", "50%", "100%"),
+            width=6,
+            justify="center",
+            state="disabled",
         )
-        self.live_document_execute_button = ttk.Button(
-            self.live_qualification_actions,
-            text="Gerar documento",
-            style="Execute.TButton",
-            command=self.generate_occurrence_document,
+        self.live_document_zoom_combo.pack(side=LEFT)
+        self.live_document_zoom_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._refresh_embedded_document_preview(),
         )
+        ttk.Label(
+            self.live_document_preview_toolbar,
+            textvariable=self.document_preview_page_var,
+            style="DocumentPreview.TLabel",
+        ).pack(side=LEFT, padx=(0, 10))
+
+        # A área do preview mantém a proporção de uma página A4 em retrato.
+        self.live_document_preview_stage = ttk.Frame(
+            self.live_document_preview_panel,
+            width=1120,
+            height=520,
+        )
+        # The stage is positioned explicitly after the qualification editor is
+        # laid out.  Packing it here would let it consume the same bottom space
+        # needed by the document action buttons on shorter windows.
+        self.live_document_preview_stage.place(
+            x=0,
+            y=24,
+            width=1120,
+            height=520,
+        )
+        self.live_document_preview_stage.pack_propagate(False)
+        self.live_document_preview_viewport = ttk.Frame(
+            self.live_document_preview_stage,
+        )
+        self.live_document_preview_viewport.pack(fill=BOTH, expand=True)
+        self.live_document_preview_viewport.columnconfigure(0, weight=1)
+        self.live_document_preview_viewport.rowconfigure(0, weight=1)
+        self.live_document_preview_canvas = Canvas(
+            self.live_document_preview_viewport,
+            highlightthickness=0,
+            borderwidth=0,
+            background="#ffffff",
+        )
+        self.live_document_preview_yscroll = ttk.Scrollbar(
+            self.live_document_preview_viewport,
+            orient="vertical",
+            command=self.live_document_preview_canvas.yview,
+        )
+        self.live_document_preview_canvas.configure(
+            yscrollcommand=self._update_document_preview_scroll,
+        )
+        self.live_document_preview_canvas.grid(row=0, column=0, sticky="nsew")
+        self.live_document_preview_yscroll.grid(row=0, column=1, sticky="ns")
+        self.live_document_preview_canvas.bind(
+            "<Configure>",
+            lambda _event: self._position_embedded_document_preview(),
+            add="+",
+        )
+        self.live_document_preview_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.live_document_preview_canvas.yview_scroll(
+                -1 if event.delta > 0 else 1,
+                "units",
+            ),
+            add="+",
+        )
+        self._set_embedded_document_preview_message("")
 
         self.live_document_actions_frame = ttk.Frame(
-            self.live_qualification_actions
+            self.live_document_preview_panel,
+            width=148,
+            height=66,
         )
+        self.live_document_actions_frame.pack_propagate(False)
+        self.live_document_copy_progress = ttk.Progressbar(
+            self.live_document_preview_panel,
+            mode="indeterminate",
+        )
+        self.live_document_copy_progress.place_forget()
 
         def document_action_button(text, image, command):
             holder = ttk.Frame(
                 self.live_document_actions_frame,
-                width=78,
-                height=78,
+                width=66,
+                height=66,
             )
             holder.pack(side=LEFT, padx=(8, 0))
             holder.pack_propagate(False)
@@ -7816,32 +8239,34 @@ try {
             self.document_copy_icon,
             self.copy_generated_occurrence_document,
         )
-        self.live_document_preview_button = document_action_button(
-            "Visualizar",
-            self.document_preview_icon,
-            self.preview_generated_occurrence_document,
-        )
         self.live_document_save_button = document_action_button(
             "Salvar",
             self.document_save_icon,
             self.save_generated_occurrence_document,
         )
-        self.live_document_actions_frame.place_forget()
+        self.live_document_actions_frame.pack_forget()
         self.live_qualification_actions.bind(
             "<Configure>",
             lambda _event: self._position_live_document_controls(),
             add="+",
         )
+        self.live_qualification_row.bind(
+            "<Configure>",
+            self._fit_live_document_preview,
+            add="+",
+        )
+        self.live_document_preview_panel.bind(
+            "<Configure>",
+            lambda _event: self._position_live_document_preview(),
+            add="+",
+        )
+        self._set_live_document_preview_visible(False)
         self.root.after_idle(self._position_live_document_controls)
+        self.root.after_idle(self._fit_live_document_preview)
 
         self._draw_live_mic_button()
         self._draw_live_pause_button()
         self._refresh_live_grok_controls()
-        ttk.Label(
-            live_frame,
-            textvariable=self.live_assistant_status_var,
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(8, 0))
 
         assistant_frame = ttk.Frame(self.assistant_tab)
         assistant_frame.pack(fill=BOTH, expand=True)
@@ -8373,8 +8798,9 @@ try {
             return
         self.settings = load_settings()
         generation, settings = self._begin_assistant_request("qualification", "qualification")
+        self._begin_activity_step("assistant:qualification", "Qualificação requisitada")
         self.qualification_status_var.set("Organizando qualificação...")
-        self.status_var.set("Enviando texto para organizar a qualificação...")
+        self._set_activity_status("Qualificação requisitada", log=False)
         self.qualification_result_fields = {}
         self._set_qualification_output("")
         self.assistant_thread = threading.Thread(
@@ -8944,6 +9370,7 @@ try {
             history_button.place_forget()
             history_button.place(x=history_center, y=0, anchor="n")
         self._position_live_document_controls()
+        self._position_live_document_preview()
 
     def _position_live_document_controls(self):
         actions = getattr(self, "live_qualification_actions", None)
@@ -8953,63 +9380,382 @@ try {
         width = max(1, actions.winfo_width())
         center_y = actions.winfo_height() / 2
 
-        x = 0
+        self.live_qualification_recover_button.place(x=0, y=center_y, anchor="w")
+        right_x = width
         for button in (
-            self.live_qualification_recover_button,
-            self.live_qualification_clear_button,
-            self.live_qualification_copy_button,
             self.live_qualification_paste_button,
+            self.live_qualification_copy_button,
+            self.live_qualification_clear_button,
         ):
-            button.place(x=x, y=center_y, anchor="w")
-            x += button.winfo_reqwidth() + 4
+            right_x -= button.winfo_reqwidth()
+            button.place(x=right_x, y=center_y, anchor="w")
+            right_x -= 4
 
-        qualification_center = width * 0.25
-        qualification_area = getattr(self, "live_qualification_area", None)
-        if qualification_area and qualification_area.winfo_ismapped():
-            qualification_center = (
-                qualification_area.winfo_rootx()
-                + qualification_area.winfo_width() / 2
-                - actions.winfo_rootx()
+    def _fit_live_document_preview(self, _event=None):
+        """Use the lower workspace for a wide, vertically scrollable A4 preview."""
+        row = getattr(self, "live_qualification_row", None)
+        content = getattr(self, "live_qualification_content", None)
+        panel = getattr(self, "live_document_preview_panel", None)
+        stage = getattr(self, "live_document_preview_stage", None)
+        statement = getattr(self, "live_statement_button", None)
+        qualification_editor = getattr(self, "live_qualification_editor_host", None)
+        generate_host = getattr(self, "live_qualification_generate_host", None)
+        widgets = (row, content, panel, stage, statement, qualification_editor, generate_host)
+        if not all(widget and widget.winfo_exists() for widget in widgets):
+            return
+        content.update_idletasks()
+        available_height = row.winfo_height()
+        if available_height <= 1:
+            return
+        qualification_right = (
+            qualification_editor.winfo_rootx()
+            + qualification_editor.winfo_width()
+            - content.winfo_rootx()
+        )
+        generate_left = generate_host.winfo_rootx() - content.winfo_rootx()
+        generate_right = generate_left + generate_host.winfo_width()
+        qualification_gap = max(0, generate_left - qualification_right)
+        # Put the player so the Generate Document button has the same gap on
+        # both sides: qualification box -> button -> player.
+        target_left = max(0, round(generate_right + qualification_gap))
+        available_width = max(220, content.winfo_width() - target_left)
+        # The qualification stack is anchored at the bottom of its column. Its
+        # editor therefore must fit between the type checkboxes and its own
+        # action row. Use the same height for the player so both bottom edges
+        # remain exactly aligned, even when the window is restored or resized.
+        type_height = max(0, self.live_qualification_type_frame.winfo_height())
+        action_height = max(31, self.live_qualification_actions.winfo_height())
+        stage_height = max(180, min(520, available_height - type_height - action_height - 4))
+        # Keep the document preview comfortably sized without letting the
+        # player occupy all of the lower workspace.  The surrounding panel
+        # remains in place so the other occurrence controls do not shift.
+        stage_width = max(220, min(1120, round(available_width * 0.77 * 0.92)))
+        stage.configure(width=stage_width, height=stage_height)
+        self.live_document_preview_toolbar.configure(width=stage_width)
+        # Keep the qualification editor the same height as the document
+        # player, including when the window is resized or maximized.
+        self.live_qualification_editor_host.configure(height=stage_height)
+        self.live_qualification_text._editor_frame.configure(height=stage_height)
+        self.live_qualification_generate_host.configure(height=stage_height)
+        self.root.after_idle(self._position_live_document_preview)
+
+    def _position_live_document_preview(self):
+        """Align the preview's left edge with the right edge of Oitiva."""
+        content = getattr(self, "live_qualification_content", None)
+        panel = getattr(self, "live_document_preview_panel", None)
+        stage = getattr(self, "live_document_preview_stage", None)
+        statement = getattr(self, "live_statement_button", None)
+        qualification_editor = getattr(self, "live_qualification_editor_host", None)
+        generate_host = getattr(self, "live_qualification_generate_host", None)
+        if not content or not panel or not stage or not statement:
+            return
+        if not all(
+            widget.winfo_exists()
+            for widget in (
+                content,
+                panel,
+                stage,
+                statement,
+                qualification_editor,
+                generate_host,
             )
-        self.live_qualification_button.place(
-            x=qualification_center,
-            y=center_y,
-            anchor="center",
+        ):
+            return
+        if not getattr(self, "document_preview_visible", False):
+            if panel.winfo_manager() == "place":
+                panel.place_forget()
+            elif panel.winfo_manager() == "grid":
+                panel.grid_remove()
+            return
+        content.update_idletasks()
+        stage.update_idletasks()
+        qualification_right = (
+            qualification_editor.winfo_rootx()
+            + qualification_editor.winfo_width()
+            - content.winfo_rootx()
+        )
+        generate_left = generate_host.winfo_rootx() - content.winfo_rootx()
+        generate_right = generate_left + generate_host.winfo_width()
+        qualification_gap = max(0, generate_left - qualification_right)
+        target_left = max(0, round(generate_right + qualification_gap))
+        panel_width = max(300, content.winfo_width() - target_left)
+        content_height = max(1, content.winfo_height())
+        # The grid column begins too far right on restored windows.  Let the
+        # preview panel float over the unused lower workspace so its visible
+        # page starts exactly after the Oitiva button.
+        if panel.winfo_manager() == "grid":
+            panel.grid_remove()
+        panel.place(
+            x=target_left,
+            y=0,
+            width=panel_width,
+            height=content_height,
+        )
+        panel.update_idletasks()
+        qualification_top = max(
+            0,
+            qualification_editor.winfo_rooty() - panel.winfo_rooty(),
+        )
+        stage_height = max(1, qualification_editor.winfo_height())
+        # Do not read stage.winfo_width() here: while the panel is being moved
+        # Tk can report its transient pre-layout width as 1 px. Recompute the
+        # approved 23% reduction from the panel's real available width.
+        stage_width = max(220, min(1120, round(panel_width * 0.77 * 0.92)))
+        stage.place(
+            x=0,
+            y=qualification_top,
+            width=stage_width,
+            height=stage_height,
+        )
+        self.live_document_preview_toolbar.configure(width=stage_width)
+
+        zoom = self.live_document_zoom_frame
+        zoom.update_idletasks()
+        zoom_width = max(1, zoom.winfo_reqwidth())
+        zoom_height = max(1, zoom.winfo_reqheight())
+        zoom.place(
+            x=max(0, stage_width - zoom_width),
+            y=qualification_top + stage_height + 4,
+            width=zoom_width,
+            height=zoom_height,
         )
 
-        aligned_centers = []
-        for button in (
-            getattr(self, "live_statement_button", None),
-            getattr(self, "live_statement_button_2", None),
-        ):
-            if button and button.winfo_exists() and button.winfo_ismapped():
-                aligned_centers.append(
-                    button.winfo_rootx()
-                    + button.winfo_width() / 2
-                    - actions.winfo_rootx()
+        # Keep the document actions in the free strip between the player and
+        # the log. Explicit placement prevents the player from squeezing them
+        # to a few pixels when the window is not maximized.
+        actions = getattr(self, "live_document_actions_frame", None)
+        if actions and actions.winfo_ismapped():
+            actions.update_idletasks()
+            actions_width = max(148, actions.winfo_reqwidth())
+            actions_height = max(66, actions.winfo_reqheight())
+            action_x = stage_width + 8
+            if action_x + actions_width > panel_width:
+                action_x = max(0, panel_width - actions_width)
+            action_y = qualification_top + max(0, (stage_height - actions_height) // 2)
+            actions.place(
+                x=action_x,
+                y=action_y,
+                width=actions_width,
+                height=actions_height,
+            )
+            copy_progress = getattr(self, "live_document_copy_progress", None)
+            if copy_progress and copy_progress.winfo_ismapped():
+                progress_y = min(
+                    max(0, panel.winfo_height() - 8),
+                    action_y + actions_height + 4,
                 )
-        document_center = (
-            sum(aligned_centers) / len(aligned_centers)
-            if aligned_centers
-            else width / 2
-        )
-        execute_half = self.live_document_execute_button.winfo_reqwidth() / 2
-        document_center = min(
-            max(execute_half, document_center),
-            max(execute_half, width - execute_half),
-        )
-        self.live_document_execute_button.place(
-            x=document_center,
-            y=center_y,
-            anchor="center",
+                copy_progress.place(
+                    x=action_x,
+                    y=progress_y,
+                    width=actions_width,
+                    height=7,
+                )
+
+    def _set_document_copy_progress(self, active: bool) -> None:
+        progress = getattr(self, "live_document_copy_progress", None)
+        if progress is None or not progress.winfo_exists():
+            return
+        if active:
+            progress.place(x=0, y=0, width=1, height=7)
+            progress.start(80)
+            self.root.after_idle(self._position_live_document_preview)
+        else:
+            progress.stop()
+            progress.place_forget()
+
+    def _set_live_document_preview_visible(self, visible: bool) -> None:
+        """Show the document preview only after the user requests generation."""
+        self.document_preview_visible = bool(visible)
+        panel = getattr(self, "live_document_preview_panel", None)
+        if panel is None or not panel.winfo_exists():
+            return
+        if not self.document_preview_visible:
+            if panel.winfo_manager() == "place":
+                panel.place_forget()
+            elif panel.winfo_manager() == "grid":
+                panel.grid_remove()
+            return
+        self.root.after_idle(self._position_live_document_preview)
+
+    def _set_embedded_document_preview_message(self, message: str) -> None:
+        canvas = getattr(self, "live_document_preview_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        self.document_preview_photo = None
+        self.live_document_preview_image_id = None
+        self.live_document_preview_message_id = None
+        if message:
+            self.live_document_preview_message_id = canvas.create_text(
+                0,
+                0,
+                text=message,
+                fill="#536565",
+                width=max(120, canvas.winfo_width() - 28),
+                justify="center",
+                anchor="center",
+            )
+        canvas.configure(scrollregion=(0, 0, max(1, canvas.winfo_width()), max(1, canvas.winfo_height())))
+        canvas.xview_moveto(0)
+        canvas.yview_moveto(0)
+        self._position_embedded_document_preview()
+
+    def _position_embedded_document_preview(self) -> None:
+        canvas = getattr(self, "live_document_preview_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas_width = max(1, canvas.winfo_width())
+        canvas_height = max(1, canvas.winfo_height())
+        message_id = getattr(self, "live_document_preview_message_id", None)
+        if message_id:
+            canvas.coords(message_id, canvas_width / 2, canvas_height / 2)
+            canvas.itemconfigure(message_id, width=max(120, canvas_width - 28))
+        image_id = getattr(self, "live_document_preview_image_id", None)
+        photo = self.document_preview_photo
+        if image_id and photo:
+            image_width = photo.width()
+            image_height = photo.height()
+            side_inset = 2
+            top_inset = 2
+            bottom_inset = 2
+            x = max(canvas_width / 2, image_width / 2 + side_inset)
+            canvas.coords(image_id, x, top_inset)
+            canvas.configure(
+                # Include both the image's top offset and a bottom safety
+                # margin, otherwise the last rendered line can be clipped.
+                scrollregion=(
+                    0,
+                    0,
+                    max(canvas_width, image_width + side_inset * 2),
+                    image_height + top_inset + bottom_inset,
+                )
+            )
+
+    def _update_document_preview_scroll(self, first: str, last: str) -> None:
+        scrollbar = getattr(self, "live_document_preview_yscroll", None)
+        if scrollbar is not None and scrollbar.winfo_exists():
+            scrollbar.set(first, last)
+        canvas = getattr(self, "live_document_preview_canvas", None)
+        regions = getattr(self, "document_preview_page_regions", [])
+        if canvas is None or not canvas.winfo_exists() or not regions:
+            return
+        top = canvas.canvasy(0)
+        current_page = len(regions)
+        for index, (_start, end) in enumerate(regions):
+            if top < end:
+                current_page = index + 1
+                break
+        self.document_preview_page_var.set(
+            f"Página {current_page}/{len(regions)}"
         )
 
-        if self.live_document_actions_frame.winfo_manager() == "place":
-            self.live_document_actions_frame.place(
-                relx=1.0,
-                rely=0.5,
-                anchor="e",
+    def _document_preview_zoom_percent(self) -> int:
+        raw = self.document_preview_zoom_var.get().strip().rstrip("%")
+        try:
+            return max(25, min(200, int(raw)))
+        except ValueError:
+            return 100
+
+    def _refresh_embedded_document_preview(self) -> None:
+        document_path = self.last_generated_document_path
+        if document_path and document_path.exists():
+            self._start_embedded_document_preview(document_path)
+
+    def _start_embedded_document_preview(
+        self,
+        document_path: Path,
+        *,
+        open_after: bool = False,
+    ) -> None:
+        self.document_preview_generation += 1
+        generation = self.document_preview_generation
+        zoom = self._document_preview_zoom_percent()
+        dpi = _window_physical_dpi(self.root)
+        self.document_preview_page_regions = []
+        self.live_document_zoom_combo.configure(state="disabled")
+        self.document_preview_page_var.set("Preparando prévia...")
+        self._set_embedded_document_preview_message("Preparando visualização do documento...")
+        threading.Thread(
+            target=self._embedded_document_preview_worker,
+            args=(generation, document_path, zoom, dpi, open_after),
+            daemon=True,
+        ).start()
+
+    def _embedded_document_preview_worker(
+        self,
+        generation: int,
+        document_path: Path,
+        zoom: int,
+        dpi: int,
+        open_after: bool,
+    ) -> None:
+        preview_started = time.perf_counter()
+        try:
+            preview_path = document_path.with_name(f"{document_path.stem}_visualizacao.pdf")
+            if (
+                not preview_path.exists()
+                or preview_path.stat().st_mtime_ns < document_path.stat().st_mtime_ns
+            ):
+                export_docx_to_pdf_with_word(document_path, preview_path)
+            image_path = document_path.with_name(
+                f"{document_path.stem}_visualizacao_{zoom}.png"
             )
+            pages, page_regions = render_pdf_preview(preview_path, image_path, zoom, dpi)
+            self._queue(
+                "document_preview_render_ready",
+                generation,
+                preview_path,
+                image_path,
+                pages,
+                page_regions,
+                open_after,
+                time.perf_counter() - preview_started,
+            )
+        except Exception as exc:
+            self._queue(
+                "document_preview_render_error",
+                generation,
+                str(exc),
+                open_after,
+                time.perf_counter() - preview_started,
+            )
+
+    def _show_embedded_document_preview(
+        self,
+        image_path: Path,
+        pages: int,
+        page_regions: list[tuple[int, int]],
+    ) -> None:
+        with Image.open(image_path) as source:
+            source_image = source.convert("RGB")
+        canvas = self.live_document_preview_canvas
+        canvas.update_idletasks()
+        # The rendered page is already calibrated for the selected zoom.
+        # Never resize it again in the UI: resizing a raster after rendering
+        # changes the physical scale and makes text blurry at 100%.
+        display_scale = 1.0
+        preview_image = source_image
+        self.document_preview_photo = ImageTk.PhotoImage(preview_image)
+        preview_image.close()
+        canvas.delete("all")
+        self.document_preview_page_regions = [
+            (
+                round(start * display_scale),
+                round(end * display_scale),
+            )
+            for start, end in page_regions
+        ]
+        self.live_document_preview_message_id = None
+        self.live_document_preview_image_id = canvas.create_image(
+            0,
+            0,
+            image=self.document_preview_photo,
+            anchor="n",
+        )
+        self.document_preview_page_var.set(f"Página 1/{pages}")
+        self._position_embedded_document_preview()
+        canvas.xview_moveto(0)
+        canvas.yview_moveto(0)
 
     def _position_live_parts_button(self):
         self._position_live_parts_buttons()
@@ -9022,11 +9768,13 @@ try {
         material = self._live_editor_value("history")
         if not material or self.assistant_busy or self.live_state != "idle":
             return
-        self.status_var.set("Solicitada extração de partes a partir do histórico atual.")
+        self._begin_activity_step("assistant:names", "Partes requisitadas")
+        self._set_activity_status("Partes requisitadas", log=False)
         generation, settings = self._begin_assistant_request("history", "live")
         self._set_live_assistant_names([])
         self.live_assistant_status_var.set("Identificando partes no histórico atual...")
         def worker():
+            started = time.monotonic()
             try:
                 if settings["parts_extraction"] == "name_database":
                     names = extract_names_from_database(material, load_name_database())
@@ -9034,11 +9782,28 @@ try {
                     names = extract_uppercase_names(material)
                 else:
                     names = parse_assistant_names(
-                        self.assistant_client.post(selected_parts_model(settings), DEFAULT_PARTS_PROMPT, material)
+                        self.assistant_client.post(
+                            selected_parts_model(settings),
+                            DEFAULT_PARTS_PROMPT,
+                            parts_user_prompt_from_history(material),
+                        )
                     )
-                self._queue("assistant_names_result", generation, "live", names, 0.0)
+                self._queue(
+                    "assistant_names_result",
+                    generation,
+                    "live",
+                    names,
+                    time.monotonic() - started,
+                )
             except Exception as exc:
-                self._queue("assistant_task_error", generation, "live", "names", str(exc), 0.0)
+                self._queue(
+                    "assistant_task_error",
+                    generation,
+                    "live",
+                    "names",
+                    str(exc),
+                    time.monotonic() - started,
+                )
             finally:
                 self._queue("assistant_finished", generation)
         self.assistant_thread = threading.Thread(target=worker, daemon=True)
@@ -9145,7 +9910,7 @@ try {
             "live_history_button_2",
             "live_statement_button",
             "live_statement_button_2",
-            "live_qualification_button",
+            "live_document_execute_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -9186,8 +9951,6 @@ try {
         if not message:
             return
         self._assistant_target_status(target).set(message)
-        if target == "live":
-            self.status_var.set(message)
 
     def _assistant_target_part(self, target: str) -> str:
         if target == "live":
@@ -9231,11 +9994,9 @@ try {
         self._request_history_for_target("assistant")
 
     def request_live_history(self):
-        self.status_var.set("Solicitada geração de histórico e extração de partes.")
         self._request_history_for_target("live")
 
     def request_live_history_2(self):
-        self.status_var.set("Solicitada geração de histórico a partir da transcrição do modelo 2.")
         self._request_history_for_target("live", self._live_editor_value("transcript2"))
 
     def _request_history_for_target(self, target: str, material_override: str | None = None):
@@ -9263,17 +10024,14 @@ try {
             statement=None,
         )
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
-            labels = self.assistant_multi_model_labels
             self.assistant_multi_started_at[("history", 1)] = request_started
             self.assistant_multi_started_at[("history", 2)] = request_started
-            status_message = (
-                f"Redigindo histórico - {labels[0]}\n"
-                f"Redigindo histórico - {labels[1]}"
-            )
-            status_var.set(status_message)
-            self._append_activity_log(status_message)
+            self._begin_activity_step("assistant:history:1", "Histórico 1 requisitado")
+            self._begin_activity_step("assistant:history:2", "Histórico 2 requisitado")
         else:
-            status_var.set("Gerando histórico e identificando partes...")
+            self._begin_activity_step("assistant:history", "Histórico requisitado")
+        self._begin_activity_step("assistant:names", "Partes requisitadas")
+        self._set_activity_status("Histórico e Partes requisitados", log=False)
         self._render_assistant_progress()
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_thread = threading.Thread(
@@ -9297,13 +10055,24 @@ try {
         model_config = selected_text_model(settings)
         parts_model_config = selected_parts_model(settings)
         extraction_method = settings["parts_extraction"]
+        history_request = history_user_prompt(material)
         try:
             if extraction_method == "ai":
                 started = {"history": time.monotonic(), "names": time.monotonic()}
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     futures = {
-                        executor.submit(client.post, model_config, DEFAULT_HISTORY_PROMPT, material): "history",
-                        executor.submit(client.post, parts_model_config, DEFAULT_PARTS_PROMPT, material): "names",
+                        executor.submit(
+                            client.post,
+                            model_config,
+                            DEFAULT_HISTORY_SYSTEM_PROMPT,
+                            history_request,
+                        ): "history",
+                        executor.submit(
+                            client.post,
+                            parts_model_config,
+                            DEFAULT_PARTS_PROMPT,
+                            parts_user_prompt_from_transcription(material),
+                        ): "names",
                     }
                     for future in concurrent.futures.as_completed(futures):
                         task = futures[future]
@@ -9325,7 +10094,11 @@ try {
             else:
                 history_started = time.monotonic()
                 try:
-                    history = client.post(model_config, DEFAULT_HISTORY_PROMPT, material)
+                    history = client.post(
+                        model_config,
+                        DEFAULT_HISTORY_SYSTEM_PROMPT,
+                        history_request,
+                    )
                     history_elapsed = time.monotonic() - history_started
                     self._queue("assistant_text_result", generation, target, "history", history, history_elapsed)
                 except Cancelled:
@@ -9361,11 +10134,17 @@ try {
         ]
         extraction_method = settings["parts_extraction"]
         primary_history = ""
+        history_request = history_user_prompt(material)
         try:
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 future_map = {
-                    executor.submit(client.post, model, DEFAULT_HISTORY_PROMPT, material): index
+                    executor.submit(
+                        client.post,
+                        model,
+                        DEFAULT_HISTORY_SYSTEM_PROMPT,
+                        history_request,
+                    ): index
                     for index, model in enumerate(models, start=1)
                 }
                 for future in concurrent.futures.as_completed(future_map):
@@ -9383,12 +10162,23 @@ try {
                             time.monotonic() - started,
                         )
                     except Exception as exc:
-                        self._queue("assistant_multi_error", generation, "history", index, str(exc))
+                        self._queue(
+                            "assistant_multi_error",
+                            generation,
+                            "history",
+                            index,
+                            str(exc),
+                            time.monotonic() - started,
+                        )
             if primary_history:
                 names_started = time.monotonic()
                 if extraction_method == "ai":
                     names = parse_assistant_names(
-                        client.post(selected_parts_model(settings), DEFAULT_PARTS_PROMPT, material)
+                        client.post(
+                            selected_parts_model(settings),
+                            DEFAULT_PARTS_PROMPT,
+                            parts_user_prompt_from_transcription(material),
+                        )
                     )
                 elif extraction_method == "name_database":
                     names = extract_names_from_database(primary_history, load_name_database())
@@ -9408,11 +10198,9 @@ try {
         self._request_statement_for_target("assistant")
 
     def request_live_statement(self):
-        self.status_var.set("Solicitada geração de oitiva.")
         self._request_statement_for_target("live", "history", self.live_assistant_part_var.get())
 
     def request_live_statement_2(self):
-        self.status_var.set("Solicitada geração de oitiva a partir do histórico 2.")
         self._request_statement_for_target("live", "history2", self.live_assistant_part_var_2.get())
 
     def _request_statement_for_target(
@@ -9451,17 +10239,13 @@ try {
             statement=request_started,
         )
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
-            labels = self.assistant_multi_model_labels
             self.assistant_multi_started_at[("statement", 1)] = request_started
             self.assistant_multi_started_at[("statement", 2)] = request_started
-            status_message = (
-                f"Redigindo oitiva - {labels[0]}\n"
-                f"Redigindo oitiva - {labels[1]}"
-            )
-            status_var.set(status_message)
-            self._append_activity_log(status_message)
+            self._begin_activity_step("assistant:statement:1", "Oitiva 1 requisitada")
+            self._begin_activity_step("assistant:statement:2", "Oitiva 2 requisitada")
         else:
-            status_var.set("Redigindo oitiva...")
+            self._begin_activity_step("assistant:statement", "Oitiva requisitada")
+        self._set_activity_status("Oitiva requisitada", log=False)
         self._render_assistant_progress()
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_thread = threading.Thread(
@@ -9556,13 +10340,21 @@ try {
                             time.monotonic() - started,
                         )
                     except Exception as exc:
-                        self._queue("assistant_multi_error", generation, "statement", index, str(exc))
+                        self._queue(
+                            "assistant_multi_error",
+                            generation,
+                            "statement",
+                            index,
+                            str(exc),
+                            time.monotonic() - started,
+                        )
         finally:
             self._queue("assistant_finished", generation)
 
     def cancel_assistant_request(self):
         if not self.assistant_busy:
             return
+        self.pending_occurrence_document_generation = False
         self.assistant_generation += 1
         self.assistant_cancel_event.set()
         if self.assistant_client:
@@ -10001,13 +10793,15 @@ try {
             label, value = first_qualification_item.split(":", 1)
             if label.strip().casefold() in ("nome", "nome completo"):
                 first_qualification_item = value.strip()
-        year_words = portuguese_number_words(now.year)
-        year_words = year_words[:1].upper() + year_words[1:]
+        # Os marcadores usados nos modelos devem entrar em minúsculas,
+        # inclusive quando aparecem no início da frase.
+        year_words = portuguese_number_words(now.year).lower()
+        month_words = PORTUGUESE_MONTHS[now.month - 1].lower()
         replacements = {
             "dia_do_mes_atual_em_numero": str(now.day),
-            "mês_atual_por_extenso": PORTUGUESE_MONTHS[now.month - 1],
+            "mês_atual_por_extenso": month_words,
             # Os modelos originais usam este mesmo marcador com "ę".
-            "męs_atual_por_extenso": PORTUGUESE_MONTHS[now.month - 1],
+            "męs_atual_por_extenso": month_words,
             "ano_atual_por_extenso": year_words,
             "cidade": str(self.settings.get("police_city") or "").strip(),
             "delegacia": str(self.settings.get("police_station") or "").strip(),
@@ -10040,9 +10834,25 @@ try {
                 parent=self.root,
             )
             return
+        self._set_live_document_preview_visible(True)
+        self._set_embedded_document_preview_message(
+            "Aguardando a geração do documento..."
+        )
+        self.request_live_qualification(generate_document=True)
+
+    def _generate_occurrence_document_from_current_text(self):
+        qualification = self._live_editor_value("qualification")
+        statement = self._live_editor_value("statement")
+        if not qualification or not statement:
+            self.status_var.set(
+                "Não consegui gerar o documento porque faltou a qualificação ou a oitiva."
+            )
+            return
         document_kind = (
             "declarations" if self.qualification_declarations_var.get() else "deposition"
         )
+        document_started = time.perf_counter()
+        self._begin_activity_step("document", "Documento requisitado")
         try:
             template_path = ensure_document_templates()[document_kind]
             output_dir = app_base_dir() / "temp" / "documentos"
@@ -10056,34 +10866,45 @@ try {
                 output_path,
                 self._occurrence_document_replacements(),
             )
+            document_elapsed = time.perf_counter() - document_started
+            self._finish_activity_step("document", document_elapsed)
             self.last_generated_document_path = output_path
             self.last_generated_document_preview_path = None
             for button in (
                 self.live_document_copy_button,
-                self.live_document_preview_button,
                 self.live_document_save_button,
             ):
                 button.configure(state="normal")
-            self.live_document_actions_frame.place(
-                relx=1.0,
-                rely=0.5,
-                anchor="e",
-            )
-            self.root.after_idle(self._position_live_document_controls)
-            self.status_var.set(
-                f"Documento gerado: {output_path.name} ({marker_count} campos preenchidos)."
-            )
-            self._append_activity_log(f"Documento pronto para copiar: {output_path}")
+            if not self.live_document_actions_frame.winfo_ismapped():
+                self.live_document_actions_frame.place(
+                    x=0,
+                    y=0,
+                    width=148,
+                    height=66,
+                )
+            self.root.after_idle(self._position_live_document_preview)
+            self._begin_activity_step("preview", "Preview requisitado")
+            self._start_embedded_document_preview(output_path)
+            self._set_activity_status(f"Documento requisitado ({document_elapsed:.1f}s)", log=False)
         except Exception as exc:
+            document_elapsed = time.perf_counter() - document_started
+            self._finish_activity_step("document", document_elapsed, error=str(exc))
             self.last_generated_document_path = None
             self.last_generated_document_preview_path = None
+            self.last_generated_document_preview_image_path = None
+            self.document_preview_generation += 1
             self.live_document_actions_frame.place_forget()
+            self.live_document_zoom_combo.configure(state="disabled")
+            self.document_preview_page_var.set("Não foi possível gerar a prévia.")
+            self._set_embedded_document_preview_message(
+                "Não foi possível gerar o documento."
+            )
             messagebox.showerror(
                 "Gerar documento",
                 f"Não consegui gerar o documento.\n\nDetalhe: {exc}",
                 parent=self.root,
             )
-            self.status_var.set(f"Falha ao gerar documento: {exc}")
+            self._set_activity_status(f"Documento ERRO ({document_elapsed:.1f}s): {exc}", log=False)
 
     def copy_generated_occurrence_document(self):
         document_path = self.last_generated_document_path
@@ -10094,19 +10915,28 @@ try {
                 parent=self.root,
             )
             return
+        copy_started = time.perf_counter()
+        self._begin_activity_step("document:copy", "Cópia requisitada")
         self.live_document_copy_button.configure(state="disabled")
-        self.status_var.set("Copiando o documento com a formatação do Word...")
+        self._set_document_copy_progress(True)
+        self._set_activity_status("Copiando documento", log=False)
         threading.Thread(
             target=self._copy_generated_occurrence_document_worker,
-            args=(document_path,),
+            args=(document_path, copy_started),
             daemon=True,
         ).start()
 
-    def _copy_generated_occurrence_document_worker(self, document_path: Path):
+    def _copy_generated_occurrence_document_worker(
+        self,
+        document_path: Path,
+        copy_started: float,
+    ):
+        copy_elapsed = lambda: time.perf_counter() - copy_started
         if os.name != "nt":
             self._queue(
                 "document_clipboard_error",
                 "A cópia formatada deste documento está disponível no Windows.",
+                copy_elapsed(),
             )
             return
         script = r"""
@@ -10179,36 +11009,9 @@ try {
                     html_path.read_bytes(),
                     text_path.read_text(encoding="utf-8"),
                 )
-            self._queue("document_clipboard_ready", document_path)
+            self._queue("document_clipboard_ready", document_path, copy_elapsed())
         except Exception as exc:
-            self._queue("document_clipboard_error", str(exc))
-
-    def preview_generated_occurrence_document(self):
-        document_path = self.last_generated_document_path
-        if not document_path or not document_path.exists():
-            messagebox.showwarning(
-                "Visualizar documento",
-                "Gere o documento antes de visualizar.",
-                parent=self.root,
-            )
-            return
-        self.live_document_preview_button.configure(state="disabled")
-        self.status_var.set("Preparando a visualização fiel do documento...")
-        threading.Thread(
-            target=self._preview_generated_occurrence_document_worker,
-            args=(document_path,),
-            daemon=True,
-        ).start()
-
-    def _preview_generated_occurrence_document_worker(self, document_path: Path):
-        try:
-            preview_path = document_path.with_name(
-                f"{document_path.stem}_visualizacao.pdf"
-            )
-            export_docx_to_pdf_with_word(document_path, preview_path)
-            self._queue("document_preview_ready", preview_path)
-        except Exception as exc:
-            self._queue("document_preview_error", str(exc))
+            self._queue("document_clipboard_error", str(exc), copy_elapsed())
 
     def save_generated_occurrence_document(self):
         document_path = self.last_generated_document_path
@@ -10253,11 +11056,13 @@ try {
                 parent=self.root,
             )
             return
+        save_started = time.perf_counter()
+        self._begin_activity_step("document:save", "Salvamento requisitado")
         self.live_document_save_button.configure(state="disabled")
-        self.status_var.set(f"Salvando documento em {destination_path.name}...")
+        self._set_activity_status("Salvando documento", log=False)
         threading.Thread(
             target=self._save_generated_occurrence_document_worker,
-            args=(document_path, destination_path),
+            args=(document_path, destination_path, save_started),
             daemon=True,
         ).start()
 
@@ -10265,6 +11070,7 @@ try {
         self,
         document_path: Path,
         destination_path: Path,
+        save_started: float,
     ):
         try:
             destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -10275,11 +11081,19 @@ try {
                     shutil.copy2(temporary_pdf, destination_path)
             elif document_path.resolve() != destination_path.resolve():
                 shutil.copy2(document_path, destination_path)
-            self._queue("document_save_ready", destination_path)
+            self._queue(
+                "document_save_ready",
+                destination_path,
+                time.perf_counter() - save_started,
+            )
         except Exception as exc:
-            self._queue("document_save_error", str(exc))
+            self._queue(
+                "document_save_error",
+                str(exc),
+                time.perf_counter() - save_started,
+            )
 
-    def request_live_qualification(self):
+    def request_live_qualification(self, *, generate_document: bool = False):
         raw_text = self._live_editor_value("qualification")
         if not raw_text:
             messagebox.showwarning(
@@ -10292,9 +11106,11 @@ try {
             return
         if self.live_state != "idle" or self.assistant_busy or self.running:
             return
+        self.pending_occurrence_document_generation = bool(generate_document)
         generation, settings = self._begin_assistant_request("qualification", "live")
+        self._begin_activity_step("assistant:qualification", "Qualificação requisitada")
         self.live_assistant_status_var.set("Organizando qualificação...")
-        self.status_var.set("Enviando qualificação para organizar...")
+        self._set_activity_status("Qualificação requisitada", log=False)
         self.assistant_thread = threading.Thread(
             target=self._live_qualification_worker,
             args=(generation, settings, raw_text),
@@ -14482,10 +15298,27 @@ try {
                         self.assistant_task_elapsed[task] = elapsed
                         status_var = self._assistant_target_status(target)
                         if task == "statement":
-                            status_var.set("Oitiva concluída.")
+                            status_var.set(f"Oitiva requisitada ({float(elapsed):.1f}s)")
+                            self._finish_activity_step(
+                                "assistant:statement",
+                                float(elapsed),
+                            )
                             if target == "live":
-                                self.status_var.set("Oitiva gerada.")
+                                self._set_activity_status(
+                                    f"Oitiva requisitada ({float(elapsed):.1f}s)",
+                                    log=False,
+                                )
                         else:
+                            status_var.set(f"Histórico requisitado ({float(elapsed):.1f}s)")
+                            self._finish_activity_step(
+                                "assistant:history",
+                                float(elapsed),
+                            )
+                            if target == "live":
+                                self._set_activity_status(
+                                    f"Histórico requisitado ({float(elapsed):.1f}s)",
+                                    log=False,
+                                )
                             self._refresh_history_completion_status(target)
                         self._render_assistant_progress()
                 elif kind == "qualification_result":
@@ -14499,23 +15332,39 @@ try {
                             )
                             self.qualification_result_fields = fields
                             self._refresh_qualification_output_from_fields()
+                            self._finish_activity_step("assistant:qualification", float(elapsed))
                             self.qualification_status_var.set(
                                 f"Qualificação concluída em {float(elapsed):.1f}s."
                             )
-                            self.status_var.set("Qualificação organizada.")
+                            self._set_activity_status(
+                                f"Qualificação requisitada ({float(elapsed):.1f}s)",
+                                log=False,
+                            )
                         except Exception as exc:
+                            self._finish_activity_step(
+                                "assistant:qualification",
+                                float(elapsed),
+                                error=str(exc),
+                            )
                             self.qualification_status_var.set(f"Resposta inválida: {exc}")
-                            self.status_var.set(f"Não consegui organizar a qualificação: {exc}")
+                            self._set_activity_status(f"Qualificação ERRO ({float(elapsed):.1f}s): {exc}", log=False)
                 elif kind == "qualification_error":
                     generation, detail, elapsed = message[1:]
                     if generation == self.assistant_generation:
+                        self._finish_activity_step(
+                            "assistant:qualification",
+                            float(elapsed),
+                            error=detail,
+                        )
                         self.qualification_status_var.set(
                             f"Falha após {float(elapsed):.1f}s: {detail}"
                         )
-                        self.status_var.set(f"Não consegui organizar a qualificação: {detail}")
+                        self._set_activity_status(f"Qualificação ERRO ({float(elapsed):.1f}s): {detail}", log=False)
                 elif kind == "live_qualification_result":
                     generation, raw_result, elapsed = message[1:]
                     if generation == self.assistant_generation:
+                        generate_document = self.pending_occurrence_document_generation
+                        self.pending_occurrence_document_generation = False
                         try:
                             formatted = format_occurrence_qualification(
                                 raw_result,
@@ -14525,76 +15374,122 @@ try {
                                 raise ValueError("a IA não devolveu informações utilizáveis")
                             self.last_live_qualification_text = formatted
                             self._set_live_editor("qualification", formatted)
+                            self._finish_activity_step("assistant:qualification", float(elapsed))
                             self.live_assistant_status_var.set(
                                 f"Qualificação concluída em {float(elapsed):.1f}s."
                             )
-                            self.status_var.set("Qualificação gerada.")
+                            self._set_activity_status(
+                                f"Qualificação requisitada ({float(elapsed):.1f}s)",
+                                log=False,
+                            )
+                            if generate_document:
+                                self.root.after_idle(
+                                    self._generate_occurrence_document_from_current_text
+                                )
                         except Exception as exc:
+                            self._finish_activity_step(
+                                "assistant:qualification",
+                                float(elapsed),
+                                error=str(exc),
+                            )
                             self.live_assistant_status_var.set(
                                 f"Resposta inválida após {float(elapsed):.1f}s: {exc}"
                             )
-                            self.status_var.set(f"Não consegui organizar a qualificação: {exc}")
+                            self._set_activity_status(f"Qualificação ERRO ({float(elapsed):.1f}s): {exc}", log=False)
                 elif kind == "live_qualification_error":
                     generation, detail, elapsed = message[1:]
                     if generation == self.assistant_generation:
+                        self._finish_activity_step(
+                            "assistant:qualification",
+                            float(elapsed),
+                            error=detail,
+                        )
+                        self.pending_occurrence_document_generation = False
                         self.live_assistant_status_var.set(
                             f"Falha após {float(elapsed):.1f}s: {detail}"
                         )
-                        self.status_var.set(f"Não consegui organizar a qualificação: {detail}")
+                        self._set_activity_status(f"Qualificação ERRO ({float(elapsed):.1f}s): {detail}", log=False)
                 elif kind == "document_clipboard_ready":
+                    _, elapsed = message[1:]
+                    self._set_document_copy_progress(False)
                     self.live_document_copy_button.configure(state="normal")
-                    self.status_var.set(
-                        "Documento formatado copiado. Ele já pode ser colado no Word ou no editor do site."
-                    )
+                    self._finish_activity_step("document:copy", float(elapsed))
+                    self._set_activity_status(f"Cópia requisitada ({float(elapsed):.1f}s)", log=False)
                 elif kind == "document_clipboard_error":
+                    detail, elapsed = message[1:]
+                    self._set_document_copy_progress(False)
                     self.live_document_copy_button.configure(state="normal")
-                    detail = str(message[1])
-                    self.status_var.set(f"Não consegui copiar o documento: {detail}")
+                    self._finish_activity_step("document:copy", float(elapsed), error=detail)
+                    self._set_activity_status(
+                        f"Cópia ERRO ({float(elapsed):.1f}s): {detail}",
+                        log=False,
+                    )
                     messagebox.showerror(
                         "Copiar documento",
                         "Não consegui copiar mantendo a formatação do Word.\n\n"
                         f"Detalhe: {detail}",
                         parent=self.root,
                     )
-                elif kind == "document_preview_ready":
-                    preview_path = Path(message[1])
-                    self.last_generated_document_preview_path = preview_path
-                    self.live_document_preview_button.configure(state="normal")
-                    try:
-                        preview_url = preview_path.resolve().as_uri() + "#zoom=100"
-                        opened = webbrowser.open_new(preview_url)
-                        if not opened and os.name == "nt":
-                            os.startfile(preview_path)
-                        self.status_var.set(
-                            "Visualização aberta em PDF com zoom de 100%."
+                elif kind == "document_preview_render_ready":
+                    generation, preview_path, image_path, pages, page_regions, open_after, elapsed = message[1:]
+                    if generation == self.document_preview_generation:
+                        preview_path = Path(preview_path)
+                        image_path = Path(image_path)
+                        self.last_generated_document_preview_path = preview_path
+                        self.last_generated_document_preview_image_path = image_path
+                        self.live_document_zoom_combo.configure(state="readonly")
+                        self._show_embedded_document_preview(
+                            image_path,
+                            int(pages),
+                            list(page_regions),
                         )
-                    except Exception as exc:
-                        detail = str(exc)
-                        self.status_var.set(
-                            f"Não consegui abrir a visualização: {detail}"
+                        self._finish_activity_step("preview", float(elapsed))
+                        self._set_activity_status(f"Preview requisitado ({float(elapsed):.1f}s)", log=False)
+                        if open_after:
+                            try:
+                                preview_url = preview_path.resolve().as_uri() + "#zoom=100"
+                                opened = webbrowser.open_new(preview_url)
+                                if not opened and os.name == "nt":
+                                    os.startfile(preview_path)
+                            except Exception as exc:
+                                messagebox.showerror(
+                                    "Visualizar documento",
+                                    f"Não consegui abrir a visualização.\n\nDetalhe: {exc}",
+                                    parent=self.root,
+                                )
+                elif kind == "document_preview_render_error":
+                    generation, detail, open_after, elapsed = message[1:]
+                    if generation == self.document_preview_generation:
+                        self._finish_activity_step("preview", float(elapsed), error=detail)
+                        self.live_document_zoom_combo.configure(state="disabled")
+                        self.document_preview_page_var.set("Prévia indisponível.")
+                        self._set_embedded_document_preview_message(
+                            "Não foi possível carregar a visualização."
                         )
-                        messagebox.showerror(
-                            "Visualizar documento",
-                            f"Não consegui abrir a visualização.\n\nDetalhe: {detail}",
-                            parent=self.root,
+                        self._set_activity_status(
+                            f"Preview ERRO ({float(elapsed):.1f}s): {detail}",
+                            log=False,
                         )
-                elif kind == "document_preview_error":
-                    self.live_document_preview_button.configure(state="normal")
-                    detail = str(message[1])
-                    self.status_var.set(f"Não consegui gerar a visualização: {detail}")
-                    messagebox.showerror(
-                        "Visualizar documento",
-                        f"Não consegui gerar a visualização.\n\nDetalhe: {detail}",
-                        parent=self.root,
-                    )
+                        if open_after:
+                            messagebox.showerror(
+                                "Visualizar documento",
+                                f"Não consegui gerar a visualização.\n\nDetalhe: {detail}",
+                                parent=self.root,
+                            )
                 elif kind == "document_save_ready":
+                    destination_path, elapsed = message[1:]
                     self.live_document_save_button.configure(state="normal")
-                    destination_path = Path(message[1])
-                    self.status_var.set(f"Documento salvo em: {destination_path}")
+                    destination_path = Path(destination_path)
+                    self._finish_activity_step("document:save", float(elapsed))
+                    self._set_activity_status(f"Salvamento requisitado ({float(elapsed):.1f}s)", log=False)
                 elif kind == "document_save_error":
+                    detail, elapsed = message[1:]
                     self.live_document_save_button.configure(state="normal")
-                    detail = str(message[1])
-                    self.status_var.set(f"Não consegui salvar o documento: {detail}")
+                    self._finish_activity_step("document:save", float(elapsed), error=detail)
+                    self._set_activity_status(
+                        f"Salvar ERRO ({float(elapsed):.1f}s): {detail}",
+                        log=False,
+                    )
                     messagebox.showerror(
                         "Salvar documento",
                         f"Não consegui salvar o documento.\n\nDetalhe: {detail}",
@@ -14611,17 +15506,29 @@ try {
                         if (task, 1) in self.assistant_multi_results and (task, 2) in self.assistant_multi_results:
                             self.assistant_task_states[task] = "done"
                         self.assistant_task_elapsed[task] = elapsed
-                        self.status_var.set(
-                            f"{'Histórico' if task == 'history' else 'Oitiva'} do modelo {index} concluído."
+                        task_label = "Histórico" if task == "history" else "Oitiva"
+                        self._finish_activity_step(
+                            f"assistant:{task}:{index}",
+                            float(elapsed),
+                        )
+                        self._set_activity_status(
+                            f"{task_label} {index} requisitado ({float(elapsed):.1f}s)",
+                            log=False,
                         )
                         self._render_assistant_progress()
                 elif kind == "assistant_multi_error":
-                    generation, task, index, detail = message[1:]
+                    generation, task, index, detail, elapsed = message[1:]
                     if generation == self.assistant_generation:
                         self.assistant_multi_errors[(task, index)] = detail
-                        self.status_var.set(
-                            f"Erro no modelo {index} ao gerar "
-                            f"{'histórico' if task == 'history' else 'oitiva'}: {detail}"
+                        task_label = "Histórico" if task == "history" else "Oitiva"
+                        self._finish_activity_step(
+                            f"assistant:{task}:{index}",
+                            float(elapsed),
+                            error=detail,
+                        )
+                        self._set_activity_status(
+                            f"{task_label} {index} ERRO ({float(elapsed):.1f}s): {detail}",
+                            log=False,
                         )
                 elif kind == "assistant_names_result":
                     generation, target, names, elapsed = message[1:]
@@ -14629,6 +15536,12 @@ try {
                         self._set_assistant_target_names(target, names)
                         self.assistant_task_states["names"] = "done"
                         self.assistant_task_elapsed["names"] = elapsed
+                        self._finish_activity_step("assistant:names", float(elapsed))
+                        if target == "live":
+                            self._set_activity_status(
+                                f"Partes requisitadas ({float(elapsed):.1f}s)",
+                                log=False,
+                            )
                         self._refresh_history_completion_status(target)
                         self._render_assistant_progress()
                 elif kind == "assistant_task_error":
@@ -14642,11 +15555,18 @@ try {
                             "names": "identificar as partes",
                             "statement": "redigir a oitiva",
                         }
+                        self._finish_activity_step(
+                            "assistant:names" if task == "names" else f"assistant:{task}",
+                            float(elapsed),
+                            error=detail,
+                        )
                         status_var.set(f"Não consegui {labels[task]}: {detail}")
                         self._render_assistant_progress()
                 elif kind == "assistant_finished":
                     generation = message[1]
                     if generation == self.assistant_generation:
+                        if self.assistant_phase == "qualification":
+                            self.pending_occurrence_document_generation = False
                         self.assistant_busy = False
                         self.assistant_client = None
                         self._set_assistant_buttons_state("normal")
