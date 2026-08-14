@@ -19,3 +19,4 @@ settings.json
 
 # lock de update do dist
 .dist.sig-update.lock
+release_run_004.log

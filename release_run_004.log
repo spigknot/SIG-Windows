@@ -1,9 +1,0 @@
-PASS: pacote full local preservado para GitHub: D:\Projetos\SIG Windows\release\generated\20260814_004\20260814_004_full.zip
-PASS: pacote incremental local validado: D:\Projetos\SIG Windows\release\generated\20260814_004\20260814_004.zip
-PASS: pacotes incompletos, traversal, g, _MEI e dist foram rejeitados
-PASS: processo ativo foi bloqueado sem modificar a instalação
-PASS: atualização onedir completa executou e iniciou o aplicativo
-PASS: falha de inicialização acionou rollback e restaurou a versão anterior
-PASS: build limpo e pacote validado: D:\Projetos\SIG Windows\release\generated\20260814_004\20260814_004.zip
-Manifesto rascunho: D:\Projetos\SIG Windows\release\generated\20260814_004\latest.draft.json
-A release ainda não é publicável: informe o ID do ZIP após o upload único ao Drive.
