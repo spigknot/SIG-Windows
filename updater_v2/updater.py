@@ -64,6 +64,7 @@ INCREMENTAL_FORBIDDEN_TOP_LEVEL = {
     "vad_worker.py",
     "vad_deps",
 }
+DIFF_REMOVED_FILE = "removidos.txt"
 MUTABLE_TOP_LEVEL_NAMES = {"temp", "cache", "logs"}
 ALLOWED_TOP_LEVEL_NAMES = {
     "sig.exe",
@@ -76,6 +77,7 @@ ALLOWED_TOP_LEVEL_NAMES = {
     "prompts",
     "modelos",
     "build-info.json",
+    "removidos.txt",
     "updater.log",
     # These directories are created by the running application and are not
     # part of an update package.
@@ -351,6 +353,23 @@ def _validate_entry_topology(entries: dict[str, bool]) -> None:
             raise UpdateError(f"entrada contraditória no ZIP: {name}")
 
 
+def _validate_removidos_entries(lines: list[str]) -> list[str]:
+    """Valida as linhas do removidos.txt com as mesmas regras de nomes do ZIP."""
+    normalized: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = _normalized_member_name(line)
+        top = name.split("/", 1)[0]
+        if top in INCREMENTAL_FORBIDDEN_TOP_LEVEL:
+            raise UpdateError(f"removidos.txt não pode remover asset de runtime: {line}")
+        if top not in ALLOWED_TOP_LEVEL_NAMES:
+            raise UpdateError(f"removidos.txt contém componente desconhecido: {line}")
+        normalized.append(name)
+    return normalized
+
+
 def _validate_required_names(
     file_names: set[str], all_names: set[str], *, full: bool
 ) -> None:
@@ -390,7 +409,8 @@ def _validate_file_sizes(root: Path, *, full: bool) -> None:
             raise UpdateError(f"arquivo obrigatório vazio: {relative}")
 
 
-def validate_zip(zip_path: Path, *, full: bool | None = None) -> bool:
+def validate_zip(zip_path: Path, *, full: bool | None = None) -> str:
+    """Valida o pacote e retorna o tipo: 'full', 'incremental' ou 'incremental-diff'."""
     if not zip_path.is_file():
         raise UpdateError(f"ZIP não encontrado: {zip_path}")
     try:
@@ -421,12 +441,31 @@ def validate_zip(zip_path: Path, *, full: bool | None = None) -> bool:
             _validate_entry_topology(entries)
             file_names = {name for name, is_directory in entries.items() if not is_directory}
             all_runtime_present = set(REQUIRED_RUNTIME_FILES) <= file_names
+            is_diff = DIFF_REMOVED_FILE in file_names
             if full is None:
                 full = all_runtime_present
             elif full and not all_runtime_present:
                 raise UpdateError("pacote completo não contém todos os recursos de runtime")
             _validate_top_level_names(file_names, set(entries), full=full)
-            _validate_required_names(file_names, set(entries), full=full)
+            if is_diff:
+                if all_runtime_present:
+                    raise UpdateError("pacote diff não pode conter recursos de runtime")
+                if full:
+                    raise UpdateError("pacote diff não pode ser tratado como completo")
+                try:
+                    with archive.open(DIFF_REMOVED_FILE) as handle:
+                        removidos_payload = handle.read(MAX_MANIFEST_BYTES + 1)
+                    if len(removidos_payload) > MAX_MANIFEST_BYTES:
+                        raise UpdateError("removidos.txt excede o tamanho permitido")
+                    _validate_removidos_entries(
+                        removidos_payload.decode("utf-8").splitlines()
+                    )
+                except UnicodeDecodeError as exc:
+                    raise UpdateError("removidos.txt não contém texto válido") from exc
+                # O diff não precisa conter os essenciais dentro do ZIP: a
+                # validação estrutural acontece no estado final após a aplicação.
+            else:
+                _validate_required_names(file_names, set(entries), full=full)
             build_info = "build-info.json"
             if build_info in file_names:
                 try:
@@ -439,7 +478,9 @@ def validate_zip(zip_path: Path, *, full: bool | None = None) -> bool:
                     raise
                 except Exception as exc:
                     raise UpdateError(f"build-info.json inválido: {exc}") from exc
-            return bool(full)
+            if is_diff:
+                return "incremental-diff"
+            return "full" if full else "incremental"
     except zipfile.BadZipFile as exc:
         raise UpdateError(f"ZIP inválido: {zip_path}") from exc
 
@@ -867,6 +908,79 @@ def _apply_transaction(
         raise
 
 
+def _apply_diff_transaction(
+    staged: Path,
+    target: Path,
+    transaction: Path,
+    startup_timeout: int,
+    log_path: Path,
+    removidos: list[str],
+) -> None:
+    """Aplica um pacote diff: substitui arquivos individuais e remove os listados.
+
+    O backup preserva a estrutura interna (`backup/_internal/foo.dll`) e o
+    diário registra cada caminho individualmente, então o rollback existente
+    continua funcionando sem alteração.
+    """
+    backup = transaction / "backup"
+    backup.mkdir()
+    started_process: subprocess.Popen[bytes] | None = None
+    staged_files = sorted(
+        (
+            path.relative_to(staged).as_posix()
+            for path in staged.rglob("*")
+            if path.is_file() and path.relative_to(staged).as_posix() != DIFF_REMOVED_FILE
+        ),
+        key=str.casefold,
+    )
+    if not staged_files:
+        raise UpdateError("o pacote diff não contém arquivos para aplicar")
+    names = sorted(set(staged_files) | set(removidos), key=str.casefold)
+    target_existed = {name: _path_exists(target / Path(*PurePosixPath(name).parts)) for name in names}
+    journal = {
+        "schema": 1,
+        "target": str(target),
+        "phase": "prepared",
+        "names": names,
+        "target_existed": target_existed,
+        "allow_incomplete_target": False,
+    }
+    _write_journal(transaction / "journal.json", journal)
+    try:
+        for name in names:
+            destination = target / Path(*PurePosixPath(name).parts)
+            if _path_exists(destination):
+                _atomic_move(destination, backup / name)
+        journal["phase"] = "old-moved"
+        _write_journal(transaction / "journal.json", journal)
+        for name in staged_files:
+            _atomic_move(staged / Path(*PurePosixPath(name).parts), target / Path(*PurePosixPath(name).parts))
+        for name in removidos:
+            destination = target / Path(*PurePosixPath(name).parts)
+            if _path_exists(destination):
+                raise UpdateError(f"arquivo removido pelo diff ainda existe: {name}")
+        journal["phase"] = "new-moved"
+        _write_journal(transaction / "journal.json", journal)
+        validate_install_tree(target, full=False)
+        _log(log_path, "Diff incremental aplicado; validando inicialização.")
+        started_process = _launch_and_verify(target / "sig.exe", startup_timeout, log_path)
+        journal["phase"] = "validated"
+        _write_journal(transaction / "journal.json", journal)
+        _log(log_path, "Atualização aplicada e validada.")
+        shutil.rmtree(transaction, ignore_errors=True)
+    except Exception:
+        _stop_process(started_process)
+        _log(log_path, "Falha na aplicação; iniciando rollback.")
+        _rollback_transaction(transaction, target, log_path)
+        _log(log_path, "Rollback concluído; a versão anterior foi restaurada.")
+        if (target / "sig.exe").is_file():
+            try:
+                _launch_and_verify(target / "sig.exe", min(startup_timeout, 5), log_path)
+            except Exception as restart_error:
+                _log(log_path, f"Não foi possível reiniciar a versão anterior: {restart_error}")
+        raise
+
+
 def execute(
     zip_path: Path,
     target: Path,
@@ -885,8 +999,10 @@ def execute(
     _log(log_path, f"ZIP={zip_path}; target={target}; pid={pid}")
     with _installation_lock(target, log_path):
         _recover_interrupted_transactions(target, log_path)
-        package_is_full = validate_zip(zip_path)
-        if not package_is_full:
+        package_kind = validate_zip(zip_path)
+        if package_kind == "incremental-diff":
+            validate_target_shell(target)
+        elif package_kind == "incremental":
             validate_target_shell(target)
         else:
             validate_full_install_destination(target)
@@ -901,16 +1017,31 @@ def execute(
                     raise UpdateError("a cópia independente do updater não está disponível")
                 shutil.copy2(updater_override, staged / "SigUpdater.exe")
                 _log(log_path, "Updater independente atual preservado no pacote aplicado.")
-            validate_install_tree(staged, full=package_is_full)
-            _log(log_path, "Pacote extraído e layout validado.")
-            _apply_transaction(
-                staged,
-                target,
-                transaction,
-                startup_timeout,
-                log_path,
-                allow_incomplete_target=package_is_full,
-            )
+            if package_kind == "incremental-diff":
+                removidos_lines = (staged / DIFF_REMOVED_FILE).read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                removidos = _validate_removidos_entries(removidos_lines)
+                _log(log_path, f"Pacote diff extraído: {len(removidos)} caminho(s) a remover.")
+                _apply_diff_transaction(
+                    staged,
+                    target,
+                    transaction,
+                    startup_timeout,
+                    log_path,
+                    removidos,
+                )
+            else:
+                validate_install_tree(staged, full=package_kind == "full")
+                _log(log_path, "Pacote extraído e layout validado.")
+                _apply_transaction(
+                    staged,
+                    target,
+                    transaction,
+                    startup_timeout,
+                    log_path,
+                    allow_incomplete_target=package_kind == "full",
+                )
         except Exception:
             if transaction.exists():
                 try:
@@ -991,7 +1122,7 @@ def _standalone_log_path(target: Path) -> Path:
         return fallback
 
 
-def _relocate_standalone_updater(origin: Path) -> int:
+def _relocate_standalone_updater(origin: Path, repair: bool = False) -> int:
     helpers_root = _standalone_cache_root() / "helpers"
     helpers_root.mkdir(parents=True, exist_ok=True)
     for previous in helpers_root.iterdir():
@@ -1011,13 +1142,16 @@ def _relocate_standalone_updater(origin: Path) -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
         subprocess, "CREATE_NEW_PROCESS_GROUP", 0
     )
+    worker_args = [
+        str(helper),
+        "--standalone-worker",
+        "--standalone-target",
+        str(origin),
+    ]
+    if repair:
+        worker_args.append("--repair")
     subprocess.Popen(
-        [
-            str(helper),
-            "--standalone-worker",
-            "--standalone-target",
-            str(origin),
-        ],
+        worker_args,
         cwd=str(origin),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -1029,7 +1163,7 @@ def _relocate_standalone_updater(origin: Path) -> int:
 
 
 class StandaloneUpdaterUI:
-    def __init__(self, target: Path):
+    def __init__(self, target: Path, repair: bool = False):
         import tkinter as tk
         from tkinter import filedialog, messagebox, ttk
 
@@ -1038,6 +1172,7 @@ class StandaloneUpdaterUI:
         self.filedialog = filedialog
         self.messagebox = messagebox
         self.target = Path(target).resolve()
+        self.repair = repair
         self.events: queue.Queue[tuple] = queue.Queue()
         self.incremental: dict | None = None
         self.full: dict | None = None
@@ -1293,6 +1428,19 @@ class StandaloneUpdaterUI:
                     if details:
                         self._write_log("Consulta concluída.")
                     self._set_busy(False, "Pronto.")
+                    if self.repair:
+                        self.repair = False
+                        if self.full:
+                            self.root.after(150, lambda: self.install("full"))
+                        else:
+                            self._write_log(
+                                "Reparo solicitado, mas o pacote completo não está disponível."
+                            )
+                            self.messagebox.showerror(
+                                "Reparar instalação",
+                                "Não foi possível localizar o pacote completo no GitHub.\n\n"
+                                "Verifique a conexão e tente novamente.",
+                            )
                 elif kind == "progress":
                     _name, percent, downloaded, total = event
                     self.progress["value"] = percent
@@ -1340,7 +1488,7 @@ class StandaloneUpdaterUI:
         return 0
 
 
-def run_standalone(target: Path | None = None, *, worker: bool = False) -> int:
+def run_standalone(target: Path | None = None, *, worker: bool = False, repair: bool = False) -> int:
     if target is None:
         if getattr(sys, "frozen", False):
             target = Path(sys.executable).resolve().parent
@@ -1348,8 +1496,8 @@ def run_standalone(target: Path | None = None, *, worker: bool = False) -> int:
             target = Path.cwd()
     target = Path(target).resolve()
     if getattr(sys, "frozen", False) and not worker:
-        return _relocate_standalone_updater(target)
-    return StandaloneUpdaterUI(target).run()
+        return _relocate_standalone_updater(target, repair=repair)
+    return StandaloneUpdaterUI(target, repair=repair).run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1360,14 +1508,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", type=Path)
     parser.add_argument("--wait-timeout", type=int, default=120)
     parser.add_argument("--startup-timeout", type=int, default=12)
+    parser.add_argument("--repair", action="store_true", help="abre o fluxo de reparo pelo pacote completo")
     parser.add_argument("--standalone-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--standalone-target", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.standalone_worker:
-        return run_standalone(args.standalone_target, worker=True)
+        return run_standalone(args.standalone_target, worker=True, repair=args.repair)
     legacy_values = (args.zip, args.target, args.pid, args.log)
     if not any(value is not None for value in legacy_values):
-        return run_standalone()
+        return run_standalone(repair=args.repair)
     if not all(value is not None for value in legacy_values):
         parser.error("--zip, --target, --pid e --log devem ser informados juntos")
     try:

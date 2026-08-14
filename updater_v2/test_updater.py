@@ -24,7 +24,6 @@ from updater import (  # noqa: E402
     verify_update_manifest_signature,
 )
 
-
 class UpdaterV2ValidationTests(unittest.TestCase):
     def _make_package(self, root: Path, missing: set[str] | None = None) -> None:
         missing = missing or set()
@@ -230,6 +229,48 @@ class UpdaterV2ValidationTests(unittest.TestCase):
     def test_version_key_orders_release_versions(self):
         self.assertLess(version_key("20260813_017"), version_key("20260813_018"))
         self.assertEqual(version_key("invalid"), (0, 0, 0))
+
+    def _make_diff_zip(self, destination: Path, removidos: list[str], extras: dict[str, bytes] | None = None) -> None:
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr("sig.exe", b"fixture-sig")
+            archive.writestr("build-info.json", '{"version": "20260814_008"}')
+            for name, data in (extras or {}).items():
+                archive.writestr(name, data)
+            archive.writestr(
+                "removidos.txt",
+                ("\n".join(removidos) + ("\n" if removidos else "")).encode(),
+            )
+
+    def test_diff_zip_is_recognized_and_validated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            zip_path = Path(temporary) / "diff.zip"
+            self._make_diff_zip(
+                zip_path,
+                ["_internal/old.dll"],
+                {"_internal/new.dll": b"novo"},
+            )
+            self.assertEqual(validate_zip(zip_path), "incremental-diff")
+
+    def test_diff_zip_rejects_runtime_removal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            zip_path = Path(temporary) / "diff-bad.zip"
+            self._make_diff_zip(zip_path, ["vad_worker.py"])
+            with self.assertRaisesRegex(UpdateError, "asset de runtime"):
+                validate_zip(zip_path)
+
+    def test_diff_zip_rejects_traversal_in_removidos(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            zip_path = Path(temporary) / "diff-bad.zip"
+            self._make_diff_zip(zip_path, ["../fora.txt"])
+            with self.assertRaises(UpdateError):
+                validate_zip(zip_path)
+
+    def test_diff_zip_rejects_runtime_files_inside(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            zip_path = Path(temporary) / "diff-bad.zip"
+            self._make_diff_zip(zip_path, [], {"ffmpeg.exe": b"big"})
+            with self.assertRaisesRegex(UpdateError, "recursos de runtime"):
+                validate_zip(zip_path)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,28 @@ def _make_invalid_executable_zip(base_zip: Path, destination: Path) -> None:
                 output.writestr(member, source.read(member))
 
 
+def _make_diff_zip(
+    base_zip: Path,
+    destination: Path,
+    changes: dict[str, bytes],
+    removidos: list[str],
+) -> None:
+    with zipfile.ZipFile(
+        destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
+    ) as output:
+        for name, data in changes.items():
+            output.writestr(name, data)
+        output.writestr(
+            "removidos.txt",
+            ("\n".join(removidos) + ("\n" if removidos else "")).encode(),
+        )
+
+
+def _member_bytes(package_zip: Path, name: str) -> bytes:
+    with zipfile.ZipFile(package_zip) as archive:
+        return archive.read(name)
+
+
 def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
     if not updater.is_file():
         raise AssertionError(f"updater V2 não encontrado: {updater}")
@@ -268,11 +290,95 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
         if "Rollback concluído" not in rollback_text:
             raise AssertionError("o log não confirma rollback")
 
+        # --- Cenários do pacote diff (incremental por arquivo) ---
+        sig_bytes = _member_bytes(package_zip, "sig.exe")
+        removed_name = "_internal/assets/appwin.jpg"
+        if removed_name not in {member.filename for member in zipfile.ZipFile(package_zip).infolist()}:
+            raise AssertionError("o pacote base não contém o arquivo de teste do diff")
+
+        diff_target = workspace / "diff-target"
+        shutil.copytree(base, diff_target)
+        diff_zip = workspace / "diff.zip"
+        _make_diff_zip(
+            package_zip,
+            diff_zip,
+            {"sig.exe": sig_bytes, "_internal/diff-test-novo.txt": b"novo-conteudo"},
+            [removed_name],
+        )
+        diff_log = workspace / "diff.log"
+        diff_holder = _start_holder(2)
+        try:
+            code = _run_helper(
+                updater, diff_zip, diff_target, diff_log, pid=diff_holder.pid, timeout=timeout
+            )
+        finally:
+            if diff_holder.poll() is None:
+                diff_holder.terminate()
+                diff_holder.wait(timeout=5)
+            _stop_sig_processes(diff_target)
+        if code != 0:
+            raise AssertionError(f"diff retornou {code}: {diff_log.read_text(errors='replace')}")
+        if (diff_target / "_internal/diff-test-novo.txt").read_text() != "novo-conteudo":
+            raise AssertionError("o diff não instalou o arquivo novo")
+        if (diff_target / removed_name).exists():
+            raise AssertionError("o diff não removeu o arquivo listado no removidos.txt")
+        if (diff_target / "sig.exe").read_bytes() != sig_bytes:
+            raise AssertionError("o diff não preservou o sig.exe aplicado")
+        if not (diff_target / "_internal" / "python311.dll").is_file():
+            raise AssertionError("o diff removeu arquivos intactos da instalação")
+        if "Atualização aplicada e validada." not in diff_log.read_text(encoding="utf-8"):
+            raise AssertionError("o log do diff não contém a validação final")
+
+        for label, removidos_bad in (
+            ("diff-forbidden-runtime", ["vad_worker.py"]),
+            ("diff-traversal", ["../fora.txt"]),
+            ("diff-absolute", ["C:/fora.txt"]),
+            ("diff-mei", ["_MEI123/old.txt"]),
+        ):
+            bad_diff = workspace / f"{label}.zip"
+            _make_diff_zip(package_zip, bad_diff, {"sig.exe": sig_bytes}, removidos_bad)
+            _assert_rejected(updater, bad_diff, diff_target, workspace, label)
+
+        rollback_diff_target = workspace / "rollback-diff-target"
+        shutil.copytree(base, rollback_diff_target)
+        old_sig_hash = _hash(rollback_diff_target / "sig.exe")
+        bad_diff_zip = workspace / "bad-diff.zip"
+        _make_diff_zip(
+            package_zip,
+            bad_diff_zip,
+            {
+                "sig.exe": b"not-a-windows-executable",
+                "_internal/diff-test-novo.txt": b"novo",
+            },
+            [],
+        )
+        bad_diff_log = workspace / "bad-diff.log"
+        bad_diff_code = _run_helper(
+            updater,
+            bad_diff_zip,
+            rollback_diff_target,
+            bad_diff_log,
+            startup_timeout=3,
+            timeout=timeout,
+        )
+        _stop_sig_processes(rollback_diff_target)
+        if bad_diff_code == 0:
+            raise AssertionError("diff com executável inválido foi aceito")
+        if _hash(rollback_diff_target / "sig.exe") != old_sig_hash:
+            raise AssertionError("rollback do diff não restaurou o sig.exe original")
+        if (rollback_diff_target / "_internal/diff-test-novo.txt").exists():
+            raise AssertionError("rollback do diff não removeu o arquivo novo aplicado")
+        if "Rollback concluído" not in bad_diff_log.read_text(encoding="utf-8", errors="replace"):
+            raise AssertionError("o log do rollback do diff não confirma a restauração")
+
         return [
             "pacotes incompletos, traversal, g, _MEI e dist foram rejeitados",
             "processo ativo foi bloqueado sem modificar a instalação",
             "atualização onedir completa executou e iniciou o aplicativo",
             "falha de inicialização acionou rollback e restaurou a versão anterior",
+            "diff incremental aplicou arquivos novos, removeu os listados e preservou os intactos",
+            "removidos.txt malicioso foi rejeitado sem alterar a instalação",
+            "rollback do diff restaurou a versão anterior",
         ]
     finally:
         if holder is not None and holder.poll() is None:

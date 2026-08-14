@@ -18,6 +18,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,7 @@ import time
 import unittest
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from release_validation import (
     ValidationError,
@@ -182,6 +183,126 @@ def create_incremental_tree(source_root: Path, destination_root: Path) -> None:
             shutil.copy2(child, destination)
 
 
+def _version_parts(version: str) -> tuple[int, ...]:
+    match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})_(\d{3})", version or "")
+    if not match:
+        return (-1,)
+    return tuple(int(part) for part in match.groups())
+
+
+def build_content_snapshot(package_root: Path) -> dict[str, dict]:
+    """Hash de todos os arquivos que a incremental gerencia (sem runtime)."""
+    snapshot: dict[str, dict] = {}
+    for path in sorted(package_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(package_root).as_posix()
+        if relative.split("/", 1)[0] in INCREMENTAL_EXCLUDED_TOP_LEVEL:
+            continue
+        snapshot[relative] = {
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
+        }
+    return snapshot
+
+
+def read_content_snapshots(root: Path) -> dict[str, dict]:
+    """Lê release/content_snapshot.json: {versão: {relpath: {sha256, size}}}."""
+    path = root / "release" / "content_snapshot.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    snapshots: dict[str, dict] = {}
+    for version, entry in data.items():
+        files = entry.get("files", {}) if isinstance(entry, dict) else {}
+        if isinstance(files, dict):
+            snapshots[str(version)] = files
+    return snapshots
+
+
+def latest_snapshot_before(root: Path, version: str) -> tuple[str, dict] | None:
+    """Entrada mais recente do snapshot com versão menor que a atual."""
+    candidates = [
+        (snapshot_version, files)
+        for snapshot_version, files in read_content_snapshots(root).items()
+        if _version_parts(snapshot_version) < _version_parts(version) and files
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: _version_parts(item[0]))
+
+
+def write_snapshot_entry(root: Path, version: str, files: dict[str, dict]) -> None:
+    """Adiciona/substitui a entrada da versão no snapshot versionado."""
+    snapshots = read_content_snapshots(root)
+    snapshots.pop(version, None)
+    snapshots[version] = files
+    ordered = dict(sorted(snapshots.items(), key=lambda item: _version_parts(item[0])))
+    path = root / "release" / "content_snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {snapshot_version: {"files": snapshot_files} for snapshot_version, snapshot_files in ordered.items()},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def create_incremental_diff_tree(
+    source_root: Path,
+    destination_root: Path,
+    previous_files: dict[str, dict],
+) -> tuple[int, int]:
+    """Monta a incremental por diff (hash por arquivo).
+
+    Inclui apenas arquivos novos/alterados em relação ao snapshot anterior e
+    escreve ``removidos.txt`` com os caminhos que sumiram. Retorna
+    ``(incluídos, removidos)``.
+    """
+    if destination_root.exists():
+        raise ValidationError(f"diretório incremental já existe: {destination_root}")
+    destination_root.mkdir(parents=True)
+    previous = {
+        str(name): str(entry.get("sha256") or "")
+        for name, entry in previous_files.items()
+    }
+    # Estes identificam o pacote instalado e sempre viajam (prompts/modelos
+    # são pequenos e mantêm os padrões editáveis em dia).
+    always_top_levels = {"sig.exe", "build-info.json", "prompts", "modelos"}
+    included = 0
+    current_names: set[str] = set()
+    for path in sorted(source_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source_root).as_posix()
+        if relative.split("/", 1)[0] in INCREMENTAL_EXCLUDED_TOP_LEVEL:
+            continue
+        current_names.add(relative)
+        if relative.split("/", 1)[0] in always_top_levels or previous.get(relative) != sha256_file(path):
+            destination = destination_root / Path(*PurePosixPath(relative).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            included += 1
+    removed = sorted(
+        name
+        for name in previous
+        if name not in current_names and name.split("/", 1)[0] not in INCREMENTAL_EXCLUDED_TOP_LEVEL
+    )
+    (destination_root / "removidos.txt").write_text(
+        "\n".join(removed) + ("\n" if removed else ""),
+        encoding="utf-8",
+    )
+    return included, len(removed)
+
+
 def sign_manifest(manifest: dict, key_path: Path, output_path: Path) -> None:
     try:
         from cryptography.hazmat.primitives import hashes, serialization
@@ -311,11 +432,34 @@ def build_release(args: argparse.Namespace) -> int:
             zip_directory(package_root, full_zip_path)
             validate_zip_layout(full_zip_path, full=True)
             incremental_root = work_root / "incremental-package"
-            create_incremental_tree(package_root, incremental_root)
-            validate_package_layout(incremental_root, full=False)
-            zip_path = output_root / f"{version}.zip"
-            zip_directory(incremental_root, zip_path)
-            validate_zip_layout(zip_path, full=False)
+            snapshot_base = latest_snapshot_before(root, version)
+            if snapshot_base:
+                base_version, previous_files = snapshot_base
+                included, removed = create_incremental_diff_tree(
+                    package_root, incremental_root, previous_files
+                )
+                validate_package_layout(incremental_root, full=False, diff=True)
+                zip_path = output_root / f"{version}.zip"
+                zip_directory(incremental_root, zip_path)
+                validate_zip_layout(zip_path, full=False, diff=True)
+                print(
+                    f"PASS: incremental por diff contra {base_version}: "
+                    f"{included} arquivo(s) incluído(s), {removed} removido(s)"
+                )
+            else:
+                create_incremental_tree(package_root, incremental_root)
+                validate_package_layout(incremental_root, full=False)
+                zip_path = output_root / f"{version}.zip"
+                zip_directory(incremental_root, zip_path)
+                validate_zip_layout(zip_path, full=False)
+                print(
+                    "PASS: snapshot anterior ausente; incremental completa (v1) gerada"
+                )
+            write_snapshot_entry(root, version, build_content_snapshot(package_root))
+            print(
+                "AVISO: release/content_snapshot.json foi atualizado; "
+                "commite-o junto com a publicação."
+            )
             print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
             print(f"PASS: pacote incremental local validado: {zip_path}")
         else:

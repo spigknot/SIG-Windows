@@ -60,6 +60,17 @@ REQUIRED_INCREMENTAL_FILES = tuple(
     if relative not in {"ffmpeg.exe", "ffplay.exe", "vad_worker.py"}
 )
 REQUIRED_INCREMENTAL_DIRECTORIES = ("_internal", "prompts", "modelos")
+DIFF_REQUIRED_FILES = ("sig.exe", "build-info.json", "removidos.txt")
+DIFF_REQUIRED_DIRECTORIES = ("prompts", "modelos")
+DIFF_ALLOWED_TOP_LEVELS = {
+    "sig.exe",
+    "SigUpdater.exe",
+    "_internal",
+    "prompts",
+    "modelos",
+    "build-info.json",
+    "removidos.txt",
+}
 
 
 class ValidationError(RuntimeError):
@@ -323,10 +334,65 @@ def _assert_no_bad_layout(names: Iterable[str]) -> None:
             raise ValidationError("pacote contém artefato de execução one-file _MEI")
 
 
-def validate_package_layout(package_root: Path, full: bool = True) -> None:
+def validate_removidos_lines(raw_lines: Iterable[str]) -> list[str]:
+    """Valida linhas do removidos.txt e retorna os caminhos normalizados."""
+    lines: list[str] = []
+    for raw in raw_lines:
+        line = raw.strip().replace("\\", "/")
+        if not line or line.startswith("#"):
+            continue
+        name = PurePosixPath(line)
+        parts = name.parts
+        if name.is_absolute() or not parts or any(part in ("", ".", "..") for part in parts):
+            raise ValidationError(f"caminho inválido no removidos.txt: {line}")
+        top = parts[0]
+        if top in INCREMENTAL_FORBIDDEN_TOP_LEVEL:
+            raise ValidationError(f"removidos.txt não pode remover asset de runtime: {line}")
+        for part in parts:
+            lowered = part.casefold()
+            if lowered.startswith("_mei") or lowered in {"g", "dist"}:
+                raise ValidationError(f"caminho proibido no removidos.txt: {line}")
+        lines.append("/".join(parts))
+    return lines
+
+
+def validate_removidos_file(path: Path) -> list[str]:
+    """Valida o removidos.txt do pacote diff e retorna as linhas normalizadas."""
+    return validate_removidos_lines(path.read_text(encoding="utf-8").splitlines())
+
+
+def validate_package_layout(package_root: Path, full: bool = True, diff: bool = False) -> None:
     if not package_root.is_dir():
         raise ValidationError(f"raiz do pacote não encontrada: {package_root}")
     _assert_no_bad_layout(path.relative_to(package_root) for path in package_root.rglob("*"))
+    if diff:
+        for relative in DIFF_REQUIRED_FILES:
+            if not (package_root / Path(relative)).is_file():
+                raise ValidationError(f"componente obrigatório ausente no diff: {relative}")
+        for relative in DIFF_REQUIRED_DIRECTORIES:
+            if not (package_root / relative).is_dir():
+                raise ValidationError(f"diretório obrigatório ausente no diff: {relative}")
+        unknown = sorted(
+            child.name
+            for child in package_root.iterdir()
+            if child.name not in DIFF_ALLOWED_TOP_LEVELS
+        )
+        if unknown:
+            raise ValidationError(
+                "componente desconhecido na raiz do diff: " + ", ".join(unknown)
+            )
+        validate_removidos_file(package_root / "removidos.txt")
+        forbidden = sorted(
+            child.name
+            for child in package_root.iterdir()
+            if child.name in INCREMENTAL_FORBIDDEN_TOP_LEVEL
+        )
+        if forbidden:
+            raise ValidationError(
+                "pacote incremental contém recursos de runtime proibidos: "
+                + ", ".join(forbidden)
+            )
+        return
     required_files = REQUIRED_FULL_FILES if full else REQUIRED_INCREMENTAL_FILES
     required_dirs = REQUIRED_FULL_DIRECTORIES if full else REQUIRED_INCREMENTAL_DIRECTORIES
     for relative in required_files:
@@ -348,7 +414,7 @@ def validate_package_layout(package_root: Path, full: bool = True) -> None:
             )
 
 
-def validate_zip_layout(zip_path: Path, full: bool = True) -> None:
+def validate_zip_layout(zip_path: Path, full: bool = True, diff: bool = False) -> None:
     if not zip_path.is_file():
         raise ValidationError(f"ZIP não encontrado: {zip_path}")
     try:
@@ -357,6 +423,30 @@ def validate_zip_layout(zip_path: Path, full: bool = True) -> None:
             _assert_no_bad_layout(names)
             files = {name.rstrip("/") for name in names if not name.endswith("/")}
             dirs = {name.rstrip("/") for name in names if name.endswith("/")}
+            if diff:
+                for relative in DIFF_REQUIRED_FILES:
+                    if relative not in files:
+                        raise ValidationError(f"componente ausente no ZIP diff: {relative}")
+                for relative in DIFF_REQUIRED_DIRECTORIES:
+                    if not any(
+                        name == relative or name.startswith(relative + "/")
+                        for name in files | dirs
+                    ):
+                        raise ValidationError(f"diretório ausente no ZIP diff: {relative}")
+                unknown = sorted(
+                    name
+                    for name in files | dirs
+                    if PurePosixPath(name).parts
+                    and PurePosixPath(name).parts[0] not in DIFF_ALLOWED_TOP_LEVELS
+                )
+                if unknown:
+                    raise ValidationError(
+                        "componente desconhecido na raiz do ZIP diff: " + ", ".join(unknown)
+                    )
+                removidos_lines = archive.read("removidos.txt").decode("utf-8").splitlines()
+                if validate_removidos_lines(removidos_lines) is None:
+                    raise ValidationError("removidos.txt inválido no ZIP diff")
+                return
             required_files = REQUIRED_FULL_FILES if full else REQUIRED_INCREMENTAL_FILES
             for relative in required_files:
                 if relative not in files:
