@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import sys
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -19,6 +19,7 @@ from updater import (  # noqa: E402
     SYNC_REQUIRED_FILES,
     UpdateError,
     canonical_sync_manifest,
+    classify_sync_files,
     validate_sync_manifest,
     verify_sync_manifest_signature,
 )
@@ -178,3 +179,87 @@ class SyncManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncClassificationTests(unittest.TestCase):
+    """FASE A2: classificação local contra o manifesto de sincronização."""
+
+    def _make_target(self, files: dict[str, bytes]) -> str:
+        import tempfile
+
+        temporary = tempfile.mkdtemp(prefix="sig-sync-classify-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(temporary, ignore_errors=True))
+        target = Path(temporary)
+        for name, data in files.items():
+            path = target / Path(*PurePosixPath(name).parts)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return str(target)
+
+    @staticmethod
+    def _hash(data: bytes) -> str:
+        import hashlib
+
+        return hashlib.sha256(data).hexdigest()
+
+    def _files(self, content: dict[str, bytes]) -> dict[str, dict]:
+        return {
+            name: {"sha256": self._hash(data), "size": len(data), "drive_id": f"id-{name}"}
+            for name, data in content.items()
+        }
+
+    def test_identical_files_are_unchanged(self):
+        content = {"sig.exe": b"sig", "_internal/base_library.zip": b"base"}
+        target = self._make_target(content)
+        result = classify_sync_files(Path(target), self._files(content))
+        self.assertEqual(result["download"], [])
+        self.assertEqual(result["remove"], [])
+        self.assertEqual(result["unchanged"], 2)
+
+    def test_missing_file_is_download(self):
+        content = {"sig.exe": b"sig"}
+        target = self._make_target({"sig.exe": b"sig"})
+        files = self._files(content)
+        files["_internal/base_library.zip"] = {
+            "sha256": "a" * 64,
+            "size": 4,
+            "drive_id": "id-base",
+        }
+        result = classify_sync_files(Path(target), files)
+        self.assertIn("_internal/base_library.zip", result["download"])
+
+    def test_divergent_content_is_download(self):
+        content = {"sig.exe": b"sig"}
+        target = self._make_target({"sig.exe": b"VELHO"})
+        result = classify_sync_files(Path(target), self._files(content))
+        self.assertIn("sig.exe", result["download"])
+
+    def test_divergent_size_is_download(self):
+        content = {"sig.exe": b"sig"}
+        target = self._make_target({"sig.exe": b"sig-exe-maior"})
+        result = classify_sync_files(Path(target), self._files(content))
+        self.assertIn("sig.exe", result["download"])
+
+    def test_orphans_inside_managed_top_levels_are_removed(self):
+        content = {"sig.exe": b"sig", "_internal/base_library.zip": b"base"}
+        target = self._make_target(
+            {
+                "sig.exe": b"sig",
+                "_internal/base_library.zip": b"base",
+                "_internal/antiga.dll": b"velha",
+                "prompts/velho.txt": b"velho",
+            }
+        )
+        result = classify_sync_files(Path(target), self._files(content))
+        self.assertEqual(
+            sorted(result["remove"]),
+            ["_internal/antiga.dll", "prompts/velho.txt"],
+        )
+
+    def test_unmanaged_files_are_not_removed(self):
+        content = {"sig.exe": b"sig"}
+        target = self._make_target(
+            {"sig.exe": b"sig", "settings.json": b"usuario", "logs/run.log": b"x"}
+        )
+        result = classify_sync_files(Path(target), self._files(content))
+        self.assertEqual(result["remove"], [])

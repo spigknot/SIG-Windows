@@ -431,6 +431,75 @@ def validate_sync_manifest(manifest: dict) -> dict:
     return {"version": version, "files": files}
 
 
+SYNC_MANAGED_TOP_LEVELS = (
+    "sig.exe",
+    "SigUpdater.exe",
+    "build-info.json",
+    "_internal",
+    "prompts",
+    "modelos",
+    "ffmpeg.exe",
+    "ffplay.exe",
+    "vad_worker.py",
+    "vad_deps",
+)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def classify_sync_files(target: Path, files: dict[str, dict]) -> dict:
+    """Classifica a instalação local contra o manifesto de sincronização.
+
+    Retorna:
+        {"download": [paths], "remove": [paths], "unchanged": int, "total": int}
+
+    - ``download``: arquivos ausentes, com tamanho divergente ou conteúdo
+      divergente (hash) — precisam ser baixados;
+    - ``remove``: arquivos locais dentro dos top-levels gerenciados que não
+      constam no manifesto (órfãos);
+    - ``unchanged``: arquivos locais idênticos ao manifesto (hash confere).
+    """
+    target = Path(target).resolve()
+    download: list[str] = []
+    unchanged = 0
+    for path, entry in sorted(files.items()):
+        local = target / Path(*PurePosixPath(path).parts)
+        if not local.is_file():
+            download.append(path)
+            continue
+        if local.stat().st_size != int(entry["size"]):
+            download.append(path)
+            continue
+        if _sha256_file(local) != entry["sha256"]:
+            download.append(path)
+            continue
+        unchanged += 1
+
+    managed_paths: set[str] = set()
+    for top in SYNC_MANAGED_TOP_LEVELS:
+        candidate = target / Path(*PurePosixPath(top).parts)
+        if candidate.is_file():
+            managed_paths.add(top)
+        elif candidate.is_dir():
+            for local in candidate.rglob("*"):
+                if local.is_file():
+                    managed_paths.add(local.relative_to(target).as_posix())
+    remove = sorted(path for path in managed_paths if path not in files)
+
+    return {
+        "download": download,
+        "remove": remove,
+        "unchanged": unchanged,
+        "total": len(files),
+    }
+
+
 def _download_to_file(
     descriptor: dict,
     destination: Path,
