@@ -91,19 +91,34 @@ def _stop_sig_processes(install_root: Path) -> None:
 
 def _run_helper(updater: Path, package: Path, target: Path, log: Path, **options) -> int:
     timeout = options.pop("timeout", 180)
-    command = [
-        str(updater),
-        "--zip",
-        str(package),
-        "--target",
-        str(target),
-        "--pid",
-        str(options.pop("pid", 0)),
-        "--log",
-        str(log),
-    ]
-    for name, value in options.items():
-        command.extend([f"--{name.replace('_', '-')}", str(value)])
+    if options.pop("sync", False):
+        command = [
+            str(updater),
+            "--sync-staged",
+            str(options.pop("staged")),
+            "--sync-removals",
+            str(options.pop("removals")),
+            "--target",
+            str(target),
+            "--log",
+            str(log),
+            "--startup-timeout",
+            str(options.pop("startup_timeout", 12)),
+        ]
+    else:
+        command = [
+            str(updater),
+            "--zip",
+            str(package),
+            "--target",
+            str(target),
+            "--pid",
+            str(options.pop("pid", 0)),
+            "--log",
+            str(log),
+        ]
+        for name, value in options.items():
+            command.extend([f"--{name.replace('_', '-')}", str(value)])
     result = subprocess.run(
         command,
         check=False,
@@ -373,7 +388,75 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
         if (rollback_diff_target / "_internal/diff-test-novo.txt").exists():
             raise AssertionError("rollback do diff não removeu o arquivo novo aplicado")
         if "Rollback concluído" not in bad_diff_log.read_text(encoding="utf-8", errors="replace"):
-            raise AssertionError("o log do rollback do diff não confirma a restauração")
+            raise AssertionError("o log não confirma rollback do diff")
+
+        # --- Sync por arquivo: instalação atrasada converge para o canônico ---
+        sync_target = workspace / "sync-target"
+        shutil.copytree(base, sync_target)
+        original_historico = (sync_target / "prompts" / "historico_system.txt").read_bytes()
+        (sync_target / "prompts" / "historico_system.txt").write_text(
+            "prompt antigo de uma versao velha", encoding="utf-8"
+        )
+        (sync_target / "_internal" / "orfao-teste.txt").write_text("orfao", encoding="utf-8")
+        sync_staged = workspace / "sync-staged"
+        staged_file = sync_staged / "prompts" / "historico_system.txt"
+        staged_file.parent.mkdir(parents=True)
+        staged_file.write_bytes(original_historico)
+        removals_file = workspace / "sync-removals.txt"
+        removals_file.write_text("_internal/orfao-teste.txt\n", encoding="utf-8")
+        sync_log = workspace / "sync.log"
+        sync_code = _run_helper(
+            updater,
+            package_zip,
+            sync_target,
+            sync_log,
+            sync=True,
+            staged=sync_staged,
+            removals=removals_file,
+            timeout=timeout,
+        )
+        _stop_sig_processes(sync_target)
+        if sync_code != 0:
+            raise AssertionError(
+                f"sync retornou {sync_code}: {sync_log.read_text(errors='replace')}"
+            )
+        if (sync_target / "prompts" / "historico_system.txt").read_bytes() != original_historico:
+            raise AssertionError("sync não restaurou o arquivo canônico")
+        if (sync_target / "_internal" / "orfao-teste.txt").exists():
+            raise AssertionError("sync não removeu o órfão listado")
+        if not (sync_target / "_internal" / "python311.dll").is_file():
+            raise AssertionError("sync corrompeu arquivos intactos da instalação")
+        if "Atualização aplicada e validada." not in sync_log.read_text(encoding="utf-8", errors="replace"):
+            raise AssertionError("o log do sync não contém a validação final")
+
+        # --- rollback do sync: sig inválido falha no launch e restaura ---
+        sync_rollback_target = workspace / "sync-rollback-target"
+        shutil.copytree(base, sync_rollback_target)
+        (sync_rollback_target / "_internal" / "orfao-rollback.txt").write_text("orfao", encoding="utf-8")
+        bad_sync_staged = workspace / "sync-bad-staged"
+        bad_sig = bad_sync_staged / "sig.exe"
+        bad_sig.parent.mkdir(parents=True)
+        bad_sig.write_bytes(b"not-a-windows-executable")
+        bad_removals_file = workspace / "sync-bad-removals.txt"
+        bad_removals_file.write_text("_internal/orfao-rollback.txt\n", encoding="utf-8")
+        bad_sync_log = workspace / "sync-bad.log"
+        bad_sync_code = _run_helper(
+            updater,
+            package_zip,
+            sync_rollback_target,
+            bad_sync_log,
+            sync=True,
+            staged=bad_sync_staged,
+            removals=bad_removals_file,
+            timeout=timeout,
+        )
+        _stop_sig_processes(sync_rollback_target)
+        if bad_sync_code == 0:
+            raise AssertionError("sync com executável inválido foi aceito")
+        if (sync_rollback_target / "_internal" / "orfao-rollback.txt").read_bytes() != b"orfao":
+            raise AssertionError("rollback do sync não restaurou o órfão removido")
+        if not (sync_rollback_target / "_internal" / "python311.dll").is_file():
+            raise AssertionError("rollback do sync corrompeu o _internal")
 
         return [
             "pacotes incompletos, traversal, g, _MEI e dist foram rejeitados",
@@ -383,6 +466,8 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
             "diff incremental aplicou arquivos novos, removeu os listados e preservou os intactos",
             "removidos.txt malicioso foi rejeitado sem alterar a instalação",
             "rollback do diff restaurou a versão anterior",
+            "sync por arquivo restaurou o canônico, removeu órfãos e preservou os intactos",
+            "rollback do sync restaurou a instalação anterior sem corromper o _internal",
         ]
     finally:
         if holder is not None and holder.poll() is None:

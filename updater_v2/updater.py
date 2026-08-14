@@ -214,6 +214,24 @@ def fetch_incremental_manifest() -> dict:
     return _validate_incremental_manifest(manifest)
 
 
+# ID do sync_manifest.json no Drive (arquivo público, atualizado a cada
+# publicação — o ID permanece estável como o do latest.json).
+SYNC_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
+
+
+def fetch_sync_manifest() -> dict:
+    """Baixa e valida o manifesto de sincronização (schema 2) do Drive."""
+    with _open_google_drive_download(SYNC_MANIFEST_FILE_ID) as response:
+        payload = response.read(SYNC_MANIFEST_MAX_BYTES + 1)
+    if len(payload) > SYNC_MANIFEST_MAX_BYTES:
+        raise UpdateError("o manifesto de sincronização excede o tamanho permitido")
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("o manifesto de sincronização não contém JSON válido") from exc
+    return validate_sync_manifest(manifest)
+
+
 def select_full_release_asset(release: dict) -> dict:
     version = str(release.get("tag_name") or release.get("tagName") or "")
     if not VERSION_RE.fullmatch(version):
@@ -1517,6 +1535,7 @@ class StandaloneUpdaterUI:
         self.target = Path(target).resolve()
         self.events: queue.Queue[tuple] = queue.Queue()
         self.incremental: dict | None = None
+        self.sync_state: dict | None = None
         self.full: dict | None = None
         self.full_releases: list[dict] = []
         self.manual_zip: Path | None = None
@@ -1571,9 +1590,9 @@ class StandaloneUpdaterUI:
         self.check_button.pack(side="left")
         self.incremental_button = ttk.Button(
             actions,
-            text="Atualizar incremental",
+            text="Atualizar",
             style="Accent.TButton",
-            command=lambda: self.install("incremental"),
+            command=self._install_update,
             state="disabled",
         )
         self.incremental_button.pack(side="left", padx=(8, 0))
@@ -1663,7 +1682,7 @@ class StandaloneUpdaterUI:
         self.choose_zip_button.configure(state=normal)
         self.full_version_combo.configure(state="disabled" if busy else "readonly")
         self.incremental_button.configure(
-            state="normal" if not busy and self.incremental else "disabled"
+            state="normal" if not busy and (self.sync_state or self.incremental) else "disabled"
         )
         full_available = bool(self.full or self.manual_zip)
         self.full_button.configure(state="normal" if not busy and full_available else "disabled")
@@ -1682,24 +1701,45 @@ class StandaloneUpdaterUI:
         errors = []
         notice = None
         incremental = None
+        sync_state = None
         full_releases: list[dict] = []
+        installed = installed_version(self.target)
         try:
-            incremental = fetch_incremental_manifest()
-            incremental["kind"] = "incremental"
-            installed = installed_version(self.target)
-            if installed and version_key(incremental["version"]) <= version_key(installed):
+            sync_manifest = fetch_sync_manifest()
+            if installed and version_key(sync_manifest["version"]) <= version_key(installed):
                 notice = (
-                    f"Incremental {incremental['version']} ignorado: "
+                    f"Sincronização {sync_manifest['version']} ignorada: "
                     f"a versão instalada ({installed}) já é igual ou mais nova."
                 )
-                incremental = None
+            else:
+                classification = classify_sync_files(self.target, sync_manifest["files"])
+                sync_state = {
+                    "kind": "sync",
+                    "version": sync_manifest["version"],
+                    "files": sync_manifest["files"],
+                    "download": classification["download"],
+                    "remove": classification["remove"],
+                    "unchanged": classification["unchanged"],
+                    "total": classification["total"],
+                }
         except Exception as exc:
-            errors.append(f"incremental: {exc}")
+            errors.append(f"sincronização: {exc}")
+            try:
+                incremental = fetch_incremental_manifest()
+                incremental["kind"] = "incremental"
+                if installed and version_key(incremental["version"]) <= version_key(installed):
+                    notice = (
+                        f"Incremental {incremental['version']} ignorado: "
+                        f"a versão instalada ({installed}) já é igual ou mais nova."
+                    )
+                    incremental = None
+            except Exception as incremental_error:
+                errors.append(f"incremental: {incremental_error}")
         try:
             full_releases = fetch_full_releases()
         except Exception as exc:
             errors.append(f"completo: {exc}")
-        self.events.put(("checked", incremental, full_releases, errors, notice))
+        self.events.put(("checked", incremental, sync_state, full_releases, errors, notice))
 
     def _on_full_version_selected(self, _event=None) -> None:
         selected = self.full_version_var.get()
@@ -1776,6 +1816,45 @@ class StandaloneUpdaterUI:
 
     def install(self, kind: str) -> None:
         if self.busy:
+            return
+        if kind == "sync":
+            if not self.sync_state:
+                return
+            try:
+                validate_target_shell(self.target)
+            except UpdateError as exc:
+                self.messagebox.showerror(
+                    "Atualização",
+                    f"A instalação não pode ser sincronizada.\\n\\n{exc}\\n\\nUse o pacote completo.",
+                    parent=self.root,
+                )
+                return
+            if len(self.sync_state["download"]) > 100:
+                if not self.messagebox.askyesno(
+                    "Muitos arquivos para baixar",
+                    f"A sincronização precisa baixar {len(self.sync_state['download'])} arquivos. "
+                    "Para instalações muito desatualizadas, o pacote completo é mais rápido "
+                    "e confiável.\\n\\n"
+                    "Deseja usar o pacote completo do GitHub em vez da sincronização?",
+                    icon="warning",
+                    parent=self.root,
+                ):
+                    pass
+                else:
+                    self.install("full")
+                    return
+            self.progress["value"] = 0
+            self._set_busy(True, "Baixando arquivos da sincronização...")
+            self._write_log(
+                f"Sincronização {self.sync_state['version']}: "
+                f"{len(self.sync_state['download'])} arquivo(s) para baixar, "
+                f"{len(self.sync_state['remove'])} para remover."
+            )
+            threading.Thread(
+                target=self._sync_install_worker,
+                args=(self.sync_state,),
+                daemon=True,
+            ).start()
             return
         if kind == "manual":
             if not self.manual_zip:
@@ -1870,16 +1949,75 @@ class StandaloneUpdaterUI:
         except Exception as exc:
             self.events.put(("failed", str(exc)))
 
+    def _install_update(self) -> None:
+        """O mecanismo principal é a sincronização por arquivo; o incremental
+        ZIP fica como contingência quando o manifesto sync não está publicado."""
+        if self.sync_state:
+            self.install("sync")
+        else:
+            self.install("incremental")
+
+    def _sync_install_worker(self, sync_state: dict) -> None:
+        try:
+            version = str(sync_state["version"])
+            cache_root = _standalone_cache_root() / "sync" / version
+            staged = cache_root / "staged"
+            if staged.exists():
+                shutil.rmtree(staged)
+            staged.mkdir(parents=True)
+            downloads = list(sync_state["download"])
+            log_path = _standalone_log_path(self.target)
+            if getattr(sys, "frozen", False) and _same_path(sys.executable, self.target / "SigUpdater.exe"):
+                raise UpdateError("o atualizador não foi realocado para a pasta temporária")
+            _terminate_target_sig_processes(self.target / "sig.exe", log_path)
+            for index, path in enumerate(downloads, 1):
+                entry = sync_state["files"][path]
+                destination = staged / Path(*PurePosixPath(path).parts)
+
+                def _file_progress(done, total, _path=path, _index=index, _count=len(downloads)):
+                    percent = round(done * 100 / total) if total else 100
+                    self.events.put(("sync_file", _index, _count, _path, percent))
+
+                self.events.put(("status", f"Baixando {index}/{len(downloads)}: {path}"))
+                download_sync_file(entry, destination, progress_callback=_file_progress)
+            self.events.put(("status", "Aplicando a sincronização com rollback protegido..."))
+            apply_sync_transaction(
+                staged,
+                self.target,
+                list(sync_state["remove"]),
+                12,
+                log_path,
+            )
+            self.events.put(("installed", version, log_path))
+        except Exception as exc:
+            self.events.put(("failed", str(exc)))
+
     def _poll_events(self) -> None:
         try:
             while True:
                 event = self.events.get_nowait()
                 kind = event[0]
                 if kind == "checked":
-                    self.incremental, self.full_releases, errors, notice = event[1], event[2], event[3], event[4]
+                    self.incremental, self.sync_state, self.full_releases, errors, notice = (
+                        event[1],
+                        event[2],
+                        event[3],
+                        event[4],
+                        event[5],
+                    )
                     self.full = self.full_releases[0] if self.full_releases else None
                     details = []
-                    if self.incremental:
+                    if self.sync_state:
+                        download_count = len(self.sync_state["download"])
+                        download_size = sum(
+                            int(self.sync_state["files"][path]["size"])
+                            for path in self.sync_state["download"]
+                        )
+                        details.append(
+                            f"Sincronização: {self.sync_state['version']} "
+                            f"({download_count} arquivo(s), {self._format_size(download_size)})"
+                        )
+                    elif self.incremental:
                         details.append(
                             f"Incremental: {self.incremental['version']} "
                             f"({self._format_size(int(self.incremental['size']))})"
@@ -1909,6 +2047,12 @@ class StandaloneUpdaterUI:
                     self.status_var.set(
                         f"Baixando: {percent}% ({self._format_size(downloaded)} de "
                         f"{self._format_size(total)})"
+                    )
+                elif kind == "sync_file":
+                    _index, _count, _path, _percent = event[1], event[2], event[3], event[4]
+                    self.progress["value"] = _percent
+                    self.status_var.set(
+                        f"Baixando arquivo {_index}/{_count}: {_path} ({_percent}%)"
                     )
                 elif kind == "status":
                     self.status_var.set(event[1])
@@ -1970,12 +2114,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", type=Path)
     parser.add_argument("--wait-timeout", type=int, default=120)
     parser.add_argument("--startup-timeout", type=int, default=12)
+    parser.add_argument("--sync-staged", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--sync-removals", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--standalone-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--standalone-target", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.standalone_worker:
         return run_standalone(args.standalone_target, worker=True)
     legacy_values = (args.zip, args.target, args.pid, args.log)
+    if args.sync_staged is not None:
+        if not all(value is not None for value in (args.target, args.log)):
+            parser.error("--sync-staged exige --target e --log")
+        removals: list[str] = []
+        if args.sync_removals is not None:
+            removals = _validate_removidos_entries(
+                args.sync_removals.read_text(encoding="utf-8").splitlines()
+            )
+        try:
+            apply_sync_transaction(
+                args.sync_staged,
+                args.target,
+                removals,
+                args.startup_timeout,
+                args.log,
+            )
+        except Exception as exc:
+            _log(args.log, f"Falha: {exc}")
+            return 2
+        return 0
     if not any(value is not None for value in legacy_values):
         return run_standalone()
     if not all(value is not None for value in legacy_values):
