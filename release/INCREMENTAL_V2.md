@@ -98,6 +98,27 @@ runtime) — nunca gera diff sem base conhecida.
 - End-to-end manual: instalação simulada com pacote 007 → aplica diff → estado
   final conferido.
 
+## Peças afetadas por mudanças de formato (CHECKLIST OBRIGATÓRIO)
+
+Qualquer mudança no formato de pacote (diff, nomes, membros obrigatórios)
+precisa atualizar TODAS estas peças + testes:
+
+1. `scripts/release.py` — geração do pacote (create_incremental_diff_tree).
+2. `updater_v2/updater.py` — validação e aplicação (`validate_zip`,
+   `_apply_diff_transaction`).
+3. **`src/sig_app.py` → `SigApp._validate_update_package_archive`** — a
+   validação do download no lado do SIG (a PEÇA ESQUECIDA no bug do
+   "componentes obrigatórios ausentes" de 2026-08-14: a incremental diff
+   foi publicada sem atualizar esta validação, que continuou exigindo o
+   conjunto completo v1).
+4. `scripts/release_validation.py` — gates de build/layout.
+
+Testes obrigatórios (já permanentes):
+- `updater_v2/test_updater.py` — validação do updater (diff e v1).
+- `tests/test_update_package_validation.py` — validação do SIG (diff e v1).
+- Teste end-to-end do fluxo do CLIQUE (SIG baixa → valida → updater aplica)
+  em qualquer mudança de formato — não basta testar o aplicador sozinho.
+
 ## Ordem de implementação
 
 1. `release.py` — snapshot + diff + removidos + updater condicional.

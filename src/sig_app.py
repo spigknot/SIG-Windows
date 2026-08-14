@@ -7248,91 +7248,106 @@ class SigApp:
             if staging_dir.exists():
                 shutil.rmtree(staging_dir)
             staging_dir.mkdir(parents=True, exist_ok=True)
-            total_uncompressed = 0
-            seen_members = set()
-            max_entries = 10_000
-            max_total_uncompressed = 4 * 1024 * 1024 * 1024
-            max_member_uncompressed = 1 * 1024 * 1024 * 1024
-            with zipfile.ZipFile(zip_path, "r") as archive:
-                corrupt_member = archive.testzip()
-                if corrupt_member is not None:
-                    raise RuntimeError(f"entrada corrompida no pacote: {corrupt_member}")
-                members = archive.infolist()
-                if len(members) > max_entries:
-                    raise RuntimeError("o pacote excede o limite de entradas")
-                for member in members:
-                    normalized_name = member.filename.replace("\\", "/").rstrip("/")
-                    pure_path = PurePosixPath(normalized_name)
-                    if (
-                        pure_path.is_absolute()
-                        or ".." in pure_path.parts
-                        or not pure_path.parts
-                        or member.flag_bits & 0x1
-                    ):
-                        raise RuntimeError(f"entrada inválida no pacote: {member.filename}")
-                    if any(
-                        "\x00" in part
-                        or ":" in part
-                        or part.endswith((" ", "."))
-                        or part.casefold() in {"g", "dist"}
-                        or part.casefold().startswith("_mei")
-                        for part in pure_path.parts
-                    ):
-                        raise RuntimeError(f"nome incompatível no pacote: {member.filename}")
-                    key = normalized_name.casefold()
-                    if key in seen_members:
-                        raise RuntimeError(f"entrada duplicada no pacote: {member.filename}")
-                    seen_members.add(key)
-                    if (member.external_attr >> 16) & 0o170000 == 0o120000:
-                        raise RuntimeError(f"link simbólico não permitido: {member.filename}")
-                    if member.file_size > max_member_uncompressed:
-                        raise RuntimeError(f"entrada individual grande demais: {member.filename}")
-                    total_uncompressed += member.file_size
-                    if total_uncompressed > max_total_uncompressed:
-                        raise RuntimeError("o pacote descompactado excede o limite permitido")
-                # Pacotes por diff (incremental v2) trazem apenas o que mudou;
-                # os componentes essenciais ficam na instalação e a validação
-                # final é feita pelo updater (com rollback).
-                if "removidos.txt" in seen_members:
-                    required_members = {"sig.exe", "build-info.json", "removidos.txt"}
-                else:
-                    required_members = {
-                        "sig.exe",
-                        "_internal/base_library.zip",
-                        "_internal/python311.dll",
-                        "_internal/vcruntime140.dll",
-                        "_internal/vcruntime140_1.dll",
-                        "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
-                        "SigUpdater.exe",
-                    }
-                missing = sorted(
-                    item for item in required_members
-                    if item.casefold() not in seen_members
-                )
-                if missing:
-                    raise RuntimeError("componentes obrigatórios ausentes: " + ", ".join(missing))
-                for member in members:
-                    normalized_name = member.filename.replace("\\", "/").rstrip("/")
-                    target = (staging_dir / Path(*PurePosixPath(normalized_name).parts)).resolve()
-                    if not target.is_relative_to(staging_dir.resolve()):
-                        raise RuntimeError(f"destino inválido no pacote: {member.filename}")
-                    if member.is_dir():
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(member, "r") as source, target.open("wb") as destination:
-                        shutil.copyfileobj(source, destination, length=1024 * 256)
-            for required in required_members:
-                required_path = staging_dir / Path(*PurePosixPath(required).parts)
-                if not required_path.is_file():
-                    raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
-                # removidos.txt vazio é válido (diff sem remoções).
-                if required != "removidos.txt" and required_path.stat().st_size <= 0:
-                    raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
+            self._validate_update_package_archive(zip_path, staging_dir)
             self._queue("update_ready", zip_path, version)
         except Exception as exc:
             shutil.rmtree(update_root, ignore_errors=True)
             self._queue("update_error", str(exc))
+
+    @staticmethod
+    def _validate_update_package_archive(zip_path: Path, staging_dir: Path) -> None:
+        """Valida e extrai o pacote de atualização baixado.
+
+        Formato diff (incremental v2, presença de ``removidos.txt``) exige
+        apenas ``sig.exe``/``build-info.json``/``removidos.txt`` — os demais
+        componentes ficam na instalação e são validados pelo updater (com
+        rollback). Formato antigo (v1) exige o conjunto completo.
+
+        Importante: esta função é a MESMA validação do updater do lado do
+        SIG. Mudanças no formato de pacote precisam atualizar os DOIS lugares
+        (veja release/INCREMENTAL_V2.md, seção "Peças afetadas").
+        """
+        total_uncompressed = 0
+        seen_members = set()
+        max_entries = 10_000
+        max_total_uncompressed = 4 * 1024 * 1024 * 1024
+        max_member_uncompressed = 1 * 1024 * 1024 * 1024
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            corrupt_member = archive.testzip()
+            if corrupt_member is not None:
+                raise RuntimeError(f"entrada corrompida no pacote: {corrupt_member}")
+            members = archive.infolist()
+            if len(members) > max_entries:
+                raise RuntimeError("o pacote excede o limite de entradas")
+            for member in members:
+                normalized_name = member.filename.replace("\\", "/").rstrip("/")
+                pure_path = PurePosixPath(normalized_name)
+                if (
+                    pure_path.is_absolute()
+                    or ".." in pure_path.parts
+                    or not pure_path.parts
+                    or member.flag_bits & 0x1
+                ):
+                    raise RuntimeError(f"entrada inválida no pacote: {member.filename}")
+                if any(
+                    "\x00" in part
+                    or ":" in part
+                    or part.endswith((" ", "."))
+                    or part.casefold() in {"g", "dist"}
+                    or part.casefold().startswith("_mei")
+                    for part in pure_path.parts
+                ):
+                    raise RuntimeError(f"nome incompatível no pacote: {member.filename}")
+                key = normalized_name.casefold()
+                if key in seen_members:
+                    raise RuntimeError(f"entrada duplicada no pacote: {member.filename}")
+                seen_members.add(key)
+                if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise RuntimeError(f"link simbólico não permitido: {member.filename}")
+                if member.file_size > max_member_uncompressed:
+                    raise RuntimeError(f"entrada individual grande demais: {member.filename}")
+                total_uncompressed += member.file_size
+                if total_uncompressed > max_total_uncompressed:
+                    raise RuntimeError("o pacote descompactado excede o limite permitido")
+            # Pacotes por diff (incremental v2) trazem apenas o que mudou;
+            # os componentes essenciais ficam na instalação e a validação
+            # final é feita pelo updater (com rollback).
+            if "removidos.txt" in seen_members:
+                required_members = {"sig.exe", "build-info.json", "removidos.txt"}
+            else:
+                required_members = {
+                    "sig.exe",
+                    "_internal/base_library.zip",
+                    "_internal/python311.dll",
+                    "_internal/vcruntime140.dll",
+                    "_internal/vcruntime140_1.dll",
+                    "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
+                    "SigUpdater.exe",
+                }
+            missing = sorted(
+                item for item in required_members
+                if item.casefold() not in seen_members
+            )
+            if missing:
+                raise RuntimeError("componentes obrigatórios ausentes: " + ", ".join(missing))
+            for member in members:
+                normalized_name = member.filename.replace("\\", "/").rstrip("/")
+                target = (staging_dir / Path(*PurePosixPath(normalized_name).parts)).resolve()
+                if not target.is_relative_to(staging_dir.resolve()):
+                    raise RuntimeError(f"destino inválido no pacote: {member.filename}")
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member, "r") as source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 256)
+        for required in required_members:
+            required_path = staging_dir / Path(*PurePosixPath(required).parts)
+            if not required_path.is_file():
+                raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
+            # removidos.txt vazio é válido (diff sem remoções).
+            if required != "removidos.txt" and required_path.stat().st_size <= 0:
+                raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
 
     @staticmethod
     def _update_script_text() -> str:
