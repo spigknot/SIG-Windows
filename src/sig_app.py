@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_009"
+APP_VERSION = "20260814_010"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -7253,15 +7253,6 @@ class SigApp:
             max_entries = 10_000
             max_total_uncompressed = 4 * 1024 * 1024 * 1024
             max_member_uncompressed = 1 * 1024 * 1024 * 1024
-            required_members = {
-                "sig.exe",
-                "_internal/base_library.zip",
-                "_internal/python311.dll",
-                "_internal/vcruntime140.dll",
-                "_internal/vcruntime140_1.dll",
-                "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
-                "SigUpdater.exe",
-            }
             with zipfile.ZipFile(zip_path, "r") as archive:
                 corrupt_member = archive.testzip()
                 if corrupt_member is not None:
@@ -7299,6 +7290,21 @@ class SigApp:
                     total_uncompressed += member.file_size
                     if total_uncompressed > max_total_uncompressed:
                         raise RuntimeError("o pacote descompactado excede o limite permitido")
+                # Pacotes por diff (incremental v2) trazem apenas o que mudou;
+                # os componentes essenciais ficam na instalação e a validação
+                # final é feita pelo updater (com rollback).
+                if "removidos.txt" in seen_members:
+                    required_members = {"sig.exe", "build-info.json", "removidos.txt"}
+                else:
+                    required_members = {
+                        "sig.exe",
+                        "_internal/base_library.zip",
+                        "_internal/python311.dll",
+                        "_internal/vcruntime140.dll",
+                        "_internal/vcruntime140_1.dll",
+                        "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
+                        "SigUpdater.exe",
+                    }
                 missing = sorted(
                     item for item in required_members
                     if item.casefold() not in seen_members
@@ -7318,7 +7324,10 @@ class SigApp:
                         shutil.copyfileobj(source, destination, length=1024 * 256)
             for required in required_members:
                 required_path = staging_dir / Path(*PurePosixPath(required).parts)
-                if not required_path.is_file() or required_path.stat().st_size <= 0:
+                if not required_path.is_file():
+                    raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
+                # removidos.txt vazio é válido (diff sem remoções).
+                if required != "removidos.txt" and required_path.stat().st_size <= 0:
                     raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
             self._queue("update_ready", zip_path, version)
         except Exception as exc:
