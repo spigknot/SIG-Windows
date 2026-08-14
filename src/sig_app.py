@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_005"
+APP_VERSION = "20260814_006"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -6756,6 +6756,7 @@ class SigApp:
         self.recover_audio_icon = self._make_recover_icon("#d39b00")
         self.document_copy_icon = self._make_document_action_icon("copy")
         self.document_save_icon = self._make_document_action_icon("save")
+        self.document_view_icon = self._make_document_action_icon("preview")
         self._build_menu()
         self._build_ui()
         self.status_var.trace_add("write", lambda *_args: self._on_status_var_changed())
@@ -8315,7 +8316,7 @@ try {
 
         self.live_document_actions_frame = ttk.Frame(
             self.live_document_preview_panel,
-            width=148,
+            width=222,
             height=66,
         )
         self.live_document_actions_frame.pack_propagate(False)
@@ -8348,6 +8349,11 @@ try {
             "Copiar",
             self.document_copy_icon,
             self.copy_generated_occurrence_document,
+        )
+        self.live_document_view_button = document_action_button(
+            "Visualizar",
+            self.document_view_icon,
+            self.open_document_viewer,
         )
         self.live_document_save_button = document_action_button(
             "Salvar",
@@ -9761,7 +9767,9 @@ try {
             image_width = photo.width()
             image_height = photo.height()
             side_inset = 2
-            top_inset = 2
+            # Borda superior de cerca de 1,3 cm físicos, calibrada pelo DPI
+            # real do monitor (mesma régua da escala de zoom da prévia).
+            top_inset = max(2, round(13 * _window_physical_dpi(self.root) / 25.4))
             bottom_inset = 2
             x = max(canvas_width / 2, image_width / 2 + side_inset)
             canvas.coords(image_id, x, top_inset)
@@ -11040,6 +11048,7 @@ try {
             self.last_generated_document_preview_path = None
             for button in (
                 self.live_document_copy_button,
+                self.live_document_view_button,
                 self.live_document_save_button,
             ):
                 button.configure(state="normal")
@@ -11047,7 +11056,7 @@ try {
                 self.live_document_actions_frame.place(
                     x=0,
                     y=0,
-                    width=148,
+                    width=222,
                     height=66,
                 )
             self.root.after_idle(self._position_live_document_preview)
@@ -11276,6 +11285,75 @@ try {
                 str(exc),
                 time.perf_counter() - save_started,
             )
+
+    def open_document_viewer(self) -> None:
+        """Abre uma janela própria do app com a prévia grande (zoom 100)."""
+        document_path = self.last_generated_document_path
+        if not document_path or not document_path.exists():
+            messagebox.showwarning(
+                "Visualizar documento",
+                "Gere o documento antes de visualizar.",
+                parent=self.root,
+            )
+            return
+        viewer = Toplevel(self.root)
+        viewer.title(f"Visualizar documento — {document_path.stem}")
+        viewer.transient(self.root)
+        viewer.geometry("640x480")
+        viewer_frame = ttk.Frame(viewer, padding=(10, 10))
+        viewer_frame.pack(fill=BOTH, expand=True)
+        canvas = Canvas(
+            viewer_frame,
+            background="#ffffff",
+            highlightthickness=0,
+            borderwidth=1,
+            relief="solid",
+        )
+        scrollbar = ttk.Scrollbar(viewer_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        canvas._viewer_photo = None
+        canvas.update_idletasks()
+        canvas.create_text(
+            max(120, canvas.winfo_width() / 2),
+            max(90, canvas.winfo_height() / 2),
+            text="Preparando visualização...",
+            fill="#879491",
+            width=max(200, canvas.winfo_width() - 60),
+        )
+        dpi = _window_physical_dpi(self.root)
+        threading.Thread(
+            target=self._document_viewer_worker,
+            args=(viewer, canvas, document_path, dpi),
+            daemon=True,
+        ).start()
+
+    def _document_viewer_worker(
+        self,
+        viewer,
+        canvas,
+        document_path: Path,
+        dpi: int,
+    ) -> None:
+        try:
+            preview_path = document_path.with_name(f"{document_path.stem}_visualizacao.pdf")
+            if (
+                not preview_path.exists()
+                or preview_path.stat().st_mtime_ns < document_path.stat().st_mtime_ns
+            ):
+                export_docx_to_pdf_with_word(document_path, preview_path)
+            image_path = document_path.with_name(f"{document_path.stem}_visualizacao_100.png")
+            pages, page_regions = render_pdf_preview(preview_path, image_path, 100, dpi)
+            self._queue(
+                "document_viewer_ready",
+                viewer,
+                canvas,
+                image_path,
+                list(page_regions),
+            )
+        except Exception as exc:
+            self._queue("document_viewer_error", viewer, canvas, str(exc))
 
     def request_live_qualification(self, *, generate_document: bool = False):
         raw_text = self._live_editor_value("qualification")
@@ -15852,6 +15930,52 @@ try {
                         f"Não consegui salvar o documento.\n\nDetalhe: {detail}",
                         parent=self.root,
                     )
+                elif kind == "document_viewer_ready":
+                    viewer, canvas, image_path, page_regions = message[1:]
+                    if not viewer.winfo_exists():
+                        return
+                    try:
+                        with Image.open(image_path) as source:
+                            source_image = source.convert("RGB")
+                        photo = ImageTk.PhotoImage(source_image)
+                        source_image.close()
+                        canvas.delete("all")
+                        canvas.create_image(2, 2, image=photo, anchor="nw")
+                        canvas._viewer_photo = photo
+                        canvas.configure(
+                            scrollregion=(0, 0, photo.width() + 4, photo.height() + 4)
+                        )
+                        viewer.update_idletasks()
+                        first_page_height = (
+                            page_regions[0][1] - page_regions[0][0]
+                            if page_regions
+                            else photo.height()
+                        )
+                        screen_w = viewer.winfo_screenwidth()
+                        screen_h = viewer.winfo_screenheight()
+                        target_w = min(screen_w - 80, photo.width() + 34)
+                        target_h = min(screen_h - 120, first_page_height + 30)
+                        viewer.geometry(f"{max(320, target_w)}x{max(240, target_h)}")
+                    except Exception as exc:
+                        canvas.delete("all")
+                        canvas.create_text(
+                            300,
+                            230,
+                            text=f"Não foi possível abrir a visualização.\n{exc}",
+                            fill="#b3261e",
+                            width=420,
+                        )
+                elif kind == "document_viewer_error":
+                    viewer, canvas, detail = message[1:]
+                    if viewer.winfo_exists():
+                        canvas.delete("all")
+                        canvas.create_text(
+                            300,
+                            230,
+                            text=f"Não foi possível gerar a visualização.\n\n{detail}",
+                            fill="#b3261e",
+                            width=420,
+                        )
                 elif kind == "assistant_multi_text_result":
                     generation, task, index, text, elapsed = message[1:]
                     if generation == self.assistant_generation:
