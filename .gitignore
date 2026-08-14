@@ -22,3 +22,4 @@ settings.json
 # lock de update do dist
 .dist.sig-update.lock
 release_run_*.log
+SigUpdater.spec
