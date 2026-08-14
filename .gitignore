@@ -23,3 +23,4 @@ settings.json
 .dist.sig-update.lock
 release_run_*.log
 SigUpdater.spec
+sync_publish_run.log
