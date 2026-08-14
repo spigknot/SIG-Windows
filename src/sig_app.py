@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_004"
+APP_VERSION = "20260814_005"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -12406,7 +12406,7 @@ try {
                 rest_row = chunk_row + 1
                 secondary_row = rest_row + 1
                 chunk_controls.grid_configure(row=chunk_row, column=1)
-                rest_controls.grid_configure(row=rest_row, column=1)
+                rest_controls.grid_configure(row=rest_row, column=1, sticky="w")
                 transcription_server_2_label.grid_configure(row=secondary_row)
                 transcription_server_2_combo.grid_configure(row=secondary_row)
                 chunk_controls.grid()
@@ -12415,7 +12415,7 @@ try {
                 chunk_row = chunk_size_row
                 rest_row = chunk_row + 1
                 chunk_controls.grid_configure(row=chunk_row, column=1)
-                rest_controls.grid_configure(row=rest_row, column=1)
+                rest_controls.grid_configure(row=rest_row, column=1, sticky="w")
                 transcription_server_2_label.grid_configure(row=transcription_server_2_row)
                 transcription_server_2_combo.grid_configure(row=transcription_server_2_row)
                 chunk_controls.grid()
@@ -12842,6 +12842,8 @@ try {
             return {
                 "labels": model_labels_holder,
                 "refresh": refresh,
+                "label": model_label,
+                "combo": model_combo,
                 "hideable": [model_label, model_combo, proxy_model_frame, reasoning_frame],
             }
 
@@ -12885,8 +12887,11 @@ try {
             )
             if extraction_key == "ai":
                 extraction_ui["refresh"]()
-                for widget in extraction_ui["hideable"]:
-                    widget.grid()
+                # Apenas o rótulo e o seletor do modelo são mostrados aqui; o
+                # refresh_reasoning_controls decide sozinho a visibilidade do
+                # seletor de modelo do IA-Proxy e do raciocínio.
+                extraction_ui["label"].grid()
+                extraction_ui["combo"].grid()
             else:
                 for widget in extraction_ui["hideable"]:
                     widget.grid_remove()
