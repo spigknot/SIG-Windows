@@ -8167,34 +8167,28 @@ try {
             height=135,
             vertical_padding=(0, 0),
         )
-        self.live_qualification_generate_host = ttk.Frame(
-            self.live_qualification_text_row,
-            width=100,
-            height=135,
-        )
-        self.live_qualification_generate_host.pack(side=LEFT, padx=(8, 0))
-        self.live_qualification_generate_host.pack_propagate(False)
+        self.live_qualification_execute_frame = ttk.Frame(self.live_qualification_content)
         self.live_qualification_declarations_check = ttk.Checkbutton(
-            self.live_qualification_generate_host,
+            self.live_qualification_execute_frame,
             text="Declarações",
             variable=self.qualification_declarations_var,
             command=lambda: select_qualification_type("declarations"),
         )
         self.live_qualification_declarations_check.pack(anchor="w")
         self.live_qualification_deposition_check = ttk.Checkbutton(
-            self.live_qualification_generate_host,
+            self.live_qualification_execute_frame,
             text="Depoimento",
             variable=self.qualification_deposition_var,
             command=lambda: select_qualification_type("deposition"),
         )
-        self.live_qualification_deposition_check.pack(anchor="w", pady=(2, 4))
+        self.live_qualification_deposition_check.pack(anchor="w", pady=(2, 6))
         self.live_document_execute_button = ttk.Button(
-            self.live_qualification_generate_host,
+            self.live_qualification_execute_frame,
             text="Gerar\ndocumento",
             style="Execute.TButton",
             command=self.generate_occurrence_document,
         )
-        self.live_document_execute_button.pack(anchor="center")
+        self.live_document_execute_button.pack()
 
         self.live_qualification_actions = ttk.Frame(
             self.live_qualification_stack,
@@ -9525,8 +9519,8 @@ try {
         stage = getattr(self, "live_document_preview_stage", None)
         statement = getattr(self, "live_statement_button", None)
         qualification_editor = getattr(self, "live_qualification_editor_host", None)
-        generate_host = getattr(self, "live_qualification_generate_host", None)
-        widgets = (row, content, panel, stage, statement, qualification_editor, generate_host)
+        execute_frame = getattr(self, "live_qualification_execute_frame", None)
+        widgets = (row, content, panel, stage, statement, qualification_editor, execute_frame)
         if not all(widget and widget.winfo_exists() for widget in widgets):
             return
         content.update_idletasks()
@@ -9538,12 +9532,10 @@ try {
             + qualification_editor.winfo_width()
             - content.winfo_rootx()
         )
-        generate_left = generate_host.winfo_rootx() - content.winfo_rootx()
-        generate_right = generate_left + generate_host.winfo_width()
-        qualification_gap = max(0, generate_left - qualification_right)
-        # Put the player so the Generate Document button has the same gap on
-        # both sides: qualification box -> button -> player.
-        target_left = max(0, round(generate_right + qualification_gap))
+        # Reserva um vão fixo entre a qualificação e o player para o botão
+        # "Gerar documento" (equidistante das duas caixas).
+        reserved_gap = 116
+        target_left = max(0, round(qualification_right + reserved_gap))
         available_width = max(220, content.winfo_width() - target_left)
         # The qualification stack is anchored at the bottom of its column. Its
         # editor therefore must fit between its action row and the top of the
@@ -9569,12 +9561,42 @@ try {
         # player, including when the window is resized or maximized.
         self.live_qualification_editor_host.configure(height=stage_height + extra_height)
         self.live_qualification_text._editor_frame.configure(height=stage_height + extra_height)
-        self.live_qualification_generate_host.configure(height=stage_height + extra_height)
         self.root.after_idle(self._position_live_document_preview)
 
     def _document_preview_extra_height(self) -> int:
         """~1,3 cm físicos extras na altura da caixa da prévia (pelo DPI real)."""
         return max(0, round(13 * _window_physical_dpi(self.root) / 25.4))
+
+    def _position_document_execute_controls(self, content, qualification_editor) -> None:
+        """Centraliza o botão Gerar documento no vão entre as duas caixas.
+
+        O CENTRO do botão fica no centro vertical das caixas e no centro
+        horizontal do vão (equidistante da qualificação e do player). As
+        checkboxes ficam empilhadas exatamente acima do botão.
+        """
+        frame = getattr(self, "live_qualification_execute_frame", None)
+        button = getattr(self, "live_document_execute_button", None)
+        if not frame or not button or not frame.winfo_exists():
+            return
+        frame.update_idletasks()
+        qualification_right = (
+            qualification_editor.winfo_rootx()
+            + qualification_editor.winfo_width()
+            - content.winfo_rootx()
+        )
+        gap_center_x = round(qualification_right + 116 / 2)
+        editor_top = max(0, qualification_editor.winfo_rooty() - content.winfo_rooty())
+        editor_height = max(1, qualification_editor.winfo_height())
+        box_center_y = editor_top + editor_height // 2
+        button_height = max(1, button.winfo_height())
+        frame_width = max(1, frame.winfo_reqwidth())
+        frame_height = max(1, frame.winfo_reqheight())
+        frame.place(
+            x=round(gap_center_x - frame_width / 2),
+            y=round(box_center_y - (frame_height - button_height / 2)),
+            width=frame_width,
+            height=frame_height,
+        )
 
     def _position_live_document_preview(self):
         """Align the preview's left edge with the right edge of Oitiva."""
@@ -9583,7 +9605,7 @@ try {
         stage = getattr(self, "live_document_preview_stage", None)
         statement = getattr(self, "live_statement_button", None)
         qualification_editor = getattr(self, "live_qualification_editor_host", None)
-        generate_host = getattr(self, "live_qualification_generate_host", None)
+        execute_frame = getattr(self, "live_qualification_execute_frame", None)
         if not content or not panel or not stage or not statement:
             return
         if not all(
@@ -9594,10 +9616,13 @@ try {
                 stage,
                 statement,
                 qualification_editor,
-                generate_host,
+                execute_frame,
             )
         ):
             return
+        # O botão "Gerar documento" (e as checkboxes acima dele) fica sempre
+        # posicionado no vão entre as caixas, mesmo sem prévia gerada.
+        self._position_document_execute_controls(content, qualification_editor)
         if not getattr(self, "document_preview_visible", False):
             if panel.winfo_manager() == "place":
                 panel.place_forget()
@@ -9611,10 +9636,7 @@ try {
             + qualification_editor.winfo_width()
             - content.winfo_rootx()
         )
-        generate_left = generate_host.winfo_rootx() - content.winfo_rootx()
-        generate_right = generate_left + generate_host.winfo_width()
-        qualification_gap = max(0, generate_left - qualification_right)
-        target_left = max(0, round(generate_right + qualification_gap))
+        target_left = max(0, round(qualification_right + 116))
         panel_width = max(300, content.winfo_width() - target_left)
         content_height = max(1, content.winfo_height())
         # The grid column begins too far right on restored windows.  Let the
