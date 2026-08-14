@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_002"
+APP_VERSION = "20260814_003"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -100,10 +100,26 @@ DEFAULT_SETTINGS = {
     "ia_proxy_model_2": "grok-4.6",
     "ia_proxy_provider": "grok",
     "ia_proxy_provider_2": "grok",
+    "history_model": "IA-Proxy",
+    "history_model_2": "",
+    "history_reasoning": "low",
+    "history_reasoning_2": "low",
+    "history_proxy_model": "grok-4.6",
+    "history_proxy_model_2": "grok-4.6",
+    "statement_model": "IA-Proxy",
+    "statement_model_2": "",
+    "statement_reasoning": "low",
+    "statement_reasoning_2": "low",
+    "statement_proxy_model": "grok-4.6",
+    "statement_proxy_model_2": "grok-4.6",
     "parts_extraction": "uppercase",
     "parts_model": "IA-Proxy",
     "parts_proxy_model": "grok-4.6",
     "parts_proxy_provider": "grok",
+    "parts_reasoning": "low",
+    "qualification_model": "IA-Proxy",
+    "qualification_reasoning": "low",
+    "qualification_proxy_model": "grok-4.6",
     "grok_api_key": "",
     "deepseek_api_key": "",
     "imei_api_key": IMEI_API_KEY,
@@ -4806,9 +4822,9 @@ def read_text_models() -> list[dict]:
     return integrated_models + regular_models
 
 
-def selected_text_model_config(settings: dict) -> dict:
+def selected_text_model_config(settings: dict, name_key: str = "text_model") -> dict:
     models = read_text_models()
-    name = settings.get("text_model")
+    name = settings.get(name_key) or settings.get("text_model")
     return (
         next((model for model in models if model["name"] == name), None)
         or next((model for model in models if model["selected"]), None)
@@ -5032,8 +5048,18 @@ def normalize_settings(data: dict) -> dict:
     return clean
 
 
-def settings_for_text_model(settings: dict, model_name: str, secondary: bool = False) -> dict:
+def settings_for_text_model(settings: dict, model_name: str, secondary: bool = False, task: str | None = None) -> dict:
     selected = dict(settings)
+    if task:
+        model_key, reasoning_key, proxy_key = TEXT_TASK_KEYS[task]
+        suffix = "_2" if secondary else ""
+        selected[model_key + suffix] = model_name
+        if secondary:
+            selected[reasoning_key + suffix] = str(settings.get(reasoning_key + "_2") or "low")
+            selected[proxy_key + suffix] = str(
+                settings.get(proxy_key + "_2") or settings.get(proxy_key) or GROK_TEXT_NAME
+            )
+        return selected
     selected["text_model"] = model_name
     if secondary:
         selected["text_reasoning"] = str(settings.get("text_reasoning_2") or "low")
@@ -5060,9 +5086,9 @@ def selected_parts_model(settings: dict) -> dict:
         model_name == IA_PROXY_NAME and proxy_model == DEEPSEEK_TEXT_NAME
     )
     if uses_deepseek:
-        selected["text_reasoning"] = "none"
+        selected["text_reasoning"] = str(settings.get("parts_reasoning") or "none")
     else:
-        selected["text_reasoning"] = "low"
+        selected["text_reasoning"] = str(settings.get("parts_reasoning") or "low")
     if model_name == IA_PROXY_NAME:
         selected["ia_proxy_provider"] = "deepseek" if uses_deepseek else "grok"
         selected["ia_proxy_model"] = proxy_model
@@ -5478,18 +5504,27 @@ def extract_text_from_response(raw: bytes) -> str:
     return parse_transcription_response(raw).text
 
 
-def selected_text_model(settings: dict) -> dict:
-    config = selected_text_model_config(settings)
+def selected_text_model(
+    settings: dict,
+    *,
+    model_key: str = "text_model",
+    reasoning_key: str = "text_reasoning",
+    proxy_key: str = "ia_proxy_model",
+    model_fallback: str = "text_model",
+    reasoning_fallback: str = "text_reasoning",
+    proxy_fallback: str = "ia_proxy_model",
+) -> dict:
+    config = selected_text_model_config(settings, model_key)
     is_proxy = config["name"] == IA_PROXY_NAME
     request_model = (
-        str(settings.get("ia_proxy_model") or GROK_TEXT_NAME)
+        str(settings.get(proxy_key) or settings.get(proxy_fallback) or GROK_TEXT_NAME)
         if is_proxy
         else config["name"]
     )
     if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME}:
         request_model = GROK_TEXT_NAME
     provider = "deepseek" if request_model == DEEPSEEK_TEXT_NAME else "xai"
-    reasoning = str(settings.get("text_reasoning") or "").casefold()
+    reasoning = str(settings.get(reasoning_key) or settings.get(reasoning_fallback) or "").casefold()
     if request_model == DEEPSEEK_TEXT_NAME:
         reasoning = reasoning if reasoning in {"none", "low", "high", "max"} else "none"
         parameters = {
@@ -5528,6 +5563,32 @@ def selected_text_model(settings: dict) -> dict:
             settings.get("deepseek_api_key" if is_deepseek_api else "grok_api_key") or ""
         ).strip(),
     }
+
+
+TEXT_TASK_KEYS = {
+    "history": ("history_model", "history_reasoning", "history_proxy_model"),
+    "statement": ("statement_model", "statement_reasoning", "statement_proxy_model"),
+    "qualification": ("qualification_model", "qualification_reasoning", "qualification_proxy_model"),
+}
+
+
+def selected_text_model_for(settings: dict, task: str, *, secondary: bool = False) -> dict:
+    """Resolve o modelo de uma tarefa específica (histórico, oitiva, qualificação).
+
+    As configurações específicas têm precedência; quando ausentes (settings
+    de versões anteriores), as configurações gerais de texto são usadas.
+    """
+    model_key, reasoning_key, proxy_key = TEXT_TASK_KEYS[task]
+    suffix = "_2" if secondary else ""
+    return selected_text_model(
+        settings,
+        model_key=model_key + suffix,
+        reasoning_key=reasoning_key + suffix,
+        proxy_key=proxy_key + suffix,
+        model_fallback="text_model" + suffix,
+        reasoning_fallback="text_reasoning" + suffix,
+        proxy_fallback="ia_proxy_model" + suffix,
+    )
 
 
 def extract_text_model_output(raw: bytes) -> str:
@@ -6920,9 +6981,8 @@ class SigApp:
         """Atualiza a linha inicial da etapa sem criar uma segunda mensagem."""
         step = self._activity_steps.pop(key, None)
         if not step:
-            label = "Etapa"
-            message = f"{label} ERRO ({float(elapsed):.1f}s): {error}" if error else f"{label} ({float(elapsed):.1f}s)"
-            self._append_activity_log(message, "warning" if error else None)
+            # Etapa nunca iniciada (ex.: zoom da prévia ou salvamento, que não
+            # produzem log): não registrar linha genérica de conclusão.
             return
         box = getattr(self, "activity_log", None)
         if box is None or not box.winfo_exists():
@@ -8175,7 +8235,8 @@ try {
         self.live_document_preview_canvas = Canvas(
             self.live_document_preview_viewport,
             highlightthickness=0,
-            borderwidth=0,
+            borderwidth=1,
+            relief="solid",
             background="#ffffff",
         )
         self.live_document_preview_yscroll = ttk.Scrollbar(
@@ -8186,8 +8247,16 @@ try {
         self.live_document_preview_canvas.configure(
             yscrollcommand=self._update_document_preview_scroll,
         )
-        self.live_document_preview_canvas.grid(row=0, column=0, sticky="nsew")
-        self.live_document_preview_yscroll.grid(row=0, column=1, sticky="ns")
+        # O canvas é posicionado por _position_embedded_document_preview para
+        # que a caixa da prévia abrace o documento (margens laterais mínimas)
+        # em vez de esticar pelo viewport inteiro.
+        self.live_document_preview_viewport.bind(
+            "<Configure>",
+            lambda _event: self._position_embedded_document_preview(),
+            add="+",
+        )
+        self.live_document_preview_canvas.place(x=0, y=0)
+        self.live_document_preview_yscroll.place(x=0, y=0)
         self.live_document_preview_canvas.bind(
             "<Configure>",
             lambda _event: self._position_embedded_document_preview(),
@@ -8823,7 +8892,7 @@ try {
         started = time.monotonic()
         try:
             result = client.post(
-                selected_text_model(settings),
+                selected_text_model_for(settings, "qualification"),
                 DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
                 qualification_user_prompt(field_ids, raw_text),
             )
@@ -8949,7 +9018,7 @@ try {
     def _refresh_assistant_model_label(self):
         transcription = selected_transcription_server(self.settings)
         transcription_model = transcription["parameters"].get("model", "modelo não informado")
-        text = selected_text_model(self.settings)
+        text = selected_text_model_for(self.settings, "qualification")
         text_model = text["parameters"].get("model", "modelo não informado")
         transcription_display = transcription_server_label(transcription)
         secondary_name = str(getattr(self, "multi_model_secondary", "") or "")
@@ -8969,9 +9038,7 @@ try {
             and self.multi_text_model_var.get()
         )
         if multi_text_enabled and secondary_text_name:
-            secondary_text = selected_text_model(
-                settings_for_text_model(self.settings, secondary_text_name, secondary=True)
-            )
+            secondary_text = selected_text_model_for(self.settings, "qualification", secondary=True)
             secondary_model = secondary_text["parameters"].get("model", "modelo não informado")
             secondary_display = (
                 secondary_text["name"]
@@ -9604,6 +9671,38 @@ try {
         canvas = getattr(self, "live_document_preview_canvas", None)
         if canvas is None or not canvas.winfo_exists():
             return
+        viewport = canvas.master
+        viewport.update_idletasks()
+        viewport_width = max(1, viewport.winfo_width())
+        viewport_height = max(1, viewport.winfo_height())
+        scrollbar = getattr(self, "live_document_preview_yscroll", None)
+        scrollbar_width = 14
+        if scrollbar is not None and scrollbar.winfo_exists():
+            scrollbar.update_idletasks()
+            scrollbar_width = max(12, scrollbar.winfo_reqwidth())
+        available_width = max(40, viewport_width - scrollbar_width)
+        photo = self.document_preview_photo
+        # A caixa da prévia abraça o documento: largura = imagem + 2px de cada
+        # lado (mesma margem discreta usada na vertical pelo crop).
+        if photo:
+            target_width = min(available_width, photo.width() + 4)
+        else:
+            target_width = available_width
+        canvas_x = max(0, (available_width - target_width) // 2)
+        canvas.place(
+            x=canvas_x,
+            y=0,
+            width=target_width,
+            height=viewport_height,
+        )
+        if scrollbar is not None and scrollbar.winfo_exists():
+            scrollbar.place(
+                x=viewport_width - scrollbar_width,
+                y=0,
+                width=scrollbar_width,
+                height=viewport_height,
+            )
+        canvas.update_idletasks()
         canvas_width = max(1, canvas.winfo_width())
         canvas_height = max(1, canvas.winfo_height())
         message_id = getattr(self, "live_document_preview_message_id", None)
@@ -9611,7 +9710,6 @@ try {
             canvas.coords(message_id, canvas_width / 2, canvas_height / 2)
             canvas.itemconfigure(message_id, width=max(120, canvas_width - 28))
         image_id = getattr(self, "live_document_preview_image_id", None)
-        photo = self.document_preview_photo
         if image_id and photo:
             image_width = photo.width()
             image_height = photo.height()
@@ -9977,10 +10075,8 @@ try {
         self.settings = load_settings()
         secondary_name = str(self.multi_text_secondary or "")
         if target == "live" and self.multi_text_model_var.get() and secondary_name:
-            primary_config = selected_text_model(self.settings)
-            secondary_config = selected_text_model(
-                settings_for_text_model(self.settings, secondary_name, secondary=True)
-            )
+            primary_config = selected_text_model_for(self.settings, "history")
+            secondary_config = selected_text_model_for(self.settings, "history", secondary=True)
             self.assistant_multi_model_labels = (
                 str(primary_config.get("name") or "Modelo 1"),
                 str(secondary_config.get("name") or "Modelo 2"),
@@ -10052,7 +10148,7 @@ try {
         client = self.assistant_client
         if not client:
             return
-        model_config = selected_text_model(settings)
+        model_config = selected_text_model_for(settings, "history")
         parts_model_config = selected_parts_model(settings)
         extraction_method = settings["parts_extraction"]
         history_request = history_user_prompt(material)
@@ -10129,8 +10225,8 @@ try {
         if not client:
             return
         models = [
-            selected_text_model(settings),
-            selected_text_model(settings_for_text_model(settings, self.multi_text_secondary, secondary=True)),
+            selected_text_model_for(settings, "history"),
+            selected_text_model_for(settings, "history", secondary=True),
         ]
         extraction_method = settings["parts_extraction"]
         primary_history = ""
@@ -10276,7 +10372,7 @@ try {
         started = time.monotonic()
         try:
             result = client.post(
-                selected_text_model(settings),
+                selected_text_model_for(settings, "statement"),
                 statement_prompt(selected_name),
                 statement_user_prompt(selected_name, material),
             )
@@ -10313,8 +10409,8 @@ try {
         if not client:
             return
         models = [
-            selected_text_model(settings),
-            selected_text_model(settings_for_text_model(settings, self.multi_text_secondary, secondary=True)),
+            selected_text_model_for(settings, "statement"),
+            selected_text_model_for(settings, "statement", secondary=True),
         ]
         started = time.monotonic()
         try:
@@ -11057,7 +11153,6 @@ try {
             )
             return
         save_started = time.perf_counter()
-        self._begin_activity_step("document:save", "Salvamento requisitado")
         self.live_document_save_button.configure(state="disabled")
         self._set_activity_status("Salvando documento", log=False)
         threading.Thread(
@@ -11125,7 +11220,7 @@ try {
         started = time.monotonic()
         try:
             result = client.post(
-                selected_text_model(settings),
+                selected_text_model_for(settings, "qualification"),
                 DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
                 qualification_user_prompt(list(LIVE_QUALIFICATION_FIELD_IDS), raw_text),
             )
@@ -11885,6 +11980,7 @@ try {
         win.resizable(False, False)
         frame = ttk.Frame(win, padding=18)
         frame.pack(fill=BOTH, expand=True)
+        frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
         conv_var = IntVar(value=self.settings["convert_parallel"])
@@ -11894,20 +11990,35 @@ try {
         transcription_server_2_labels = {"Nenhum": ""}
         transcription_server_2_var = StringVar(value="Nenhum")
         refreshing_transcription_servers = False
-        text_model_labels = {}
-        text_model_var = StringVar()
-        text_model_2_labels = {"Nenhum": ""}
-        text_model_2_var = StringVar(value="Nenhum")
-        text_reasoning_var = StringVar(value=self.settings.get("text_reasoning", "low"))
-        proxy_model_var = StringVar(value=self.settings.get("ia_proxy_model", GROK_TEXT_NAME))
-        text_reasoning_2_var = StringVar(value=self.settings.get("text_reasoning_2", "low"))
-        proxy_model_2_var = StringVar(value=self.settings.get("ia_proxy_model_2", GROK_TEXT_NAME))
+        history_model_labels = {}
+        history_model_var = StringVar()
+        history_model_2_labels = {"Nenhum": ""}
+        history_model_2_var = StringVar(value="Nenhum")
+        history_reasoning_var = StringVar(value=self.settings.get("history_reasoning", "low"))
+        history_proxy_model_var = StringVar(value=self.settings.get("history_proxy_model", GROK_TEXT_NAME))
+        history_reasoning_2_var = StringVar(value=self.settings.get("history_reasoning_2", "low"))
+        history_proxy_model_2_var = StringVar(value=self.settings.get("history_proxy_model_2", GROK_TEXT_NAME))
+        statement_model_labels = {}
+        statement_model_var = StringVar()
+        statement_model_2_labels = {"Nenhum": ""}
+        statement_model_2_var = StringVar(value="Nenhum")
+        statement_reasoning_var = StringVar(value=self.settings.get("statement_reasoning", "low"))
+        statement_proxy_model_var = StringVar(value=self.settings.get("statement_proxy_model", GROK_TEXT_NAME))
+        statement_reasoning_2_var = StringVar(value=self.settings.get("statement_reasoning_2", "low"))
+        statement_proxy_model_2_var = StringVar(value=self.settings.get("statement_proxy_model_2", GROK_TEXT_NAME))
         extraction_var = StringVar(value=PARTS_EXTRACTION_LABELS[self.settings["parts_extraction"]])
         parts_model_var = StringVar(value=self.settings.get("parts_model", IA_PROXY_NAME))
         parts_proxy_model_var = StringVar(
             value=self.settings.get("parts_proxy_model", GROK_TEXT_NAME)
         )
+        parts_reasoning_var = StringVar(value=self.settings.get("parts_reasoning", "low"))
         parts_model_labels: dict[str, str] = {}
+        qualification_model_var = StringVar(value=self.settings.get("qualification_model", IA_PROXY_NAME))
+        qualification_proxy_model_var = StringVar(
+            value=self.settings.get("qualification_proxy_model", GROK_TEXT_NAME)
+        )
+        qualification_reasoning_var = StringVar(value=self.settings.get("qualification_reasoning", "low"))
+        qualification_model_labels: dict[str, str] = {}
         grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
@@ -11920,35 +12031,47 @@ try {
         grok_rest_var = BooleanVar(value=bool(self.settings.get("grok_rest_requests", False)))
 
         import tkinter as tk
-        sections = []
-        for section_row, (title, name) in enumerate(
+        # Duas colunas: a primeira com os dados gerais, a segunda com os
+        # modelos de texto por tarefa.
+        columns = []
+        for col_index, titles in enumerate(
             (
-                ("Paralelismo", "parallel"),
-                ("Chaves API", "api"),
-                ("Transcrição", "transcription"),
-                ("Texto", "text"),
-                ("Extração de partes", "extraction"),
-                ("Policial", "police"),
+                ("Policial", "Chaves API", "Transcrição", "Paralelismo"),
+                ("Histórico", "Oitiva", "Extração de partes", "Qualificação"),
             )
         ):
-            section = ttk.LabelFrame(
-                frame,
-                text=title,
-                padding=(12, 8),
-                style="Settings.TLabelframe",
+            column = ttk.Frame(frame)
+            column.grid(
+                row=0,
+                column=col_index,
+                sticky="n",
+                padx=(0, 9) if col_index == 0 else (9, 0),
             )
-            section.grid(row=section_row, column=0, columnspan=4, sticky="ew", pady=(0, 8))
-            section.columnconfigure(0, minsize=170)
-            section.columnconfigure(1, weight=1)
-            sections.append(section)
+            column_sections = []
+            for title in titles:
+                section = ttk.LabelFrame(
+                    column,
+                    text=title,
+                    padding=(12, 8),
+                    style="Settings.TLabelframe",
+                )
+                section.grid(row=len(column_sections), column=0, sticky="ew", pady=(0, 8))
+                section.columnconfigure(0, minsize=170)
+                section.columnconfigure(1, weight=1)
+                column_sections.append(section)
+            columns.append(column_sections)
         (
-            parallel_frame,
+            police_frame,
             api_frame,
             transcription_frame,
-            text_frame,
+            parallel_frame,
+        ) = columns[0]
+        (
+            history_frame,
+            statement_frame,
             extraction_frame,
-            police_frame,
-        ) = sections
+            qualification_frame,
+        ) = columns[1]
 
         cpu_count = max(1, os.cpu_count() or 1)
 
@@ -12193,8 +12316,8 @@ try {
                 chunk_row = transcription_server_2_row
                 rest_row = chunk_row + 1
                 secondary_row = rest_row + 1
-                chunk_controls.grid_configure(row=chunk_row)
-                rest_controls.grid_configure(row=rest_row)
+                chunk_controls.grid_configure(row=chunk_row, column=1)
+                rest_controls.grid_configure(row=rest_row, column=1)
                 transcription_server_2_label.grid_configure(row=secondary_row)
                 transcription_server_2_combo.grid_configure(row=secondary_row)
                 chunk_controls.grid()
@@ -12202,8 +12325,8 @@ try {
             elif selected_name_2 == GROK_API_NAME:
                 chunk_row = chunk_size_row
                 rest_row = chunk_row + 1
-                chunk_controls.grid_configure(row=chunk_row)
-                rest_controls.grid_configure(row=rest_row)
+                chunk_controls.grid_configure(row=chunk_row, column=1)
+                rest_controls.grid_configure(row=rest_row, column=1)
                 transcription_server_2_label.grid_configure(row=transcription_server_2_row)
                 transcription_server_2_combo.grid_configure(row=transcription_server_2_row)
                 chunk_controls.grid()
@@ -12218,134 +12341,6 @@ try {
         transcription_server_var.trace_add("write", primary_server_changed)
         transcription_server_2_var.trace_add("write", refresh_chunk_visibility)
         refresh_chunk_visibility()
-
-        text_model_row = 0
-        ttk.Label(text_frame, text="Modelo de texto 1").grid(
-            row=text_model_row,
-            column=0,
-            sticky="w",
-            pady=5,
-            padx=(0, 12),
-        )
-        text_model_combo = ttk.Combobox(
-            text_frame,
-            textvariable=text_model_var,
-            state="readonly",
-            width=44,
-        )
-        text_model_combo.grid(row=text_model_row, column=1, sticky="ew", pady=5)
-        text_model_2_row = text_model_row + 3
-        ttk.Label(text_frame, text="Modelo de texto 2").grid(
-            row=text_model_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        text_model_2_combo = ttk.Combobox(
-            text_frame, textvariable=text_model_2_var, state="readonly", width=44
-        )
-        text_model_2_combo.grid(row=text_model_2_row, column=1, sticky="ew", pady=5)
-
-        def refresh_text_models(preferred_name: str | None = None):
-            nonlocal text_model_labels, text_model_2_labels
-            available_models = [
-                model
-                for model in read_text_models()
-                if (
-                    (
-                        model["name"] not in GROK_TEXT_API_NAMES
-                        or plausible_xai_api_key(grok_api_key_var.get())
-                    )
-                    and (
-                        model["name"] not in DEEPSEEK_API_NAMES
-                        or plausible_deepseek_api_key(deepseek_api_key_var.get())
-                    )
-                )
-            ]
-            text_model_labels = {
-                (
-                    model["name"]
-                    if model["name"] == IA_PROXY_NAME or model["name"] in GROK_TEXT_API_NAMES or model["name"] in DEEPSEEK_API_NAMES
-                    else f"{model['name']} ({model['parameters'].get('model', 'modelo não informado')})"
-                ): model["name"]
-                for model in available_models
-            }
-            text_model_combo.configure(values=list(text_model_labels))
-            target_name = preferred_name or selected_text_model_config(self.settings)["name"]
-            selected_label = next(
-                (label for label, name in text_model_labels.items() if name == target_name),
-                next(iter(text_model_labels), ""),
-            )
-            text_model_var.set(selected_label)
-            primary_name = text_model_labels.get(selected_label, "")
-            text_model_2_labels = {"Nenhum": ""}
-            text_model_2_labels.update(
-                {
-                    label: name
-                    for label, name in text_model_labels.items()
-                    if name != primary_name or name == IA_PROXY_NAME
-                }
-            )
-            text_model_2_combo.configure(values=list(text_model_2_labels))
-            wanted_secondary = (
-                text_model_2_labels.get(text_model_2_var.get(), "")
-                or str(self.settings.get("text_model_2") or "")
-            )
-            secondary_label = next(
-                (label for label, name in text_model_2_labels.items() if name == wanted_secondary),
-                "Nenhum",
-            )
-            text_model_2_var.set(secondary_label)
-
-        def add_text_server():
-            dialog = Toplevel(win)
-            dialog.title("Adicionar modelo de texto")
-            dialog.resizable(False, False)
-            dialog.transient(win)
-            dialog.grab_set()
-            dialog_frame = ttk.Frame(dialog, padding=16)
-            dialog_frame.pack(fill=BOTH, expand=True)
-            name_var, url_var, model_var = StringVar(), StringVar(), StringVar()
-            for row, (label, variable) in enumerate(
-                (("Nome do servidor", name_var), ("URL", url_var), ("Modelo", model_var))
-            ):
-                ttk.Label(dialog_frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
-                entry = ttk.Entry(dialog_frame, textvariable=variable, width=46)
-                entry.grid(row=row, column=1, sticky="ew", pady=4)
-                if row == 0:
-                    entry.focus_set()
-            dialog_buttons = ttk.Frame(dialog_frame)
-            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
-
-            def confirm_add():
-                added, reason = add_text_model(name_var.get(), url_var.get(), model_var.get())
-                if not added:
-                    messagebox.showerror("sig", reason, parent=dialog)
-                    return
-                refresh_text_models(text_model_labels.get(text_model_var.get()))
-                dialog.destroy()
-
-            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(0, 8))
-            ttk.Button(dialog_buttons, text="Adicionar", command=confirm_add).pack(side=LEFT)
-            dialog.bind("<Return>", lambda _event: confirm_add())
-            dialog.bind("<Escape>", lambda _event: dialog.destroy())
-
-        def remove_text_server():
-            model_name = text_model_labels.get(text_model_var.get())
-            if not model_name:
-                messagebox.showinfo("sig", "Selecione um modelo de texto para remover.", parent=win)
-                return
-            if model_name == IA_PROXY_NAME or model_name in GROK_TEXT_API_NAMES or model_name in DEEPSEEK_API_NAMES:
-                messagebox.showinfo("sig", "Este modelo de API é integrado e não pode ser removido.", parent=win)
-                return
-            if not messagebox.askyesno("sig", f"Remover o modelo de texto {model_name}?", parent=win):
-                return
-            if not remove_text_model(model_name):
-                messagebox.showerror("sig", "Não consegui remover o modelo de texto.", parent=win)
-                return
-            refresh_text_models()
-            if self.settings.get("text_model") == model_name:
-                replacement = text_model_labels.get(text_model_var.get())
-                if replacement:
-                    self.settings = save_settings({**self.settings, "text_model": replacement})
-                    self._refresh_assistant_model_label()
 
         proxy_model_options = (
             GROK_NON_REASONING_TEXT_NAME,
@@ -12371,80 +12366,6 @@ try {
                         target, label_var, selected
                     ),
                 )
-
-        proxy_model_row = text_model_row + 1
-        proxy_model_frame = ttk.Frame(text_frame, style="Settings.TFrame")
-        ttk.Label(
-            proxy_model_frame,
-            text="Modelo",
-            width=12,
-            anchor="w",
-            style="Settings.TLabel",
-        ).pack(
-            side=LEFT, padx=(0, 10)
-        )
-        proxy_model_display_var = StringVar(value=proxy_model_var.get())
-        proxy_model_button = ttk.Menubutton(
-            proxy_model_frame, textvariable=proxy_model_display_var, width=30
-        )
-        proxy_model_menu = tk.Menu(proxy_model_button, tearoff=False)
-        proxy_model_button.configure(menu=proxy_model_menu)
-        proxy_model_button.pack(side=LEFT)
-
-        reasoning_row = text_model_row + 2
-        reasoning_frame = ttk.Frame(text_frame, style="Settings.TFrame")
-        reasoning_label = ttk.Label(
-            reasoning_frame,
-            text="Raciocínio:",
-            width=12,
-            anchor="w",
-            style="Settings.TLabel",
-        )
-        reasoning_label.pack(side=LEFT, padx=(0, 10))
-        reasoning_display_var = StringVar(value=text_reasoning_var.get())
-        reasoning_button = ttk.Menubutton(
-            reasoning_frame, textvariable=reasoning_display_var, width=12
-        )
-        reasoning_menu = tk.Menu(reasoning_button, tearoff=False)
-        reasoning_button.configure(menu=reasoning_menu)
-        reasoning_button.pack(side=LEFT)
-
-        proxy_model_2_row = text_model_2_row + 1
-        proxy_model_2_frame = ttk.Frame(text_frame, style="Settings.TFrame")
-        ttk.Label(
-            proxy_model_2_frame,
-            text="Modelo",
-            width=12,
-            anchor="w",
-            style="Settings.TLabel",
-        ).pack(
-            side=LEFT, padx=(0, 10)
-        )
-        proxy_model_2_display_var = StringVar(value=proxy_model_2_var.get())
-        proxy_model_2_button = ttk.Menubutton(
-            proxy_model_2_frame, textvariable=proxy_model_2_display_var, width=30
-        )
-        proxy_model_2_menu = tk.Menu(proxy_model_2_button, tearoff=False)
-        proxy_model_2_button.configure(menu=proxy_model_2_menu)
-        proxy_model_2_button.pack(side=LEFT)
-
-        reasoning_2_row = text_model_2_row + 2
-        reasoning_2_frame = ttk.Frame(text_frame, style="Settings.TFrame")
-        reasoning_2_label = ttk.Label(
-            reasoning_2_frame,
-            text="Raciocínio:",
-            width=12,
-            anchor="w",
-            style="Settings.TLabel",
-        )
-        reasoning_2_label.pack(side=LEFT, padx=(0, 10))
-        reasoning_2_display_var = StringVar(value=text_reasoning_2_var.get())
-        reasoning_2_button = ttk.Menubutton(
-            reasoning_2_frame, textvariable=reasoning_2_display_var, width=12
-        )
-        reasoning_2_menu = tk.Menu(reasoning_2_button, tearoff=False)
-        reasoning_2_button.configure(menu=reasoning_2_menu)
-        reasoning_2_button.pack(side=LEFT)
 
         def refresh_model_reasoning_controls(
             selected_name: str,
@@ -12479,62 +12400,360 @@ try {
                 row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=5
             )
 
-        def refresh_text_reasoning_controls(*_args):
-            refresh_model_reasoning_controls(
-                text_model_labels.get(text_model_var.get(), ""),
-                proxy_model_var,
+        def make_two_model_section(
+            section_frame,
+            *,
+            model_var,
+            model_2_var,
+            reasoning_var,
+            reasoning_2_var,
+            proxy_var,
+            proxy_2_var,
+            settings_model_key,
+            settings_model_2_key,
+            settings_reasoning_key,
+            settings_reasoning_2_key,
+            settings_proxy_key,
+            settings_proxy_2_key,
+            label_first,
+            label_second,
+        ):
+            model_labels = {}
+            model_2_labels = {"Nenhum": ""}
+            model_row = 0
+            ttk.Label(section_frame, text=label_first).grid(
+                row=model_row,
+                column=0,
+                sticky="w",
+                pady=5,
+                padx=(0, 12),
+            )
+            model_combo = ttk.Combobox(
+                section_frame,
+                textvariable=model_var,
+                state="readonly",
+                width=44,
+            )
+            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
+            model_2_row = model_row + 3
+            ttk.Label(section_frame, text=label_second).grid(
+                row=model_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            )
+            model_2_combo = ttk.Combobox(
+                section_frame, textvariable=model_2_var, state="readonly", width=44
+            )
+            model_2_combo.grid(row=model_2_row, column=1, sticky="ew", pady=5)
+
+            proxy_model_row = model_row + 1
+            proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            ttk.Label(
                 proxy_model_frame,
-                proxy_model_menu,
-                proxy_model_display_var,
-                text_reasoning_var,
+                text="Modelo",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            ).pack(
+                side=LEFT, padx=(0, 10)
+            )
+            proxy_model_display_var = StringVar(value=proxy_var.get())
+            proxy_model_button = ttk.Menubutton(
+                proxy_model_frame, textvariable=proxy_model_display_var, width=30
+            )
+            proxy_model_menu = tk.Menu(proxy_model_button, tearoff=False)
+            proxy_model_button.configure(menu=proxy_model_menu)
+            proxy_model_button.pack(side=LEFT)
+
+            reasoning_row = model_row + 2
+            reasoning_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            reasoning_label = ttk.Label(
                 reasoning_frame,
-                reasoning_menu,
-                reasoning_display_var,
-                proxy_model_row,
-                reasoning_row,
+                text="Raciocínio:",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
             )
+            reasoning_label.pack(side=LEFT, padx=(0, 10))
+            reasoning_display_var = StringVar(value=reasoning_var.get())
+            reasoning_button = ttk.Menubutton(
+                reasoning_frame, textvariable=reasoning_display_var, width=12
+            )
+            reasoning_menu = tk.Menu(reasoning_button, tearoff=False)
+            reasoning_button.configure(menu=reasoning_menu)
+            reasoning_button.pack(side=LEFT)
 
-        def refresh_text_2_reasoning_controls(*_args):
-            refresh_model_reasoning_controls(
-                text_model_2_labels.get(text_model_2_var.get(), ""),
-                proxy_model_2_var,
+            proxy_model_2_row = model_2_row + 1
+            proxy_model_2_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            ttk.Label(
                 proxy_model_2_frame,
-                proxy_model_2_menu,
-                proxy_model_2_display_var,
-                text_reasoning_2_var,
-                reasoning_2_frame,
-                reasoning_2_menu,
-                reasoning_2_display_var,
-                proxy_model_2_row,
-                reasoning_2_row,
+                text="Modelo",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            ).pack(
+                side=LEFT, padx=(0, 10)
             )
+            proxy_model_2_display_var = StringVar(value=proxy_2_var.get())
+            proxy_model_2_button = ttk.Menubutton(
+                proxy_model_2_frame, textvariable=proxy_model_2_display_var, width=30
+            )
+            proxy_model_2_menu = tk.Menu(proxy_model_2_button, tearoff=False)
+            proxy_model_2_button.configure(menu=proxy_model_2_menu)
+            proxy_model_2_button.pack(side=LEFT)
 
-        refresh_text_models()
-        text_model_var.trace_add("write", refresh_text_reasoning_controls)
-        text_model_2_var.trace_add("write", refresh_text_2_reasoning_controls)
-        text_model_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda _event: refresh_text_models(text_model_labels.get(text_model_var.get(), "")),
+            reasoning_2_row = model_2_row + 2
+            reasoning_2_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            reasoning_2_label = ttk.Label(
+                reasoning_2_frame,
+                text="Raciocínio:",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            )
+            reasoning_2_label.pack(side=LEFT, padx=(0, 10))
+            reasoning_2_display_var = StringVar(value=reasoning_2_var.get())
+            reasoning_2_button = ttk.Menubutton(
+                reasoning_2_frame, textvariable=reasoning_2_display_var, width=12
+            )
+            reasoning_2_menu = tk.Menu(reasoning_2_button, tearoff=False)
+            reasoning_2_button.configure(menu=reasoning_2_menu)
+            reasoning_2_button.pack(side=LEFT)
+
+            def refresh(preferred_name: str | None = None):
+                available_models = [
+                    model
+                    for model in read_text_models()
+                    if (
+                        (
+                            model["name"] not in GROK_TEXT_API_NAMES
+                            or plausible_xai_api_key(grok_api_key_var.get())
+                        )
+                        and (
+                            model["name"] not in DEEPSEEK_API_NAMES
+                            or plausible_deepseek_api_key(deepseek_api_key_var.get())
+                        )
+                    )
+                ]
+                model_labels.clear()
+                model_labels.update(
+                    {
+                        (
+                            model["name"]
+                            if model["name"] == IA_PROXY_NAME or model["name"] in GROK_TEXT_API_NAMES or model["name"] in DEEPSEEK_API_NAMES
+                            else f"{model['name']} ({model['parameters'].get('model', 'modelo não informado')})"
+                        ): model["name"]
+                        for model in available_models
+                    }
+                )
+                model_combo.configure(values=list(model_labels))
+                target_name = preferred_name or str(self.settings.get(settings_model_key) or "")
+                if not target_name:
+                    target_name = selected_text_model_config(self.settings)["name"]
+                selected_label = next(
+                    (label for label, name in model_labels.items() if name == target_name),
+                    next(iter(model_labels), ""),
+                )
+                model_var.set(selected_label)
+                primary_name = model_labels.get(selected_label, "")
+                model_2_labels.clear()
+                model_2_labels["Nenhum"] = ""
+                model_2_labels.update(
+                    {
+                        label: name
+                        for label, name in model_labels.items()
+                        if name != primary_name or name == IA_PROXY_NAME
+                    }
+                )
+                model_2_combo.configure(values=list(model_2_labels))
+                wanted_secondary = (
+                    model_2_labels.get(model_2_var.get(), "")
+                    or str(self.settings.get(settings_model_2_key) or "")
+                )
+                secondary_label = next(
+                    (label for label, name in model_2_labels.items() if name == wanted_secondary),
+                    "Nenhum",
+                )
+                model_2_var.set(secondary_label)
+
+            def refresh_reasoning_controls(*_args):
+                refresh_model_reasoning_controls(
+                    model_labels.get(model_var.get(), ""),
+                    proxy_var,
+                    proxy_model_frame,
+                    proxy_model_menu,
+                    proxy_model_display_var,
+                    reasoning_var,
+                    reasoning_frame,
+                    reasoning_menu,
+                    reasoning_display_var,
+                    proxy_model_row,
+                    reasoning_row,
+                )
+
+            def refresh_reasoning_2_controls(*_args):
+                refresh_model_reasoning_controls(
+                    model_2_labels.get(model_2_var.get(), ""),
+                    proxy_2_var,
+                    proxy_model_2_frame,
+                    proxy_model_2_menu,
+                    proxy_model_2_display_var,
+                    reasoning_2_var,
+                    reasoning_2_frame,
+                    reasoning_2_menu,
+                    reasoning_2_display_var,
+                    proxy_model_2_row,
+                    reasoning_2_row,
+                )
+
+            refresh()
+            model_var.trace_add("write", refresh_reasoning_controls)
+            model_2_var.trace_add("write", refresh_reasoning_2_controls)
+            model_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _event: refresh(model_labels.get(model_var.get(), "")),
+            )
+            proxy_var.trace_add("write", refresh_reasoning_controls)
+            proxy_2_var.trace_add("write", refresh_reasoning_2_controls)
+            refresh_reasoning_controls()
+            refresh_reasoning_2_controls()
+            return {
+                "labels": model_labels,
+                "labels_2": model_2_labels,
+                "refresh": refresh,
+            }
+
+        history_ui = make_two_model_section(
+            history_frame,
+            model_var=history_model_var,
+            model_2_var=history_model_2_var,
+            reasoning_var=history_reasoning_var,
+            reasoning_2_var=history_reasoning_2_var,
+            proxy_var=history_proxy_model_var,
+            proxy_2_var=history_proxy_model_2_var,
+            settings_model_key="history_model",
+            settings_model_2_key="history_model_2",
+            settings_reasoning_key="history_reasoning",
+            settings_reasoning_2_key="history_reasoning_2",
+            settings_proxy_key="history_proxy_model",
+            settings_proxy_2_key="history_proxy_model_2",
+            label_first="Modelo de histórico 1",
+            label_second="Modelo de histórico 2",
         )
-        proxy_model_var.trace_add("write", refresh_text_reasoning_controls)
-        proxy_model_2_var.trace_add("write", refresh_text_2_reasoning_controls)
-        refresh_text_reasoning_controls()
-        refresh_text_2_reasoning_controls()
+        statement_ui = make_two_model_section(
+            statement_frame,
+            model_var=statement_model_var,
+            model_2_var=statement_model_2_var,
+            reasoning_var=statement_reasoning_var,
+            reasoning_2_var=statement_reasoning_2_var,
+            proxy_var=statement_proxy_model_var,
+            proxy_2_var=statement_proxy_model_2_var,
+            settings_model_key="statement_model",
+            settings_model_2_key="statement_model_2",
+            settings_reasoning_key="statement_reasoning",
+            settings_reasoning_2_key="statement_reasoning_2",
+            settings_proxy_key="statement_proxy_model",
+            settings_proxy_2_key="statement_proxy_model_2",
+            label_first="Modelo de oitiva 1",
+            label_second="Modelo de oitiva 2",
+        )
 
-        def grok_api_key_changed(*_args):
-            primary_name = transcription_labels.get(transcription_server_var.get(), "")
-            refresh_transcription_servers(primary_name)
-            refresh_text_models(text_model_labels.get(text_model_var.get(), ""))
-            refresh_parts_models()
-            refresh_chunk_visibility()
+        def make_single_model_section(
+            section_frame,
+            *,
+            model_var,
+            reasoning_var,
+            proxy_var,
+            settings_model_key,
+            settings_reasoning_key,
+            settings_proxy_key,
+            model_labels_holder,
+        ):
+            model_row = 0
+            model_label = ttk.Label(section_frame, text="Modelo:")
+            model_label.grid(row=model_row, column=0, sticky="w", pady=5, padx=(0, 12))
+            model_combo = ttk.Combobox(
+                section_frame,
+                textvariable=model_var,
+                state="readonly",
+                width=44,
+            )
+            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
 
-        grok_api_key_var.trace_add("write", grok_api_key_changed)
+            proxy_model_row = model_row + 1
+            proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            ttk.Label(
+                proxy_model_frame,
+                text="Modelo",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            ).pack(
+                side=LEFT, padx=(0, 10)
+            )
+            proxy_model_display_var = StringVar(value=proxy_var.get())
+            proxy_model_button = ttk.Menubutton(
+                proxy_model_frame, textvariable=proxy_model_display_var, width=30
+            )
+            proxy_model_menu = tk.Menu(proxy_model_button, tearoff=False)
+            proxy_model_button.configure(menu=proxy_model_menu)
+            proxy_model_button.pack(side=LEFT)
 
-        def deepseek_api_key_changed(*_args):
-            refresh_text_models(text_model_labels.get(text_model_var.get(), ""))
-            refresh_parts_models()
+            reasoning_row = model_row + 2
+            reasoning_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            ttk.Label(
+                reasoning_frame,
+                text="Raciocínio:",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            ).pack(side=LEFT, padx=(0, 10))
+            reasoning_display_var = StringVar(value=reasoning_var.get())
+            reasoning_button = ttk.Menubutton(
+                reasoning_frame, textvariable=reasoning_display_var, width=12
+            )
+            reasoning_menu = tk.Menu(reasoning_button, tearoff=False)
+            reasoning_button.configure(menu=reasoning_menu)
+            reasoning_button.pack(side=LEFT)
 
-        deepseek_api_key_var.trace_add("write", deepseek_api_key_changed)
+            def refresh():
+                model_labels_holder.clear()
+                model_labels_holder.update(history_ui["labels"])
+                model_combo.configure(values=list(model_labels_holder))
+                current = model_var.get() or str(self.settings.get(settings_model_key) or IA_PROXY_NAME)
+                target = current if current in model_labels_holder else IA_PROXY_NAME
+                if model_var.get() != target:
+                    model_var.set(target)
+                configure_menu(
+                    proxy_model_menu,
+                    proxy_var,
+                    proxy_model_display_var,
+                    proxy_model_options,
+                )
+                refresh_reasoning_controls()
+
+            def refresh_reasoning_controls(*_args):
+                refresh_model_reasoning_controls(
+                    model_labels_holder.get(model_var.get(), ""),
+                    proxy_var,
+                    proxy_model_frame,
+                    proxy_model_menu,
+                    proxy_model_display_var,
+                    reasoning_var,
+                    reasoning_frame,
+                    reasoning_menu,
+                    reasoning_display_var,
+                    proxy_model_row,
+                    reasoning_row,
+                )
+
+            refresh()
+            model_var.trace_add("write", refresh_reasoning_controls)
+            proxy_var.trace_add("write", refresh_reasoning_controls)
+            refresh_reasoning_controls()
+            return {
+                "labels": model_labels_holder,
+                "refresh": refresh,
+                "hideable": [model_label, model_combo, proxy_model_frame, reasoning_frame],
+            }
 
         extraction_row = 0
         ttk.Label(extraction_frame, text="Método").grid(
@@ -12553,52 +12772,18 @@ try {
         )
         extraction_combo.grid(row=extraction_row, column=1, sticky="ew", pady=5)
 
-        parts_model_row = extraction_row + 1
-        parts_model_label = ttk.Label(extraction_frame, text="Modelo:")
-        parts_model_label.grid(
-            row=parts_model_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        parts_model_combo = ttk.Combobox(
+        extraction_ui = make_single_model_section(
             extraction_frame,
-            textvariable=parts_model_var,
-            state="readonly",
-            width=25,
+            model_var=parts_model_var,
+            reasoning_var=parts_reasoning_var,
+            proxy_var=parts_proxy_model_var,
+            settings_model_key="parts_model",
+            settings_reasoning_key="parts_reasoning",
+            settings_proxy_key="parts_proxy_model",
+            model_labels_holder=parts_model_labels,
         )
-        parts_model_combo.grid(row=parts_model_row, column=1, sticky="ew", pady=5)
 
-        parts_proxy_row = parts_model_row + 1
-        parts_proxy_frame = ttk.Frame(extraction_frame, style="Settings.TFrame")
-        ttk.Label(parts_proxy_frame, text="Modelo", width=12, anchor="w", style="Settings.TLabel").pack(
-            side=LEFT, padx=(0, 10)
-        )
-        parts_proxy_display_var = StringVar(value=parts_proxy_model_var.get())
-        parts_proxy_button = ttk.Menubutton(
-            parts_proxy_frame,
-            textvariable=parts_proxy_display_var,
-            width=30,
-        )
-        parts_proxy_menu = tk.Menu(parts_proxy_button, tearoff=False)
-        parts_proxy_button.configure(menu=parts_proxy_menu)
-        parts_proxy_button.pack(side=LEFT)
-
-        def refresh_parts_models(*_args):
-            nonlocal parts_model_labels
-            # Keep the extraction model list identical to the text model list,
-            # including the same API-key filtering and integrated IA-Proxy item.
-            parts_model_labels = dict(text_model_labels)
-            parts_model_combo.configure(values=list(parts_model_labels))
-            current = parts_model_var.get() or str(self.settings.get("parts_model") or IA_PROXY_NAME)
-            target = current if current in parts_model_labels else IA_PROXY_NAME
-            if parts_model_var.get() != target:
-                parts_model_var.set(target)
-            configure_menu(
-                parts_proxy_menu,
-                parts_proxy_model_var,
-                parts_proxy_display_var,
-                proxy_model_options,
-            )
-
-        def refresh_parts_model_visibility(*_args):
+        def refresh_extraction_visibility(*_args):
             extraction_key = next(
                 (
                     key
@@ -12608,23 +12793,27 @@ try {
                 DEFAULT_SETTINGS["parts_extraction"],
             )
             if extraction_key == "ai":
-                refresh_parts_models()
-                parts_model_label.grid()
-                parts_model_combo.grid()
-                if parts_model_labels.get(parts_model_var.get()) == IA_PROXY_NAME:
-                    parts_proxy_frame.grid(
-                        row=parts_proxy_row, column=1, sticky="w", pady=5
-                    )
-                else:
-                    parts_proxy_frame.grid_remove()
+                extraction_ui["refresh"]()
+                for widget in extraction_ui["hideable"]:
+                    widget.grid()
             else:
-                parts_model_label.grid_remove()
-                parts_model_combo.grid_remove()
-                parts_proxy_frame.grid_remove()
+                for widget in extraction_ui["hideable"]:
+                    widget.grid_remove()
 
-        extraction_var.trace_add("write", refresh_parts_model_visibility)
-        parts_model_var.trace_add("write", refresh_parts_model_visibility)
-        refresh_parts_model_visibility()
+        extraction_var.trace_add("write", refresh_extraction_visibility)
+        parts_model_var.trace_add("write", refresh_extraction_visibility)
+        refresh_extraction_visibility()
+
+        qualification_ui = make_single_model_section(
+            qualification_frame,
+            model_var=qualification_model_var,
+            reasoning_var=qualification_reasoning_var,
+            proxy_var=qualification_proxy_model_var,
+            settings_model_key="qualification_model",
+            settings_reasoning_key="qualification_reasoning",
+            settings_proxy_key="qualification_proxy_model",
+            model_labels_holder=qualification_model_labels,
+        )
 
         ttk.Label(police_frame, text="Nome").grid(
             row=0, column=0, sticky="w", pady=5, padx=(0, 12)
@@ -12736,14 +12925,35 @@ try {
             dialog.bind("<Return>", lambda _event: confirm_edit())
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
 
+        def grok_api_key_changed(*_args):
+            primary_name = transcription_labels.get(transcription_server_var.get(), "")
+            refresh_transcription_servers(primary_name)
+            history_ui["refresh"](history_ui["labels"].get(history_model_var.get(), ""))
+            statement_ui["refresh"](statement_ui["labels"].get(statement_model_var.get(), ""))
+            extraction_ui["refresh"]()
+            qualification_ui["refresh"]()
+            refresh_chunk_visibility()
+
+        grok_api_key_var.trace_add("write", grok_api_key_changed)
+
+        def deepseek_api_key_changed(*_args):
+            history_ui["refresh"](history_ui["labels"].get(history_model_var.get(), ""))
+            statement_ui["refresh"](statement_ui["labels"].get(statement_model_var.get(), ""))
+            extraction_ui["refresh"]()
+            qualification_ui["refresh"]()
+
+        deepseek_api_key_var.trace_add("write", deepseek_api_key_changed)
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=0, columnspan=4, sticky="e", pady=(6, 0))
+        buttons.grid(row=1, column=0, columnspan=2, sticky="e", pady=(6, 0))
 
         def save_and_close():
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
             selected_transcription_2 = transcription_server_2_labels.get(transcription_server_2_var.get(), "")
-            selected_text = text_model_labels.get(text_model_var.get(), "")
-            selected_text_2 = text_model_2_labels.get(text_model_2_var.get(), "")
+            selected_history = history_ui["labels"].get(history_model_var.get(), "")
+            selected_history_2 = history_ui["labels_2"].get(history_model_2_var.get(), "")
+            selected_statement = statement_ui["labels"].get(statement_model_var.get(), "")
+            selected_statement_2 = statement_ui["labels_2"].get(statement_model_2_var.get(), "")
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
             imei_api_key = imei_api_key_var.get().strip()
@@ -12774,32 +12984,39 @@ try {
                     parent=win,
                 )
                 return
-            if (
-                selected_transcription == GROK_API_NAME
-                or selected_transcription_2 == GROK_API_NAME
-                or selected_text in GROK_TEXT_API_NAMES
-                or selected_text_2 in GROK_TEXT_API_NAMES
-            ) and not api_key:
+            selected_models = (
+                selected_transcription,
+                selected_transcription_2,
+                selected_history,
+                selected_history_2,
+                selected_statement,
+                selected_statement_2,
+            )
+            if any(model in GROK_TEXT_API_NAMES for model in selected_models) and not api_key:
                 messagebox.showerror("sig", "Insira uma chave API válida da xAI para selecionar este modelo.", parent=win)
                 return
-            if (selected_text in DEEPSEEK_API_NAMES or selected_text_2 in DEEPSEEK_API_NAMES) and not deepseek_api_key:
+            if any(model in DEEPSEEK_API_NAMES for model in selected_models) and not deepseek_api_key:
                 messagebox.showerror(
                     "sig",
                     "Insira uma chave API válida do Deepseek para selecionar este modelo.",
                     parent=win,
                 )
                 return
-            if (
-                selected_text == IA_PROXY_NAME
-                and selected_text_2 == IA_PROXY_NAME
-                and proxy_model_var.get() == proxy_model_2_var.get()
+            for section_name, model_1, model_2, proxy_1, proxy_2 in (
+                ("Histórico", selected_history, selected_history_2, history_proxy_model_var.get(), history_proxy_model_2_var.get()),
+                ("Oitiva", selected_statement, selected_statement_2, statement_proxy_model_var.get(), statement_proxy_model_2_var.get()),
             ):
-                messagebox.showerror(
-                    "sig",
-                    "Ao selecionar IA-Proxy duas vezes, escolha modelos diferentes nos dois seletores.",
-                    parent=win,
-                )
-                return
+                if (
+                    model_1 == IA_PROXY_NAME
+                    and model_2 == IA_PROXY_NAME
+                    and proxy_1 == proxy_2
+                ):
+                    messagebox.showerror(
+                        "sig",
+                        f"Ao selecionar IA-Proxy duas vezes em {section_name}, escolha modelos diferentes nos dois seletores.",
+                        parent=win,
+                    )
+                    return
             try:
                 grok_chunk_ms = int(grok_chunk_ms_var.get().strip())
             except ValueError:
@@ -12838,6 +13055,25 @@ try {
                     "sig", "Insira uma chave API válida do Deepseek para usar DeepSeek na extração de partes.", parent=win
                 )
                 return
+            selected_qualification_model = qualification_model_labels.get(
+                qualification_model_var.get(), IA_PROXY_NAME
+            )
+            if (
+                selected_qualification_model in GROK_TEXT_API_NAMES
+                and not plausible_xai_api_key(api_key)
+            ):
+                messagebox.showerror(
+                    "sig", "Insira uma chave API válida da xAI para usar Grok na qualificação.", parent=win
+                )
+                return
+            if (
+                selected_qualification_model in DEEPSEEK_API_NAMES
+                and not plausible_deepseek_api_key(deepseek_api_key)
+            ):
+                messagebox.showerror(
+                    "sig", "Insira uma chave API válida do Deepseek para usar DeepSeek na qualificação.", parent=win
+                )
+                return
             self.settings = save_settings(
                 {
                     "convert_parallel": conv_var.get(),
@@ -12846,12 +13082,18 @@ try {
                     "grok_rest_requests": bool(grok_rest_var.get()),
                     "transcription_server": selected_transcription,
                     "transcription_server_2": selected_transcription_2,
-                    "text_model": selected_text,
-                    "text_model_2": selected_text_2,
-                    "text_reasoning": text_reasoning_var.get(),
-                    "text_reasoning_2": text_reasoning_2_var.get(),
-                    "ia_proxy_model": proxy_model_var.get(),
-                    "ia_proxy_model_2": proxy_model_2_var.get(),
+                    "history_model": selected_history,
+                    "history_model_2": selected_history_2,
+                    "history_reasoning": history_reasoning_var.get(),
+                    "history_reasoning_2": history_reasoning_2_var.get(),
+                    "history_proxy_model": history_proxy_model_var.get(),
+                    "history_proxy_model_2": history_proxy_model_2_var.get(),
+                    "statement_model": selected_statement,
+                    "statement_model_2": selected_statement_2,
+                    "statement_reasoning": statement_reasoning_var.get(),
+                    "statement_reasoning_2": statement_reasoning_2_var.get(),
+                    "statement_proxy_model": statement_proxy_model_var.get(),
+                    "statement_proxy_model_2": statement_proxy_model_2_var.get(),
                     "parts_extraction": extraction_key,
                     "parts_model": selected_parts_model_name,
                     "parts_proxy_model": selected_parts_proxy_model,
@@ -12860,6 +13102,10 @@ try {
                         if selected_parts_proxy_model == DEEPSEEK_TEXT_NAME
                         else "grok"
                     ),
+                    "parts_reasoning": parts_reasoning_var.get(),
+                    "qualification_model": selected_qualification_model,
+                    "qualification_reasoning": qualification_reasoning_var.get(),
+                    "qualification_proxy_model": qualification_proxy_model_var.get(),
                     "grok_api_key": api_key,
                     "deepseek_api_key": deepseek_api_key,
                     "imei_api_key": imei_api_key,
@@ -12868,14 +13114,13 @@ try {
                     "police_station": police_station,
                     "police_delegate": police_delegate,
                     "police_city": police_city,
-
                 }
             )
             self._refresh_server_label()
             self._refresh_assistant_model_label()
             self._refresh_live_grok_controls()
             self.multi_model_secondary = selected_transcription_2
-            self.multi_text_secondary = selected_text_2
+            self.multi_text_secondary = selected_history_2
             if self.multi_model_var.get() and not selected_transcription_2:
                 self.multi_model_var.set(False)
             self._refresh_multi_model_layout()
@@ -12895,13 +13140,13 @@ try {
                     child.configure(style="Settings.TFrame")
                 normalize_settings_surface(child)
 
-        for section in sections:
-            normalize_settings_surface(section)
+        for column_sections in columns:
+            for section in column_sections:
+                normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
         win.wait_visibility()
         win.focus()
-
     def open_about(self):
         if self.about_window is not None:
             try:
