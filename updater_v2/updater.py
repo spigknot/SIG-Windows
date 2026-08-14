@@ -98,6 +98,28 @@ class UpdateError(RuntimeError):
     pass
 
 
+def _verify_rsa_sha256_signature(signature_b64: str, canonical_bytes: bytes) -> bool:
+    """Verifica assinatura RSA PKCS#1 v1.5 + SHA-256 com a chave pública embutida."""
+    try:
+        signature = base64.b64decode(signature_b64 or "", validate=True)
+        key_size = (UPDATE_PUBLIC_KEY_N.bit_length() + 7) // 8
+        if len(signature) != key_size:
+            return False
+        encoded = pow(int.from_bytes(signature, "big"), UPDATE_PUBLIC_KEY_E, UPDATE_PUBLIC_KEY_N)
+        encoded_bytes = encoded.to_bytes(key_size, "big")
+        digest_info = (
+            bytes.fromhex("3031300d060960864801650304020105000420")
+            + hashlib.sha256(canonical_bytes).digest()
+        )
+        padding_size = key_size - len(digest_info) - 3
+        if padding_size < 8:
+            return False
+        expected = b"\x00\x01" + (b"\xff" * padding_size) + b"\x00" + digest_info
+        return encoded_bytes == expected
+    except (TypeError, ValueError):
+        return False
+
+
 def canonical_update_manifest(manifest: dict) -> bytes:
     signed_payload = {
         "schema": int(manifest.get("schema") or 0),
@@ -117,24 +139,10 @@ def canonical_update_manifest(manifest: dict) -> bytes:
 
 
 def verify_update_manifest_signature(manifest: dict) -> bool:
-    try:
-        signature = base64.b64decode(str(manifest.get("signature") or ""), validate=True)
-        key_size = (UPDATE_PUBLIC_KEY_N.bit_length() + 7) // 8
-        if len(signature) != key_size:
-            return False
-        encoded = pow(int.from_bytes(signature, "big"), UPDATE_PUBLIC_KEY_E, UPDATE_PUBLIC_KEY_N)
-        encoded_bytes = encoded.to_bytes(key_size, "big")
-        digest_info = (
-            bytes.fromhex("3031300d060960864801650304020105000420")
-            + hashlib.sha256(canonical_update_manifest(manifest)).digest()
-        )
-        padding_size = key_size - len(digest_info) - 3
-        if padding_size < 8:
-            return False
-        expected = b"\x00\x01" + (b"\xff" * padding_size) + b"\x00" + digest_info
-        return encoded_bytes == expected
-    except (TypeError, ValueError):
-        return False
+    return _verify_rsa_sha256_signature(
+        str(manifest.get("signature") or ""),
+        canonical_update_manifest(manifest),
+    )
 
 
 def _validate_incremental_manifest(manifest: dict) -> dict:
@@ -308,6 +316,119 @@ def zip_version(zip_path: Path) -> str | None:
     except (OSError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError, KeyError):
         return None
     return version if VERSION_RE.fullmatch(version) else None
+
+
+SYNC_MANIFEST_SCHEMA = 2
+SYNC_MANIFEST_MAX_FILES = 20_000
+SYNC_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+SYNC_REQUIRED_FILES = (
+    "sig.exe",
+    "SigUpdater.exe",
+    "build-info.json",
+    "_internal/base_library.zip",
+    "_internal/python311.dll",
+    "_internal/vcruntime140.dll",
+    "_internal/vcruntime140_1.dll",
+    "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
+    "ffmpeg.exe",
+    "ffplay.exe",
+    "vad_worker.py",
+    "prompts/historico_system.txt",
+    "prompts/historico_user.txt",
+    "prompts/oitiva_system.txt",
+    "prompts/oitiva_user.txt",
+    "prompts/partes_system.txt",
+    "prompts/qualificacao_system.txt",
+    "prompts/qualificacao_user.txt",
+    "modelos/modelo_declaracoes.docx",
+    "modelos/modelo_depoimento.docx",
+)
+
+
+def canonical_sync_manifest(manifest: dict) -> bytes:
+    """Payload canônico assinado do manifesto de sincronização (schema 2)."""
+    files = manifest.get("files") or []
+    canonical_files = sorted(
+        (
+            {
+                "path": str(entry.get("path") or ""),
+                "sha256": str(entry.get("sha256") or "").lower(),
+                "size": int(entry.get("size") or 0),
+                "drive_id": str(entry.get("drive_id") or ""),
+            }
+            for entry in files
+        ),
+        key=lambda item: item["path"],
+    )
+    signed_payload = {
+        "schema": int(manifest.get("schema") or 0),
+        "version": str(manifest.get("version") or ""),
+        "created_at": str(manifest.get("created_at") or ""),
+        "files": canonical_files,
+    }
+    return json.dumps(
+        signed_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def verify_sync_manifest_signature(manifest: dict) -> bool:
+    return _verify_rsa_sha256_signature(
+        str(manifest.get("signature") or ""),
+        canonical_sync_manifest(manifest),
+    )
+
+
+def validate_sync_manifest(manifest: dict) -> dict:
+    """Valida a estrutura e a assinatura do manifesto de sincronização.
+
+    Retorna um dict normalizado: {"version": str, "files": {path: entry}}.
+    """
+    if not isinstance(manifest, dict):
+        raise UpdateError("o manifesto de sincronização não é um objeto JSON")
+    if int(manifest.get("schema") or 0) != SYNC_MANIFEST_SCHEMA:
+        raise UpdateError("o manifesto de sincronização não usa o schema esperado")
+    if not verify_sync_manifest_signature(manifest):
+        raise UpdateError("o manifesto de sincronização não possui uma assinatura digital válida")
+    version = str(manifest.get("version") or "")
+    if not VERSION_RE.fullmatch(version):
+        raise UpdateError("o manifesto de sincronização contém uma versão inválida")
+    raw_files = manifest.get("files")
+    if not isinstance(raw_files, list) or not raw_files:
+        raise UpdateError("o manifesto de sincronização não lista arquivos")
+    if len(raw_files) > SYNC_MANIFEST_MAX_FILES:
+        raise UpdateError("o manifesto de sincronização excede o limite de arquivos")
+    files: dict[str, dict] = {}
+    for index, entry in enumerate(raw_files):
+        if not isinstance(entry, dict):
+            raise UpdateError(f"entrada {index} do manifesto é inválida")
+        path = _normalized_member_name(str(entry.get("path") or ""))
+        top = path.split("/", 1)[0]
+        if top not in ALLOWED_TOP_LEVEL_NAMES:
+            raise UpdateError(f"componente desconhecido no manifesto de sincronização: {path}")
+        if path in files:
+            raise UpdateError(f"caminho duplicado no manifesto de sincronização: {path}")
+        sha256 = str(entry.get("sha256") or "").lower()
+        if len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+            raise UpdateError(f"hash inválido no manifesto para: {path}")
+        size = int(entry.get("size") or 0)
+        if size < 0:
+            raise UpdateError(f"tamanho inválido no manifesto para: {path}")
+        drive_id = str(entry.get("drive_id") or "").strip()
+        if not drive_id:
+            raise UpdateError(f"drive_id ausente no manifesto para: {path}")
+        files[path] = {"sha256": sha256, "size": size, "drive_id": drive_id}
+    missing = sorted(
+        relative for relative in SYNC_REQUIRED_FILES if relative not in files
+    )
+    if missing:
+        raise UpdateError(
+            "o manifesto de sincronização não cobre componentes obrigatórios: "
+            + ", ".join(missing)
+        )
+    return {"version": version, "files": files}
 
 
 def _download_to_file(
