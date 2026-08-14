@@ -898,7 +898,16 @@ def _rollback_transaction(transaction: Path, target: Path, log_path: Path) -> No
         raise UpdateError(f"diário aponta para outra instalação: {transaction}")
     backup = transaction / "backup"
     names = {str(name) for name in journal.get("names", []) if isinstance(name, str)}
-    if backup.is_dir():
+    if journal.get("mode") == "file":
+        # Transação por arquivo: o backup guarda caminhos ANINHADOS
+        # (backup/_internal/foo.dll). Restaurar apenas os arquivos — nunca
+        # diretórios inteiros — para não apagar o restante da instalação.
+        names.update(
+            path.relative_to(backup).as_posix()
+            for path in backup.rglob("*")
+            if path.is_file()
+        )
+    elif backup.is_dir():
         names.update(path.name for path in backup.iterdir())
     _log(log_path, f"Recuperando transação interrompida: {transaction.name}.")
     for name in sorted(names, key=str.casefold, reverse=True):
@@ -1161,6 +1170,7 @@ def _apply_transaction(
         "schema": 1,
         "target": str(target),
         "phase": "prepared",
+        "mode": "top_level",
         "names": names,
         "target_existed": target_existed,
         "allow_incomplete_target": allow_incomplete_target,
@@ -1197,19 +1207,20 @@ def _apply_transaction(
         raise
 
 
-def _apply_diff_transaction(
+def _apply_file_transaction(
     staged: Path,
     target: Path,
     transaction: Path,
     startup_timeout: int,
     log_path: Path,
-    removidos: list[str],
+    removals: list[str],
 ) -> None:
-    """Aplica um pacote diff: substitui arquivos individuais e remove os listados.
+    """Aplica substituições e remoções de arquivos individuais com rollback.
 
-    O backup preserva a estrutura interna (`backup/_internal/foo.dll`) e o
-    diário registra cada caminho individualmente, então o rollback existente
-    continua funcionando sem alteração.
+    Compartilhada pelo pacote diff (removidos.txt) e pela sincronização por
+    arquivo (órfãos). O backup preserva a estrutura interna
+    (`backup/_internal/foo.dll`) e o diário registra cada caminho
+    individualmente, então o rollback existente funciona sem alteração.
     """
     backup = transaction / "backup"
     backup.mkdir()
@@ -1222,14 +1233,15 @@ def _apply_diff_transaction(
         ),
         key=str.casefold,
     )
-    if not staged_files:
-        raise UpdateError("o pacote diff não contém arquivos para aplicar")
-    names = sorted(set(staged_files) | set(removidos), key=str.casefold)
+    if not staged_files and not removals:
+        raise UpdateError("a transação não contém arquivos para aplicar")
+    names = sorted(set(staged_files) | set(removals), key=str.casefold)
     target_existed = {name: _path_exists(target / Path(*PurePosixPath(name).parts)) for name in names}
     journal = {
         "schema": 1,
         "target": str(target),
         "phase": "prepared",
+        "mode": "file",
         "names": names,
         "target_existed": target_existed,
         "allow_incomplete_target": False,
@@ -1244,14 +1256,14 @@ def _apply_diff_transaction(
         _write_journal(transaction / "journal.json", journal)
         for name in staged_files:
             _atomic_move(staged / Path(*PurePosixPath(name).parts), target / Path(*PurePosixPath(name).parts))
-        for name in removidos:
+        for name in removals:
             destination = target / Path(*PurePosixPath(name).parts)
             if _path_exists(destination):
-                raise UpdateError(f"arquivo removido pelo diff ainda existe: {name}")
+                raise UpdateError(f"arquivo removido ainda existe: {name}")
         journal["phase"] = "new-moved"
         _write_journal(transaction / "journal.json", journal)
         validate_install_tree(target, full=False)
-        _log(log_path, "Diff incremental aplicado; validando inicialização.")
+        _log(log_path, "Arquivos aplicados; validando inicialização.")
         started_process = _launch_and_verify(target / "sig.exe", startup_timeout, log_path)
         journal["phase"] = "validated"
         _write_journal(transaction / "journal.json", journal)
@@ -1268,6 +1280,51 @@ def _apply_diff_transaction(
             except Exception as restart_error:
                 _log(log_path, f"Não foi possível reiniciar a versão anterior: {restart_error}")
         raise
+
+
+def _apply_diff_transaction(
+    staged: Path,
+    target: Path,
+    transaction: Path,
+    startup_timeout: int,
+    log_path: Path,
+    removidos: list[str],
+) -> None:
+    """Aplica um pacote diff (wrapper da transação genérica por arquivo)."""
+    _apply_file_transaction(staged, target, transaction, startup_timeout, log_path, removidos)
+
+
+def apply_sync_transaction(
+    staged_root: Path,
+    target: Path,
+    removals: list[str],
+    startup_timeout: int,
+    log_path: Path,
+) -> None:
+    """Aplica o resultado da sincronização por arquivo com rollback.
+
+    ``staged_root`` contém os arquivos baixados (na estrutura final) e
+    ``removals`` lista os órfãos a deletar. A instalação é validada ao final
+    e o aplicativo é reiniciado após a verificação de inicialização.
+    """
+    target = Path(target).resolve()
+    with _installation_lock(target, log_path):
+        _recover_interrupted_transactions(target, log_path)
+        validate_target_shell(target)
+        transaction = Path(tempfile.mkdtemp(prefix=".sig-sync-", dir=str(target.parent)))
+        try:
+            _apply_file_transaction(
+                staged_root,
+                target,
+                transaction,
+                startup_timeout,
+                log_path,
+                removals,
+            )
+        except Exception:
+            if transaction.exists():
+                shutil.rmtree(transaction, ignore_errors=True)
+            raise
 
 
 def execute(

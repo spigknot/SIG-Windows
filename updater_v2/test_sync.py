@@ -183,6 +183,99 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class SyncTransactionTests(unittest.TestCase):
+    """FASE A4: transação por arquivo (substituição + remoção + rollback)."""
+
+    def _make_install(self, files: dict[str, bytes]) -> str:
+        temporary = tempfile.mkdtemp(prefix="sig-sync-txn-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(temporary, ignore_errors=True))
+        target = Path(temporary)
+        required = {
+            "sig.exe": b"fixture-sig",
+            "SigUpdater.exe": b"fixture-updater",
+            "build-info.json": b'{"version": "20260814_010"}',
+            "_internal/base_library.zip": b"fixture",
+            "_internal/python311.dll": b"fixture",
+            "_internal/vcruntime140.dll": b"fixture",
+            "_internal/vcruntime140_1.dll": b"fixture",
+            "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll": b"fixture",
+            "ffmpeg.exe": b"fixture",
+            "ffplay.exe": b"fixture",
+            "vad_worker.py": b"fixture",
+            "vad_deps/fixture.txt": b"fixture",
+        }
+        required.update(files)
+        for name, data in required.items():
+            path = target / Path(*PurePosixPath(name).parts)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return temporary
+
+    def _make_staged(self, root: Path, files: dict[str, bytes]) -> Path:
+        staged = root / "staged"
+        for name, data in files.items():
+            path = staged / Path(*PurePosixPath(name).parts)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return staged
+
+    def test_launch_failure_rolls_back_everything(self):
+        import updater as updater_module
+
+        target = Path(self._make_install(
+            {"_internal/antiga.dll": b"velha", "prompts/velho.txt": b"velho"}
+        ))
+        root = target
+        staged = self._make_staged(root, {"_internal/nova.dll": b"nova"})
+        transaction = root / "txn"
+        transaction.mkdir()
+        log = root / "updater.log"
+        with self.assertRaises(Exception):
+            updater_module._apply_file_transaction(
+                staged,
+                target,
+                transaction,
+                startup_timeout=1,
+                log_path=log,
+                removals=["_internal/antiga.dll"],
+            )
+        # rollback: a antiga.dll voltou, a nova.dll não ficou, o sig original intacto
+        self.assertTrue((target / "_internal" / "antiga.dll").is_file())
+        self.assertEqual((target / "_internal" / "antiga.dll").read_bytes(), b"velha")
+        self.assertFalse((target / "_internal" / "nova.dll").exists())
+        self.assertEqual((target / "sig.exe").read_bytes(), b"fixture-sig")
+        self.assertIn("Rollback concluído", log.read_text(encoding="utf-8", errors="replace"))
+
+    def test_empty_transaction_is_rejected(self):
+        import updater as updater_module
+
+        target = Path(self._make_install({}))
+        root = target
+        staged = self._make_staged(root, {})
+        transaction = root / "txn"
+        transaction.mkdir()
+        log = root / "updater.log"
+        with self.assertRaisesRegex(UpdateError, "não contém arquivos"):
+            updater_module._apply_file_transaction(
+                staged, target, transaction, startup_timeout=1, log_path=log, removals=[]
+            )
+
+    def test_removal_only_rolls_back_removed_file(self):
+        import updater as updater_module
+
+        target = Path(self._make_install({"_internal/orfa.dll": b"orfa"}))
+        root = target
+        staged = self._make_staged(root, {})
+        transaction = root / "txn"
+        transaction.mkdir()
+        log = root / "updater.log"
+        with self.assertRaises(Exception):
+            updater_module._apply_file_transaction(
+                staged, target, transaction, startup_timeout=1, log_path=log, removals=["_internal/orfa.dll"]
+            )
+        self.assertEqual((target / "_internal" / "orfa.dll").read_bytes(), b"orfa")
+
+
 class SyncDownloadTests(unittest.TestCase):
     """FASE A3: download por arquivo com retry e validação de hash."""
 

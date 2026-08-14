@@ -287,6 +287,8 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
             raise AssertionError("pacote com executável inválido foi aceito")
         if _hash(rollback_target / "sig.exe") != old_hash:
             raise AssertionError("rollback não restaurou o sig.exe original")
+        if not (rollback_target / "_internal" / "python311.dll").is_file():
+            raise AssertionError("rollback do pacote completo corrompeu o _internal")
         if "Rollback concluído" not in rollback_text:
             raise AssertionError("o log não confirma rollback")
 
@@ -366,6 +368,8 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
             raise AssertionError("diff com executável inválido foi aceito")
         if _hash(rollback_diff_target / "sig.exe") != old_sig_hash:
             raise AssertionError("rollback do diff não restaurou o sig.exe original")
+        if not (rollback_diff_target / "_internal" / "python311.dll").is_file():
+            raise AssertionError("rollback do diff corrompeu o _internal")
         if (rollback_diff_target / "_internal/diff-test-novo.txt").exists():
             raise AssertionError("rollback do diff não removeu o arquivo novo aplicado")
         if "Rollback concluído" not in bad_diff_log.read_text(encoding="utf-8", errors="replace"):
