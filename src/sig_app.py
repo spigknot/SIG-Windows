@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_008"
+APP_VERSION = "20260814_009"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -9618,14 +9618,18 @@ try {
             0,
             qualification_editor.winfo_rooty() - panel.winfo_rooty(),
         )
-        stage_height = max(1, qualification_editor.winfo_height() + self._document_preview_extra_height())
+        # A caixa cresce 1,3 cm para CIMA: o fundo permanece na posição
+        # original (a tela não tem espaço para baixo) e o topo sobe.
+        extra_height = self._document_preview_extra_height()
+        stage_y = max(0, qualification_top - extra_height)
+        stage_height = max(1, qualification_editor.winfo_height() + extra_height)
         # Do not read stage.winfo_width() here: while the panel is being moved
         # Tk can report its transient pre-layout width as 1 px. Recompute the
         # approved 23% reduction from the panel's real available width.
         stage_width = max(220, min(1120, round(panel_width * 0.77 * 0.92)))
         stage.place(
             x=0,
-            y=qualification_top,
+            y=stage_y,
             width=stage_width,
             height=stage_height,
         )
@@ -9637,7 +9641,7 @@ try {
         zoom_height = max(1, zoom.winfo_reqheight())
         zoom.place(
             x=max(0, stage_width - zoom_width),
-            y=qualification_top + stage_height + 4,
+            y=stage_y + stage_height + 4,
             width=zoom_width,
             height=zoom_height,
         )
@@ -9653,7 +9657,7 @@ try {
             action_x = stage_width + 8
             if action_x + actions_width > panel_width:
                 action_x = max(0, panel_width - actions_width)
-            action_y = qualification_top + max(0, (stage_height - actions_height) // 2)
+            action_y = stage_y + max(0, (stage_height - actions_height) // 2)
             actions.place(
                 x=action_x,
                 y=action_y,
