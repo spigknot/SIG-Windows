@@ -8150,33 +8150,6 @@ try {
                 else:
                     self.qualification_deposition_var.set(True)
 
-        self.live_qualification_type_frame = ttk.Frame(self.live_qualification_stack)
-        self.live_qualification_type_frame.pack(fill=X, pady=(0, 4))
-        self.live_qualification_declarations_check = ttk.Checkbutton(
-            self.live_qualification_type_frame,
-            text="Declarações",
-            variable=self.qualification_declarations_var,
-            command=lambda: select_qualification_type("declarations"),
-        )
-        self.live_qualification_type_frame.columnconfigure(0, weight=1)
-        self.live_qualification_declarations_check.grid(
-            row=0,
-            column=0,
-            sticky="w",
-        )
-        self.live_qualification_deposition_check = ttk.Checkbutton(
-            self.live_qualification_type_frame,
-            text="Depoimento",
-            variable=self.qualification_deposition_var,
-            command=lambda: select_qualification_type("deposition"),
-        )
-        self.live_qualification_deposition_check.grid(
-            row=1,
-            column=0,
-            sticky="w",
-            pady=(4, 0),
-        )
-
         self.live_qualification_text_row = ttk.Frame(self.live_qualification_stack)
         self.live_qualification_text_row.pack(fill=X)
         self.live_qualification_editor_host = ttk.Frame(
@@ -8196,18 +8169,32 @@ try {
         )
         self.live_qualification_generate_host = ttk.Frame(
             self.live_qualification_text_row,
-            width=92,
+            width=100,
             height=135,
         )
         self.live_qualification_generate_host.pack(side=LEFT, padx=(8, 0))
         self.live_qualification_generate_host.pack_propagate(False)
+        self.live_qualification_declarations_check = ttk.Checkbutton(
+            self.live_qualification_generate_host,
+            text="Declarações",
+            variable=self.qualification_declarations_var,
+            command=lambda: select_qualification_type("declarations"),
+        )
+        self.live_qualification_declarations_check.pack(anchor="w")
+        self.live_qualification_deposition_check = ttk.Checkbutton(
+            self.live_qualification_generate_host,
+            text="Depoimento",
+            variable=self.qualification_deposition_var,
+            command=lambda: select_qualification_type("deposition"),
+        )
+        self.live_qualification_deposition_check.pack(anchor="w", pady=(2, 4))
         self.live_document_execute_button = ttk.Button(
             self.live_qualification_generate_host,
             text="Gerar\ndocumento",
             style="Execute.TButton",
             command=self.generate_occurrence_document,
         )
-        self.live_document_execute_button.pack(anchor="center", expand=True)
+        self.live_document_execute_button.pack(anchor="center")
 
         self.live_qualification_actions = ttk.Frame(
             self.live_qualification_stack,
@@ -9559,26 +9546,30 @@ try {
         target_left = max(0, round(generate_right + qualification_gap))
         available_width = max(220, content.winfo_width() - target_left)
         # The qualification stack is anchored at the bottom of its column. Its
-        # editor therefore must fit between the type checkboxes and its own
-        # action row. Use the same height for the player so both bottom edges
-        # remain exactly aligned, even when the window is restored or resized.
-        type_height = max(0, self.live_qualification_type_frame.winfo_height())
+        # editor therefore must fit between its action row and the top of the
+        # row. Both boxes (qualification and player) share EXACTLY the same
+        # height, including the 1,3 cm preview bonus, so their top and bottom
+        # edges stay perfectly aligned on resize or restore.
         action_height = max(31, self.live_qualification_actions.winfo_height())
-        stage_height = max(180, min(520, available_height - type_height - action_height - 4))
+        extra_height = self._document_preview_extra_height()
+        stage_height = max(
+            180,
+            min(520, available_height - action_height - 4 - extra_height),
+        )
         # Keep the document preview comfortably sized without letting the
         # player occupy all of the lower workspace.  The surrounding panel
         # remains in place so the other occurrence controls do not shift.
         stage_width = max(220, min(1120, round(available_width * 0.77 * 0.92)))
         stage.configure(
             width=stage_width,
-            height=stage_height + self._document_preview_extra_height(),
+            height=stage_height + extra_height,
         )
         self.live_document_preview_toolbar.configure(width=stage_width)
         # Keep the qualification editor the same height as the document
         # player, including when the window is resized or maximized.
-        self.live_qualification_editor_host.configure(height=stage_height)
-        self.live_qualification_text._editor_frame.configure(height=stage_height)
-        self.live_qualification_generate_host.configure(height=stage_height)
+        self.live_qualification_editor_host.configure(height=stage_height + extra_height)
+        self.live_qualification_text._editor_frame.configure(height=stage_height + extra_height)
+        self.live_qualification_generate_host.configure(height=stage_height + extra_height)
         self.root.after_idle(self._position_live_document_preview)
 
     def _document_preview_extra_height(self) -> int:
@@ -9642,11 +9633,10 @@ try {
             0,
             qualification_editor.winfo_rooty() - panel.winfo_rooty(),
         )
-        # A caixa cresce 1,3 cm para CIMA: o fundo permanece na posição
-        # original (a tela não tem espaço para baixo) e o topo sobe.
-        extra_height = self._document_preview_extra_height()
-        stage_y = max(0, qualification_top - extra_height)
-        stage_height = max(1, qualification_editor.winfo_height() + extra_height)
+        # Qualification box and player share exactly the same height and top:
+        # perfectly aligned edges (the 1,3 cm bonus applies to both).
+        stage_y = qualification_top
+        stage_height = max(1, qualification_editor.winfo_height())
         # Do not read stage.winfo_width() here: while the panel is being moved
         # Tk can report its transient pre-layout width as 1 px. Recompute the
         # approved 23% reduction from the panel's real available width.
