@@ -38,6 +38,7 @@ UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
 UPDATE_PUBLIC_KEY_N = 4776833754672109710666015745718377295826954378034957006723781632230794955188598743370375368759247701138572196632244506341860738985196771222328276471293164426045586502411553661270415658303449836000240060850077943629529298365455842583839584430835872888082421190431050761740593243172708805858229100494995424042846759167936558524923889093025581721886390801543158714477942628958659907698645218405072643039190789807520623959789948760663039915934233343926084287154817842449929074144135976678727267978353880303189583548982201552861178437687569977746462198133228741460769839629249527122404198789341588724117695515639417887297249072695071299249800470626986276226209694407865386128033982643621030612265330884993509358887003353611841249193688390145075540912405754224137641702769971761374974256331506313629217304424829655209764530396523158905317988087656296751937468490602949770457129034644632659661248617309294539893653236376299080388523
 FULL_RELEASE_API_URL = "https://api.github.com/repos/spigknot/SIG-Windows/releases/latest"
+FULL_RELEASES_API_URL = "https://api.github.com/repos/spigknot/SIG-Windows/releases?per_page=20"
 HTTP_USER_AGENT = "SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)"
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_ZIP_ENTRIES = 10_000
@@ -260,6 +261,53 @@ def fetch_full_release() -> dict:
         return select_full_release_asset(json.loads(payload.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise UpdateError("o GitHub não retornou uma release válida") from exc
+
+
+def fetch_full_releases() -> list[dict]:
+    """Lista os pacotes completos disponíveis (mais recente primeiro)."""
+    request = urllib.request.Request(
+        FULL_RELEASES_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": HTTP_USER_AGENT,
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with _urlopen(request) as response:
+        payload = response.read(2 * 1024 * 1024 + 1)
+    if len(payload) > 2 * 1024 * 1024:
+        raise UpdateError("a resposta das releases excedeu o tamanho permitido")
+    try:
+        releases = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("o GitHub não retornou a lista de releases") from exc
+    if not isinstance(releases, list):
+        raise UpdateError("o GitHub não retornou a lista de releases")
+    descriptors: list[dict] = []
+    for release in releases[:20]:
+        if not isinstance(release, dict):
+            continue
+        try:
+            descriptors.append(select_full_release_asset(release))
+        except UpdateError:
+            continue
+    if not descriptors:
+        raise UpdateError("nenhum pacote completo válido foi encontrado")
+    return descriptors
+
+
+def zip_version(zip_path: Path) -> str | None:
+    """Lê a versão de um ZIP do SIG pelo build-info.json, sem extrair."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            names = {member.filename for member in archive.infolist()}
+            if "build-info.json" not in names:
+                return None
+            metadata = json.loads(archive.read("build-info.json").decode("utf-8"))
+        version = str(metadata.get("version") or "")
+    except (OSError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError, KeyError):
+        return None
+    return version if VERSION_RE.fullmatch(version) else None
 
 
 def _download_to_file(
@@ -1122,7 +1170,7 @@ def _standalone_log_path(target: Path) -> Path:
         return fallback
 
 
-def _relocate_standalone_updater(origin: Path, repair: bool = False) -> int:
+def _relocate_standalone_updater(origin: Path) -> int:
     helpers_root = _standalone_cache_root() / "helpers"
     helpers_root.mkdir(parents=True, exist_ok=True)
     for previous in helpers_root.iterdir():
@@ -1142,16 +1190,13 @@ def _relocate_standalone_updater(origin: Path, repair: bool = False) -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
         subprocess, "CREATE_NEW_PROCESS_GROUP", 0
     )
-    worker_args = [
-        str(helper),
-        "--standalone-worker",
-        "--standalone-target",
-        str(origin),
-    ]
-    if repair:
-        worker_args.append("--repair")
     subprocess.Popen(
-        worker_args,
+        [
+            str(helper),
+            "--standalone-worker",
+            "--standalone-target",
+            str(origin),
+        ],
         cwd=str(origin),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -1163,7 +1208,7 @@ def _relocate_standalone_updater(origin: Path, repair: bool = False) -> int:
 
 
 class StandaloneUpdaterUI:
-    def __init__(self, target: Path, repair: bool = False):
+    def __init__(self, target: Path):
         import tkinter as tk
         from tkinter import filedialog, messagebox, ttk
 
@@ -1172,10 +1217,11 @@ class StandaloneUpdaterUI:
         self.filedialog = filedialog
         self.messagebox = messagebox
         self.target = Path(target).resolve()
-        self.repair = repair
         self.events: queue.Queue[tuple] = queue.Queue()
         self.incremental: dict | None = None
         self.full: dict | None = None
+        self.full_releases: list[dict] = []
+        self.manual_zip: Path | None = None
         self.busy = False
 
         self.root = tk.Tk()
@@ -1240,6 +1286,25 @@ class StandaloneUpdaterUI:
             state="disabled",
         )
         self.full_button.pack(side="left", padx=(8, 0))
+        self.choose_zip_button = ttk.Button(
+            actions,
+            text="Escolher ZIP...",
+            command=self._choose_manual_zip,
+        )
+        self.choose_zip_button.pack(side="left", padx=(8, 0))
+
+        version_row = ttk.Frame(container)
+        version_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(version_row, text="Versão do pacote completo:").pack(side="left")
+        self.full_version_var = tk.StringVar(value="(mais recente)")
+        self.full_version_combo = ttk.Combobox(
+            version_row,
+            textvariable=self.full_version_var,
+            state="readonly",
+            width=26,
+        )
+        self.full_version_combo.pack(side="left", padx=(8, 0))
+        self.full_version_combo.bind("<<ComboboxSelected>>", self._on_full_version_selected)
 
         self.log = tk.Text(
             container,
@@ -1297,10 +1362,13 @@ class StandaloneUpdaterUI:
         normal = "disabled" if busy else "normal"
         self.check_button.configure(state=normal)
         self.choose_button.configure(state=normal)
+        self.choose_zip_button.configure(state=normal)
+        self.full_version_combo.configure(state="disabled" if busy else "readonly")
         self.incremental_button.configure(
             state="normal" if not busy and self.incremental else "disabled"
         )
-        self.full_button.configure(state="normal" if not busy and self.full else "disabled")
+        full_available = bool(self.full or self.manual_zip)
+        self.full_button.configure(state="normal" if not busy and full_available else "disabled")
         if status:
             self.status_var.set(status)
 
@@ -1316,7 +1384,7 @@ class StandaloneUpdaterUI:
         errors = []
         notice = None
         incremental = None
-        full = None
+        full_releases: list[dict] = []
         try:
             incremental = fetch_incremental_manifest()
             incremental["kind"] = "incremental"
@@ -1330,15 +1398,101 @@ class StandaloneUpdaterUI:
         except Exception as exc:
             errors.append(f"incremental: {exc}")
         try:
-            full = fetch_full_release()
+            full_releases = fetch_full_releases()
         except Exception as exc:
             errors.append(f"completo: {exc}")
-        self.events.put(("checked", incremental, full, errors, notice))
+        self.events.put(("checked", incremental, full_releases, errors, notice))
+
+    def _on_full_version_selected(self, _event=None) -> None:
+        selected = self.full_version_var.get()
+        for descriptor in self.full_releases:
+            if str(descriptor.get("version")) == selected:
+                self.full = dict(descriptor)
+                self._set_busy(False, f"Pacote completo {selected} selecionado.")
+                self._write_log(
+                    f"Pacote completo selecionado: {selected} "
+                    f"({self._format_size(int(descriptor['size']))})."
+                )
+                return
+
+    def _choose_manual_zip(self) -> None:
+        if self.busy:
+            return
+        selected = self.filedialog.askopenfilename(
+            title="Escolha o pacote completo (.zip) baixado manualmente",
+            initialdir=str(self.target.parent if self.target.exists() else Path.cwd()),
+            filetypes=(("Pacote SIG", "*.zip"), ("Todos os arquivos", "*.*")),
+        )
+        if not selected:
+            return
+        path = Path(selected).resolve()
+        if not path.is_file():
+            self.messagebox.showerror("Pacote completo", "O arquivo escolhido não existe.")
+            return
+        version = zip_version(path)
+        if version is None:
+            self.messagebox.showerror(
+                "Pacote completo",
+                "O arquivo escolhido não parece ser um pacote completo do SIG "
+                "(build-info.json com versão válida não encontrado).",
+            )
+            return
+        try:
+            validate_zip(path, full=True)
+        except UpdateError as exc:
+            self.messagebox.showerror(
+                "Pacote completo",
+                f"O pacote escolhido foi recusado na validação:\n\n{exc}",
+            )
+            return
+        self.manual_zip = path
+        self.full_version_var.set(f"Manual: {version}")
+        self._write_log(
+            f"Pacote manual selecionado: {path.name} (versão {version})."
+        )
+        self._set_busy(False, f"Pacote manual {version} pronto para instalar.")
+
+    def _confirm_regression(self, descriptor: dict) -> bool:
+        installed = installed_version(self.target)
+        target_version = str(descriptor.get("version") or "")
+        if not installed or not target_version or version_key(target_version) >= version_key(installed):
+            return True
+        if not self.messagebox.askyesno(
+            "Regressão de versão",
+            "ATENÇÃO: REGRESSÃO DE VERSÃO\n\n"
+            f"A versão instalada é {installed} e o pacote selecionado é {target_version}.\n\n"
+            "Instalar este pacote REVERTERÁ o SIG para um estado mais antigo.\n"
+            "Use apenas para corrigir um problema grave introduzido por uma "
+            "versão mais nova.\n\n"
+            "Deseja continuar mesmo assim?",
+            icon="warning",
+        ):
+            return False
+        return self.messagebox.askyesno(
+            "Regressão de versão",
+            f"Confirmação final: instalar a versão ANTIGA {target_version} "
+            f"por cima da {installed}?\n\nEsta ação sobrescreverá arquivos da "
+            "instalação atual.",
+            icon="warning",
+        )
 
     def install(self, kind: str) -> None:
         if self.busy:
             return
-        descriptor = self.incremental if kind == "incremental" else self.full
+        if kind == "manual":
+            if not self.manual_zip:
+                return
+            version = zip_version(self.manual_zip) or ""
+            descriptor = {
+                "kind": "manual",
+                "version": version,
+                "zip_name": self.manual_zip.name,
+                "local_zip": str(self.manual_zip),
+                "size": self.manual_zip.stat().st_size,
+                "sha256": "",
+            }
+        else:
+            descriptor = self.incremental if kind == "incremental" else self.full
         if not descriptor:
             return
         if kind == "incremental":
@@ -1354,7 +1508,17 @@ class StandaloneUpdaterUI:
                 f"O SIG será fechado e a versão {descriptor['version']} será aplicada.\n\n"
                 "Continuar?"
             )
+        elif kind == "manual":
+            if not self._confirm_regression(descriptor):
+                return
+            warning = (
+                f"O pacote manual {descriptor['zip_name']} (versão {descriptor['version']}) "
+                "será instalado por cima da instalação atual.\n\n"
+                "O SIG aberto será fechado. Continuar?"
+            )
         else:
+            if not self._confirm_regression(descriptor):
+                return
             warning = (
                 f"O pacote completo {descriptor['version']} ({self._format_size(descriptor['size'])}) "
                 "será instalado. Ele pode reparar uma instalação quebrada ou criar uma nova.\n\n"
@@ -1363,7 +1527,7 @@ class StandaloneUpdaterUI:
         if not self.messagebox.askyesno("Atualizador do SIG", warning):
             return
         self.progress["value"] = 0
-        self._set_busy(True, "Preparando o download...")
+        self._set_busy(True, "Preparando o download..." if kind != "manual" else "Preparando a instalação...")
         threading.Thread(
             target=self._install_worker,
             args=(dict(descriptor), kind),
@@ -1372,19 +1536,24 @@ class StandaloneUpdaterUI:
 
     def _install_worker(self, descriptor: dict, kind: str) -> None:
         version = str(descriptor["version"])
-        download_root = _standalone_cache_root() / "downloads" / version / kind
-        zip_path = download_root / str(descriptor["zip_name"])
         try:
-            download_root.mkdir(parents=True, exist_ok=True)
+            if descriptor.get("local_zip"):
+                zip_path = Path(str(descriptor["local_zip"])).resolve()
+                if not zip_path.is_file():
+                    raise UpdateError("o pacote manual não está mais disponível")
+            else:
+                download_root = _standalone_cache_root() / "downloads" / version / kind
+                zip_path = download_root / str(descriptor["zip_name"])
+                download_root.mkdir(parents=True, exist_ok=True)
 
-            def progress(downloaded: int, total: int) -> None:
-                percent = min(100, int(downloaded * 100 / max(1, total)))
-                self.events.put(("progress", percent, downloaded, total))
+                def progress(downloaded: int, total: int) -> None:
+                    percent = min(100, int(downloaded * 100 / max(1, total)))
+                    self.events.put(("progress", percent, downloaded, total))
 
-            self.events.put(("status", f"Baixando {descriptor['zip_name']}..."))
-            _download_to_file(descriptor, zip_path, progress)
+                self.events.put(("status", f"Baixando {descriptor['zip_name']}..."))
+                _download_to_file(descriptor, zip_path, progress)
             self.events.put(("status", "Validando o pacote antes de alterar a instalação..."))
-            validate_zip(zip_path, full=(kind == "full"))
+            validate_zip(zip_path, full=(kind != "incremental"))
             log_path = _standalone_log_path(self.target)
             if getattr(sys, "frozen", False) and _same_path(sys.executable, self.target / "SigUpdater.exe"):
                 raise UpdateError("o atualizador não foi realocado para a pasta temporária")
@@ -1397,7 +1566,8 @@ class StandaloneUpdaterUI:
                 log_path,
                 updater_override=Path(sys.executable) if getattr(sys, "frozen", False) else None,
             )
-            zip_path.unlink(missing_ok=True)
+            if not descriptor.get("local_zip"):
+                zip_path.unlink(missing_ok=True)
             self.events.put(("installed", version, log_path))
         except Exception as exc:
             self.events.put(("failed", str(exc)))
@@ -1408,17 +1578,21 @@ class StandaloneUpdaterUI:
                 event = self.events.get_nowait()
                 kind = event[0]
                 if kind == "checked":
-                    self.incremental, self.full, errors, notice = event[1], event[2], event[3], event[4]
+                    self.incremental, self.full_releases, errors, notice = event[1], event[2], event[3], event[4]
+                    self.full = self.full_releases[0] if self.full_releases else None
                     details = []
                     if self.incremental:
                         details.append(
                             f"Incremental: {self.incremental['version']} "
                             f"({self._format_size(int(self.incremental['size']))})"
                         )
-                    if self.full:
+                    if self.full_releases:
+                        labels = [str(item["version"]) for item in self.full_releases]
+                        self.full_version_combo.configure(values=labels)
+                        self.full_version_var.set(labels[0])
                         details.append(
-                            f"Completo: {self.full['version']} "
-                            f"({self._format_size(int(self.full['size']))})"
+                            f"Completo: {labels[0]} "
+                            f"({self._format_size(int(self.full_releases[0]['size']))})"
                         )
                     self.available_var.set(" | ".join(details) or "Nenhum pacote disponível.")
                     for error in errors:
@@ -1426,21 +1600,11 @@ class StandaloneUpdaterUI:
                     if notice:
                         self._write_log(notice)
                     if details:
-                        self._write_log("Consulta concluída.")
+                        self._write_log(
+                            f"Consulta concluída: {len(self.full_releases)} pacote(s) "
+                            "completo(s) disponíveis no GitHub."
+                        )
                     self._set_busy(False, "Pronto.")
-                    if self.repair:
-                        self.repair = False
-                        if self.full:
-                            self.root.after(150, lambda: self.install("full"))
-                        else:
-                            self._write_log(
-                                "Reparo solicitado, mas o pacote completo não está disponível."
-                            )
-                            self.messagebox.showerror(
-                                "Reparar instalação",
-                                "Não foi possível localizar o pacote completo no GitHub.\n\n"
-                                "Verifique a conexão e tente novamente.",
-                            )
                 elif kind == "progress":
                     _name, percent, downloaded, total = event
                     self.progress["value"] = percent
@@ -1488,7 +1652,7 @@ class StandaloneUpdaterUI:
         return 0
 
 
-def run_standalone(target: Path | None = None, *, worker: bool = False, repair: bool = False) -> int:
+def run_standalone(target: Path | None = None, *, worker: bool = False) -> int:
     if target is None:
         if getattr(sys, "frozen", False):
             target = Path(sys.executable).resolve().parent
@@ -1496,8 +1660,8 @@ def run_standalone(target: Path | None = None, *, worker: bool = False, repair: 
             target = Path.cwd()
     target = Path(target).resolve()
     if getattr(sys, "frozen", False) and not worker:
-        return _relocate_standalone_updater(target, repair=repair)
-    return StandaloneUpdaterUI(target, repair=repair).run()
+        return _relocate_standalone_updater(target)
+    return StandaloneUpdaterUI(target).run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1508,15 +1672,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", type=Path)
     parser.add_argument("--wait-timeout", type=int, default=120)
     parser.add_argument("--startup-timeout", type=int, default=12)
-    parser.add_argument("--repair", action="store_true", help="abre o fluxo de reparo pelo pacote completo")
     parser.add_argument("--standalone-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--standalone-target", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.standalone_worker:
-        return run_standalone(args.standalone_target, worker=True, repair=args.repair)
+        return run_standalone(args.standalone_target, worker=True)
     legacy_values = (args.zip, args.target, args.pid, args.log)
     if not any(value is not None for value in legacy_values):
-        return run_standalone(repair=args.repair)
+        return run_standalone()
     if not all(value is not None for value in legacy_values):
         parser.error("--zip, --target, --pid e --log devem ser informados juntos")
     try:

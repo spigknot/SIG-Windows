@@ -7522,60 +7522,6 @@ try {
 }
 '''
 
-    def repair_installation(self) -> None:
-        """Abre o atualizador no modo reparo (pacote completo do GitHub)."""
-        updater_path = app_base_dir() / "SigUpdater.exe"
-        if not updater_path.is_file():
-            messagebox.showerror(
-                "Reparar instalação",
-                "SigUpdater.exe não foi encontrado ao lado do SIG.\n\n"
-                "Baixe o pacote completo da release do GitHub e extraia por "
-                "cima da instalação para reparar manualmente.",
-                parent=self.root,
-            )
-            return
-        if not messagebox.askyesno(
-            "Reparar instalação",
-            "O atualizador baixará o pacote completo mais recente do GitHub "
-            "e reinstalará todos os componentes por cima da instalação "
-            "(rede de segurança: rollback automático em caso de falha).\n\n"
-            "O SIG será fechado na hora de aplicar. Continuar?",
-            parent=self.root,
-        ):
-            return
-        temporary_updater = (
-            Path(tempfile.gettempdir()) / f"SigUpdater-{uuid.uuid4().hex}.exe"
-        )
-        flags = 0
-        if os.name == "nt":
-            flags = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            )
-        try:
-            shutil.copy2(updater_path, temporary_updater)
-            subprocess.Popen(
-                [
-                    str(temporary_updater),
-                    "--standalone-worker",
-                    "--standalone-target",
-                    str(app_base_dir()),
-                    "--repair",
-                ],
-                creationflags=flags,
-                close_fds=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self._append_activity_log("Reparo de instalação solicitado.", "warning")
-        except Exception as exc:
-            messagebox.showerror(
-                "Reparar instalação",
-                f"Não foi possível iniciar o reparo.\n\n{exc}",
-                parent=self.root,
-            )
-
     def _launch_prepared_update(self, zip_path: Path, version: str) -> None:
         log_path = settings_path().parent / "updater.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7661,13 +7607,6 @@ try {
             style="Update.TButton",
             command=self.install_available_update,
         )
-        self.repair_button = ttk.Button(
-            top,
-            text="Reparar instalação",
-            style="Update.TButton",
-            command=self.repair_installation,
-        )
-        self.repair_button.pack(side=RIGHT, anchor="n", padx=(8, 0))
         model_summary = ttk.Frame(top)
         model_summary.pack(side=LEFT, anchor="nw")
         ttk.Label(
