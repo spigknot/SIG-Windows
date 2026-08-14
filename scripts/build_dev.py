@@ -62,6 +62,18 @@ def main() -> int:
                 "— o exe pode estar com código desatualizado."
             )
 
+    # Sincroniza prompts/ e modelos/ da raiz para dist/: o exe lê os arquivos
+    # ao lado dele com PRIORIDADE (assistant_prompts._prompt_path), então o
+    # dist desatualizaria os prompts que o usuário edita na raiz.
+    for relative in ("prompts", "modelos"):
+        source_dir = ROOT / relative
+        target_dir = DIST / relative
+        if source_dir.is_dir():
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            shutil.copytree(source_dir, target_dir)
+            print(f"+ sincronizado {relative}/ da raiz para dist/")
+
     print(f"OK: {exe} pronto (layout flat), assets de runtime preservados em {DIST}")
     return 0
 
