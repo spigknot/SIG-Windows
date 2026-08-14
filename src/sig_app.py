@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_006"
+APP_VERSION = "20260814_007"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -6621,7 +6621,7 @@ class SigApp:
         self.assistant_target = "assistant"
         self.assistant_names: list[str] = []
         self.live_assistant_names: list[str] = []
-        self.assistant_task_states = {"history": "idle", "names": "idle", "statement": "idle", "document": "idle", "document_copy": "idle", "document_save_docx": "idle", "document_save_pdf": "idle"}
+        self.assistant_task_states = {"history": "idle", "names": "idle", "statement": "idle", "document": "idle", "document_copy": "idle", "document_save_docx": "idle", "document_save_pdf": "idle", "qualification_document": "idle"}
         self.assistant_task_elapsed: dict[str, float | None] = {
             "history": None,
             "names": None,
@@ -6630,6 +6630,7 @@ class SigApp:
             "document_copy": None,
             "document_save_docx": None,
             "document_save_pdf": None,
+            "qualification_document": None,
         }
         self.assistant_task_started_at: dict[str, float | None] = {
             "history": None,
@@ -6639,6 +6640,7 @@ class SigApp:
             "document_copy": None,
             "document_save_docx": None,
             "document_save_pdf": None,
+            "qualification_document": None,
         }
         self.assistant_multi_started_at: dict[tuple[str, int], float] = {}
         self.assistant_phase = "idle"
@@ -7751,7 +7753,6 @@ try {
             background="#f4f7f6",
         )
         self.live_waveform_canvas.pack(side=TOP, fill=X, anchor="w")
-        create_tooltip(self.live_waveform_canvas, "Nível de áudio captado pelo microfone")
         self.live_waveform_canvas.bind(
             "<Configure>", lambda _event: self._draw_live_waveform(), add="+"
         )
@@ -9544,7 +9545,10 @@ try {
         # player occupy all of the lower workspace.  The surrounding panel
         # remains in place so the other occurrence controls do not shift.
         stage_width = max(220, min(1120, round(available_width * 0.77 * 0.92)))
-        stage.configure(width=stage_width, height=stage_height)
+        stage.configure(
+            width=stage_width,
+            height=stage_height + self._document_preview_extra_height(),
+        )
         self.live_document_preview_toolbar.configure(width=stage_width)
         # Keep the qualification editor the same height as the document
         # player, including when the window is resized or maximized.
@@ -9552,6 +9556,10 @@ try {
         self.live_qualification_text._editor_frame.configure(height=stage_height)
         self.live_qualification_generate_host.configure(height=stage_height)
         self.root.after_idle(self._position_live_document_preview)
+
+    def _document_preview_extra_height(self) -> int:
+        """~1,3 cm físicos extras na altura da caixa da prévia (pelo DPI real)."""
+        return max(0, round(13 * _window_physical_dpi(self.root) / 25.4))
 
     def _position_live_document_preview(self):
         """Align the preview's left edge with the right edge of Oitiva."""
@@ -9610,7 +9618,7 @@ try {
             0,
             qualification_editor.winfo_rooty() - panel.winfo_rooty(),
         )
-        stage_height = max(1, qualification_editor.winfo_height())
+        stage_height = max(1, qualification_editor.winfo_height() + self._document_preview_extra_height())
         # Do not read stage.winfo_width() here: while the panel is being moved
         # Tk can report its transient pre-layout width as 1 px. Recompute the
         # approved 23% reduction from the panel's real available width.
@@ -9767,9 +9775,7 @@ try {
             image_width = photo.width()
             image_height = photo.height()
             side_inset = 2
-            # Borda superior de cerca de 1,3 cm físicos, calibrada pelo DPI
-            # real do monitor (mesma régua da escala de zoom da prévia).
-            top_inset = max(2, round(13 * _window_physical_dpi(self.root) / 25.4))
+            top_inset = 2
             bottom_inset = 2
             x = max(canvas_width / 2, image_width / 2 + side_inset)
             canvas.coords(image_id, x, top_inset)
@@ -10020,43 +10026,62 @@ try {
                 )
             progress_var.set("\n".join(rendered))
             return
-        if self.assistant_phase == "history":
-            entries = (
-                ("Redigindo histórico", "history"),
-                ("Extraindo partes", "names"),
-            )
-        elif self.assistant_phase == "statement":
-            entries = (("Redigindo oitiva", "statement"),)
-        elif any(
-            self.assistant_task_states[task] != "idle"
-            for task in ("document", "document_copy", "document_save_docx", "document_save_pdf")
-        ):
-            entries = (
-                ("Gerando documento", "document"),
-                ("Copiando documento", "document_copy"),
-                ("Salvando docx", "document_save_docx"),
-                ("Salvando pdf", "document_save_pdf"),
-            )
+        task_labels = {
+            "qualification_document": "Qualificando e gerando documento",
+            "history": "Redigindo histórico",
+            "names": "Extraindo partes",
+            "statement": "Redigindo oitiva",
+            "document": "Gerando documento",
+            "document_copy": "Copiando documento",
+            "document_save_docx": "Salvando docx",
+            "document_save_pdf": "Salvando pdf",
+        }
+        task_priority = (
+            "qualification_document",
+            "history",
+            "statement",
+            "document",
+            "names",
+            "document_copy",
+            "document_save_docx",
+            "document_save_pdf",
+        )
+        # Apenas uma tarefa por vez no painel: a em execução mais prioritária
+        # ou, sem nada rodando, a última concluída. O log guarda o histórico.
+        running = [
+            task
+            for task in task_labels
+            if self.assistant_task_states[task] == "running"
+        ]
+        if running:
+            task = min(running, key=lambda item: task_priority.index(item))
         else:
-            progress_var.set("")
-            return
-        rendered = []
-        for label, task in entries:
-            state = self.assistant_task_states[task]
-            if state == "idle":
-                continue
-            elapsed = self.assistant_task_elapsed[task]
-            if elapsed is None:
-                started = self.assistant_task_started_at.get(task)
-                elapsed = max(0.0, time.monotonic() - started) if started is not None else None
-            suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
-            if state == "done":
-                rendered.append(f"100% {label}{suffix}")
-            elif state == "error":
-                rendered.append(f"ERRO {label}{suffix}")
-            else:
-                rendered.append(f"0% {label}{suffix}")
-        progress_var.set("  |  ".join(rendered))
+            finished = [
+                task
+                for task in task_labels
+                if self.assistant_task_states[task] in ("done", "error")
+            ]
+            if not finished:
+                progress_var.set("")
+                return
+            task = max(
+                finished,
+                key=lambda item: self.assistant_task_started_at.get(item) or 0,
+            )
+        state = self.assistant_task_states[task]
+        elapsed = self.assistant_task_elapsed[task]
+        if elapsed is None:
+            started = self.assistant_task_started_at.get(task)
+            elapsed = max(0.0, time.monotonic() - started) if started is not None else None
+        suffix = f" ({elapsed:.1f}s)" if elapsed is not None else ""
+        label = task_labels[task]
+        if state == "error":
+            rendered = f"ERRO {label}{suffix}"
+        elif state == "done":
+            rendered = f"100% {label}{suffix}"
+        else:
+            rendered = f"0% {label}{suffix}"
+        progress_var.set(rendered)
 
     def _refresh_assistant_progress_clock(self):
         """Refresh active text-task timers without adding repeated log entries."""
@@ -11020,11 +11045,18 @@ try {
         )
         document_started = time.perf_counter()
         self._begin_activity_step("document", "Documento requisitado")
-        for task in ("document", "document_copy", "document_save_docx", "document_save_pdf"):
-            self.assistant_task_states[task] = "idle"
-            self.assistant_task_elapsed[task] = None
-        self.assistant_task_states["document"] = "running"
-        self.assistant_task_started_at["document"] = time.monotonic()
+        combined = self.assistant_task_states.get("qualification_document") == "running"
+        if combined:
+            # Fluxo "Qualificando e gerando documento": a linha única do painel
+            # continua cobrindo as duas etapas; o log mantém uma linha por etapa.
+            self.assistant_task_states["document"] = "idle"
+            self.assistant_task_elapsed["document"] = None
+        else:
+            for task in ("document", "document_copy", "document_save_docx", "document_save_pdf"):
+                self.assistant_task_states[task] = "idle"
+                self.assistant_task_elapsed[task] = None
+            self.assistant_task_states["document"] = "running"
+            self.assistant_task_started_at["document"] = time.monotonic()
         self._render_assistant_progress()
         try:
             template_path = ensure_document_templates()[document_kind]
@@ -11041,8 +11073,15 @@ try {
             )
             document_elapsed = time.perf_counter() - document_started
             self._finish_activity_step("document", document_elapsed)
-            self.assistant_task_states["document"] = "done"
-            self.assistant_task_elapsed["document"] = document_elapsed
+            if combined:
+                total_elapsed = time.monotonic() - (
+                    self.assistant_task_started_at.get("qualification_document") or time.monotonic()
+                )
+                self.assistant_task_states["qualification_document"] = "done"
+                self.assistant_task_elapsed["qualification_document"] = total_elapsed
+            else:
+                self.assistant_task_states["document"] = "done"
+                self.assistant_task_elapsed["document"] = document_elapsed
             self._render_assistant_progress()
             self.last_generated_document_path = output_path
             self.last_generated_document_preview_path = None
@@ -11066,8 +11105,15 @@ try {
         except Exception as exc:
             document_elapsed = time.perf_counter() - document_started
             self._finish_activity_step("document", document_elapsed, error=str(exc))
-            self.assistant_task_states["document"] = "error"
-            self.assistant_task_elapsed["document"] = document_elapsed
+            if combined:
+                total_elapsed = time.monotonic() - (
+                    self.assistant_task_started_at.get("qualification_document") or time.monotonic()
+                )
+                self.assistant_task_states["qualification_document"] = "error"
+                self.assistant_task_elapsed["qualification_document"] = total_elapsed
+            else:
+                self.assistant_task_states["document"] = "error"
+                self.assistant_task_elapsed["document"] = document_elapsed
             self._render_assistant_progress()
             self.last_generated_document_path = None
             self.last_generated_document_preview_path = None
@@ -11249,7 +11295,7 @@ try {
         self._render_assistant_progress()
         self._begin_activity_step(
             "document:save:docx" if suffix == ".docx" else "document:save:pdf",
-            "0% docx requisitado" if suffix == ".docx" else "0% pdf requisitado",
+            "Docx requisitado" if suffix == ".docx" else "Pdf requisitado",
         )
         self.live_document_save_button.configure(state="disabled")
         self._set_activity_status("Salvando documento", log=False)
@@ -11370,6 +11416,11 @@ try {
             return
         self.pending_occurrence_document_generation = bool(generate_document)
         generation, settings = self._begin_assistant_request("qualification", "live")
+        if generate_document:
+            self.assistant_task_states["qualification_document"] = "running"
+            self.assistant_task_elapsed["qualification_document"] = None
+            self.assistant_task_started_at["qualification_document"] = time.monotonic()
+            self._render_assistant_progress()
         self._begin_activity_step("assistant:qualification", "Qualificação requisitada")
         self.live_assistant_status_var.set("Organizando qualificação...")
         self._set_activity_status("Qualificação requisitada", log=False)
