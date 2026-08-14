@@ -53,7 +53,7 @@ from assistant_prompts import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260814_003"
+APP_VERSION = "20260814_004"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
@@ -5044,6 +5044,31 @@ def normalize_settings(data: dict) -> dict:
         clean["parts_model"] = IA_PROXY_NAME
     if clean["parts_model"] == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
         clean["parts_model"] = IA_PROXY_NAME
+    # Modelos por tarefa (histórico, oitiva e qualificação) e raciocínio das
+    # partes: preservados com fallback para as chaves gerais de texto.
+    task_preserved: dict[str, object] = {}
+    for task, keys in TEXT_TASK_KEYS.items():
+        suffixes = ("", "_2") if task in ("history", "statement") else ("",)
+        for suffix in suffixes:
+            model_key, reasoning_key, proxy_key = (key + suffix for key in keys)
+            raw_model = str(data.get(model_key) or "")
+            fallback_model = str(clean.get("text_model" + suffix) or clean["text_model"])
+            model_value = raw_model if raw_model in text_model_names else fallback_model
+            task_preserved[model_key] = model_value
+            task_preserved[proxy_key] = proxy_model(data.get(proxy_key), "grok")
+            effective_model = (
+                task_preserved[proxy_key]
+                if model_value == IA_PROXY_NAME
+                else model_value
+            )
+            task_preserved[reasoning_key] = normalize_reasoning(
+                data.get(reasoning_key), effective_model
+            )
+    clean.update(task_preserved)
+    clean["parts_reasoning"] = normalize_reasoning(
+        data.get("parts_reasoning"),
+        clean["parts_proxy_model"] if clean["parts_model"] == IA_PROXY_NAME else clean["parts_model"],
+    )
     # VAD removido
     return clean
 
@@ -6596,16 +6621,24 @@ class SigApp:
         self.assistant_target = "assistant"
         self.assistant_names: list[str] = []
         self.live_assistant_names: list[str] = []
-        self.assistant_task_states = {"history": "idle", "names": "idle", "statement": "idle"}
+        self.assistant_task_states = {"history": "idle", "names": "idle", "statement": "idle", "document": "idle", "document_copy": "idle", "document_save_docx": "idle", "document_save_pdf": "idle"}
         self.assistant_task_elapsed: dict[str, float | None] = {
             "history": None,
             "names": None,
             "statement": None,
+            "document": None,
+            "document_copy": None,
+            "document_save_docx": None,
+            "document_save_pdf": None,
         }
         self.assistant_task_started_at: dict[str, float | None] = {
             "history": None,
             "names": None,
             "statement": None,
+            "document": None,
+            "document_copy": None,
+            "document_save_docx": None,
+            "document_save_pdf": None,
         }
         self.assistant_multi_started_at: dict[tuple[str, int], float] = {}
         self.assistant_phase = "idle"
@@ -6958,6 +6991,7 @@ class SigApp:
         for tag, color in (
             ("activity_step_running", "#33403e"),
             ("activity_step_done", "#16833a"),
+            ("activity_step_warning", "#a8711a"),
             ("activity_step_error", "#b3261e"),
         ):
             if tag not in box.tag_names():
@@ -6977,6 +7011,8 @@ class SigApp:
         elapsed: float,
         *,
         error: str | None = None,
+        suffix: str | None = None,
+        tag: str | None = None,
     ):
         """Atualiza a linha inicial da etapa sem criar uma segunda mensagem."""
         step = self._activity_steps.pop(key, None)
@@ -6998,8 +7034,9 @@ class SigApp:
                 text = f"{step['started_at']}  {label} ERRO ({float(elapsed):.1f}s): {str(error).rstrip(' .')}\n"
                 tag = "activity_step_error"
             else:
-                text = f"{step['started_at']}  {label} ({float(elapsed):.1f}s)\n"
-                tag = "activity_step_done"
+                suffix_text = f" {suffix}" if suffix else ""
+                text = f"{step['started_at']}  {label}{suffix_text} ({float(elapsed):.1f}s)\n"
+                tag = tag or "activity_step_done"
             box.insert(start, text, tag)
             box.mark_unset(mark)
             box.see(END)
@@ -7110,7 +7147,8 @@ class SigApp:
         if self.update_check_thread and self.update_check_thread.is_alive():
             messagebox.showinfo("Atualizações", "A verificação já está em andamento.")
             return
-        self._append_activity_log("Verificando atualizações...")
+        self._begin_activity_step("update:check", "Verificando atualizações")
+        self._update_check_started = time.perf_counter()
         self.update_check_thread = threading.Thread(
             target=self._update_check_worker,
             args=(True,),
@@ -7778,7 +7816,10 @@ try {
             self.live_grok_controls,
             text="Diarização",
             variable=self.live_diarize_var,
-            command=lambda: self.status_var.set("Diarização ativada." if self.live_diarize_var.get() else "Diarização desativada."),
+            command=lambda: self._set_activity_status(
+                "Diarização ativada." if self.live_diarize_var.get() else "Diarização desativada.",
+                log=False,
+            ),
         ).pack(side=LEFT)
         self.live_diarize_help = ttk.Button(self.live_grok_controls, text="?", width=2, command=self.show_live_diarization_help)
         self.live_diarize_help.pack(side=LEFT, padx=(4, 8))
@@ -8815,14 +8856,14 @@ try {
         editor.delete("1.0", END)
         if target == "output":
             self.qualification_result_fields = {}
-        self.status_var.set(f"Caixa de {('entrada' if target == 'input' else 'saída')} da qualificação limpa.")
+        self._set_activity_status(f"Caixa de {('entrada' if target == 'input' else 'saída')} da qualificação limpa.", log=False)
 
     def _copy_qualification_text(self, target: str) -> None:
         text = self._qualification_editor_value(target)
         if text:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
-            self.status_var.set(f"Texto da qualificação ({'entrada' if target == 'input' else 'saída'}) copiado.")
+            self._set_activity_status(f"Texto da qualificação ({'entrada' if target == 'input' else 'saída'}) copiado.", log=False)
 
     def _paste_qualification_text(self, target: str) -> None:
         if self.assistant_busy:
@@ -8842,7 +8883,7 @@ try {
         editor.insert("1.0", pasted)
         if target == "output":
             self.qualification_result_fields = {}
-        self.status_var.set(f"Texto colado na qualificação ({'entrada' if target == 'input' else 'saída'}).")
+        self._set_activity_status(f"Texto colado na qualificação ({'entrada' if target == 'input' else 'saída'}).", log=False)
 
     def _organize_qualification(self) -> None:
         raw_text = self._qualification_editor_value("input")
@@ -9696,8 +9737,14 @@ try {
             height=viewport_height,
         )
         if scrollbar is not None and scrollbar.winfo_exists():
+            # A barra de rolagem fica colada na lateral direita da caixa da
+            # prévia (não na borda distante do viewport).
+            scrollbar_x = min(
+                canvas_x + target_width,
+                viewport_width - scrollbar_width,
+            )
             scrollbar.place(
-                x=viewport_width - scrollbar_width,
+                x=scrollbar_x,
                 y=0,
                 width=scrollbar_width,
                 height=viewport_height,
@@ -9972,12 +10019,24 @@ try {
             )
         elif self.assistant_phase == "statement":
             entries = (("Redigindo oitiva", "statement"),)
+        elif any(
+            self.assistant_task_states[task] != "idle"
+            for task in ("document", "document_copy", "document_save_docx", "document_save_pdf")
+        ):
+            entries = (
+                ("Gerando documento", "document"),
+                ("Copiando documento", "document_copy"),
+                ("Salvando docx", "document_save_docx"),
+                ("Salvando pdf", "document_save_pdf"),
+            )
         else:
             progress_var.set("")
             return
         rendered = []
         for label, task in entries:
             state = self.assistant_task_states[task]
+            if state == "idle":
+                continue
             elapsed = self.assistant_task_elapsed[task]
             if elapsed is None:
                 started = self.assistant_task_started_at.get(task)
@@ -9993,7 +10052,11 @@ try {
 
     def _refresh_assistant_progress_clock(self):
         """Refresh active text-task timers without adding repeated log entries."""
-        if self.assistant_busy:
+        document_active = any(
+            self.assistant_task_states[task] == "running"
+            for task in ("document", "document_copy", "document_save_docx", "document_save_pdf")
+        )
+        if self.assistant_busy or document_active:
             self._render_assistant_progress()
         try:
             self.root.after(100, self._refresh_assistant_progress_clock)
@@ -10838,13 +10901,13 @@ try {
         elif kind == "transcript2":
             self.live_secondary_committed_text = ""
             self.live_secondary_draft_text = ""
-        self.status_var.set(f"Caixa de {self._live_editor_label(kind)} limpa.")
+        self._set_activity_status(f"Caixa de {self._live_editor_label(kind)} limpa.", log=False)
 
     def copy_live_editor(self, kind: str):
         text = self._live_editor_value(kind)
         if text:
             self.root.clipboard_clear(); self.root.clipboard_append(text)
-            self.status_var.set(f"Conteúdo de {self._live_editor_label(kind)} copiado.")
+            self._set_activity_status(f"Conteúdo de {self._live_editor_label(kind)} copiado.", log=False)
 
     def paste_live_editor(self, kind: str):
         if self.live_state != "idle" or self.assistant_busy:
@@ -10861,7 +10924,7 @@ try {
                 with self.live_secondary_lock:
                     self.live_secondary_committed_text = pasted
                     self.live_secondary_draft_text = ""
-            self.status_var.set(f"Texto colado em {self._live_editor_label(kind)}.")
+            self._set_activity_status(f"Texto colado em {self._live_editor_label(kind)}.", log=False)
 
     def recover_live_assistant_text(self, kind: str):
         saved = getattr(self, f"last_live_{kind}_text", "")
@@ -10872,7 +10935,7 @@ try {
         ):
             return
         self._set_live_editor(kind, saved)
-        self.status_var.set(f"Último {self._live_editor_label(kind)} recuperado.")
+        self._set_activity_status(f"Último {self._live_editor_label(kind)} recuperado.", log=False)
 
     def recover_live_qualification(self):
         if not self.last_live_qualification_text:
@@ -10949,6 +11012,12 @@ try {
         )
         document_started = time.perf_counter()
         self._begin_activity_step("document", "Documento requisitado")
+        for task in ("document", "document_copy", "document_save_docx", "document_save_pdf"):
+            self.assistant_task_states[task] = "idle"
+            self.assistant_task_elapsed[task] = None
+        self.assistant_task_states["document"] = "running"
+        self.assistant_task_started_at["document"] = time.monotonic()
+        self._render_assistant_progress()
         try:
             template_path = ensure_document_templates()[document_kind]
             output_dir = app_base_dir() / "temp" / "documentos"
@@ -10964,6 +11033,9 @@ try {
             )
             document_elapsed = time.perf_counter() - document_started
             self._finish_activity_step("document", document_elapsed)
+            self.assistant_task_states["document"] = "done"
+            self.assistant_task_elapsed["document"] = document_elapsed
+            self._render_assistant_progress()
             self.last_generated_document_path = output_path
             self.last_generated_document_preview_path = None
             for button in (
@@ -10985,6 +11057,9 @@ try {
         except Exception as exc:
             document_elapsed = time.perf_counter() - document_started
             self._finish_activity_step("document", document_elapsed, error=str(exc))
+            self.assistant_task_states["document"] = "error"
+            self.assistant_task_elapsed["document"] = document_elapsed
+            self._render_assistant_progress()
             self.last_generated_document_path = None
             self.last_generated_document_preview_path = None
             self.last_generated_document_preview_image_path = None
@@ -11013,6 +11088,10 @@ try {
             return
         copy_started = time.perf_counter()
         self._begin_activity_step("document:copy", "Cópia requisitada")
+        self.assistant_task_states["document_copy"] = "running"
+        self.assistant_task_elapsed["document_copy"] = None
+        self.assistant_task_started_at["document_copy"] = time.monotonic()
+        self._render_assistant_progress()
         self.live_document_copy_button.configure(state="disabled")
         self._set_document_copy_progress(True)
         self._set_activity_status("Copiando documento", log=False)
@@ -11153,6 +11232,16 @@ try {
             )
             return
         save_started = time.perf_counter()
+        save_task = "document_save_docx" if suffix == ".docx" else "document_save_pdf"
+        self._active_document_save_task = save_task
+        self.assistant_task_states[save_task] = "running"
+        self.assistant_task_elapsed[save_task] = None
+        self.assistant_task_started_at[save_task] = time.monotonic()
+        self._render_assistant_progress()
+        self._begin_activity_step(
+            "document:save:docx" if suffix == ".docx" else "document:save:pdf",
+            "0% docx requisitado" if suffix == ".docx" else "0% pdf requisitado",
+        )
         self.live_document_save_button.configure(state="disabled")
         self._set_activity_status("Salvando documento", log=False)
         threading.Thread(
@@ -11357,7 +11446,7 @@ try {
         self.live_language_var.set(code)
         label = labels.get(code, "Português")
         self.live_language_label_var.set(f"Idioma: {label}")
-        self.status_var.set(f"Idioma selecionado: {label}.")
+        self._set_activity_status(f"Idioma selecionado: {label}.", log=False)
 
     def _format_grok_diarized_transcript(self, payload: dict, fallback: str) -> str:
         if not self.live_diarize_var.get() or not isinstance(payload.get("words"), list):
@@ -12666,8 +12755,9 @@ try {
             settings_reasoning_key,
             settings_proxy_key,
             model_labels_holder,
+            start_row: int = 0,
         ):
-            model_row = 0
+            model_row = start_row
             model_label = ttk.Label(section_frame, text="Modelo:")
             model_label.grid(row=model_row, column=0, sticky="w", pady=5, padx=(0, 12))
             model_combo = ttk.Combobox(
@@ -12781,6 +12871,7 @@ try {
             settings_reasoning_key="parts_reasoning",
             settings_proxy_key="parts_proxy_model",
             model_labels_holder=parts_model_labels,
+            start_row=1,
         )
 
         def refresh_extraction_visibility(*_args):
@@ -15659,12 +15750,18 @@ try {
                     self._set_document_copy_progress(False)
                     self.live_document_copy_button.configure(state="normal")
                     self._finish_activity_step("document:copy", float(elapsed))
+                    self.assistant_task_states["document_copy"] = "done"
+                    self.assistant_task_elapsed["document_copy"] = float(elapsed)
+                    self._render_assistant_progress()
                     self._set_activity_status(f"Cópia requisitada ({float(elapsed):.1f}s)", log=False)
                 elif kind == "document_clipboard_error":
                     detail, elapsed = message[1:]
                     self._set_document_copy_progress(False)
                     self.live_document_copy_button.configure(state="normal")
                     self._finish_activity_step("document:copy", float(elapsed), error=detail)
+                    self.assistant_task_states["document_copy"] = "error"
+                    self.assistant_task_elapsed["document_copy"] = float(elapsed)
+                    self._render_assistant_progress()
                     self._set_activity_status(
                         f"Cópia ERRO ({float(elapsed):.1f}s): {detail}",
                         log=False,
@@ -15725,12 +15822,22 @@ try {
                     destination_path, elapsed = message[1:]
                     self.live_document_save_button.configure(state="normal")
                     destination_path = Path(destination_path)
-                    self._finish_activity_step("document:save", float(elapsed))
+                    save_task = getattr(self, "_active_document_save_task", "document_save_docx")
+                    step_key = "document:save:docx" if save_task == "document_save_docx" else "document:save:pdf"
+                    self._finish_activity_step(step_key, float(elapsed))
+                    self.assistant_task_states[save_task] = "done"
+                    self.assistant_task_elapsed[save_task] = float(elapsed)
+                    self._render_assistant_progress()
                     self._set_activity_status(f"Salvamento requisitado ({float(elapsed):.1f}s)", log=False)
                 elif kind == "document_save_error":
                     detail, elapsed = message[1:]
                     self.live_document_save_button.configure(state="normal")
-                    self._finish_activity_step("document:save", float(elapsed), error=detail)
+                    save_task = getattr(self, "_active_document_save_task", "document_save_docx")
+                    step_key = "document:save:docx" if save_task == "document_save_docx" else "document:save:pdf"
+                    self._finish_activity_step(step_key, float(elapsed), error=detail)
+                    self.assistant_task_states[save_task] = "error"
+                    self.assistant_task_elapsed[save_task] = float(elapsed)
+                    self._render_assistant_progress()
                     self._set_activity_status(
                         f"Salvar ERRO ({float(elapsed):.1f}s): {detail}",
                         log=False,
@@ -15835,20 +15942,29 @@ try {
                     self.update_button.configure(state="normal")
                     if not self.update_button.winfo_ismapped():
                         self.update_button.pack(side=RIGHT, anchor="n")
+                    self._finish_activity_step(
+                        "update:check",
+                        time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),
+                        suffix="- Encontrada!",
+                        tag="activity_step_warning",
+                    )
                     self._append_activity_log(
                         f"Nova versão disponível: {self.available_update['version']}.",
                         "warning",
                     )
                 elif kind == "update_not_found":
-                    self._append_activity_log("Nenhuma atualização encontrada.")
-                    messagebox.showinfo(
-                        "Atualizações",
-                        f"O SIG já está na versão mais recente ({APP_VERSION}).",
+                    self._finish_activity_step(
+                        "update:check",
+                        time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),
+                        suffix="- Não tem!",
                     )
                 elif kind == "update_check_error":
                     detail = str(message[1])
-                    self._append_activity_log(f"Falha ao verificar atualizações: {detail}", "warning")
-                    messagebox.showerror("Atualizações", f"Não foi possível verificar atualizações:\n{detail}")
+                    self._finish_activity_step(
+                        "update:check",
+                        time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),
+                        error=detail,
+                    )
                 elif kind == "update_progress":
                     self.update_button_var.set(message[1])
                 elif kind == "update_error":
