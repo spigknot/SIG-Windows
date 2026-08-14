@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import sys
+import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
@@ -20,6 +21,7 @@ from updater import (  # noqa: E402
     UpdateError,
     canonical_sync_manifest,
     classify_sync_files,
+    download_sync_file,
     validate_sync_manifest,
     verify_sync_manifest_signature,
 )
@@ -179,6 +181,106 @@ class SyncManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncDownloadTests(unittest.TestCase):
+    """FASE A3: download por arquivo com retry e validação de hash."""
+
+    def _fake_open_drive(self, payload_factory):
+        import updater
+
+        original = updater._open_google_drive_download
+
+        class _FakeResponse:
+            def __init__(self, payload: bytes):
+                self._payload = payload
+                self._offset = 0
+
+            def read(self, size=-1):
+                if size < 0:
+                    size = len(self._payload) - self._offset
+                chunk = self._payload[self._offset : self._offset + size]
+                self._offset += len(chunk)
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        calls = {"count": 0}
+        sequence = payload_factory() if callable(payload_factory) else payload_factory
+
+        def fake(drive_id):
+            calls["count"] += 1
+            payload = next(sequence)
+            if isinstance(payload, Exception):
+                raise payload
+            return _FakeResponse(payload)
+
+        updater._open_google_drive_download = fake
+        self.addCleanup(lambda: setattr(updater, "_open_google_drive_download", original))
+        return calls
+
+    def _entry(self, data: bytes) -> dict:
+        import hashlib
+
+        return {
+            "drive_id": "fake-id",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        }
+
+    def test_download_writes_validated_file(self):
+        data = b"conteudo do arquivo"
+        calls = self._fake_open_drive(iter([data]))
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "sig.exe"
+            download_sync_file(self._entry(data), destination)
+            self.assertEqual(destination.read_bytes(), data)
+            self.assertFalse(Path(str(destination) + ".part").exists())
+        self.assertEqual(calls["count"], 1)
+
+    def test_divergent_hash_is_rejected(self):
+        data = b"conteudo bom"
+        calls = self._fake_open_drive(iter([b"conteudo adulterado"] * 3))
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "sig.exe"
+            with self.assertRaisesRegex(UpdateError, "após 3 tentativas"):
+                download_sync_file(self._entry(data), destination)
+            self.assertFalse(destination.exists())
+        self.assertEqual(calls["count"], 3)
+
+    def test_transient_failure_recovers_on_retry(self):
+        data = b"arquivo certo"
+        calls = self._fake_open_drive(iter([ConnectionError("rede caiu"), data]))
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "sig.exe"
+            download_sync_file(self._entry(data), destination)
+            self.assertEqual(destination.read_bytes(), data)
+        self.assertEqual(calls["count"], 2)
+
+    def test_oversized_payload_is_rejected(self):
+        data = b"pequeno"
+        calls = self._fake_open_drive(iter([b"grande demais"] * 3))
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "sig.exe"
+            with self.assertRaises(UpdateError):
+                download_sync_file(self._entry(data), destination)
+
+    def test_progress_callback_reports_bytes(self):
+        data = b"x" * 300_000
+        calls = self._fake_open_drive(iter([data]))
+        seen = []
+        with tempfile.TemporaryDirectory() as temporary:
+            download_sync_file(
+                self._entry(data),
+                Path(temporary) / "sig.exe",
+                progress_callback=lambda done, total: seen.append((done, total)),
+            )
+        self.assertTrue(seen)
+        self.assertEqual(seen[-1], (len(data), len(data)))
 
 
 class SyncClassificationTests(unittest.TestCase):

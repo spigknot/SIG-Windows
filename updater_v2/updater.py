@@ -500,6 +500,57 @@ def classify_sync_files(target: Path, files: dict[str, dict]) -> dict:
     }
 
 
+SYNC_DOWNLOAD_ATTEMPTS = 3
+
+
+def download_sync_file(entry: dict, destination: Path, progress_callback=None) -> None:
+    """Baixa UM arquivo do sync por ``drive_id``, com retry e validação.
+
+    O arquivo é gravado em ``.part`` e só promovido ao destino após tamanho e
+    SHA-256 conferirem com o manifesto. Falhas transitórias são repetidas com
+    espera progressiva (0,75s * tentativa).
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_suffix(destination.suffix + ".part")
+    expected_size = int(entry["size"])
+    expected_sha256 = str(entry["sha256"]).lower()
+    last_error: Exception | None = None
+    for attempt in range(1, SYNC_DOWNLOAD_ATTEMPTS + 1):
+        partial.unlink(missing_ok=True)
+        digest = hashlib.sha256()
+        downloaded = 0
+        try:
+            response_context = _open_google_drive_download(str(entry["drive_id"]))
+            with response_context as response, partial.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > expected_size:
+                        raise UpdateError("o arquivo recebido é maior que o tamanho declarado")
+                    output.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, expected_size)
+            if downloaded != expected_size:
+                raise UpdateError(
+                    f"o arquivo recebido possui {downloaded} bytes; eram esperados {expected_size}"
+                )
+            if digest.hexdigest() != expected_sha256:
+                raise UpdateError("o SHA-256 do arquivo recebido não confere")
+            os.replace(partial, destination)
+            return
+        except Exception as exc:
+            last_error = exc
+            partial.unlink(missing_ok=True)
+            if attempt < SYNC_DOWNLOAD_ATTEMPTS:
+                time.sleep(0.75 * attempt)
+    raise UpdateError(
+        f"falha no download após {SYNC_DOWNLOAD_ATTEMPTS} tentativas: {last_error}"
+    )
+
+
 def _download_to_file(
     descriptor: dict,
     destination: Path,
