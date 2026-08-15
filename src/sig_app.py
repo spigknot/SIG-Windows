@@ -62,7 +62,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260815_018"
+APP_VERSION = "20260815_019"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
@@ -5347,10 +5347,10 @@ def deepgram_keyterms_list(settings: dict) -> list[str]:
     return [term.strip() for term in raw.replace("\n", ",").split(",") if term.strip()]
 
 
-def deepgram_query_string(settings: dict, language: str = "pt") -> str:
+def deepgram_query_string(settings: dict, language: str = "pt", diarize: bool = False) -> str:
     """Parâmetros do Deepgram Nova 3 (REST e WS) — mesma base do Grok."""
     params = ["model=nova-3", f"language={language}", "smart_format=true", "punctuate=true"]
-    if settings.get("diarize") or settings.get("grok_diarize"):
+    if diarize or settings.get("diarize") or settings.get("grok_diarize"):
         params.append("diarize=true")
     for term in deepgram_keyterms_list(settings):
         params.append(f"keyterm={urllib.parse.quote(term)}")
@@ -11968,7 +11968,7 @@ try {
         for word in payload["words"]:
             if not isinstance(word, dict):
                 continue
-            text = str(word.get("text") or "").strip()
+            text = str(word.get("text") or word.get("word") or "").strip()
             if not text:
                 continue
             next_speaker = word.get("speaker")
@@ -11984,8 +11984,12 @@ try {
         return "".join(output).strip() or fallback
 
     def _refresh_live_grok_controls(self):
-        grok = is_grok_transcription(self.settings)
-        if grok:
+        diarize_supported = (
+            is_grok_transcription(self.settings)
+            or is_deepgram_transcription(self.settings)
+            or is_assemblyai_transcription(self.settings)
+        )
+        if diarize_supported:
             self.live_grok_controls.pack(side=LEFT, before=self.live_top_spacer)
         else:
             self.live_grok_controls.pack_forget()
@@ -12014,7 +12018,9 @@ try {
         self.normal_record_grok = is_grok_transcription(self.settings)
         self.normal_record_deepgram = is_deepgram_transcription(self.settings)
         self.normal_record_language = self.live_language_var.get().strip() or "pt"
-        self.normal_record_diarize = self.normal_record_grok and bool(self.live_diarize_var.get())
+        self.normal_record_diarize = (self.normal_record_grok or self.normal_record_deepgram) and bool(
+            self.live_diarize_var.get()
+        )
         self.normal_record_paused = False
         self.normal_recording = True
         self.normal_record_stop_event.clear()
@@ -12048,9 +12054,17 @@ try {
             write_wav_from_pcm_file(wav_path, pcm_path)
             cancel = threading.Event()
             grok = self.normal_record_grok
-            if getattr(self, "normal_record_deepgram", False):
-                uploader = create_transcription_uploader(cancel, self.settings)
-                url = transcribe_url(self.settings)
+            api_provider = (
+                getattr(self, "normal_record_deepgram", False)
+                or is_assemblyai_transcription(self.settings)
+                or is_elevenlabs_transcription(self.settings)
+            )
+            if api_provider:
+                record_settings = self.settings.copy()
+                if getattr(self, "normal_record_deepgram", False) and self.normal_record_diarize:
+                    record_settings["diarize"] = True
+                uploader = create_transcription_uploader(cancel, record_settings)
+                url = transcribe_url(record_settings)
             else:
                 fields = {"language": self.normal_record_language, "format": "true", "filler_words": "false"}
                 if self.normal_record_diarize:
@@ -14206,7 +14220,7 @@ try {
         )
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
         self.live_grok_language = self.live_language_var.get().strip() or "pt"
-        self.live_grok_diarize = bool(self.live_diarize_var.get()) if self.live_uses_grok_websocket else False
+        self.live_grok_diarize = bool(self.live_diarize_var.get())
         self.grok_ws_ready_event.clear()
         self.grok_ws_done_event.clear()
         self.grok_ws_lost_event.clear()
@@ -15094,6 +15108,17 @@ try {
         buffer_lock = threading.Lock()
         full_pcm_lock = threading.Lock()
         full_pcm = None
+        speaker_labels: dict[str, int] = {}
+
+        def speaker_prefix(label) -> str:
+            if not label:
+                return ""
+            label = str(label)
+            number = speaker_labels.get(label)
+            if number is None:
+                number = len(speaker_labels) + 1
+                speaker_labels[label] = number
+            return f"Interlocutor {number}: "
 
         def remember(chunk: bytes) -> None:
             nonlocal buffered_bytes
@@ -15130,6 +15155,8 @@ try {
                 text = str(event.get("transcript") or "").strip()
                 if not text or self.assemblyai_ws_done_event.is_set():
                     return
+                if self.live_grok_diarize:
+                    text = speaker_prefix(event.get("speaker_label")) + text
                 if bool(event.get("end_of_turn")):
                     with self.live_lock:
                         committed = self.live_committed_text.strip()
@@ -15216,6 +15243,8 @@ try {
                 "speech_model=universal-3-5-pro&encoding=pcm_s16le"
                 "&sample_rate=16000&continuous_partials=true"
             )
+            if self.live_grok_diarize:
+                query += "&speaker_labels=true"
             self._queue("status", f"Parâmetros AssemblyAI: {query}")
             app = websocket.WebSocketApp(
                 f"{ASSEMBLYAI_WEBSOCKET_URL}?{query}",
@@ -15384,6 +15413,11 @@ try {
             channel = event.get("channel") or {}
             alternatives = channel.get("alternatives") or []
             text = str(alternatives[0].get("transcript") or "").strip() if alternatives else ""
+            if self.live_grok_diarize:
+                text = self._format_grok_diarized_transcript(
+                    {"words": (alternatives[0].get("words") or []) if alternatives else []},
+                    text,
+                )
             is_final = bool(event.get("is_final"))
             speech_final = bool(event.get("speech_final"))
             if text and not self.deepgram_ws_done_event.is_set():
@@ -15457,7 +15491,7 @@ try {
             self.deepgram_ws_ready_event.clear()
             self.deepgram_ws_lost_event.clear()
             language = self.live_language_var.get().strip() or "pt"
-            query = deepgram_query_string(settings, language)
+            query = deepgram_query_string(settings, language, diarize=self.live_grok_diarize)
             query += (
                 "&encoding=linear16&sample_rate=16000&channels=1"
                 "&interim_results=true&endpointing=900"
