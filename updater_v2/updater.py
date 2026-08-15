@@ -216,7 +216,7 @@ def fetch_incremental_manifest() -> dict:
 
 # ID do sync_manifest.json no Drive (arquivo público, atualizado a cada
 # publicação — o ID permanece estável como o do latest.json).
-SYNC_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
+SYNC_MANIFEST_FILE_ID = "1FiuZNZ6Ylub7P10vecwV29UNntoOkySw"
 
 
 def fetch_sync_manifest() -> dict:

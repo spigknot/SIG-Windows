@@ -199,6 +199,29 @@ def publish_manifest(service, state: dict, manifest: dict) -> str:
     return updated["id"]
 
 
+def list_sync_folder_files(service, folder_id: str) -> dict[str, str]:
+    """Lista os arquivos existentes na pasta sync: {nome: id}."""
+    listing: dict[str, str] = {}
+    page_token = ""
+    while True:
+        response = (
+            service.files()
+            .list(
+                q=f"'{folder_id}' in parents and trashed=false",
+                fields="nextPageToken,files(id,name)",
+                pageSize=1000,
+                pageToken=page_token or None,
+            )
+            .execute()
+        )
+        for item in response.get("files", []):
+            listing[str(item["name"])] = str(item["id"])
+        page_token = response.get("nextPageToken", "")
+        if not page_token:
+            break
+    return listing
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", type=Path, required=True)
@@ -230,23 +253,79 @@ def main() -> int:
             print(f"  delete: {path}")
         return 0
 
-    from googleapiclient.http import MediaFileUpload
+    from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
+    # Reconciliação: arquivos já presentes na pasta (de execuções anteriores
+    # interrompidas) são reusados pelo nome quando o estado não os conhece.
+    existing_in_folder = list_sync_folder_files(service, folder_id)
     new_files: dict[str, dict] = {}
     for index, path in enumerate(to_upload, 1):
         local = package / Path(*path.split("/"))
         entry = current[path]
-        media = MediaFileUpload(str(local), resumable=True)
-        created = _upload_with_retry(
-            service,
-            media,
-            {"name": path, "parents": [folder_id]},
-            "id,name,size",
-        )
-        new_files[path] = {"drive_id": created["id"], "sha256": entry["sha256"], "size": entry["size"]}
+        reused_id = None
+        if path not in previous and path in existing_in_folder:
+            # confirma pelo hash baixado? não: reusa o ID e o próximo diff
+            # corrige se o conteúdo divergir. Para o upload inicial basta o nome.
+            reused_id = existing_in_folder[path]
+        if reused_id:
+            new_files[path] = {
+                "drive_id": reused_id,
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
+        elif entry["size"] < 5 * 1024 * 1024:
+            # Upload simples para arquivos pequenos: muito mais rápido que o
+            # resumable (que tem handshake por arquivo).
+            with local.open("rb") as handle:
+                media = MediaIoBaseUpload(
+                    handle, mimetype="application/octet-stream", chunksize=1024 * 1024
+                )
+                created = _upload_with_retry(
+                    service,
+                    media,
+                    {"name": path, "parents": [folder_id]},
+                    "id,name,size",
+                )
+            new_files[path] = {
+                "drive_id": created["id"],
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
+        else:
+            media = MediaFileUpload(str(local), resumable=True)
+            created = _upload_with_retry(
+                service,
+                media,
+                {"name": path, "parents": [folder_id]},
+                "id,name,size",
+            )
+            new_files[path] = {
+                "drive_id": created["id"],
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
         if index % 25 == 0 or index == len(to_upload):
+            # Salva o progresso incremental para poder continuar de onde parou.
+            interim = dict(state)
+            interim_files: dict[str, dict] = {}
+            for done_path, done_entry in current.items():
+                if done_path in new_files:
+                    interim_files[done_path] = new_files[done_path]
+                else:
+                    previous_entry = previous.get(done_path) or {}
+                    drive_id = previous_entry.get("drive_id")
+                    if drive_id:
+                        interim_files[done_path] = {
+                            "drive_id": drive_id,
+                            "sha256": done_entry["sha256"],
+                            "size": done_entry["size"],
+                        }
+            interim["files"] = interim_files
+            interim["sync_folder_id"] = folder_id
+            interim["partial"] = True
+            save_state(interim)
             print(f"  upload {index}/{len(to_upload)}")
-        time.sleep(0.08)
+        time.sleep(0.02)
 
     for path in to_delete:
         old_entry = previous.get(path) or {}
