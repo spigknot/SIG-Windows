@@ -128,6 +128,7 @@ DEFAULT_SETTINGS = {
     "qualification_proxy_model": "grok-4.6",
     "grok_api_key": "",
     "deepseek_api_key": "",
+    "deepgram_api_key": "",
     "imei_api_key": IMEI_API_KEY,
     "police_name": "",
     "police_role": "",
@@ -138,6 +139,9 @@ DEFAULT_SETTINGS = {
 GROK_API_NAME = "Grok STT"
 GROK_STT_URL = "https://api.x.ai/v1/stt"
 GROK_STT_WEBSOCKET_URL = "wss://api.x.ai/v1/stt"
+DEEPGRAM_API_NAME = "Deepgram Nova 3"
+DEEPGRAM_STT_URL = "https://api.deepgram.com/v1/listen"
+DEEPGRAM_STT_WEBSOCKET_URL = "wss://api.deepgram.com/v1/listen"
 LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
 LIVE_QUALIFICATION_FIELD_IDS = (
     "nome",
@@ -4671,17 +4675,28 @@ def read_transcription_servers() -> list[dict]:
             }
         ]
     grok_selected = any(server["name"] == GROK_API_NAME for server in servers if server["selected"])
-    return [
-        {**server, "selected": server["selected"] and not grok_selected, "is_grok_api": False}
+    deepgram_selected = any(server["name"] == DEEPGRAM_API_NAME for server in servers if server["selected"])
+    api_selected = grok_selected or deepgram_selected
+    plain_servers = [
+        {**server, "selected": server["selected"] and not api_selected}
         for server in servers
-    ] + [
+        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME)
+    ]
+    return plain_servers + [
         {
             "name": GROK_API_NAME,
             "url": GROK_STT_URL,
             "parameters": {"model": "Speech to Text"},
             "selected": grok_selected,
             "is_grok_api": True,
-        }
+        },
+        {
+            "name": DEEPGRAM_API_NAME,
+            "url": DEEPGRAM_STT_URL,
+            "parameters": {"model": "Nova 3"},
+            "selected": deepgram_selected,
+            "is_deepgram_api": True,
+        },
     ]
 
 
@@ -4704,7 +4719,7 @@ def add_transcription_server(name: str, url: str, model: str) -> tuple[bool, str
 
 
 def remove_transcription_server(name: str) -> bool:
-    if name == GROK_API_NAME:
+    if name in (GROK_API_NAME, DEEPGRAM_API_NAME):
         return False
     path = transcription_servers_path()
     removed = False
@@ -5051,6 +5066,7 @@ def normalize_settings(data: dict) -> dict:
         else "grok"
     )
     clean["grok_api_key"] = str(data.get("grok_api_key") or "").strip()
+    clean["deepgram_api_key"] = str(data.get("deepgram_api_key") or "").strip()
     clean["deepseek_api_key"] = str(data.get("deepseek_api_key") or "").strip()
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
@@ -5284,11 +5300,26 @@ def fetch_imei_info_record(imei: str, api_key: str) -> dict:
 
 
 def transcribe_url(settings: dict) -> str:
-    return selected_transcription_server(settings)["url"]
+    url = selected_transcription_server(settings)["url"]
+    if is_deepgram_transcription(settings):
+        url = f"{url}?{deepgram_query_string(settings)}"
+    return url
+
+
+def deepgram_query_string(settings: dict) -> str:
+    """Parâmetros do Deepgram Nova 3 para o fluxo REST (mesma base do Grok)."""
+    params = ["model=nova-3", "language=pt", "smart_format=true", "punctuate=true"]
+    if settings.get("diarize") or settings.get("grok_diarize"):
+        params.append("diarize=true")
+    return "&".join(params)
 
 
 def is_grok_transcription(settings: dict) -> bool:
     return selected_transcription_server(settings).get("is_grok_api", False)
+
+
+def is_deepgram_transcription(settings: dict) -> bool:
+    return selected_transcription_server(settings).get("is_deepgram_api", False)
 
 
 def settings_for_transcription_server(settings: dict, server_name: str) -> dict:
@@ -5300,6 +5331,10 @@ def settings_for_transcription_server(settings: dict, server_name: str) -> dict:
 def transcription_form_fields(settings: dict) -> dict:
     if is_grok_transcription(settings):
         return {"language": "pt", "format": "true", "filler_words": "false"}
+    if is_deepgram_transcription(settings):
+        # No fluxo Deepgram os parâmetros viajam na URL (raw body); o dict
+        # fica vazio apenas para manter a assinatura do uploader.
+        return {}
     return selected_transcription_server(settings)["parameters"].copy()
 
 
@@ -5313,6 +5348,17 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
             transcription_form_fields(settings),
             {"Authorization": f"Bearer {api_key}"},
             "file",
+        )
+    if is_deepgram_transcription(settings):
+        api_key = str(settings.get("deepgram_api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Insira a chave API do Deepgram nas configurações.")
+        return GraniteUploader(
+            cancel_event,
+            {},
+            {"Authorization": f"Token {api_key}"},
+            "file",
+            raw_body=True,
         )
     return GraniteUploader(cancel_event, transcription_form_fields(settings))
 
@@ -6282,11 +6328,13 @@ class GraniteUploader:
         form_fields: dict | None = None,
         extra_headers: dict[str, str] | None = None,
         file_field: str = "files",
+        raw_body: bool = False,
     ):
         self.cancel_event = cancel_event
         self.form_fields = dict(form_fields or {})
         self.extra_headers = dict(extra_headers or {})
         self.file_field = file_field
+        self.raw_body = bool(raw_body)
         self._lock = threading.Lock()
         self._connections: set[http.client.HTTPConnection] = set()
 
@@ -6338,27 +6386,36 @@ class GraniteUploader:
         parts = []
         merged_fields = self.form_fields.copy()
         merged_fields.update(form_fields or {})
-        for key, value in merged_fields.items():
-            if key.lower() in ("file", "files") or value is None:
-                continue
-            clean_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if self.raw_body:
+            # Deepgram (e APIs de áudio cru): o arquivo vai como body direto,
+            # sem multipart; os parâmetros viajam na query da URL.
+            preamble = b""
+            ending = b""
+            content_type = mime_type
+            content_length = file_path.stat().st_size
+        else:
+            for key, value in merged_fields.items():
+                if key.lower() in ("file", "files") or value is None:
+                    continue
+                clean_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                parts.append(
+                    (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                        f"{clean_value}\r\n"
+                    ).encode("utf-8")
+                )
             parts.append(
                 (
                     f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                    f"{clean_value}\r\n"
+                    f'Content-Disposition: form-data; name="{self.file_field}"; filename="{filename}"\r\n'
+                    f"Content-Type: {mime_type}\r\n\r\n"
                 ).encode("utf-8")
             )
-        parts.append(
-            (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="{self.file_field}"; filename="{filename}"\r\n'
-                f"Content-Type: {mime_type}\r\n\r\n"
-            ).encode("utf-8")
-        )
-        preamble = b"".join(parts)
-        ending = f"\r\n--{boundary}--\r\n".encode("utf-8")
-        content_length = len(preamble) + file_path.stat().st_size + len(ending)
+            preamble = b"".join(parts)
+            ending = f"\r\n--{boundary}--\r\n".encode("utf-8")
+            content_type = f"multipart/form-data; boundary={boundary}"
+            content_length = len(preamble) + file_path.stat().st_size + len(ending)
         path = parsed.path or "/"
         if parsed.query:
             path += f"?{parsed.query}"
@@ -6371,7 +6428,7 @@ class GraniteUploader:
                 raise Cancelled()
             conn.putrequest("POST", path)
             conn.putheader("accept", accept)
-            conn.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+            conn.putheader("Content-Type", content_type)
             conn.putheader("Content-Length", str(content_length))
             for header, value in self.extra_headers.items():
                 conn.putheader(header, value)
@@ -6574,6 +6631,7 @@ class SigApp:
         self.live_uploader: GraniteUploader | None = None
         self.live_full_pcm_path: Path | None = None
         self.live_uses_grok_websocket = False
+        self.live_uses_deepgram_websocket = False
         self.live_grok_settings: dict | None = None
         self.live_grok_language = "pt"
         self.live_grok_diarize = False
@@ -6583,6 +6641,12 @@ class SigApp:
         self.grok_ws_done_event = threading.Event()
         self.grok_ws_lost_event = threading.Event()
         self.grok_ws_intentional_close = False
+        self.deepgram_ws_app = None
+        self.deepgram_ws_thread: threading.Thread | None = None
+        self.deepgram_ws_ready_event = threading.Event()
+        self.deepgram_ws_done_event = threading.Event()
+        self.deepgram_ws_lost_event = threading.Event()
+        self.deepgram_ws_intentional_close = False
         self.live_was_grok_websocket = False
         self.live_audio_recovery_available = False
         self.live_recovery_thread: threading.Thread | None = None
@@ -12452,6 +12516,7 @@ try {
         qualification_model_labels: dict[str, str] = {}
         grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
+        deepgram_api_key_var = StringVar(value=self.settings.get("deepgram_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         police_name_var = StringVar(value=self.settings.get("police_name", ""))
         police_role_var = StringVar(value=self.settings.get("police_role", ""))
@@ -12551,6 +12616,19 @@ try {
         imei_key_entry = ttk.Entry(api_frame, textvariable=imei_api_key_var, show="*", width=44)
         imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=5)
 
+        deepgram_key_row = imei_key_row + 1
+        ttk.Label(api_frame, text="Chave API do Deepgram").grid(
+            row=deepgram_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        deepgram_key_entry = ttk.Entry(
+            api_frame, textvariable=deepgram_api_key_var, show="*", width=44
+        )
+        deepgram_key_entry.grid(row=deepgram_key_row, column=1, sticky="ew", pady=5)
+        create_tooltip(
+            deepgram_key_entry,
+            "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
+        )
+
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
             row=transcription_server_row,
@@ -12575,7 +12653,11 @@ try {
             transcription_servers = [
                 server
                 for server in read_transcription_servers()
-                if server["name"] != GROK_API_NAME or plausible_xai_api_key(grok_api_key_var.get())
+                if (server["name"] != GROK_API_NAME or plausible_xai_api_key(grok_api_key_var.get()))
+                and (
+                    server["name"] != DEEPGRAM_API_NAME
+                    or bool(deepgram_api_key_var.get().strip())
+                )
             ]
             transcription_labels = {
                 transcription_server_label(server): server["name"]
@@ -13394,6 +13476,7 @@ try {
             selected_statement_2 = statement_ui["labels_2"].get(statement_model_2_var.get(), "")
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
+            deepgram_api_key = deepgram_api_key_var.get().strip()
             imei_api_key = imei_api_key_var.get().strip()
             police_name = police_name_var.get().strip()
             police_role = police_role_var.get().strip()
@@ -13546,6 +13629,7 @@ try {
                     "qualification_proxy_model": qualification_proxy_model_var.get(),
                     "grok_api_key": api_key,
                     "deepseek_api_key": deepseek_api_key,
+                    "deepgram_api_key": deepgram_api_key,
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -13915,9 +13999,18 @@ try {
         ) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de iniciar.")
             return
+        if (
+            is_deepgram_transcription(self.settings)
+            or (secondary_settings is not None and is_deepgram_transcription(secondary_settings))
+        ) and not self.settings.get("deepgram_api_key"):
+            messagebox.showerror("sig", "Insira a chave API do Deepgram nas configurações antes de iniciar.")
+            return
         self.live_stop_event.clear()
         self.live_abort_event.clear()
         self.live_uses_grok_websocket = is_grok_transcription(self.settings) and not self.settings.get(
+            "grok_rest_requests", False
+        )
+        self.live_uses_deepgram_websocket = is_deepgram_transcription(self.settings) and not self.settings.get(
             "grok_rest_requests", False
         )
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
@@ -13928,12 +14021,18 @@ try {
         self.grok_ws_lost_event.clear()
         self.grok_ws_intentional_close = False
         self.grok_ws_app = None
-        self.live_uploader = None if self.live_uses_grok_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
+        self.deepgram_ws_ready_event.clear()
+        self.deepgram_ws_done_event.clear()
+        self.deepgram_ws_lost_event.clear()
+        self.deepgram_ws_intentional_close = False
+        self.deepgram_ws_app = None
+        streaming_websocket = self.live_uses_grok_websocket or self.live_uses_deepgram_websocket
+        self.live_uploader = None if streaming_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
         temp_live = app_base_dir() / "temp" / "live"
         temp_live.mkdir(parents=True, exist_ok=True)
         self._clear_live_integral_audio()
         self.live_full_pcm_path = temp_live / f"live_full_{int(time.time() * 1000)}.pcm"
-        self.live_was_grok_websocket = self.live_uses_grok_websocket
+        self.live_was_grok_websocket = streaming_websocket
         self.live_recovery_cancel_event.clear()
         self.live_capture_finish_waiting = False
         self.live_output_finished = False
@@ -13964,7 +14063,11 @@ try {
         self.live_paused_total = 0.0
         self._set_live_text("")
         self._set_live_editor("transcript2", "")
-        self.live_upload_executor = None if self.live_uses_grok_websocket else concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.live_upload_executor = (
+            None
+            if (self.live_uses_grok_websocket or self.live_uses_deepgram_websocket)
+            else concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        )
         self._set_live_state("listening")
         if secondary_settings is not None:
             self.live_secondary_thread = threading.Thread(
@@ -13973,9 +14076,14 @@ try {
                 daemon=True,
             )
             self.live_secondary_thread.start()
-        if not self.live_uses_grok_websocket:
+        if not self.live_uses_grok_websocket and not self.live_uses_deepgram_websocket:
             self.status_var.set("Ouvindo e transcrevendo ao vivo...")
-        target = self._grok_live_capture_loop if self.live_uses_grok_websocket else self._live_capture_loop
+        if self.live_uses_deepgram_websocket:
+            target = self._deepgram_live_capture_loop
+        elif self.live_uses_grok_websocket:
+            target = self._grok_live_capture_loop
+        else:
+            target = self._live_capture_loop
         self.live_thread = threading.Thread(target=target, args=(self.settings.copy(),), daemon=True)
         self.live_thread.start()
         self._tick_live_timer()
@@ -14018,6 +14126,22 @@ try {
             self.live_paused_total += time.time() - self.live_paused_at
             self.live_paused_at = 0.0
         self._set_live_state("finalizing")
+        if self.live_uses_deepgram_websocket:
+            self.deepgram_ws_intentional_close = True
+            self.status_var.set("Recebendo a transcrição final do Deepgram...")
+            self.live_stop_event.set()
+            app = self.deepgram_ws_app
+            if not app:
+                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
+                self._finish_live_output()
+                return
+            try:
+                app.send(json.dumps({"type": "CloseStream"}))
+                threading.Thread(target=self._wait_for_deepgram_final_event, daemon=True).start()
+            except Exception:
+                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
+                self._finish_live_output()
+            return
         if self.live_uses_grok_websocket:
             self.grok_ws_intentional_close = True
             self.status_var.set("Recebendo a transcrição final do Grok...")
@@ -14051,6 +14175,23 @@ try {
         self.live_finalize_thread = threading.Thread(target=self._finish_live_transcription, daemon=True)
         self.live_finalize_thread.start()
 
+    def _wait_for_deepgram_final_event(self):
+        if self.deepgram_ws_done_event.wait(20):
+            return
+        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
+            self.deepgram_ws_intentional_close = True
+            app = self.deepgram_ws_app
+            if app:
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self._queue(
+                "status",
+                "O Deepgram não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
+            )
+            self._finish_live_output()
+
     def _wait_for_grok_final_event(self):
         if self.grok_ws_done_event.wait(20):
             return
@@ -14078,6 +14219,7 @@ try {
         self.live_output_finished = True
         self._set_live_audio_recovery_visible(False)
         self.grok_ws_intentional_close = True
+        self.deepgram_ws_intentional_close = True
         if self.live_uploader:
             self.live_uploader.cancel()
         if self.grok_ws_app:
@@ -14086,7 +14228,14 @@ try {
             except Exception:
                 pass
         self.grok_ws_app = None
+        if self.deepgram_ws_app:
+            try:
+                self.deepgram_ws_app.close(status=1000, reason="Cancelado")
+            except Exception:
+                pass
+        self.deepgram_ws_app = None
         self.live_uses_grok_websocket = False
+        self.live_uses_deepgram_websocket = False
         executor = self.live_upload_executor
         self.live_upload_executor = None
         if executor:
@@ -14341,6 +14490,234 @@ try {
             self.live_secondary_committed_text = clean
             self.live_secondary_draft_text = ""
         self._queue("live_display_2", clean)
+
+    def _deepgram_live_capture_loop(self, settings: dict):
+        try:
+            import sounddevice as sd
+            import websocket
+        except Exception as exc:
+            self._queue("live_error", f"Streaming do Deepgram indisponível: {exc}")
+            return
+
+        api_key = str(settings.get("deepgram_api_key") or "").strip()
+        if not api_key:
+            self._queue("live_error", "Insira a chave API do Deepgram nas configurações.")
+            return
+
+        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
+        buffered_pcm: deque[bytes] = deque()
+        buffered_bytes = 0
+        buffer_limit = pcm_bytes_for_millis(GROK_RECONNECT_BUFFER_MILLIS)
+        buffer_lock = threading.Lock()
+        full_pcm_lock = threading.Lock()
+        full_pcm = None
+
+        def remember(chunk: bytes) -> None:
+            nonlocal buffered_bytes
+            with buffer_lock:
+                buffered_pcm.append(chunk)
+                buffered_bytes += len(chunk)
+                while buffered_pcm and buffered_bytes > buffer_limit:
+                    buffered_bytes -= len(buffered_pcm.popleft())
+
+        def buffered_snapshot() -> list[bytes]:
+            with buffer_lock:
+                return list(buffered_pcm)
+
+        def on_message(_app, raw_event):
+            if _app is not self.deepgram_ws_app:
+                return
+            try:
+                event = json.loads(raw_event)
+            except Exception:
+                self.deepgram_ws_lost_event.set()
+                self._queue("status", "Reconectando: resposta inválida do Deepgram.")
+                return
+            event_type = str(event.get("type") or "")
+            if event_type == "Metadata":
+                self.deepgram_ws_ready_event.set()
+                self._queue("status", "Conectado ao Deepgram. Ouvindo e transcrevendo ao vivo...")
+                return
+            if event_type != "Results":
+                return
+            channel = event.get("channel") or {}
+            alternatives = channel.get("alternatives") or []
+            text = str(alternatives[0].get("transcript") or "").strip() if alternatives else ""
+            is_final = bool(event.get("is_final"))
+            speech_final = bool(event.get("speech_final"))
+            if text:
+                self._update_live_transcript_window(text, is_final or speech_final, self.live_draft_generation)
+            if is_final and text:
+                with self.live_lock:
+                    self.live_committed_text = text
+            timestamped = _timestamped_text_from_json(event).strip()
+            if timestamped:
+                self._queue("live_timestamp_data", timestamped)
+
+        def on_error(_app, _error):
+            if (
+                _app is self.deepgram_ws_app
+                and not self.deepgram_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.deepgram_ws_done_event.is_set()
+            ):
+                self._queue("status", "Desconectado do Deepgram; reconectando...")
+                self.deepgram_ws_lost_event.set()
+
+        def on_close(_app, _status_code, _message):
+            if _app is not self.deepgram_ws_app:
+                return
+            if self.deepgram_ws_intentional_close and not self.deepgram_ws_done_event.is_set():
+                with self.live_lock:
+                    text = self.live_committed_text.strip() or self._current_live_text_locked().strip()
+                    self.live_committed_text = text
+                    self.live_draft_text = ""
+                timestamped = (self.live_timestamped_transcript_text or "").strip()
+                self.deepgram_ws_done_event.set()
+                self.deepgram_ws_app = None
+                self.live_uses_deepgram_websocket = False
+                if not text:
+                    self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
+                self._queue("live_display", text)
+                if timestamped:
+                    self._queue("live_payload", text, timestamped, True)
+                self._queue("status", "Transcrição definitiva concluída.")
+                self._finish_live_output()
+                return
+            if (
+                not self.deepgram_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.deepgram_ws_done_event.is_set()
+            ):
+                self._queue("status", "Desconectado do Deepgram; reconectando...")
+                self.deepgram_ws_lost_event.set()
+
+        def connect() -> bool:
+            previous = self.deepgram_ws_app
+            self.deepgram_ws_app = None
+            if previous:
+                try:
+                    previous.close()
+                except Exception:
+                    pass
+            self.deepgram_ws_ready_event.clear()
+            self.deepgram_ws_lost_event.clear()
+            language = self.live_language_var.get().strip() or "pt"
+            query = (
+                "model=nova-3&encoding=linear16&sample_rate=16000&channels=1"
+                "&interim_results=true&smart_format=true&punctuate=true&endpointing=900"
+            )
+            query += f"&language={language}"
+            if self.live_diarize_var.get():
+                query += "&diarize=true"
+            self._queue("status", f"Parâmetros Deepgram: {query}")
+            app = websocket.WebSocketApp(
+                f"{DEEPGRAM_STT_WEBSOCKET_URL}?{query}",
+                header=[f"Authorization: Token {api_key}"],
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            self.deepgram_ws_app = app
+            self.deepgram_ws_thread = threading.Thread(
+                target=lambda: app.run_forever(ping_interval=30, ping_timeout=10),
+                daemon=True,
+            )
+            self.deepgram_ws_thread.start()
+            deadline = time.monotonic() + 15
+            while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                if self.deepgram_ws_ready_event.wait(0.1):
+                    return True
+                if self.deepgram_ws_lost_event.is_set() or time.monotonic() >= deadline:
+                    return False
+            return False
+
+        def reconnect(attempt: int) -> bool:
+            delay = min(8.0, 0.5 * (2 ** max(0, attempt - 1))) + random.uniform(0.0, 0.25)
+            self._queue("status", f"Reconectando ao Deepgram ({attempt}/{GROK_RECONNECT_MAX_ATTEMPTS}) em {delay:.1f}s...")
+            if self.live_abort_event.wait(delay) or self.live_stop_event.is_set():
+                return False
+            if not connect():
+                return False
+            chunks = buffered_snapshot()
+            try:
+                for chunk in chunks:
+                    self.deepgram_ws_app.send(chunk, opcode=websocket.ABNF.OPCODE_BINARY)
+                self._queue("status", f"Reconectou com sucesso; reenviados {len(chunks)} bloco(s) dos últimos 8 segundos.")
+            except Exception:
+                self._queue("status", "Reconectou, mas não foi possível reenviar parte do buffer de áudio.")
+            return True
+
+        def audio_callback(indata, _frames, _time_info, _status):
+            if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            chunk = bytes(indata)
+            self._push_live_waveform_chunk(chunk)
+            self._queue_secondary_audio(chunk)
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.write(chunk)
+            remember(chunk)
+            try:
+                audio_queue.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    audio_queue.get_nowait()
+                    audio_queue.put_nowait(chunk)
+                    self._queue("status", "Parte do áudio ao vivo foi descartada por atraso local.")
+                except queue.Empty:
+                    pass
+
+        try:
+            pcm_path = self.live_full_pcm_path
+            if not pcm_path:
+                raise RuntimeError("não foi possível criar o áudio integral do streaming")
+            pcm_path.parent.mkdir(parents=True, exist_ok=True)
+            full_pcm = pcm_path.open("wb")
+            with sd.RawInputStream(
+                samplerate=LIVE_SAMPLE_RATE,
+                channels=LIVE_CHANNELS,
+                dtype="int16",
+                blocksize=max(
+                    1,
+                    LIVE_SAMPLE_RATE * int(settings.get("grok_chunk_ms", 100)) // 1000,
+                ),
+                callback=audio_callback,
+            ):
+                attempts = 0
+                connected = False
+                while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                    if not connected or self.deepgram_ws_lost_event.is_set():
+                        reconnecting = connected or self.deepgram_ws_lost_event.is_set() or attempts > 0
+                        attempts += 1
+                        self._queue("status", "Reconectando ao streaming do Deepgram..." if reconnecting else "Conectando ao streaming do Deepgram...")
+                        connected = reconnect(attempts) if reconnecting else connect()
+                        if connected:
+                            attempts = 0
+                            continue
+                        if attempts >= GROK_RECONNECT_MAX_ATTEMPTS:
+                            self._queue("live_error", "Falhou: reconexão do Deepgram esgotada após 8 tentativas.")
+                            return
+                        continue
+                    try:
+                        chunk = audio_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if self.live_state == "paused" or not chunk:
+                        continue
+                    try:
+                        self.deepgram_ws_app.send(chunk, opcode=websocket.ABNF.OPCODE_BINARY)
+                    except Exception:
+                        self.deepgram_ws_lost_event.set()
+                        connected = False
+        except Exception as exc:
+            if not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                self._queue("live_error", f"Falhou: erro no microfone ao vivo: {exc}")
+        finally:
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.close()
+                    full_pcm = None
 
     def _grok_live_capture_loop(self, settings: dict):
         try:
