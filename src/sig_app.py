@@ -50,14 +50,20 @@ from assistant_prompts import (
     statement_prompt,
     statement_user_prompt,
 )
+from sync_common import (
+    SYNC_MANIFEST_FILE_ID,
+    UPDATE_PUBLIC_KEY_E,
+    UPDATE_PUBLIC_KEY_N,
+    SyncError,
+    classify_sync_files,
+    validate_sync_manifest,
+)
 
 
 APP_NAME = "sig"
 APP_VERSION = "20260814_013"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
-UPDATE_PUBLIC_KEY_E = 65537
-UPDATE_PUBLIC_KEY_N = 4776833754672109710666015745718377295826954378034957006723781632230794955188598743370375368759247701138572196632244506341860738985196771222328276471293164426045586502411553661270415658303449836000240060850077943629529298365455842583839584430835872888082421190431050761740593243172708805858229100494995424042846759167936558524923889093025581721886390801543158714477942628958659907698645218405072643039190789807520623959789948760663039915934233343926084287154817842449929074144135976678727267978353880303189583548982201552861178437687569977746462198133228741460769839629249527122404198789341588724117695515639417887297249072695071299249800470626986276226209694407865386128033982643621030612265330884993509358887003353611841249193688390145075540912405754224137641702769971761374974256331506313629217304424829655209764530396523158905317988087656296751937468490602949770457129034644632659661248617309294539893653236376299080388523
 SUPPORTED_EXTENSIONS = {
     ".wav",
     ".mp3",
@@ -6653,6 +6659,7 @@ class SigApp:
         self.zip_help_window = None
         self.zip_help_position = (0, 0)
         self.available_update: dict | None = None
+        self.available_update_sync: dict | None = None
         self.update_check_thread: threading.Thread | None = None
         self.update_install_thread: threading.Thread | None = None
         self.update_installing = False
@@ -7160,34 +7167,56 @@ class SigApp:
         self.update_check_thread.start()
 
     def _update_check_worker(self, manual: bool = False) -> None:
+        # Mecanismo principal: sincronização por arquivo (manifesto schema 2).
         try:
-            raw = download_google_drive_bytes(UPDATE_MANIFEST_FILE_ID, 1024 * 128)
+            raw = download_google_drive_bytes(SYNC_MANIFEST_FILE_ID, 2 * 1024 * 1024)
             manifest = json.loads(raw.decode("utf-8"))
-            if not verify_update_manifest_signature(manifest):
-                raise RuntimeError("assinatura digital inválida")
-            version = str(manifest.get("version") or "")
-            zip_file_id = str(manifest.get("zip_file_id") or "")
-            zip_name = str(manifest.get("zip_name") or "")
-            digest = str(manifest.get("sha256") or "").lower()
-            size = int(manifest.get("size") or 0)
-            if not re.fullmatch(r"\d{8}_\d{3}", version):
-                return
-            if not zip_file_id or zip_name != f"{version}.zip":
-                raise RuntimeError("manifesto de atualização inconsistente")
-            if not re.fullmatch(r"[0-9a-f]{64}", digest) or size <= 0:
-                raise RuntimeError("hash ou tamanho inválido no manifesto")
+            sync_state = validate_sync_manifest(manifest)
+            version = sync_state["version"]
             if version > APP_VERSION:
-                self._queue("update_available", manifest)
+                classification = classify_sync_files(app_base_dir(), sync_state["files"])
+                self._queue(
+                    "update_available_sync",
+                    {
+                        "version": version,
+                        "files": sync_state["files"],
+                        "download": classification["download"],
+                        "remove": classification["remove"],
+                    },
+                )
             elif manual:
                 self._queue("update_not_found")
-        except Exception as exc:
+            return
+        except (SyncError, ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             if manual:
-                self._queue("update_check_error", str(exc))
-            else:
-                self._queue("activity", f"Atualização: não foi possível consultar o Drive ({exc}).")
+                # Tenta o incremental ZIP (formato antigo) como contingência.
+                try:
+                    raw = download_google_drive_bytes(UPDATE_MANIFEST_FILE_ID, 1024 * 128)
+                    manifest = json.loads(raw.decode("utf-8"))
+                    if not verify_update_manifest_signature(manifest):
+                        raise RuntimeError("assinatura digital inválida")
+                    version = str(manifest.get("version") or "")
+                    zip_file_id = str(manifest.get("zip_file_id") or "")
+                    zip_name = str(manifest.get("zip_name") or "")
+                    digest = str(manifest.get("sha256") or "").lower()
+                    size = int(manifest.get("size") or 0)
+                    if not re.fullmatch(r"\d{8}_\d{3}", version):
+                        raise RuntimeError("versão inválida no manifesto")
+                    if not zip_file_id or zip_name != f"{version}.zip":
+                        raise RuntimeError("manifesto de atualização inconsistente")
+                    if not re.fullmatch(r"[0-9a-f]{64}", digest) or size <= 0:
+                        raise RuntimeError("hash ou tamanho inválido no manifesto")
+                    if version > APP_VERSION:
+                        self._queue("update_available", manifest)
+                    else:
+                        self._queue("update_not_found")
+                except Exception as fallback_error:
+                    self._queue("update_check_error", str(fallback_error))
+                return
+            self._queue("activity", f"Atualização: não foi possível consultar o Drive ({exc}).")
 
     def install_available_update(self) -> None:
-        if not self.available_update or self.update_installing:
+        if (not self.available_update and not self.available_update_sync) or self.update_installing:
             return
         ffmpeg_running = bool(getattr(self, "ffmpeg_tools", None) and self.ffmpeg_tools.running)
         if self.running or self.live_state != "idle" or self.normal_recording or self.assistant_busy or ffmpeg_running:
@@ -7196,12 +7225,86 @@ class SigApp:
         self.update_installing = True
         self.update_button.configure(state="disabled")
         self.update_button_var.set("Preparando atualização...")
-        self.update_install_thread = threading.Thread(
-            target=self._update_download_worker,
-            args=(self.available_update.copy(),),
-            daemon=True,
-        )
+        if self.available_update_sync:
+            self.update_install_thread = threading.Thread(
+                target=self._sync_download_worker,
+                args=(self.available_update_sync.copy(),),
+                daemon=True,
+            )
+        else:
+            self.update_install_thread = threading.Thread(
+                target=self._update_download_worker,
+                args=(self.available_update.copy(),),
+                daemon=True,
+            )
         self.update_install_thread.start()
+
+    def _sync_download_worker(self, sync_state: dict) -> None:
+        version = str(sync_state["version"])
+        staging_root = Path(tempfile.gettempdir()) / "sig_updater_sync" / version
+        staged = staging_root / "staged"
+        try:
+            if staged.exists():
+                shutil.rmtree(staged)
+            staged.mkdir(parents=True)
+            removals_path = staging_root / "removals.txt"
+            removals_path.write_text(
+                "\n".join(sync_state["remove"]) + ("\n" if sync_state["remove"] else ""),
+                encoding="utf-8",
+            )
+            downloads = list(sync_state["download"])
+            for index, path in enumerate(downloads, 1):
+                entry = sync_state["files"][path]
+                destination = staged / Path(*PurePosixPath(path).parts)
+                self._queue("update_sync_progress", index, len(downloads), path)
+                digest = download_google_drive_file(entry["drive_id"], destination)
+                if digest.lower() != entry["sha256"]:
+                    raise RuntimeError(f"SHA-256 divergente ao baixar: {path}")
+            self._queue("update_ready_sync", staged, removals_path, version)
+        except Exception as exc:
+            self._queue("update_error", str(exc))
+
+    def _launch_sync_update(self, staged: Path, removals_path: Path, version: str) -> None:
+        """Abre o updater em modo sincronização com rollback protegido."""
+        updater_path = app_base_dir() / "SigUpdater.exe"
+        if not updater_path.is_file():
+            self._queue("update_error", "SigUpdater.exe não foi encontrado ao lado do SIG.")
+            return
+        temporary_updater = Path(tempfile.gettempdir()) / f"SigUpdater-{uuid.uuid4().hex}.exe"
+        flags = 0
+        if os.name == "nt":
+            flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        try:
+            shutil.copy2(updater_path, temporary_updater)
+            subprocess.Popen(
+                [
+                    str(temporary_updater),
+                    "--sync-staged",
+                    str(staged),
+                    "--sync-removals",
+                    str(removals_path),
+                    "--target",
+                    str(app_base_dir()),
+                    "--pid",
+                    str(os.getpid()),
+                    "--log",
+                    str(app_base_dir() / "updater.log"),
+                ],
+                creationflags=flags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._append_activity_log(
+                f"Sincronização {version} pronta. Reiniciando o SIG...", "warning"
+            )
+            self.root.after(250, self.root.destroy)
+        except Exception as exc:
+            self._queue("update_error", f"Não foi possível iniciar a sincronização: {exc}")
 
     def _update_download_worker(self, manifest: dict) -> None:
         version = str(manifest["version"])
@@ -16172,6 +16275,30 @@ try {
                         f"Nova versão disponível: {self.available_update['version']}.",
                         "warning",
                     )
+                elif kind == "update_available_sync":
+                    state = dict(message[1])
+                    self.available_update_sync = state
+                    self.available_update = None
+                    count = len(state["download"])
+                    size = sum(int(state["files"][path]["size"]) for path in state["download"])
+                    self.update_button_var.set(f"Atualização: {count} arquivo(s)")
+                    self.update_button.configure(state="normal")
+                    if not self.update_button.winfo_ismapped():
+                        self.update_button.pack(side=RIGHT, anchor="n")
+                    self._finish_activity_step(
+                        "update:check",
+                        time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),
+                        suffix="- Encontrada!",
+                        tag="activity_step_warning",
+                    )
+                    self._append_activity_log(
+                        f"Nova versão {state['version']}: {count} arquivo(s) para baixar "
+                        f"({self._format_size(size)}), {len(state['remove'])} para remover.",
+                        "warning",
+                    )
+                elif kind == "update_sync_progress":
+                    _index, _count, _path = message[1], message[2], message[3]
+                    self.update_button_var.set(f"Baixando {_index}/{_count}: {_path}")
                 elif kind == "update_not_found":
                     self._finish_activity_step(
                         "update:check",
@@ -16197,6 +16324,11 @@ try {
                 elif kind == "update_ready":
                     self.update_button_var.set("Reiniciando...")
                     self._launch_prepared_update(Path(message[1]), str(message[2]))
+                elif kind == "update_ready_sync":
+                    self.update_button_var.set("Reiniciando...")
+                    self._launch_sync_update(
+                        Path(message[1]), Path(message[2]), str(message[3])
+                    )
                 elif kind == "done":
                     self.running = False
                     self._set_controls_state("normal")

@@ -2144,6 +2144,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.sync_removals.read_text(encoding="utf-8").splitlines()
             )
         try:
+            if args.pid:
+                _wait_for_processes(args.pid, args.target / "sig.exe", min(args.wait_timeout, 60), args.log)
             apply_sync_transaction(
                 args.sync_staged,
                 args.target,
