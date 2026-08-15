@@ -14565,6 +14565,13 @@ try {
             with buffer_lock:
                 return list(buffered_pcm)
 
+        def on_open(_app):
+            # O handshake do Deepgram está aberto assim que o socket sobe; o
+            # Metadata pode demorar ~12s, então o "pronto" é o on_open.
+            if _app is self.deepgram_ws_app:
+                self.deepgram_ws_ready_event.set()
+                self._queue("status", "Conectado ao Deepgram. Ouvindo e transcrevendo ao vivo...")
+
         def on_message(_app, raw_event):
             if _app is not self.deepgram_ws_app:
                 return
@@ -14577,7 +14584,6 @@ try {
             event_type = str(event.get("type") or "")
             if event_type == "Metadata":
                 self.deepgram_ws_ready_event.set()
-                self._queue("status", "Conectado ao Deepgram. Ouvindo e transcrevendo ao vivo...")
                 return
             if event_type != "Results":
                 return
@@ -14656,6 +14662,7 @@ try {
             app = websocket.WebSocketApp(
                 f"{DEEPGRAM_STT_WEBSOCKET_URL}?{query}",
                 header=[f"Authorization: Token {api_key}"],
+                on_open=on_open,
                 on_message=on_message,
                 on_error=on_error,
                 on_close=on_close,
