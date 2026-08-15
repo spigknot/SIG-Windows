@@ -431,37 +431,17 @@ def build_release(args: argparse.Namespace) -> int:
             full_zip_path = output_root / f"{version}_full.zip"
             zip_directory(package_root, full_zip_path)
             validate_zip_layout(full_zip_path, full=True)
-            incremental_root = work_root / "incremental-package"
-            snapshot_base = latest_snapshot_before(root, version)
-            if snapshot_base:
-                base_version, previous_files = snapshot_base
-                included, removed = create_incremental_diff_tree(
-                    package_root, incremental_root, previous_files
-                )
-                validate_package_layout(incremental_root, full=False, diff=True)
-                zip_path = output_root / f"{version}.zip"
-                zip_directory(incremental_root, zip_path)
-                validate_zip_layout(zip_path, full=False, diff=True)
-                print(
-                    f"PASS: incremental por diff contra {base_version}: "
-                    f"{included} arquivo(s) incluído(s), {removed} removido(s)"
-                )
-            else:
-                create_incremental_tree(package_root, incremental_root)
-                validate_package_layout(incremental_root, full=False)
-                zip_path = output_root / f"{version}.zip"
-                zip_directory(incremental_root, zip_path)
-                validate_zip_layout(zip_path, full=False)
-                print(
-                    "PASS: snapshot anterior ausente; incremental completa (v1) gerada"
-                )
+            # A incremental (arquivo por arquivo) é publicada DEPOIS pelo
+            # scripts/sync_publish.py com o package gerado aqui. O ZIP
+            # incremental foi aposentado (2026-08-15): o snapshot continua
+            # sendo gravado como referência de conteúdo por versão.
             write_snapshot_entry(root, version, build_content_snapshot(package_root))
             print(
                 "AVISO: release/content_snapshot.json foi atualizado; "
                 "commite-o junto com a publicação."
             )
             print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
-            print(f"PASS: pacote incremental local validado: {zip_path}")
+            print("PASS: incremental será publicada por sync_publish.py (arquivo por arquivo).")
         else:
             zip_path = output_root / f"{version}.zip"
             zip_directory(package_root, zip_path)
