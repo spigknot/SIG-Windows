@@ -14592,11 +14592,24 @@ try {
             text = str(alternatives[0].get("transcript") or "").strip() if alternatives else ""
             is_final = bool(event.get("is_final"))
             speech_final = bool(event.get("speech_final"))
-            if text:
-                self._update_live_transcript_window(text, is_final or speech_final, self.live_draft_generation)
-            if is_final and text:
-                with self.live_lock:
-                    self.live_committed_text = text
+            if text and not self.deepgram_ws_done_event.is_set():
+                if is_final or speech_final:
+                    # O Deepgram manda SEGMENTOS (cada final é um trecho novo),
+                    # diferente do Grok que revisa o texto cumulativo. Acumular
+                    # os finais, sem repetir o mesmo segmento.
+                    with self.live_lock:
+                        committed = self.live_committed_text.strip()
+                        if not committed:
+                            self.live_committed_text = text
+                        elif text not in committed:
+                            self.live_committed_text = f"{committed}\n{text}"
+                        self.live_draft_text = ""
+                        display = self._current_live_text_locked()
+                else:
+                    with self.live_lock:
+                        self.live_draft_text = text
+                        display = self._current_live_text_locked()
+                self._queue("live_display", display)
             timestamped = _timestamped_text_from_json(event).strip()
             if timestamped:
                 self._queue("live_timestamp_data", timestamped)
