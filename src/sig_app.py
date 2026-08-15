@@ -6660,6 +6660,7 @@ class SigApp:
         self.zip_help_position = (0, 0)
         self.available_update: dict | None = None
         self.available_update_sync: dict | None = None
+        self._sync_file_marks: dict[str, str] = {}
         self.update_check_thread: threading.Thread | None = None
         self.update_install_thread: threading.Thread | None = None
         self.update_installing = False
@@ -7128,6 +7129,35 @@ class SigApp:
         self.activity_log.see(END)
         self.activity_log.configure(state="disabled")
 
+    def _render_sync_file_line(self, path: str, display: str, tag: str | None) -> None:
+        """Atualiza a linha viva de um arquivo do download (padrão do VAD).
+
+        Cria a linha na primeira aparição e substitui no lugar nas
+        atualizações seguintes; ao concluir, recebe a tag verde.
+        """
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        box.configure(state="normal")
+        if "vad_total" not in box.tag_names():
+            box.tag_configure("vad_total", foreground="#0a7a2f")
+        mark_name = self._sync_file_marks.get(path)
+        if mark_name is None:
+            mark_name = f"syncfile:{path}"
+            box.mark_set(mark_name, END)
+            box.mark_gravity(mark_name, "left")
+            self._sync_file_marks[path] = mark_name
+        else:
+            start = box.index(mark_name)
+            end = box.index(f"{mark_name} lineend +1c")
+            box.delete(start, end)
+        line = f"{time.strftime('%H:%M:%S')}  {path} - {display}\n"
+        box.insert(mark_name, line, tag)
+        if display == "100%":
+            self._sync_file_marks.pop(path, None)
+        box.see(END)
+        box.configure(state="disabled")
+
     @staticmethod
     def _format_size(total_bytes: int) -> str:
         size = max(0, int(total_bytes))
@@ -7224,7 +7254,7 @@ class SigApp:
             return
         self.update_installing = True
         self.update_button.configure(state="disabled")
-        self.update_button_var.set("Preparando atualização...")
+        self.update_button_var.set("Baixando arquivos...")
         if self.available_update_sync:
             self.update_install_thread = threading.Thread(
                 target=self._sync_download_worker,
@@ -7253,13 +7283,28 @@ class SigApp:
                 encoding="utf-8",
             )
             downloads = list(sync_state["download"])
-            for index, path in enumerate(downloads, 1):
-                entry = sync_state["files"][path]
-                destination = staged / Path(*PurePosixPath(path).parts)
-                self._queue("update_sync_progress", index, len(downloads), path)
-                digest = download_google_drive_file(entry["drive_id"], destination)
-                if digest.lower() != entry["sha256"]:
-                    raise RuntimeError(f"SHA-256 divergente ao baixar: {path}")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                def _download_one(path: str) -> None:
+                    entry = sync_state["files"][path]
+                    destination = staged / Path(*PurePosixPath(path).parts)
+                    last_report = {"at": 0.0}
+
+                    def on_progress(downloaded: int, total: int) -> None:
+                        now = time.monotonic()
+                        if now - last_report["at"] >= 0.1 or (total and downloaded >= total):
+                            last_report["at"] = now
+                            self._queue("update_sync_file_progress", path, downloaded, total)
+
+                    digest = download_google_drive_file(
+                        entry["drive_id"], destination, progress_callback=on_progress
+                    )
+                    if digest.lower() != entry["sha256"]:
+                        raise RuntimeError(f"SHA-256 divergente ao baixar: {path}")
+                    self._queue("update_sync_file_done", path)
+
+                futures = {pool.submit(_download_one, path): path for path in downloads}
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()  # propaga falha de qualquer arquivo
             self._queue("update_ready_sync", staged, removals_path, version)
         except Exception as exc:
             self._queue("update_error", str(exc))
@@ -16296,9 +16341,16 @@ try {
                         f"({self._format_size(size)}), {len(state['remove'])} para remover.",
                         "warning",
                     )
-                elif kind == "update_sync_progress":
-                    _index, _count, _path = message[1], message[2], message[3]
-                    self.update_button_var.set(f"{_index}/{_count}")
+                elif kind == "update_sync_file_progress":
+                    path, downloaded, total = message[1], int(message[2]), int(message[3])
+                    if total and total > 0:
+                        percent = min(100, round(downloaded * 100 / total))
+                        display = f"{percent}%"
+                    else:
+                        display = self._format_size(downloaded)
+                    self._render_sync_file_line(path, display, None)
+                elif kind == "update_sync_file_done":
+                    self._render_sync_file_line(str(message[1]), "100%", "vad_total")
                 elif kind == "update_not_found":
                     self._finish_activity_step(
                         "update:check",
@@ -16326,6 +16378,15 @@ try {
                     self._launch_prepared_update(Path(message[1]), str(message[2]))
                 elif kind == "update_ready_sync":
                     self.update_button_var.set("Reiniciando...")
+                    count_done = len([
+                        p for p in self.available_update_sync.get("download", [])
+                        if p not in self._sync_file_marks
+                    ]) if self.available_update_sync else 0
+                    total_count = len(self.available_update_sync.get("download", [])) if self.available_update_sync else 0
+                    self._append_activity_log(
+                        f"Download concluído: {count_done}/{total_count} arquivo(s) baixados.",
+                        "vad_total",
+                    )
                     self._launch_sync_update(
                         Path(message[1]), Path(message[2]), str(message[3])
                     )

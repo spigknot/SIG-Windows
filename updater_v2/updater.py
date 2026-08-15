@@ -12,6 +12,7 @@ import argparse
 import base64
 import ctypes
 import errno
+import concurrent.futures
 from contextlib import contextmanager
 import hashlib
 import html
@@ -1983,16 +1984,19 @@ class StandaloneUpdaterUI:
             if getattr(sys, "frozen", False) and _same_path(sys.executable, self.target / "SigUpdater.exe"):
                 raise UpdateError("o atualizador não foi realocado para a pasta temporária")
             _terminate_target_sig_processes(self.target / "sig.exe", log_path)
-            for index, path in enumerate(downloads, 1):
+
+            def _download_one(path: str) -> None:
                 entry = sync_state["files"][path]
                 destination = staged / Path(*PurePosixPath(path).parts)
+                download_sync_file(entry, destination)
 
-                def _file_progress(done, total, _path=path, _index=index, _count=len(downloads)):
-                    percent = round(done * 100 / total) if total else 100
-                    self.events.put(("sync_file", _index, _count, _path, percent))
-
-                self.events.put(("status", f"Baixando {index}/{len(downloads)}: {path}"))
-                download_sync_file(entry, destination, progress_callback=_file_progress)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {pool.submit(_download_one, path): path for path in downloads}
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+                    completed += 1
+                    self.events.put(("sync_file", completed, len(downloads), futures[future], 100))
             self.events.put(("status", "Aplicando a sincronização com rollback protegido..."))
             apply_sync_transaction(
                 staged,
