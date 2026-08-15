@@ -132,6 +132,7 @@ DEFAULT_SETTINGS = {
     "deepgram_api_key": "",
     "deepgram_keyterms": "",
     "assemblyai_api_key": "",
+    "elevenlabs_api_key": "",
     "imei_api_key": IMEI_API_KEY,
     "police_name": "",
     "police_role": "",
@@ -148,6 +149,9 @@ DEEPGRAM_STT_WEBSOCKET_URL = "wss://api.deepgram.com/v1/listen"
 ASSEMBLYAI_API_NAME = "AssemblyAI Universal-3.5 Pro"
 ASSEMBLYAI_SYNC_URL = "https://sync.assemblyai.com/transcribe"
 ASSEMBLYAI_WEBSOCKET_URL = "wss://streaming.assemblyai.com/v3/ws"
+ELEVENLABS_API_NAME = "ElevenLabs Scribe v2 Realtime"
+ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+ELEVENLABS_WEBSOCKET_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
 LIVE_QUALIFICATION_FIELD_IDS = (
     "nome",
@@ -4683,11 +4687,12 @@ def read_transcription_servers() -> list[dict]:
     grok_selected = any(server["name"] == GROK_API_NAME for server in servers if server["selected"])
     deepgram_selected = any(server["name"] == DEEPGRAM_API_NAME for server in servers if server["selected"])
     assemblyai_selected = any(server["name"] == ASSEMBLYAI_API_NAME for server in servers if server["selected"])
-    api_selected = grok_selected or deepgram_selected or assemblyai_selected
+    elevenlabs_selected = any(server["name"] == ELEVENLABS_API_NAME for server in servers if server["selected"])
+    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected
     plain_servers = [
         {**server, "selected": server["selected"] and not api_selected}
         for server in servers
-        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME)
+        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME)
     ]
     return plain_servers + [
         {
@@ -4711,6 +4716,13 @@ def read_transcription_servers() -> list[dict]:
             "selected": assemblyai_selected,
             "is_assemblyai_api": True,
         },
+        {
+            "name": ELEVENLABS_API_NAME,
+            "url": ELEVENLABS_STT_URL,
+            "parameters": {"model": "scribe_v2_realtime"},
+            "selected": elevenlabs_selected,
+            "is_elevenlabs_api": True,
+        },
     ]
 
 
@@ -4733,7 +4745,7 @@ def add_transcription_server(name: str, url: str, model: str) -> tuple[bool, str
 
 
 def remove_transcription_server(name: str) -> bool:
-    if name in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME):
+    if name in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME):
         return False
     path = transcription_servers_path()
     removed = False
@@ -5087,6 +5099,7 @@ def normalize_settings(data: dict) -> dict:
         if term.strip()
     )
     clean["assemblyai_api_key"] = str(data.get("assemblyai_api_key") or "").strip()
+    clean["elevenlabs_api_key"] = str(data.get("elevenlabs_api_key") or "").strip()
     clean["deepseek_api_key"] = str(data.get("deepseek_api_key") or "").strip()
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
@@ -5323,6 +5336,8 @@ def transcribe_url(settings: dict) -> str:
     url = selected_transcription_server(settings)["url"]
     if is_deepgram_transcription(settings):
         url = f"{url}?{deepgram_query_string(settings)}"
+    if is_elevenlabs_transcription(settings):
+        url = f"{url}?model_id=scribe_v2"
     return url
 
 
@@ -5354,6 +5369,17 @@ def is_assemblyai_transcription(settings: dict) -> bool:
     return selected_transcription_server(settings).get("is_assemblyai_api", False)
 
 
+def is_elevenlabs_transcription(settings: dict) -> bool:
+    return selected_transcription_server(settings).get("is_elevenlabs_api", False)
+
+
+def plausible_elevenlabs_api_key(value: str) -> bool:
+    key = (value or "").strip()
+    return 20 <= len(key) <= 64 and all(
+        char.isalnum() or char in "-_" for char in key
+    )
+
+
 def plausible_assemblyai_api_key(value: str) -> bool:
     key = (value or "").strip()
     return 32 <= len(key) <= 64 and all(
@@ -5376,6 +5402,8 @@ def transcription_form_fields(settings: dict) -> dict:
         return {}
     if is_assemblyai_transcription(settings):
         # O Sync da AssemblyAI recebe o áudio no campo multipart "audio".
+        return {}
+    if is_elevenlabs_transcription(settings):
         return {}
     return selected_transcription_server(settings)["parameters"].copy()
 
@@ -5414,6 +5442,16 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
                 "X-AAI-Model": "u3-sync-pro",
             },
             "audio",
+        )
+    if is_elevenlabs_transcription(settings):
+        api_key = str(settings.get("elevenlabs_api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Insira a chave API da ElevenLabs nas configurações.")
+        return GraniteUploader(
+            cancel_event,
+            {},
+            {"xi-api-key": api_key},
+            "file",
         )
     return GraniteUploader(cancel_event, transcription_form_fields(settings))
 
@@ -6688,6 +6726,7 @@ class SigApp:
         self.live_uses_grok_websocket = False
         self.live_uses_deepgram_websocket = False
         self.live_uses_assemblyai_websocket = False
+        self.live_uses_elevenlabs_websocket = False
         self.live_grok_settings: dict | None = None
         self.live_grok_language = "pt"
         self.live_grok_diarize = False
@@ -6709,6 +6748,12 @@ class SigApp:
         self.assemblyai_ws_done_event = threading.Event()
         self.assemblyai_ws_lost_event = threading.Event()
         self.assemblyai_ws_intentional_close = False
+        self.elevenlabs_ws_app = None
+        self.elevenlabs_ws_thread: threading.Thread | None = None
+        self.elevenlabs_ws_ready_event = threading.Event()
+        self.elevenlabs_ws_done_event = threading.Event()
+        self.elevenlabs_ws_lost_event = threading.Event()
+        self.elevenlabs_ws_intentional_close = False
         self.live_was_grok_websocket = False
         self.live_audio_recovery_available = False
         self.live_recovery_thread: threading.Thread | None = None
@@ -12590,6 +12635,7 @@ try {
         deepgram_api_key_var = StringVar(value=self.settings.get("deepgram_api_key", ""))
         deepgram_keyterms_var = StringVar(value=self.settings.get("deepgram_keyterms", ""))
         assemblyai_api_key_var = StringVar(value=self.settings.get("assemblyai_api_key", ""))
+        elevenlabs_api_key_var = StringVar(value=self.settings.get("elevenlabs_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         police_name_var = StringVar(value=self.settings.get("police_name", ""))
         police_role_var = StringVar(value=self.settings.get("police_role", ""))
@@ -12729,6 +12775,19 @@ try {
             "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
         )
 
+        elevenlabs_key_row = assemblyai_key_row + 1
+        ttk.Label(api_frame, text="Chave API da ElevenLabs").grid(
+            row=elevenlabs_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        elevenlabs_key_entry = ttk.Entry(
+            api_frame, textvariable=elevenlabs_api_key_var, show="*", width=44
+        )
+        elevenlabs_key_entry.grid(row=elevenlabs_key_row, column=1, sticky="ew", pady=5)
+        create_tooltip(
+            elevenlabs_key_entry,
+            "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
+        )
+
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
             row=transcription_server_row,
@@ -12761,6 +12820,10 @@ try {
                 and (
                     server["name"] != ASSEMBLYAI_API_NAME
                     or plausible_assemblyai_api_key(assemblyai_api_key_var.get())
+                )
+                and (
+                    server["name"] != ELEVENLABS_API_NAME
+                    or plausible_elevenlabs_api_key(elevenlabs_api_key_var.get())
                 )
             ]
             transcription_labels = {
@@ -13583,6 +13646,7 @@ try {
             deepgram_api_key = deepgram_api_key_var.get().strip()
             deepgram_keyterms = deepgram_keyterms_var.get().strip()
             assemblyai_api_key = assemblyai_api_key_var.get().strip()
+            elevenlabs_api_key = elevenlabs_api_key_var.get().strip()
             imei_api_key = imei_api_key_var.get().strip()
             police_name = police_name_var.get().strip()
             police_role = police_role_var.get().strip()
@@ -13738,6 +13802,7 @@ try {
                     "deepgram_api_key": deepgram_api_key,
                     "deepgram_keyterms": deepgram_keyterms,
                     "assemblyai_api_key": assemblyai_api_key,
+                    "elevenlabs_api_key": elevenlabs_api_key,
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -14119,6 +14184,12 @@ try {
         ) and not self.settings.get("assemblyai_api_key"):
             messagebox.showerror("sig", "Insira a chave API da AssemblyAI nas configurações antes de iniciar.")
             return
+        if (
+            is_elevenlabs_transcription(self.settings)
+            or (secondary_settings is not None and is_elevenlabs_transcription(secondary_settings))
+        ) and not self.settings.get("elevenlabs_api_key"):
+            messagebox.showerror("sig", "Insira a chave API da ElevenLabs nas configurações antes de iniciar.")
+            return
         self.live_stop_event.clear()
         self.live_abort_event.clear()
         self.live_uses_grok_websocket = is_grok_transcription(self.settings) and not self.settings.get(
@@ -14128,6 +14199,9 @@ try {
             "grok_rest_requests", False
         )
         self.live_uses_assemblyai_websocket = is_assemblyai_transcription(self.settings) and not self.settings.get(
+            "grok_rest_requests", False
+        )
+        self.live_uses_elevenlabs_websocket = is_elevenlabs_transcription(self.settings) and not self.settings.get(
             "grok_rest_requests", False
         )
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
@@ -14148,10 +14222,16 @@ try {
         self.assemblyai_ws_lost_event.clear()
         self.assemblyai_ws_intentional_close = False
         self.assemblyai_ws_app = None
+        self.elevenlabs_ws_ready_event.clear()
+        self.elevenlabs_ws_done_event.clear()
+        self.elevenlabs_ws_lost_event.clear()
+        self.elevenlabs_ws_intentional_close = False
+        self.elevenlabs_ws_app = None
         streaming_websocket = (
             self.live_uses_grok_websocket
             or self.live_uses_deepgram_websocket
             or self.live_uses_assemblyai_websocket
+            or self.live_uses_elevenlabs_websocket
         )
         self.live_uploader = None if streaming_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
         temp_live = app_base_dir() / "temp" / "live"
@@ -14195,6 +14275,7 @@ try {
                 self.live_uses_grok_websocket
                 or self.live_uses_deepgram_websocket
                 or self.live_uses_assemblyai_websocket
+                or self.live_uses_elevenlabs_websocket
             )
             else concurrent.futures.ThreadPoolExecutor(max_workers=1)
         )
@@ -14210,9 +14291,12 @@ try {
             not self.live_uses_grok_websocket
             and not self.live_uses_deepgram_websocket
             and not self.live_uses_assemblyai_websocket
+            and not self.live_uses_elevenlabs_websocket
         ):
             self.status_var.set("Ouvindo e transcrevendo ao vivo...")
-        if self.live_uses_assemblyai_websocket:
+        if self.live_uses_elevenlabs_websocket:
+            target = self._elevenlabs_live_capture_loop
+        elif self.live_uses_assemblyai_websocket:
             target = self._assemblyai_live_capture_loop
         elif self.live_uses_deepgram_websocket:
             target = self._deepgram_live_capture_loop
@@ -14262,6 +14346,30 @@ try {
             self.live_paused_total += time.time() - self.live_paused_at
             self.live_paused_at = 0.0
         self._set_live_state("finalizing")
+        if self.live_uses_elevenlabs_websocket:
+            self.elevenlabs_ws_intentional_close = True
+            self.status_var.set("Recebendo a transcrição final do Scribe...")
+            self.live_stop_event.set()
+            app = self.elevenlabs_ws_app
+            if not app:
+                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
+                self._finish_live_output()
+                return
+            try:
+                # Força a finalização com um chunk de silêncio commitado (a VAD
+                # fecharia sozinha, mas o commit garante o último segmento).
+                silence = base64.b64encode(bytes(3200)).decode("ascii")
+                app.send(json.dumps({
+                    "message_type": "input_audio_chunk",
+                    "audio_base_64": silence,
+                    "commit": True,
+                    "sample_rate": LIVE_SAMPLE_RATE,
+                }))
+                threading.Thread(target=self._wait_for_elevenlabs_final_event, daemon=True).start()
+            except Exception:
+                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
+                self._finish_live_output()
+            return
         if self.live_uses_assemblyai_websocket:
             self.assemblyai_ws_intentional_close = True
             self.status_var.set("Recebendo a transcrição final da AssemblyAI...")
@@ -14327,6 +14435,23 @@ try {
         self.live_finalize_thread = threading.Thread(target=self._finish_live_transcription, daemon=True)
         self.live_finalize_thread.start()
 
+    def _wait_for_elevenlabs_final_event(self):
+        if self.elevenlabs_ws_done_event.wait(20):
+            return
+        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
+            self.elevenlabs_ws_intentional_close = True
+            app = self.elevenlabs_ws_app
+            if app:
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self._queue(
+                "status",
+                "O Scribe não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
+            )
+            self._finish_live_output()
+
     def _wait_for_assemblyai_final_event(self):
         if self.assemblyai_ws_done_event.wait(20):
             return
@@ -14390,6 +14515,7 @@ try {
         self.grok_ws_intentional_close = True
         self.deepgram_ws_intentional_close = True
         self.assemblyai_ws_intentional_close = True
+        self.elevenlabs_ws_intentional_close = True
         if self.live_uploader:
             self.live_uploader.cancel()
         if self.grok_ws_app:
@@ -14410,9 +14536,16 @@ try {
             except Exception:
                 pass
         self.assemblyai_ws_app = None
+        if self.elevenlabs_ws_app:
+            try:
+                self.elevenlabs_ws_app.close(status=1000, reason="Cancelado")
+            except Exception:
+                pass
+        self.elevenlabs_ws_app = None
         self.live_uses_grok_websocket = False
         self.live_uses_deepgram_websocket = False
         self.live_uses_assemblyai_websocket = False
+        self.live_uses_elevenlabs_websocket = False
         executor = self.live_upload_executor
         self.live_upload_executor = None
         if executor:
@@ -14667,6 +14800,279 @@ try {
             self.live_secondary_committed_text = clean
             self.live_secondary_draft_text = ""
         self._queue("live_display_2", clean)
+
+    def _elevenlabs_live_capture_loop(self, settings: dict):
+        try:
+            import sounddevice as sd
+            import websocket
+        except Exception as exc:
+            self._queue("live_error", f"Streaming do Scribe indisponível: {exc}")
+            return
+
+        api_key = str(settings.get("elevenlabs_api_key") or "").strip()
+        if not api_key:
+            self._queue("live_error", "Insira a chave API da ElevenLabs nas configurações.")
+            return
+
+        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
+        buffered_pcm: deque[bytes] = deque()
+        buffered_bytes = 0
+        buffer_limit = pcm_bytes_for_millis(GROK_RECONNECT_BUFFER_MILLIS)
+        buffer_lock = threading.Lock()
+        full_pcm_lock = threading.Lock()
+        full_pcm = None
+
+        def remember(chunk: bytes) -> None:
+            nonlocal buffered_bytes
+            with buffer_lock:
+                buffered_pcm.append(chunk)
+                buffered_bytes += len(chunk)
+                while buffered_pcm and buffered_bytes > buffer_limit:
+                    buffered_bytes -= len(buffered_pcm.popleft())
+
+        def buffered_snapshot() -> list[bytes]:
+            with buffer_lock:
+                return list(buffered_pcm)
+
+        def send_chunk(app, chunk: bytes, commit: bool) -> bool:
+            payload = json.dumps({
+                "message_type": "input_audio_chunk",
+                "audio_base_64": base64.b64encode(chunk).decode("ascii"),
+                "commit": commit,
+                "sample_rate": LIVE_SAMPLE_RATE,
+            })
+            return bool(app.send(payload))
+
+        def on_open(_app):
+            if _app is self.elevenlabs_ws_app:
+                self.elevenlabs_ws_ready_event.set()
+                self._queue("status", "Conectado ao Scribe. Ouvindo e transcrevendo ao vivo...")
+
+        def on_message(_app, raw_event):
+            if _app is not self.elevenlabs_ws_app:
+                return
+            try:
+                event = json.loads(raw_event)
+            except Exception:
+                self.elevenlabs_ws_lost_event.set()
+                self._queue("status", "Reconectando: resposta inválida do Scribe.")
+                return
+            event_type = str(event.get("message_type") or "")
+            if event_type == "session_started":
+                self.elevenlabs_ws_ready_event.set()
+                return
+            if event_type == "partial_transcript":
+                text = str(event.get("text") or "").strip()
+                if text and not self.elevenlabs_ws_done_event.is_set():
+                    with self.live_lock:
+                        self.live_draft_text = text
+                        display = self._current_live_text_locked()
+                    self._queue("live_display", display)
+                return
+            if event_type == "final_transcript":
+                text = str(event.get("text") or "").strip()
+                if text and not self.elevenlabs_ws_done_event.is_set():
+                    with self.live_lock:
+                        committed = self.live_committed_text.strip()
+                        if not committed:
+                            self.live_committed_text = text
+                        elif text not in committed:
+                            self.live_committed_text = f"{committed}\n{text}"
+                        self.live_draft_text = ""
+                        display = self._current_live_text_locked()
+                    self._queue("live_display", display)
+                return
+            if event_type == "committed_transcript_with_timestamps":
+                words = event.get("words") or []
+                normalized = []
+                for word in words:
+                    if isinstance(word, dict) and word.get("type") == "word":
+                        normalized.append(
+                            {"word": word.get("text"), "start": word.get("start"), "end": word.get("end")}
+                        )
+                timestamped = _timestamped_text_from_json({"words": normalized}).strip()
+                if timestamped:
+                    self._queue("live_timestamp_data", timestamped)
+                return
+            if event_type == "committed_transcript":
+                if self.elevenlabs_ws_intentional_close and not self.elevenlabs_ws_done_event.is_set():
+                    self._finish_elevenlabs_session()
+                return
+            if event_type.startswith("scribe_") and "error" in event_type:
+                self.elevenlabs_ws_lost_event.set()
+                self._queue(
+                    "status",
+                    f"Reconectando: {str(event.get('message') or event_type)}",
+                )
+
+        def _finish_elevenlabs_session():
+            with self.live_lock:
+                text = self.live_committed_text.strip() or self._current_live_text_locked().strip()
+                self.live_committed_text = text
+                self.live_draft_text = ""
+            timestamped = (self.live_timestamped_transcript_text or "").strip()
+            self.elevenlabs_ws_done_event.set()
+            self.elevenlabs_ws_app = None
+            self.live_uses_elevenlabs_websocket = False
+            if not text:
+                self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
+            self._queue("live_display", text)
+            if timestamped:
+                self._queue("live_payload", text, timestamped, True)
+            self._queue("status", "Transcrição definitiva concluída.")
+            self._finish_live_output()
+
+        def on_error(_app, _error):
+            if (
+                _app is self.elevenlabs_ws_app
+                and not self.elevenlabs_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.elevenlabs_ws_done_event.is_set()
+            ):
+                self._queue("status", "Desconectado do Scribe; reconectando...")
+                self.elevenlabs_ws_lost_event.set()
+
+        def on_close(_app, _status_code, _message):
+            if _app is not self.elevenlabs_ws_app:
+                return
+            if self.elevenlabs_ws_intentional_close and not self.elevenlabs_ws_done_event.is_set():
+                self._finish_elevenlabs_session()
+                return
+            if (
+                not self.elevenlabs_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.elevenlabs_ws_done_event.is_set()
+            ):
+                self._queue("status", "Desconectado do Scribe; reconectando...")
+                self.elevenlabs_ws_lost_event.set()
+
+        def connect() -> bool:
+            previous = self.elevenlabs_ws_app
+            self.elevenlabs_ws_app = None
+            if previous:
+                try:
+                    previous.close()
+                except Exception:
+                    pass
+            self.elevenlabs_ws_ready_event.clear()
+            self.elevenlabs_ws_lost_event.clear()
+            language = self.live_language_var.get().strip() or "pt"
+            query = (
+                "model_id=scribe_v2_realtime&audio_format=pcm_16000"
+                f"&language_code={language}&commit_strategy=vad"
+                "&vad_silence_threshold_secs=1.0&include_timestamps=true"
+            )
+            self._queue("status", f"Parâmetros Scribe: {query}")
+            app = websocket.WebSocketApp(
+                f"{ELEVENLABS_WEBSOCKET_URL}?{query}",
+                header=[f"xi-api-key: {api_key}"],
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            self.elevenlabs_ws_app = app
+            self.elevenlabs_ws_thread = threading.Thread(
+                target=lambda: app.run_forever(ping_interval=30, ping_timeout=10),
+                daemon=True,
+            )
+            self.elevenlabs_ws_thread.start()
+            deadline = time.monotonic() + 15
+            while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                if self.elevenlabs_ws_ready_event.wait(0.1):
+                    return True
+                if self.elevenlabs_ws_lost_event.is_set() or time.monotonic() >= deadline:
+                    return False
+            return False
+
+        def reconnect(attempt: int) -> bool:
+            delay = min(8.0, 0.5 * (2 ** max(0, attempt - 1))) + random.uniform(0.0, 0.25)
+            self._queue("status", f"Reconectando ao Scribe ({attempt}/{GROK_RECONNECT_MAX_ATTEMPTS}) em {delay:.1f}s...")
+            if self.live_abort_event.wait(delay) or self.live_stop_event.is_set():
+                return False
+            if not connect():
+                return False
+            chunks = buffered_snapshot()
+            try:
+                for chunk in chunks:
+                    if not send_chunk(self.elevenlabs_ws_app, chunk, commit=False):
+                        raise RuntimeError("envio falhou")
+                self._queue("status", f"Reconectou com sucesso; reenviados {len(chunks)} bloco(s) dos últimos 8 segundos.")
+            except Exception:
+                self._queue("status", "Reconectou, mas não foi possível reenviar parte do buffer de áudio.")
+            return True
+
+        def audio_callback(indata, _frames, _time_info, _status):
+            if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            chunk = bytes(indata)
+            self._push_live_waveform_chunk(chunk)
+            self._queue_secondary_audio(chunk)
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.write(chunk)
+            remember(chunk)
+            try:
+                audio_queue.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    audio_queue.get_nowait()
+                    audio_queue.put_nowait(chunk)
+                    self._queue("status", "Parte do áudio ao vivo foi descartada por atraso local.")
+                except queue.Empty:
+                    pass
+
+        try:
+            pcm_path = self.live_full_pcm_path
+            if not pcm_path:
+                raise RuntimeError("não foi possível criar o áudio integral do streaming")
+            pcm_path.parent.mkdir(parents=True, exist_ok=True)
+            full_pcm = pcm_path.open("wb")
+            with sd.RawInputStream(
+                samplerate=LIVE_SAMPLE_RATE,
+                channels=LIVE_CHANNELS,
+                dtype="int16",
+                blocksize=max(
+                    1,
+                    LIVE_SAMPLE_RATE * int(settings.get("grok_chunk_ms", 100)) // 1000,
+                ),
+                callback=audio_callback,
+            ):
+                attempts = 0
+                connected = False
+                while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                    if not connected or self.elevenlabs_ws_lost_event.is_set():
+                        reconnecting = connected or self.elevenlabs_ws_lost_event.is_set() or attempts > 0
+                        attempts += 1
+                        self._queue("status", "Reconectando ao streaming do Scribe..." if reconnecting else "Conectando ao streaming do Scribe...")
+                        connected = reconnect(attempts) if reconnecting else connect()
+                        if connected:
+                            attempts = 0
+                            continue
+                        if attempts >= GROK_RECONNECT_MAX_ATTEMPTS:
+                            self._queue("live_error", "Falhou: reconexão do Scribe esgotada após 8 tentativas.")
+                            return
+                        continue
+                    try:
+                        chunk = audio_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if self.live_state == "paused" or not chunk:
+                        continue
+                    try:
+                        if not send_chunk(self.elevenlabs_ws_app, chunk, commit=False):
+                            raise RuntimeError("envio falhou")
+                    except Exception:
+                        self.elevenlabs_ws_lost_event.set()
+                        connected = False
+        except Exception as exc:
+            if not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                self._queue("live_error", f"Falhou: erro no microfone ao vivo: {exc}")
+        finally:
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.close()
+                    full_pcm = None
 
     def _assemblyai_live_capture_loop(self, settings: dict):
         try:
