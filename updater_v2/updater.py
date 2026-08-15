@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import errno
 from contextlib import contextmanager
 import hashlib
 import html
@@ -903,7 +904,19 @@ def _atomic_move(source: Path, destination: Path) -> None:
     if _path_exists(destination):
         raise UpdateError(f"destino já existe durante a troca: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(source, destination)
+    try:
+        os.replace(source, destination)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) not in (17, 31) and exc.errno not in (errno.EXDEV,):
+            raise
+        # Volumes diferentes (WinError 17 / EXDEV): os.replace não atravessa
+        # unidades de disco no Windows. Copia e remove a origem; o diário da
+        # transação cobre a recuperação mesmo sem atomicidade de rename.
+        shutil.copy2(source, destination)
+        try:
+            source.unlink()
+        except OSError:
+            pass
 
 
 def _rollback_transaction(transaction: Path, target: Path, log_path: Path) -> None:

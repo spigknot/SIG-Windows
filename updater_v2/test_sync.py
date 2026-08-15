@@ -275,6 +275,29 @@ class SyncTransactionTests(unittest.TestCase):
             )
         self.assertEqual((target / "_internal" / "orfa.dll").read_bytes(), b"orfa")
 
+    def test_atomic_move_falls_back_across_drives(self):
+        import os as os_module
+
+        import updater as updater_module
+
+        root = Path(tempfile.mkdtemp(prefix="sig-sync-xdrive-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        source = root / "origem.bin"
+        destination = root / "destino.bin"
+        source.write_bytes(b"conteudo")
+
+        def fake_replace(src, dst):
+            error = OSError("cross-device")
+            error.winerror = 17
+            raise error
+
+        original_replace = os_module.replace
+        updater_module.os.replace = fake_replace
+        self.addCleanup(lambda: setattr(updater_module.os, "replace", original_replace))
+        updater_module._atomic_move(source, destination)
+        self.assertEqual(destination.read_bytes(), b"conteudo")
+        self.assertFalse(source.exists())
+
 
 class SyncDownloadTests(unittest.TestCase):
     """FASE A3: download por arquivo com retry e validação de hash."""
