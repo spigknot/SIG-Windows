@@ -151,6 +151,16 @@ class DeepgramRestTests(unittest.TestCase):
         cleaned = sig_app.normalize_settings({"deepgram_keyterms": "  Taguaí ,  Fartura  "})
         self.assertEqual(cleaned["deepgram_keyterms"], "Taguaí, Fartura")
 
+    def test_ws_query_has_no_duplicate_params(self):
+        """Vacina: o WS já rejeitou 'Invalid query string' por language duplicado."""
+        settings = _settings(deepgram_keyterms="Taguaí")
+        query = sig_app.deepgram_query_string(settings, "en")
+        query += "&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=900"
+        keys = [pair.split("=", 1)[0] for pair in query.split("&")]
+        self.assertEqual(len(keys), len(set(keys)), f"parâmetros duplicados: {query}")
+        self.assertIn("language=en", query)
+        self.assertIn("keyterm=Tagua%C3%AD", query)
+
 
 if __name__ == "__main__":
     unittest.main()

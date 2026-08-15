@@ -5319,9 +5319,9 @@ def deepgram_keyterms_list(settings: dict) -> list[str]:
     return [term.strip() for term in raw.replace("\n", ",").split(",") if term.strip()]
 
 
-def deepgram_query_string(settings: dict) -> str:
+def deepgram_query_string(settings: dict, language: str = "pt") -> str:
     """Parâmetros do Deepgram Nova 3 (REST e WS) — mesma base do Grok."""
-    params = ["model=nova-3", "language=pt", "smart_format=true", "punctuate=true"]
+    params = ["model=nova-3", f"language={language}", "smart_format=true", "punctuate=true"]
     if settings.get("diarize") or settings.get("grok_diarize"):
         params.append("diarize=true")
     for term in deepgram_keyterms_list(settings):
@@ -14650,12 +14650,11 @@ try {
             self.deepgram_ws_ready_event.clear()
             self.deepgram_ws_lost_event.clear()
             language = self.live_language_var.get().strip() or "pt"
-            query = deepgram_query_string(settings)
+            query = deepgram_query_string(settings, language)
             query += (
                 "&encoding=linear16&sample_rate=16000&channels=1"
                 "&interim_results=true&endpointing=900"
             )
-            query += f"&language={language}"
             if self.live_diarize_var.get():
                 query += "&diarize=true"
             self._queue("status", f"Parâmetros Deepgram: {query}")
