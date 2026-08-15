@@ -16279,9 +16279,7 @@ try {
                     state = dict(message[1])
                     self.available_update_sync = state
                     self.available_update = None
-                    count = len(state["download"])
-                    size = sum(int(state["files"][path]["size"]) for path in state["download"])
-                    self.update_button_var.set(f"Atualização: {count} arquivo(s)")
+                    self.update_button_var.set("Atualizar")
                     self.update_button.configure(state="normal")
                     if not self.update_button.winfo_ismapped():
                         self.update_button.pack(side=RIGHT, anchor="n")
@@ -16291,6 +16289,8 @@ try {
                         suffix="- Encontrada!",
                         tag="activity_step_warning",
                     )
+                    count = len(state["download"])
+                    size = sum(int(state["files"][path]["size"]) for path in state["download"])
                     self._append_activity_log(
                         f"Nova versão {state['version']}: {count} arquivo(s) para baixar "
                         f"({self._format_size(size)}), {len(state['remove'])} para remover.",
@@ -16298,7 +16298,7 @@ try {
                     )
                 elif kind == "update_sync_progress":
                     _index, _count, _path = message[1], message[2], message[3]
-                    self.update_button_var.set(f"Baixando {_index}/{_count}: {_path}")
+                    self.update_button_var.set(f"{_index}/{_count}")
                 elif kind == "update_not_found":
                     self._finish_activity_step(
                         "update:check",
