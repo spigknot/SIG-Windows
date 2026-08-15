@@ -457,7 +457,7 @@ def build_release(args: argparse.Namespace) -> int:
             args.updater_timeout,
         ):
             print(f"PASS: {message}")
-        if args.zip_file_id:
+        if not args.incremental and args.zip_file_id:
             manifest = {
                 "schema": 1,
                 "version": version,
@@ -475,7 +475,7 @@ def build_release(args: argparse.Namespace) -> int:
             validate_version_consistency(version, final_manifest, zip_path, frozen_version)
             print(f"PASS: release local aprovada: {zip_path}")
             print(f"Manifesto assinado: {manifest_path}")
-        else:
+        elif not args.incremental:
             draft = output_root / "latest.draft.json"
             draft.write_text(
                 json.dumps(
