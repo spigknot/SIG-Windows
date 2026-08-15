@@ -24,6 +24,7 @@ import threading
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
@@ -129,6 +130,7 @@ DEFAULT_SETTINGS = {
     "grok_api_key": "",
     "deepseek_api_key": "",
     "deepgram_api_key": "",
+    "deepgram_keyterms": "",
     "imei_api_key": IMEI_API_KEY,
     "police_name": "",
     "police_role": "",
@@ -5067,6 +5069,11 @@ def normalize_settings(data: dict) -> dict:
     )
     clean["grok_api_key"] = str(data.get("grok_api_key") or "").strip()
     clean["deepgram_api_key"] = str(data.get("deepgram_api_key") or "").strip()
+    clean["deepgram_keyterms"] = ", ".join(
+        term.strip()
+        for term in str(data.get("deepgram_keyterms") or "").replace("\n", ",").split(",")
+        if term.strip()
+    )
     clean["deepseek_api_key"] = str(data.get("deepseek_api_key") or "").strip()
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
@@ -5306,11 +5313,19 @@ def transcribe_url(settings: dict) -> str:
     return url
 
 
+def deepgram_keyterms_list(settings: dict) -> list[str]:
+    """Termos de reforço do Deepgram (keyterm prompting), separados por vírgula."""
+    raw = str(settings.get("deepgram_keyterms") or "")
+    return [term.strip() for term in raw.replace("\n", ",").split(",") if term.strip()]
+
+
 def deepgram_query_string(settings: dict) -> str:
-    """Parâmetros do Deepgram Nova 3 para o fluxo REST (mesma base do Grok)."""
+    """Parâmetros do Deepgram Nova 3 (REST e WS) — mesma base do Grok."""
     params = ["model=nova-3", "language=pt", "smart_format=true", "punctuate=true"]
     if settings.get("diarize") or settings.get("grok_diarize"):
         params.append("diarize=true")
+    for term in deepgram_keyterms_list(settings):
+        params.append(f"keyterm={urllib.parse.quote(term)}")
     return "&".join(params)
 
 
@@ -11901,7 +11916,11 @@ try {
         if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de gravar.")
             return
+        if is_deepgram_transcription(self.settings) and not self.settings.get("deepgram_api_key"):
+            messagebox.showerror("sig", "Insira a chave API do Deepgram nas configurações antes de gravar.")
+            return
         self.normal_record_grok = is_grok_transcription(self.settings)
+        self.normal_record_deepgram = is_deepgram_transcription(self.settings)
         self.normal_record_language = self.live_language_var.get().strip() or "pt"
         self.normal_record_diarize = self.normal_record_grok and bool(self.live_diarize_var.get())
         self.normal_record_paused = False
@@ -11937,17 +11956,22 @@ try {
             write_wav_from_pcm_file(wav_path, pcm_path)
             cancel = threading.Event()
             grok = self.normal_record_grok
-            fields = {"language": self.normal_record_language, "format": "true", "filler_words": "false"}
-            if self.normal_record_diarize:
-                fields["diarize"] = "true"
-            uploader = GraniteUploader(
-                cancel,
-                fields,
-                {"Authorization": f"Bearer {self.settings['grok_api_key']}"} if grok else {},
-                "file" if grok else "files",
-            )
+            if getattr(self, "normal_record_deepgram", False):
+                uploader = create_transcription_uploader(cancel, self.settings)
+                url = transcribe_url(self.settings)
+            else:
+                fields = {"language": self.normal_record_language, "format": "true", "filler_words": "false"}
+                if self.normal_record_diarize:
+                    fields["diarize"] = "true"
+                uploader = GraniteUploader(
+                    cancel,
+                    fields,
+                    {"Authorization": f"Bearer {self.settings['grok_api_key']}"} if grok else {},
+                    "file" if grok else "files",
+                )
+                url = GROK_STT_URL if grok else transcribe_url(self.settings)
             status, parsed = uploader.post_file_parsed(
-                GROK_STT_URL if grok else transcribe_url(self.settings),
+                url,
                 wav_path,
                 "audio/wav",
                 wav_path.with_suffix(".raw"),
@@ -12517,6 +12541,7 @@ try {
         grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
         deepgram_api_key_var = StringVar(value=self.settings.get("deepgram_api_key", ""))
+        deepgram_keyterms_var = StringVar(value=self.settings.get("deepgram_keyterms", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         police_name_var = StringVar(value=self.settings.get("police_name", ""))
         police_role_var = StringVar(value=self.settings.get("police_role", ""))
@@ -12627,6 +12652,20 @@ try {
         create_tooltip(
             deepgram_key_entry,
             "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
+        )
+
+        deepgram_keyterms_row = deepgram_key_row + 1
+        ttk.Label(api_frame, text="Palavras-chave do Deepgram").grid(
+            row=deepgram_keyterms_row, column=0, sticky="w", pady=5, padx=(0, 12)
+        )
+        deepgram_keyterms_entry = ttk.Entry(
+            api_frame, textvariable=deepgram_keyterms_var, width=44
+        )
+        deepgram_keyterms_entry.grid(row=deepgram_keyterms_row, column=1, sticky="ew", pady=5)
+        create_tooltip(
+            deepgram_keyterms_entry,
+            "Termos que o Nova 3 deve priorizar na transcrição, separados por vírgula "
+            "(ex.: Taguaí, Fartura, ruas e nomes locais). Limite: 500 tokens no total.",
         )
 
         transcription_server_row = 0
@@ -13477,6 +13516,7 @@ try {
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
             deepgram_api_key = deepgram_api_key_var.get().strip()
+            deepgram_keyterms = deepgram_keyterms_var.get().strip()
             imei_api_key = imei_api_key_var.get().strip()
             police_name = police_name_var.get().strip()
             police_role = police_role_var.get().strip()
@@ -13630,6 +13670,7 @@ try {
                     "grok_api_key": api_key,
                     "deepseek_api_key": deepseek_api_key,
                     "deepgram_api_key": deepgram_api_key,
+                    "deepgram_keyterms": deepgram_keyterms,
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -14603,9 +14644,10 @@ try {
             self.deepgram_ws_ready_event.clear()
             self.deepgram_ws_lost_event.clear()
             language = self.live_language_var.get().strip() or "pt"
-            query = (
-                "model=nova-3&encoding=linear16&sample_rate=16000&channels=1"
-                "&interim_results=true&smart_format=true&punctuate=true&endpointing=900"
+            query = deepgram_query_string(settings)
+            query += (
+                "&encoding=linear16&sample_rate=16000&channels=1"
+                "&interim_results=true&endpointing=900"
             )
             query += f"&language={language}"
             if self.live_diarize_var.get():

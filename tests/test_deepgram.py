@@ -130,6 +130,27 @@ class DeepgramRestTests(unittest.TestCase):
         settings = _settings(transcription_server=sig_app.DEEPGRAM_API_NAME)
         self.assertEqual(sig_app.transcription_form_fields(settings), {})
 
+    def test_keyterms_in_query(self):
+        settings = _settings(
+            transcription_server=sig_app.DEEPGRAM_API_NAME,
+            deepgram_keyterms="Taguaí, Fartura ,  Rua Monsenhor",
+        )
+        query = sig_app.deepgram_query_string(settings)
+        self.assertIn("keyterm=Tagua%C3%AD", query)
+        self.assertIn("keyterm=Fartura", query)
+        self.assertIn("keyterm=Rua%20Monsenhor", query)
+
+    def test_keyterms_list_normalizes(self):
+        settings = _settings(deepgram_keyterms="  Taguaí,, Fartura\nItaguaí ")
+        self.assertEqual(
+            sig_app.deepgram_keyterms_list(settings),
+            ["Taguaí", "Fartura", "Itaguaí"],
+        )
+
+    def test_keyterms_preserved_in_normalize(self):
+        cleaned = sig_app.normalize_settings({"deepgram_keyterms": "  Taguaí ,  Fartura  "})
+        self.assertEqual(cleaned["deepgram_keyterms"], "Taguaí, Fartura")
+
 
 if __name__ == "__main__":
     unittest.main()
