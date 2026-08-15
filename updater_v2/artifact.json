@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "name": "SigUpdater.exe",
-  "size": 11174944,
-  "sha256": "1c79f587d90da3c750da7ec029305012ed7f9c482719267886af97dbfe1eb5ae",
+  "size": 11604984,
+  "sha256": "58cea303f0a7b439c7494e6c3ec0b0f3e28984a82dab3202f68ec765cdb24808",
   "source": "updater_v2/updater.py",
-  "source_sha256": "5e6849f0e3128b11e1c06ca72bd6a415714ae414d70d887e74f3f390c86b8b88",
+  "source_sha256": "1ea71d33e13aca51f708aacec3bf45d1eba70a794a276e9f3e02bfc2e94527ff",
   "builder": "PyInstaller 6.21.0, Python 3.11.0, --onefile --windowed --clean --noupx, SOURCE_DATE_EPOCH=946684800, PYTHONHASHSEED=0"
 }

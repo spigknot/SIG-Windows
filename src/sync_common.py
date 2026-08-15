@@ -113,6 +113,7 @@ def canonical_sync_manifest(manifest: dict) -> bytes:
                 "sha256": str(entry.get("sha256") or "").lower(),
                 "size": int(entry.get("size") or 0),
                 "drive_id": str(entry.get("drive_id") or ""),
+                "github_url": str(entry.get("github_url") or ""),
             }
             for entry in files
         ),
@@ -172,9 +173,27 @@ def validate_sync_manifest(manifest: dict) -> dict:
         if size < 0:
             raise SyncError(f"tamanho inválido no manifesto para: {path}")
         drive_id = str(entry.get("drive_id") or "").strip()
-        if not drive_id:
-            raise SyncError(f"drive_id ausente no manifesto para: {path}")
-        files[path] = {"sha256": sha256, "size": size, "drive_id": drive_id}
+        github_url = str(entry.get("github_url") or "").strip()
+        if not drive_id and not github_url:
+            raise SyncError(
+                f"sem fonte de download (drive_id ou github_url) no manifesto para: {path}"
+            )
+        if github_url:
+            import urllib.parse
+
+            parsed = urllib.parse.urlparse(github_url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "github.com"
+                or not parsed.path.startswith("/spigknot/SIG-Windows/releases/download/")
+            ):
+                raise SyncError(f"URL alternativa inválida no manifesto para: {path}")
+        files[path] = {
+            "sha256": sha256,
+            "size": size,
+            "drive_id": drive_id,
+            "github_url": github_url,
+        }
     missing = sorted(relative for relative in SYNC_REQUIRED_FILES if relative not in files)
     if missing:
         raise SyncError(

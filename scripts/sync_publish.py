@@ -154,6 +154,7 @@ def canonical_manifest(manifest: dict) -> bytes:
                 "sha256": str(entry["sha256"]).lower(),
                 "size": int(entry["size"]),
                 "drive_id": str(entry["drive_id"]),
+                "github_url": str(entry.get("github_url") or ""),
             }
             for entry in manifest.get("files", [])
         ),
@@ -226,6 +227,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--github-tag", default="")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -350,7 +352,22 @@ def main() -> int:
         "version": args.version,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "files": [
-            {"path": path, "sha256": entry["sha256"], "size": entry["size"], "drive_id": entry["drive_id"]}
+            {
+                "path": path,
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+                "drive_id": entry["drive_id"],
+                **(
+                    {
+                        "github_url": (
+                            "https://github.com/spigknot/SIG-Windows/releases/"
+                            f"download/{args.github_tag}/{path}"
+                        )
+                    }
+                    if args.github_tag and path in {"sig.exe", "SigUpdater.exe"}
+                    else {}
+                ),
+            }
             for path, entry in sorted(merged.items())
         ],
     }

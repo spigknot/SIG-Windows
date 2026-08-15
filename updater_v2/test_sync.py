@@ -160,12 +160,31 @@ class SyncManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(UpdateError, "obrigatórios"):
             validate_sync_manifest(manifest)
 
-    def test_missing_drive_id_is_rejected(self):
-        files = _fake_files({"sig.exe": {"drive_id": ""}})
+    def test_missing_download_source_is_rejected(self):
+        files = _fake_files({"sig.exe": {"drive_id": "", "github_url": ""}})
         manifest = _make_manifest(files)
         if PRIVATE_KEY is not None:
             manifest["signature"] = _sign(canonical_sync_manifest(manifest))
-        with self.assertRaisesRegex(UpdateError, "drive_id"):
+        with self.assertRaisesRegex(UpdateError, "fonte de download"):
+            validate_sync_manifest(manifest)
+
+    def test_github_url_without_drive_id_is_accepted(self):
+        if PRIVATE_KEY is None:
+            self.skipTest("chave privada de teste indisponível")
+        files = _fake_files(
+            {"sig.exe": {"drive_id": "", "github_url": "https://github.com/spigknot/SIG-Windows/releases/download/20260815_017/sig.exe"}}
+        )
+        validated = validate_sync_manifest(_make_manifest(files))
+        self.assertIn("github_url", validated["files"]["sig.exe"])
+
+    def test_invalid_github_url_is_rejected(self):
+        files = _fake_files(
+            {"sig.exe": {"github_url": "https://evil.com/x/sig.exe"}}
+        )
+        manifest = _make_manifest(files)
+        if PRIVATE_KEY is not None:
+            manifest["signature"] = _sign(canonical_sync_manifest(manifest))
+        with self.assertRaisesRegex(UpdateError, "URL alternativa"):
             validate_sync_manifest(manifest)
 
     def test_canonical_is_stable_regardless_of_file_order(self):

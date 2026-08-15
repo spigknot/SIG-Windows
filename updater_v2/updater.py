@@ -375,6 +375,7 @@ def canonical_sync_manifest(manifest: dict) -> bytes:
                 "sha256": str(entry.get("sha256") or "").lower(),
                 "size": int(entry.get("size") or 0),
                 "drive_id": str(entry.get("drive_id") or ""),
+                "github_url": str(entry.get("github_url") or ""),
             }
             for entry in files
         ),
@@ -437,9 +438,25 @@ def validate_sync_manifest(manifest: dict) -> dict:
         if size < 0:
             raise UpdateError(f"tamanho inválido no manifesto para: {path}")
         drive_id = str(entry.get("drive_id") or "").strip()
-        if not drive_id:
-            raise UpdateError(f"drive_id ausente no manifesto para: {path}")
-        files[path] = {"sha256": sha256, "size": size, "drive_id": drive_id}
+        github_url = str(entry.get("github_url") or "").strip()
+        if not drive_id and not github_url:
+            raise UpdateError(
+                f"sem fonte de download (drive_id ou github_url) no manifesto para: {path}"
+            )
+        if github_url:
+            parsed = urllib.parse.urlparse(github_url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "github.com"
+                or not parsed.path.startswith("/spigknot/SIG-Windows/releases/download/")
+            ):
+                raise UpdateError(f"URL alternativa inválida no manifesto para: {path}")
+        files[path] = {
+            "sha256": sha256,
+            "size": size,
+            "drive_id": drive_id,
+            "github_url": github_url,
+        }
     missing = sorted(
         relative for relative in SYNC_REQUIRED_FILES if relative not in files
     )
@@ -540,7 +557,14 @@ def download_sync_file(entry: dict, destination: Path, progress_callback=None) -
         digest = hashlib.sha256()
         downloaded = 0
         try:
-            response_context = _open_google_drive_download(str(entry["drive_id"]))
+            if entry.get("github_url"):
+                request = urllib.request.Request(
+                    str(entry["github_url"]),
+                    headers={"User-Agent": HTTP_USER_AGENT},
+                )
+                response_context = _urlopen(request)
+            else:
+                response_context = _open_google_drive_download(str(entry["drive_id"]))
             with response_context as response, partial.open("wb") as output:
                 while True:
                     chunk = response.read(1024 * 256)

@@ -61,7 +61,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260815_016"
+APP_VERSION = "20260815_017"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
@@ -986,6 +986,26 @@ def download_google_drive_file(file_id: str, destination: Path, progress_callbac
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     with _open_google_drive_download(file_id) as response, destination.open("wb") as output:
+        total = int(response.headers.get("Content-Length") or 0)
+        downloaded = 0
+        while True:
+            chunk = response.read(1024 * 256)
+            if not chunk:
+                break
+            output.write(chunk)
+            digest.update(chunk)
+            downloaded += len(chunk)
+            if progress_callback:
+                progress_callback(downloaded, total)
+    return digest.hexdigest()
+
+
+def download_github_url(url: str, destination: Path, progress_callback=None) -> str:
+    """Baixa um arquivo de uma URL do GitHub releases, devolvendo o sha256."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    request = urllib.request.Request(url, headers={"User-Agent": "sig-updater/1.0"})
+    with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
         total = int(response.headers.get("Content-Length") or 0)
         downloaded = 0
         while True:
@@ -7295,9 +7315,14 @@ class SigApp:
                             last_report["at"] = now
                             self._queue("update_sync_file_progress", path, downloaded, total)
 
-                    digest = download_google_drive_file(
-                        entry["drive_id"], destination, progress_callback=on_progress
-                    )
+                    if entry.get("github_url"):
+                        digest = download_github_url(
+                            entry["github_url"], destination, progress_callback=on_progress
+                        )
+                    else:
+                        digest = download_google_drive_file(
+                            entry["drive_id"], destination, progress_callback=on_progress
+                        )
                     if digest.lower() != entry["sha256"]:
                         raise RuntimeError(f"SHA-256 divergente ao baixar: {path}")
                     self._queue("update_sync_file_done", path)
