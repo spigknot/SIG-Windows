@@ -72,9 +72,20 @@ class ElevenLabsUploaderTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ElevenLabs"):
             sig_app.create_transcription_uploader(cancel, settings)
 
-    def test_form_fields_empty_for_elevenlabs(self):
+    def test_form_fields_default_language_for_elevenlabs(self):
         settings = _settings(transcription_server=sig_app.ELEVENLABS_API_NAME)
-        self.assertEqual(sig_app.transcription_form_fields(settings), {})
+        self.assertEqual(
+            sig_app.transcription_form_fields(settings),
+            {"language_code": "pt"},
+        )
+
+    def test_form_fields_diarize_adds_diarize_true(self):
+        settings = _settings(transcription_server=sig_app.ELEVENLABS_API_NAME)
+        settings["diarize"] = True
+        self.assertEqual(
+            sig_app.transcription_form_fields(settings),
+            {"language_code": "pt", "diarize": "true"},
+        )
 
 
 if __name__ == "__main__":

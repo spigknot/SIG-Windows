@@ -51,6 +51,29 @@ from assistant_prompts import (
     statement_prompt,
     statement_user_prompt,
 )
+import stt_provider_rules
+from stt_provider_rules import (
+    assemblyai_rest_diarize,
+    assemblyai_rest_language,
+    assemblyai_ws_diarize_query,
+    assemblyai_ws_language_codes,
+    codes_for_help,
+    deepgram_diarize_query,
+    deepgram_language_param,
+    elevenlabs_rest_diarize,
+    elevenlabs_rest_language_code,
+    elevenlabs_ws_diarize_query,
+    elevenlabs_ws_language,
+    grok_diarize_query,
+    grok_language_param,
+    grok_rest_diarize,
+    invalid_codes,
+    language_custom,
+    language_mode,
+    MENU_OPTIONS,
+    parse_codes,
+    supports_diarize,
+)
 from sync_common import (
     SYNC_MANIFEST_FILE_ID,
     UPDATE_PUBLIC_KEY_E,
@@ -133,6 +156,14 @@ DEFAULT_SETTINGS = {
     "deepgram_keyterms": "",
     "assemblyai_api_key": "",
     "elevenlabs_api_key": "",
+    "deepgram_language_mode": "pt-BR",
+    "deepgram_language_custom": "",
+    "assemblyai_language_mode": "pt",
+    "assemblyai_language_custom": "",
+    "elevenlabs_language_mode": "pt",
+    "elevenlabs_language_custom": "",
+    "grok_language_mode": "pt",
+    "grok_language_custom": "",
     "imei_api_key": IMEI_API_KEY,
     "police_name": "",
     "police_role": "",
@@ -4969,6 +5000,21 @@ def normalize_settings(data: dict) -> dict:
     clean["convert_parallel"] = max(1, clamp_int(data.get("convert_parallel"), 1, 256, DEFAULT_SETTINGS["convert_parallel"]))
     clean["transcribe_parallel"] = max(1, clamp_int(data.get("transcribe_parallel"), 1, 256, DEFAULT_SETTINGS["transcribe_parallel"]))
     clean["grok_chunk_ms"] = clamp_int(data.get("grok_chunk_ms"), 20, 2000, DEFAULT_SETTINGS["grok_chunk_ms"])
+    for language_key, fallback in {
+        "deepgram_language_mode": "pt-BR",
+        "assemblyai_language_mode": "pt",
+        "elevenlabs_language_mode": "pt",
+        "grok_language_mode": "pt",
+    }.items():
+        value = str(data.get(language_key) or "").strip()
+        clean[language_key] = value or fallback
+    for custom_key in (
+        "deepgram_language_custom",
+        "assemblyai_language_custom",
+        "elevenlabs_language_custom",
+        "grok_language_custom",
+    ):
+        clean[custom_key] = str(data.get(custom_key) or "").strip()
     rest_value = data.get("grok_rest_requests", DEFAULT_SETTINGS["grok_rest_requests"])
     clean["grok_rest_requests"] = (
         rest_value
@@ -5339,17 +5385,44 @@ def transcribe_url(settings: dict) -> str:
     return url
 
 
+def probe_duration_ms(path: Path) -> int:
+    """Duração real do arquivo em ms via ffmpeg (0 se não for possível medir)."""
+    try:
+        ffmpeg = app_base_dir() / "ffmpeg.exe"
+        if not ffmpeg.exists():
+            return 0
+        result = subprocess.run(
+            [str(ffmpeg), "-hide_banner", "-i", str(path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr + result.stdout)
+        if not match:
+            return 0
+        seconds = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+        return int(seconds * 1000)
+    except Exception:
+        return 0
+
+
 def deepgram_keyterms_list(settings: dict) -> list[str]:
     """Termos de reforço do Deepgram (keyterm prompting), separados por vírgula."""
     raw = str(settings.get("deepgram_keyterms") or "")
     return [term.strip() for term in raw.replace("\n", ",").split(",") if term.strip()]
 
 
-def deepgram_query_string(settings: dict, language: str = "pt", diarize: bool = False) -> str:
-    """Parâmetros do Deepgram Nova 3 (REST e WS) — mesma base do Grok."""
+def deepgram_query_string(settings: dict, language: str | None = None, diarize: bool = False) -> str:
+    """Parâmetros do Deepgram Nova 3 (REST e WS) — espelho do app Android."""
+    if language is None:
+        language = stt_provider_rules.deepgram_language_param(settings)
     params = ["model=nova-3", f"language={language}", "smart_format=true", "punctuate=true"]
     if diarize or settings.get("diarize") or settings.get("grok_diarize"):
-        params.append("diarize=true")
+        diarize_param = stt_provider_rules.deepgram_diarize_query(True)
+        if diarize_param:
+            params.append(diarize_param)
     for term in deepgram_keyterms_list(settings):
         params.append(f"keyterm={urllib.parse.quote(term)}")
     return "&".join(params)
@@ -5392,17 +5465,39 @@ def settings_for_transcription_server(settings: dict, server_name: str) -> dict:
 
 
 def transcription_form_fields(settings: dict) -> dict:
+    diarize_checked = bool(settings.get("diarize") or settings.get("grok_diarize"))
     if is_grok_transcription(settings):
-        return {"language": "pt", "format": "true", "filler_words": "false"}
+        fields = {"format": "true", "filler_words": "false"}
+        language = stt_provider_rules.grok_language_param(settings)
+        if language:
+            fields["language"] = language
+        if stt_provider_rules.grok_rest_diarize(diarize_checked):
+            fields["diarize"] = "true"
+        return fields
     if is_deepgram_transcription(settings):
         # No fluxo Deepgram os parâmetros viajam na URL (raw body); o dict
         # fica vazio apenas para manter a assinatura do uploader.
         return {}
     if is_assemblyai_transcription(settings):
-        # O Sync da AssemblyAI recebe o áudio no campo multipart "audio".
-        return {}
+        fields: dict = {}
+        detection, code = stt_provider_rules.assemblyai_rest_language(settings)
+        if detection:
+            fields["language_detection"] = "true"
+        if code:
+            fields["language_code"] = code
+        speaker_labels, punctuate = stt_provider_rules.assemblyai_rest_diarize(diarize_checked)
+        if speaker_labels:
+            fields["speaker_labels"] = "true"
+            fields["punctuate"] = "true"
+        return fields
     if is_elevenlabs_transcription(settings):
-        return {}
+        fields = {}
+        code = stt_provider_rules.elevenlabs_rest_language_code(settings)
+        if code:
+            fields["language_code"] = code
+        if stt_provider_rules.elevenlabs_rest_diarize(diarize_checked):
+            fields["diarize"] = "true"
+        return fields
     return selected_transcription_server(settings)["parameters"].copy()
 
 
@@ -11952,12 +12047,96 @@ try {
     def show_live_diarization_help(self):
         messagebox.showinfo("Diarização", "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante.")
 
+    def _current_stt_provider(self) -> str | None:
+        if is_deepgram_transcription(self.settings):
+            return "deepgram"
+        if is_assemblyai_transcription(self.settings):
+            return "assemblyai"
+        if is_elevenlabs_transcription(self.settings):
+            return "elevenlabs"
+        if is_grok_transcription(self.settings):
+            return "grok"
+        return None
+
+    def _rebuild_live_language_menu(self):
+        provider = self._current_stt_provider()
+        menu = self.live_language_menu
+        menu.delete(0, "end")
+        if provider is None:
+            self.live_language_label_var.set("Idioma")
+            return
+        for option in MENU_OPTIONS[provider]:
+            menu.add_command(label=option, command=lambda selected=option: self._set_live_language(selected))
+        self.live_language_button.configure(menu=menu)
+        mode = language_mode(self.settings, provider)
+        custom = language_custom(self.settings, provider)
+        shown = custom if mode == "custom" and custom else mode
+        self.live_language_label_var.set(f"Idioma: {shown}")
+
     def _set_live_language(self, code: str):
-        labels = {"pt": "Português", "en": "Inglês", "es": "Espanhol"}
+        provider = self._current_stt_provider()
+        if provider is None:
+            return
+        if code == "custom":
+            self._show_custom_language_dialog(provider)
+            return
+        self.settings[stt_provider_rules.KEY_LANGUAGE_MODE[provider]] = code
+        save_settings(self.settings)
         self.live_language_var.set(code)
-        label = labels.get(code, "Português")
-        self.live_language_label_var.set(f"Idioma: {label}")
-        self._set_activity_status(f"Idioma selecionado: {label}.", log=False)
+        self.live_language_label_var.set(f"Idioma: {code}")
+        self._set_activity_status(f"Idioma selecionado: {code}.", log=False)
+
+    def _show_custom_language_dialog(self, provider: str):
+        win = tk.Toplevel(self.root)
+        win.title("Código do idioma")
+        win.configure(background="#101418")
+        win.resizable(False, False)
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill=BOTH, expand=True)
+        entry = ttk.Entry(frame, width=28)
+        entry.insert(0, language_custom(self.settings, provider))
+        entry.pack(fill=X, pady=(0, 8))
+        hint = ttk.Label(
+            frame,
+            text="Digite um ou mais códigos, separados por vírgula.\nEx: en, es, pt",
+            justify="left",
+        )
+        hint.pack(anchor="w", pady=(0, 8))
+
+        def apply_codes():
+            raw = entry.get().strip()
+            codes = parse_codes(raw)
+            invalid = invalid_codes(provider, codes)
+            if not codes:
+                messagebox.showinfo("Código do idioma", "Digite pelo menos um código de idioma.", parent=win)
+                return
+            if invalid:
+                messagebox.showinfo(
+                    "Código do idioma",
+                    f"O modelo não suporta: {', '.join(invalid)}.\nCorrija e tente novamente.",
+                    parent=win,
+                )
+                return
+            self.settings[stt_provider_rules.KEY_LANGUAGE_MODE[provider]] = "custom"
+            self.settings[stt_provider_rules.KEY_LANGUAGE_CUSTOM[provider]] = ",".join(codes)
+            save_settings(self.settings)
+            self.live_language_label_var.set(f"Idioma: {','.join(codes)}")
+            self._set_activity_status("Idioma custom salvo.", log=False)
+            win.destroy()
+
+        def show_help():
+            messagebox.showinfo(
+                "Códigos aceitos",
+                codes_for_help(provider),
+                parent=win,
+            )
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=X, pady=(4, 0))
+        ttk.Button(buttons, text="Voltar", command=win.destroy).pack(side=LEFT)
+        ttk.Button(buttons, text="?", width=3, command=show_help).pack(side=LEFT, padx=6)
+        ttk.Button(buttons, text="OK", command=apply_codes).pack(side=RIGHT)
 
     def _format_grok_diarized_transcript(self, payload: dict, fallback: str) -> str:
         if not self.live_diarize_var.get() or not isinstance(payload.get("words"), list):
@@ -11986,12 +12165,14 @@ try {
             is_grok_transcription(self.settings)
             or is_deepgram_transcription(self.settings)
             or is_assemblyai_transcription(self.settings)
+            or is_elevenlabs_transcription(self.settings)
         )
         if diarize_supported:
             self.live_grok_controls.pack(side=LEFT, before=self.live_top_spacer)
         else:
             self.live_grok_controls.pack_forget()
             self.live_diarize_var.set(False)
+        self._rebuild_live_language_menu()
         interval_state = "disabled" if self.live_state != "idle" else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
             widget.configure(state=interval_state)
@@ -12015,7 +12196,11 @@ try {
             return
         self.normal_record_grok = is_grok_transcription(self.settings)
         self.normal_record_deepgram = is_deepgram_transcription(self.settings)
-        self.normal_record_language = self.live_language_var.get().strip() or "pt"
+        self.normal_record_language = (
+            deepgram_language_param(self.settings)
+            if is_deepgram_transcription(self.settings)
+            else grok_language_param(self.settings) or "pt"
+        )
         self.normal_record_diarize = (self.normal_record_grok or self.normal_record_deepgram) and bool(
             self.live_diarize_var.get()
         )
@@ -14217,7 +14402,7 @@ try {
             "grok_rest_requests", False
         )
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
-        self.live_grok_language = self.live_language_var.get().strip() or "pt"
+        self.live_grok_language = grok_language_param(self.settings) or ""
         self.live_grok_diarize = bool(self.live_diarize_var.get())
         self.grok_ws_ready_event.clear()
         self.grok_ws_done_event.clear()
@@ -14637,10 +14822,12 @@ try {
             if not done.is_set() and not self.live_stop_event.is_set():
                 failed.set()
 
-        language = self.live_language_var.get().strip() or "pt"
+        language = grok_language_param(self.settings)
         query = "sample_rate=16000&encoding=pcm&interim_results=true"
-        query += f"&language={language}&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
-        if self.live_diarize_var.get():
+        if language:
+            query += f"&language={language}"
+        query += "&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
+        if grok_diarize_query(bool(self.live_diarize_var.get())):
             query += "&diarize=true"
         app = websocket.WebSocketApp(
             f"{GROK_STT_WEBSOCKET_URL}?{query}",
@@ -14968,12 +15155,14 @@ try {
                     pass
             self.elevenlabs_ws_ready_event.clear()
             self.elevenlabs_ws_lost_event.clear()
-            language = self.live_language_var.get().strip() or "pt"
-            query = (
-                "model_id=scribe_v2_realtime&audio_format=pcm_16000"
-                f"&language_code={language}&commit_strategy=vad"
-                "&vad_silence_threshold_secs=1.0&include_timestamps=true"
-            )
+            primary, secondary = elevenlabs_ws_language(self.settings)
+            query = "model_id=scribe_v2_realtime&audio_format=pcm_16000"
+            if primary:
+                query += f"&language_code={primary}"
+            for code in secondary:
+                query += f"&secondary_languages={code}"
+            query += "&commit_strategy=vad"
+            query += "&vad_silence_threshold_secs=1.0&include_timestamps=true"
             self._queue("status", f"Parâmetros Scribe: {query}")
             app = websocket.WebSocketApp(
                 f"{ELEVENLABS_WEBSOCKET_URL}?{query}",
@@ -15241,8 +15430,12 @@ try {
                 "speech_model=universal-3-5-pro&encoding=pcm_s16le"
                 "&sample_rate=16000&continuous_partials=true"
             )
-            if self.live_grok_diarize:
-                query += "&speaker_labels=true"
+            # language_codes como parâmetro REPETIDO (lista vazia = multi).
+            for code in assemblyai_ws_language_codes(self.settings):
+                query += f"&language_codes={code}"
+            diarize_param = assemblyai_ws_diarize_query(bool(self.live_grok_diarize))
+            if diarize_param:
+                query += f"&{diarize_param}"
             self._queue("status", f"Parâmetros AssemblyAI: {query}")
             app = websocket.WebSocketApp(
                 f"{ASSEMBLYAI_WEBSOCKET_URL}?{query}",
@@ -15488,7 +15681,7 @@ try {
                     pass
             self.deepgram_ws_ready_event.clear()
             self.deepgram_ws_lost_event.clear()
-            language = self.live_language_var.get().strip() or "pt"
+            language = deepgram_language_param(settings)
             query = deepgram_query_string(settings, language, diarize=self.live_grok_diarize)
             query += (
                 "&encoding=linear16&sample_rate=16000&channels=1"
@@ -15702,10 +15895,12 @@ try {
                     pass
             self.grok_ws_ready_event.clear()
             self.grok_ws_lost_event.clear()
-            language = self.live_language_var.get().strip() or "pt"
+            language = grok_language_param(self.settings)
             query = "sample_rate=16000&encoding=pcm&interim_results=true"
-            query += f"&language={language}&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
-            if self.live_diarize_var.get():
+            if language:
+                query += f"&language={language}"
+            query += "&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
+            if self.live_grok_diarize:
                 query += "&diarize=true"
             self._queue("status", f"Parâmetros: {query}")
             app = websocket.WebSocketApp(
@@ -17130,6 +17325,19 @@ try {
         txt_path = job.txt_path if model_index == 1 else job.txt_path_2
         if raw_path is None or txt_path is None:
             raise RuntimeError(f"arquivos de saída do modelo {model_index} não definidos")
+        # AssemblyAI: áudios com 2 minutos ou mais vão pelo fluxo assíncrono
+        # (v2/upload -> v2/transcript -> polling a cada 3s).
+        if (
+            is_assemblyai_transcription(request_settings)
+            and probe_duration_ms(job.upload_path) >= 120000
+        ):
+            result = self._assemblyai_async_transcribe(job, request_settings)
+            if model_index == 1:
+                job.transcription = result
+            else:
+                job.transcription_2 = result
+            txt_path.write_text(result, encoding="utf-8")
+            return
         status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
         if status != 200 and is_grok_transcription(request_settings):
             raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
@@ -17164,6 +17372,95 @@ try {
         else:
             job.transcription_2 = result
         txt_path.write_text(result, encoding="utf-8")
+
+    def _assemblyai_async_transcribe(self, job: AudioJob, request_settings: dict) -> str:
+        """Fluxo async da AssemblyAI (espelho do Android): upload -> submit ->
+        polling GET /v2/transcript/{id} a cada 3 segundos."""
+        api_key = str(request_settings.get("assemblyai_api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Insira a chave API da AssemblyAI nas configurações.")
+        diarize_checked = bool(request_settings.get("diarize") or request_settings.get("grok_diarize"))
+        detection, code = assemblyai_rest_language(request_settings)
+        speaker_labels, punctuate = assemblyai_rest_diarize(diarize_checked)
+
+        def http_request(host: str, path: str, *, headers=None, payload=None, method="GET"):
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            conn = http.client.HTTPSConnection(host, timeout=180)
+            try:
+                conn.request(method, path, body=payload, headers=headers or {})
+                response = conn.getresponse()
+                return response.status, response.read()
+            finally:
+                conn.close()
+
+        if not job.upload_path:
+            raise RuntimeError("arquivo para envio não definido")
+        self._queue("job", job.original_path, "AssemblyAI upload")
+        upload_payload = job.upload_path.read_bytes()
+        status, body = http_request(
+            "api.assemblyai.com",
+            "/v2/upload",
+            headers={"Authorization": api_key, "Content-Type": "application/octet-stream"},
+            payload=upload_payload,
+            method="POST",
+        )
+        if status != 200:
+            raise RuntimeError(f"AssemblyAI upload HTTP {status}\n{body[:400]!r}")
+        upload_url = json.loads(body.decode("utf-8", errors="replace") or "{}").get("upload_url")
+        if not upload_url:
+            raise RuntimeError("AssemblyAI não retornou upload_url.")
+
+        params: dict = {
+            "audio_url": upload_url,
+            "speech_models": ["universal-3-5-pro", "universal-2"],
+        }
+        if detection:
+            params["language_detection"] = True
+        if code:
+            params["language_code"] = code
+        if speaker_labels:
+            params["speaker_labels"] = True
+            params["punctuate"] = True
+        status, body = http_request(
+            "api.assemblyai.com",
+            "/v2/transcript",
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            payload=json.dumps(params).encode("utf-8"),
+            method="POST",
+        )
+        if status != 200:
+            raise RuntimeError(f"AssemblyAI async HTTP {status}\n{body[:400]!r}")
+        transcript_id = json.loads(body.decode("utf-8", errors="replace") or "{}").get("id")
+        if not transcript_id:
+            raise RuntimeError("AssemblyAI não retornou id.")
+
+        attempt = 0
+        while True:
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            attempt += 1
+            self._queue("job", job.original_path, f"AssemblyAI async ({attempt})")
+            status, body = http_request(
+                "api.assemblyai.com",
+                f"/v2/transcript/{transcript_id}",
+                headers={"Authorization": api_key},
+            )
+            if status != 200:
+                raise RuntimeError(f"AssemblyAI poll HTTP {status}")
+            payload = json.loads(body.decode("utf-8", errors="replace") or "{}")
+            state = payload.get("status")
+            if state == "completed":
+                text = str(payload.get("text") or "").strip()
+                if not text:
+                    raise RuntimeError("A AssemblyAI retornou uma transcrição vazia (async).")
+                return text
+            if state == "error":
+                raise RuntimeError(f"AssemblyAI async falhou: {payload.get('error') or 'erro desconhecido'}")
+            # Espera 3 segundos em fatias para respeitar o cancelamento.
+            for _ in range(6):
+                if self.cancel_event.wait(0.5):
+                    raise Cancelled()
 
     def _queue(self, *items):
         self.ui_queue.put(items)
