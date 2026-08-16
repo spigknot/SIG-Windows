@@ -44,10 +44,10 @@ class ElevenLabsConfigTests(unittest.TestCase):
         self.assertTrue(sig_app.is_elevenlabs_transcription(settings))
         self.assertFalse(sig_app.is_grok_transcription(settings))
 
-    def test_transcribe_url_has_scribe_model(self):
+    def test_transcribe_url_is_base_endpoint(self):
         settings = _settings(transcription_server=sig_app.ELEVENLABS_API_NAME)
         url = sig_app.transcribe_url(settings)
-        self.assertEqual(url, sig_app.ELEVENLABS_STT_URL + "?model_id=scribe_v2")
+        self.assertEqual(url, sig_app.ELEVENLABS_STT_URL)
 
     def test_remove_server_refuses_elevenlabs(self):
         self.assertFalse(sig_app.remove_transcription_server(sig_app.ELEVENLABS_API_NAME))
@@ -64,6 +64,7 @@ class ElevenLabsUploaderTests(unittest.TestCase):
         self.assertFalse(uploader.raw_body)
         self.assertEqual(uploader.file_field, "file")
         self.assertEqual(uploader.extra_headers, {"xi-api-key": "sk_" + "b" * 30})
+        self.assertEqual(uploader.form_fields, {"model_id": "scribe_v2"})
 
     def test_uploader_without_key_raises(self):
         cancel = threading.Event()

@@ -5336,8 +5336,6 @@ def transcribe_url(settings: dict) -> str:
     url = selected_transcription_server(settings)["url"]
     if is_deepgram_transcription(settings):
         url = f"{url}?{deepgram_query_string(settings)}"
-    if is_elevenlabs_transcription(settings):
-        url = f"{url}?model_id=scribe_v2"
     return url
 
 
@@ -5449,7 +5447,7 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
             raise RuntimeError("Insira a chave API da ElevenLabs nas configurações.")
         return GraniteUploader(
             cancel_event,
-            {},
+            {"model_id": "scribe_v2"},
             {"xi-api-key": api_key},
             "file",
         )
