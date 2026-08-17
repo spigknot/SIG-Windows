@@ -85,7 +85,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260817_008"
+APP_VERSION = "20260817_009"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
