@@ -7442,7 +7442,10 @@ class SigApp:
             start = box.index(mark_name)
             end = box.index(f"{mark_name} lineend +1c")
             box.delete(start, end)
-        line = f"{time.strftime('%H:%M:%S')}  {path} - {display}\n"
+        if display == "100%":
+            line = f"Baixando {path}\n"
+        else:
+            line = f"Baixando {path} - {display}\n"
         box.insert(mark_name, line, tag)
         if display == "100%":
             self._sync_file_marks.pop(path, None)
