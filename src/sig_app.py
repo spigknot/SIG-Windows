@@ -85,7 +85,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260817_007"
+APP_VERSION = "20260817_008"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
@@ -12165,11 +12165,12 @@ try {
             self.live_language_label_var.set("Idioma")
             return
         for option in MENU_OPTIONS[provider]:
-            menu.add_command(label=option, command=lambda selected=option: self._set_live_language(selected))
+            label = stt_provider_rules.LANGUAGE_LABELS.get(option, option)
+            menu.add_command(label=label, command=lambda selected=option: self._set_live_language(selected))
         self.live_language_button.configure(menu=menu)
         mode = language_mode(self.settings, provider)
         custom = language_custom(self.settings, provider)
-        shown = custom if mode == "custom" and custom else mode
+        shown = custom if mode == "custom" and custom else stt_provider_rules.LANGUAGE_LABELS.get(mode, mode)
         self.live_language_label_var.set(f"Idioma: {shown}")
 
     def _set_live_language(self, code: str):

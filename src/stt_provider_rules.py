@@ -79,6 +79,11 @@ MENU_OPTIONS = {
     "grok": ["multi", "pt", "en", "es", "custom"],
 }
 
+# Labels de exibição (SOMENTE cosmético): o que o usuário vê nos menus e
+# botões. Os valores reais (as chaves) continuam sendo enviados nas
+# requisições — nunca mude os valores, apenas estas labels.
+LANGUAGE_LABELS = {"multi": "auto"}
+
 
 def parse_codes(raw: str) -> list[str]:
     """Normaliza a entrada do usuário: ' en ,  es , pt ' -> ['en', 'es', 'pt']."""
