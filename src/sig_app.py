@@ -15289,7 +15289,7 @@ try {
             for code in secondary:
                 query += f"&secondary_languages={code}"
             query += "&commit_strategy=vad"
-            query += "&vad_silence_threshold_secs=1.0&include_timestamps=true"
+            query += "&vad_silence_threshold_secs=1.0"
             self._queue("status", f"Parâmetros Scribe: {query}")
             app = websocket.WebSocketApp(
                 f"{ELEVENLABS_WEBSOCKET_URL}?{query}",
