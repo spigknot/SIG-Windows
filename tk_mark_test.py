@@ -1,0 +1,26 @@
+import tkinter as tk
+
+root = tk.Tk()
+box = tk.Text(root)
+box.pack()
+root.update()
+
+mark_name = "syncfile:a"
+box.mark_set(mark_name, "end")
+box.mark_gravity(mark_name, "left")
+print("apos criar:", box.mark_names())
+print("index da marca:", box.index(mark_name))
+box.insert(mark_name, "0%\n")
+print("apos inserir 1:", box.mark_names())
+print("index da marca agora:", box.index(mark_name))
+print("conteudo:", repr(box.get("1.0", "end")))
+print("esta em mark_names?", mark_name in box.mark_names())
+start = box.index(mark_name)
+end = box.index(f"{mark_name} lineend +1c")
+print("delete range:", start, "->", end)
+box.delete(start, end)
+print("apos delete:", repr(box.get("1.0", "end")))
+print("index da marca apos delete:", box.index(mark_name))
+box.insert(mark_name, "50%\n")
+print("apos inserir 2:", repr(box.get("1.0", "end")))
+root.destroy()

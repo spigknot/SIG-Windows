@@ -7510,8 +7510,10 @@ class SigApp:
     def _render_sync_file_line(self, path: str, display: str, tag: str | None) -> None:
         """Atualiza a linha viva de um arquivo do download (padrão do VAD).
 
-        Cria a linha na primeira aparição e substitui no lugar nas
-        atualizações seguintes; ao concluir, recebe a tag verde.
+        Cada arquivo tem uma TAG única: a atualização remove TODO o texto
+        anterior da tag (tag.first/tag.last) e insere a linha nova no fim —
+        sem depender da gravidade de marcas, que não segura a linha no
+        início. Ao concluir, recebe a tag verde.
         """
         box = getattr(self, "activity_log", None)
         if box is None or not box.winfo_exists():
@@ -7519,24 +7521,19 @@ class SigApp:
         box.configure(state="normal")
         if "vad_total" not in box.tag_names():
             box.tag_configure("vad_total", foreground="#0a7a2f")
-        mark_name = self._sync_file_marks.get(path)
-        if mark_name is None:
-            mark_name = f"syncfile:{path}"
-            box.mark_set(mark_name, END)
-            box.mark_gravity(mark_name, "left")
-            self._sync_file_marks[path] = mark_name
-        else:
-            start = box.index(mark_name)
-            end = box.index(f"{mark_name} lineend +1c")
-            box.delete(start, end)
+        line_tag = f"syncfile:{path}"
         if display == "100%":
             line = f"{time.strftime('%H:%M:%S')}  Baixando {path}\n"
         else:
             line = f"{time.strftime('%H:%M:%S')}  Baixando {path} - {display}\n"
-        box.insert(mark_name, line, tag)
-        if display == "100%":
+        try:
+            box.delete(f"{line_tag}.first", f"{line_tag}.last")
+        except tk.TclError:
+            pass
+        box.insert("end", line, (line_tag, tag or ()))
+        if display == "100%" and tag:
             self._sync_file_marks.pop(path, None)
-        box.see(END)
+        box.see("end")
         box.configure(state="disabled")
 
     @staticmethod
