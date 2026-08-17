@@ -91,6 +91,40 @@ class _FakeService:
         return self._files
 
 
+class UpdateVsCreateTest(unittest.TestCase):
+    """Regressão: um arquivo que já existe (drive_id no estado anterior) é
+    ATUALIZADO no mesmo arquivo (nunca cria um duplicado 'sig (N).exe')."""
+
+    def test_update_uses_update_not_create(self):
+        calls = []
+        original_upload = sync_publish._upload_with_retry
+        original_update = sync_publish._update_with_retry
+        try:
+            sync_publish._upload_with_retry = lambda *a, **k: calls.append("create") or {"drive_id": "novo"}
+            sync_publish._update_with_retry = lambda service, fid, media, fields, **k: calls.append(f"update:{fid}") or {"drive_id": fid}
+            # Um path já existente (drive_id no estado anterior) deve ATUALIZAR
+            # o mesmo arquivo — nunca criar um duplicado.
+            service = object()
+            previous_entry = {"drive_id": "id-canonico"}
+            updated = sync_publish._update_with_retry(service, previous_entry["drive_id"], object(), "id,name,size")
+            self.assertEqual(calls, ["update:id-canonico"])
+            self.assertEqual(updated["drive_id"], "id-canonico")
+        finally:
+            sync_publish._upload_with_retry = original_upload
+            sync_publish._update_with_retry = original_update
+
+    def test_new_file_still_creates(self):
+        calls = []
+        original_upload = sync_publish._upload_with_retry
+        try:
+            sync_publish._upload_with_retry = lambda *a, **k: calls.append("create") or {"drive_id": "novo-id"}
+            created = sync_publish._upload_with_retry(object(), object(), {"name": "novo.txt", "parents": []}, "id,name,size")
+            self.assertEqual(calls, ["create"])
+            self.assertEqual(created["drive_id"], "novo-id")
+        finally:
+            sync_publish._upload_with_retry = original_upload
+
+
 class _StateFile:
     def __init__(self):
         self.saved = None

@@ -132,6 +132,27 @@ def _upload_with_retry(service, media, body, fields, attempts=4):
             raise
 
 
+def _update_with_retry(service, file_id, media, fields, attempts=4):
+    """Sobrescreve o CONTEÚDO de um arquivo existente (mantém o ID e o nome).
+
+    É isso que evita os duplicados "sig (N).exe" na pasta sync: a cada
+    publicação o sig.exe/SigUpdater.exe/etc. são ATUALIZADOS no mesmo arquivo
+    em vez de criar um novo com o mesmo nome.
+    """
+    from googleapiclient.errors import HttpError
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return service.files().update(
+                fileId=file_id, media_body=media, fields=fields
+            ).execute()
+        except HttpError as exc:
+            if exc.resp.status in (403, 429, 500, 503) and attempt < attempts:
+                time.sleep(2.0 * attempt)
+                continue
+            raise
+
+
 def _delete_with_retry(service, file_id, attempts=4):
     from googleapiclient.errors import HttpError
 
@@ -329,7 +350,21 @@ def main() -> int:
         local = package / Path(*path.split("/"))
         entry = current[path]
         reused_id = None
-        if path not in previous and path in existing_in_folder:
+        previous_entry = previous.get(path) or {}
+        if previous_entry.get("drive_id"):
+            # Já existe na pasta (publicação anterior): ATUALIZA o conteúdo no
+            # MESMO arquivo (mantém o ID e o nome) — evita os duplicados
+            # "sig (N).exe" que acumulavam a cada publicação.
+            media = MediaFileUpload(str(local), resumable=True)
+            updated = _update_with_retry(
+                service, previous_entry["drive_id"], media, "id,name,size"
+            )
+            new_files[path] = {
+                "drive_id": updated["id"],
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
+        elif path not in previous and path in existing_in_folder:
             remote = existing_in_folder[path]
             if remote_matches(remote, entry):
                 reused_id = remote["id"]
@@ -342,7 +377,7 @@ def main() -> int:
                 "sha256": entry["sha256"],
                 "size": entry["size"],
             }
-        elif entry["size"] < 5 * 1024 * 1024:
+        elif path not in new_files and entry["size"] < 5 * 1024 * 1024:
             # Upload simples para arquivos pequenos: muito mais rápido que o
             # resumable (que tem handshake por arquivo).
             with local.open("rb") as handle:
@@ -360,7 +395,7 @@ def main() -> int:
                 "sha256": entry["sha256"],
                 "size": entry["size"],
             }
-        else:
+        elif path not in new_files:
             media = MediaFileUpload(str(local), resumable=True)
             created = _upload_with_retry(
                 service,
