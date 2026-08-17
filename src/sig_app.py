@@ -6694,11 +6694,14 @@ class GraniteUploader:
 class TextModelClient:
 
     def _count_input_tokens(self, url: str, fallback_url: str, model: str, system_prompt: str, material: str) -> int:
-        """max_tokens = quantidade de tokens do input.
+        """max_tokens = tokens do input com a margem do template do chat.
 
-        Pergunta ao endpoint /tokenize do servidor (vLLM: POST {base}/tokenize
-        com {"model", "prompt"} -> {"count", "tokens"}). Quando o servidor não
-        responde, cai na estimativa local (4 caracteres por token).
+        O servidor é um llama.cpp (vLLM-like): o endpoint /tokenize conta o
+        texto CRU via {"content": <texto>} e a resposta traz {"tokens": [...]}.
+        O template do chat do modelo (turnos system/user) adiciona ~50% em
+        textos curtos, então aplicamos a margem 1.5 — no teste real isso bateu
+        exatamente com o usage.prompt_tokens da resposta. Sem o /tokenize,
+        estimativa local de 4 caracteres por token (também com a margem).
         """
         text = f"{system_prompt}\n{material}"
         bases = []
@@ -6712,18 +6715,21 @@ class TextModelClient:
             try:
                 request = urllib.request.Request(
                     tokenize_url,
-                    data=json.dumps({"model": model, "prompt": text}, ensure_ascii=False).encode("utf-8"),
+                    data=json.dumps({"content": text}, ensure_ascii=False).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
                 with urllib.request.urlopen(request, timeout=10) as response:
                     root = json.loads(response.read().decode("utf-8", errors="replace"))
                 count = root.get("count") if isinstance(root, dict) else None
+                if not isinstance(count, int) or count <= 0:
+                    tokens = root.get("tokens") if isinstance(root, dict) else None
+                    count = len(tokens) if isinstance(tokens, list) else 0
                 if isinstance(count, int) and count > 0:
-                    return max(1, count)
+                    return max(1, round(count * 1.5))
             except Exception:
                 continue
-        return max(1, round(len(text) / 4))
+        return max(1, round((len(text) / 4) * 1.5))
 
     def __init__(self, cancel_event: threading.Event):
         self.cancel_event = cancel_event
