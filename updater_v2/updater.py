@@ -995,8 +995,11 @@ def _rollback_transaction(transaction: Path, target: Path, log_path: Path) -> No
 
 
 def _recover_interrupted_transactions(target: Path, log_path: Path) -> None:
-    parent = target.parent
-    for transaction in sorted(parent.glob(".sig-updater-v2-*"), key=lambda item: item.name):
+    root = _transaction_root()
+    for transaction in sorted(
+        list(root.glob(".sig-updater-v2-*")) + list(root.glob(".sig-sync-*")),
+        key=lambda item: item.name,
+    ):
         if not transaction.is_dir():
             continue
         journal = transaction / "journal.json"
@@ -1382,7 +1385,7 @@ def apply_sync_transaction(
     with _installation_lock(target, log_path):
         _recover_interrupted_transactions(target, log_path)
         validate_target_shell(target)
-        transaction = Path(tempfile.mkdtemp(prefix=".sig-sync-", dir=str(target.parent)))
+        transaction = Path(tempfile.mkdtemp(prefix=".sig-sync-", dir=str(_transaction_root())))
         try:
             _apply_file_transaction(
                 staged_root,
@@ -1424,7 +1427,7 @@ def execute(
         else:
             validate_full_install_destination(target)
         _wait_for_processes(pid, target / "sig.exe", wait_timeout, log_path)
-        transaction = Path(tempfile.mkdtemp(prefix=".sig-updater-v2-", dir=str(target.parent)))
+        transaction = Path(tempfile.mkdtemp(prefix=".sig-updater-v2-", dir=str(_transaction_root())))
         staged = transaction / "staged"
         try:
             _extract_zip(zip_path, staged)
@@ -1524,6 +1527,20 @@ def _standalone_cache_root() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     base = Path(local) if local else Path(tempfile.gettempdir())
     return base / "sig" / "updater"
+
+
+def _transaction_root() -> Path:
+    """Diretório GRAVÁVEL para as transações do updater.
+
+    Nunca usar o diretório pai do target: numa instalação em
+    C:\\Program Files\\SIG o pai (Program Files) não é gravável pelo usuário e o
+    tempfile.mkdtemp ali TRAVA — era a causa da atualização ficar presa em
+    'Aplicando a sincronização'. O %LOCALAPPDATA%\\sig\\updater\\transactions é
+    sempre gravável (Inno e portable).
+    """
+    root = _standalone_cache_root() / "transactions"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _standalone_log_path(target: Path) -> Path:
