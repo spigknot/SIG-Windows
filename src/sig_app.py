@@ -85,7 +85,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260816_001"
+APP_VERSION = "20260816_002"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
@@ -6780,6 +6780,13 @@ class TextModelClient:
         raise last_error or RuntimeError("Não foi possível consultar o modelo de texto.")
 
 
+def cpu_parallel_options(cpu_count: int) -> list[int]:
+    """Opções de Conversões paralelas: n/2, n, 2n e 4n núcleos (exemplos do
+    usuário: 6 núcleos -> 3, 6, 12, 24; Xeon 18 -> 9, 18, 36, 72)."""
+    half = max(1, cpu_count // 2)
+    return sorted({half, cpu_count, cpu_count * 2, cpu_count * 4})
+
+
 class SigApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -12887,14 +12894,21 @@ try {
 
         cpu_count = max(1, os.cpu_count() or 1)
 
-        def parallel_selector(row: int, label: str, variable: IntVar, maximum: int):
+        def parallel_selector(
+            row: int,
+            label: str,
+            variable: IntVar,
+            maximum: int,
+            values: list[int] | None = None,
+        ):
             ttk.Label(parallel_frame, text=label).grid(
                 row=row, column=0, sticky="w", pady=5, padx=(0, 12)
             )
             label_var = StringVar(value=str(variable.get()))
             button = ttk.Menubutton(parallel_frame, textvariable=label_var, width=3)
             menu = tk.Menu(button, tearoff=False)
-            for value in range(1, maximum + 1):
+            options = values if values is not None else list(range(1, maximum + 1))
+            for value in options:
                 menu.add_command(
                     label=str(value),
                     command=lambda selected=value: (variable.set(selected), label_var.set(str(selected))),
@@ -12903,7 +12917,10 @@ try {
             button.grid(row=row, column=1, sticky="w", pady=5)
             return button
 
-        parallel_selector(0, "Conversões paralelas", conv_var, cpu_count * 4)
+        cpu_options = cpu_parallel_options(cpu_count)
+        if conv_var.get() not in cpu_options:
+            conv_var.set(cpu_count)
+        parallel_selector(0, "Conversões paralelas", conv_var, cpu_count * 4, values=cpu_options)
         parallel_selector(1, "Requisições paralelas", req_var, 16)
 
         grok_key_row = 0
