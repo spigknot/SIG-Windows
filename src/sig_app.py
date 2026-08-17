@@ -14742,7 +14742,7 @@ try {
         self.live_finalize_thread.start()
 
     def _wait_for_elevenlabs_final_event(self):
-        if self.elevenlabs_ws_done_event.wait(20):
+        if self.elevenlabs_ws_done_event.wait(10):
             return
         if self.live_state == "finalizing" and not self.live_abort_event.is_set():
             self.elevenlabs_ws_intentional_close = True
@@ -15207,6 +15207,20 @@ try {
                     self._queue("live_timestamp_data", timestamped)
                 return
             if event_type == "committed_transcript":
+                # O Scribe v2 envia CADA frase finalizada como
+                # committed_transcript (com o texto). Acumula no committed
+                # para a transcricao nao se perder (so o draft ficaria).
+                text = str(event.get("text") or "").strip()
+                if text and not self.elevenlabs_ws_done_event.is_set():
+                    with self.live_lock:
+                        committed = self.live_committed_text.strip()
+                        if not committed:
+                            self.live_committed_text = text
+                        elif text not in committed:
+                            self.live_committed_text = f"{committed}\n{text}"
+                        self.live_draft_text = ""
+                        display = self._current_live_text_locked()
+                    self._queue("live_display", display)
                 if self.elevenlabs_ws_intentional_close and not self.elevenlabs_ws_done_event.is_set():
                     self._finish_elevenlabs_session()
                 return
