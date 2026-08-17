@@ -273,5 +273,77 @@ class UpdaterV2ValidationTests(unittest.TestCase):
                 validate_zip(zip_path)
 
 
+class SyncTransactionLogTests(unittest.TestCase):
+    """F4: o --sync-staged grava versão + run id por tentativa, distinguíveis
+    mesmo com o mesmo updater.log anexado entre execuções."""
+
+    def test_two_runs_share_log_but_are_distinguishable(self):
+        import re
+        import time
+        from unittest import mock
+
+        from updater import main as updater_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "updater.log"
+            target = Path(temporary) / "target"
+            target.mkdir()
+            staged = Path(temporary) / "staged"
+            staged.mkdir()
+            removals = Path(temporary) / "removidos.txt"
+            removals.write_text("", encoding="utf-8")
+
+            with mock.patch("updater.apply_sync_transaction") as apply_mock:
+                with mock.patch("updater._validate_removidos_entries", return_value=[]):
+                    first = updater_main(
+                        ["--sync-staged", str(staged), "--sync-removals", str(removals),
+                         "--sync-version", "20260816_002", "--target", str(target),
+                         "--log", str(log_path)]
+                    )
+                    time.sleep(1.1)  # garante run id com segundo distinto
+                    second = updater_main(
+                        ["--sync-staged", str(staged), "--sync-removals", str(removals),
+                         "--sync-version", "20260816_002", "--target", str(target),
+                         "--log", str(log_path)]
+                    )
+            self.assertEqual(first, 0)
+            self.assertEqual(second, 0)
+            self.assertEqual(apply_mock.call_count, 2)
+            text = log_path.read_text(encoding="utf-8")
+            starts = re.findall(r"Início da aplicação sync v=(\S+) run=(\S+)\.", text)
+            self.assertEqual(len(starts), 2)
+            self.assertEqual(starts[0][0], "20260816_002")
+            self.assertEqual(starts[1][0], "20260816_002")
+            self.assertNotEqual(starts[0][1], starts[1][1], "run ids devem ser distintos")
+            self.assertIn("Aplicação concluída sync v=20260816_002", text)
+
+    def test_failure_logs_transaction_label(self):
+        import re
+        from unittest import mock
+
+        from updater import main as updater_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "updater.log"
+            target = Path(temporary) / "target"
+            target.mkdir()
+            staged = Path(temporary) / "staged"
+            staged.mkdir()
+
+            with mock.patch("updater._validate_removidos_entries", return_value=[]):
+                with mock.patch(
+                    "updater.apply_sync_transaction",
+                    side_effect=RuntimeError("falha simulada"),
+                ):
+                    code = updater_main(
+                        ["--sync-staged", str(staged), "--sync-version", "v123",
+                         "--target", str(target), "--log", str(log_path)]
+                    )
+            self.assertEqual(code, 2)
+            text = log_path.read_text(encoding="utf-8")
+            self.assertRegex(text, r"Início da aplicação sync v=v123 run=\S+\.")
+            self.assertRegex(text, r"Falha na aplicação sync v=v123 run=\S+: falha simulada")
+
+
 if __name__ == "__main__":
     unittest.main()

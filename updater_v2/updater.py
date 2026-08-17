@@ -13,6 +13,7 @@ import base64
 import ctypes
 import errno
 import concurrent.futures
+import datetime
 from contextlib import contextmanager
 import hashlib
 import html
@@ -2157,6 +2158,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-timeout", type=int, default=12)
     parser.add_argument("--sync-staged", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--sync-removals", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--sync-version", type=str, help=argparse.SUPPRESS)
     parser.add_argument("--standalone-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--standalone-target", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -2171,6 +2173,11 @@ def main(argv: list[str] | None = None) -> int:
             removals = _validate_removidos_entries(
                 args.sync_removals.read_text(encoding="utf-8").splitlines()
             )
+        # Identificador reader-safe da transação: permite correlacionar cada
+        # tentativa (início/sucesso/falha/rollback) mesmo com updater.log anexado.
+        run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        txn_label = f"sync v={args.sync_version or '?'} run={run_id}"
+        _log(args.log, f"Início da aplicação {txn_label}.")
         try:
             if args.pid:
                 _wait_for_processes(args.pid, args.target / "sig.exe", min(args.wait_timeout, 60), args.log)
@@ -2182,8 +2189,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.log,
             )
         except Exception as exc:
-            _log(args.log, f"Falha: {exc}")
+            _log(args.log, f"Falha na aplicação {txn_label}: {exc}")
             return 2
+        _log(args.log, f"Aplicação concluída {txn_label}.")
         return 0
     if not any(value is not None for value in legacy_values):
         return run_standalone()

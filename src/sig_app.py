@@ -7627,6 +7627,8 @@ class SigApp:
                     str(staged),
                     "--sync-removals",
                     str(removals_path),
+                    "--sync-version",
+                    str(version),
                     "--target",
                     str(app_base_dir()),
                     "--pid",

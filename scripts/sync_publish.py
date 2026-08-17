@@ -200,27 +200,87 @@ def publish_manifest(service, state: dict, manifest: dict) -> str:
     return updated["id"]
 
 
-def list_sync_folder_files(service, folder_id: str) -> dict[str, str]:
-    """Lista os arquivos existentes na pasta sync: {nome: id}."""
-    listing: dict[str, str] = {}
+def list_sync_folder_files(service, folder_id: str) -> dict[str, dict]:
+    """Lista os arquivos existentes na pasta sync: {nome: {id, size, sha256_checksum}}.
+
+    O tamanho e o sha256Checksum (base64 do digest binário) permitem PROVAR que
+    um arquivo remoto corresponde aos bytes locais antes de reutilizá-lo numa
+    retomada — reusar apenas pelo nome poderia apontar o manifesto para bytes
+    divergentes.
+    """
+    listing: dict[str, dict] = {}
     page_token = ""
     while True:
         response = (
             service.files()
             .list(
                 q=f"'{folder_id}' in parents and trashed=false",
-                fields="nextPageToken,files(id,name)",
+                fields="nextPageToken,files(id,name,size,sha256Checksum)",
                 pageSize=1000,
                 pageToken=page_token or None,
             )
             .execute()
         )
         for item in response.get("files", []):
-            listing[str(item["name"])] = str(item["id"])
+            listing[str(item["name"])] = {
+                "id": str(item["id"]),
+                "size": int(item.get("size") or 0),
+                "sha256_checksum": str(item.get("sha256Checksum") or ""),
+            }
         page_token = response.get("nextPageToken", "")
         if not page_token:
             break
     return listing
+
+
+def sha256_checksum_b64(hex_digest: str) -> str:
+    """Converte o SHA-256 hex (manifesto) para o formato base64 do Drive."""
+    import base64
+
+    try:
+        return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
+    except (ValueError, TypeError):
+        return ""
+
+
+def remote_matches(remote: dict, local_entry: dict) -> bool:
+    """True somente quando o arquivo remoto é COMPROVADAMENTE idêntico ao local.
+
+    Exige tamanho igual E sha256Checksum remoto presente e igual ao digest
+    local. Sem checksum remoto não há prova — nunca reutilizar.
+    """
+    expected_size = int(local_entry.get("size") or 0)
+    expected_checksum = sha256_checksum_b64(str(local_entry.get("sha256") or ""))
+    return (
+        expected_checksum
+        and int(remote.get("size") or 0) == expected_size
+        and str(remote.get("sha256_checksum") or "") == expected_checksum
+    )
+
+
+def _finalize_publish(service, state: dict, previous: dict, to_delete: list[str], superseded_ids: list[str], manifest: dict) -> str:
+    """Publica o manifesto e SÓ ENTÃO remove os arquivos antigos/órfãos.
+
+    A ordem é o coração da transacionalidade: se a publicação falhar, nada foi
+    apagado e o manifesto anterior continua íntegro e instalável. Um delete que
+    falhe depois da publicação deixa apenas um órfão inofensivo no Drive (o
+    manifesto novo não o referencia).
+    """
+    manifest_id = publish_manifest(service, state, manifest)
+    state["manifest_file_id"] = manifest_id
+    save_state(state)
+    print(f"sync_manifest.json publicado: id={manifest_id}")
+    for path in to_delete:
+        old_entry = previous.get(path) or {}
+        if old_entry.get("drive_id"):
+            _delete_with_retry(service, old_entry["drive_id"])
+        print(f"  removido do Drive: {path}")
+    for stale_id in superseded_ids:
+        try:
+            _delete_with_retry(service, stale_id)
+        except Exception as exc:  # órfão divergente: melhor sobrar que quebrar o fluxo
+            print(f"  aviso: nao foi possivel remover orfao {stale_id}: {exc}")
+    return manifest_id
 
 
 def main() -> int:
@@ -258,17 +318,24 @@ def main() -> int:
     from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
     # Reconciliação: arquivos já presentes na pasta (de execuções anteriores
-    # interrompidas) são reusados pelo nome quando o estado não os conhece.
+    # interrompidas) são reusados SOMENTE quando o tamanho e o sha256Checksum
+    # remotos provam que os bytes são iguais aos locais. Um arquivo de mesmo
+    # nome com conteúdo divergente é reenviado e o ID antigo vai para
+    # superseded_ids (removido só após o manifesto novo estar publicado).
     existing_in_folder = list_sync_folder_files(service, folder_id)
     new_files: dict[str, dict] = {}
+    superseded_ids: list[str] = []
     for index, path in enumerate(to_upload, 1):
         local = package / Path(*path.split("/"))
         entry = current[path]
         reused_id = None
         if path not in previous and path in existing_in_folder:
-            # confirma pelo hash baixado? não: reusa o ID e o próximo diff
-            # corrige se o conteúdo divergir. Para o upload inicial basta o nome.
-            reused_id = existing_in_folder[path]
+            remote = existing_in_folder[path]
+            if remote_matches(remote, entry):
+                reused_id = remote["id"]
+            else:
+                # Mesmo nome, bytes não comprovados: substituir pelo upload.
+                superseded_ids.append(remote["id"])
         if reused_id:
             new_files[path] = {
                 "drive_id": reused_id,
@@ -329,12 +396,6 @@ def main() -> int:
             print(f"  upload {index}/{len(to_upload)}")
         time.sleep(0.02)
 
-    for path in to_delete:
-        old_entry = previous.get(path) or {}
-        if old_entry.get("drive_id"):
-            _delete_with_retry(service, old_entry["drive_id"])
-        print(f"  removido do Drive: {path}")
-
     # Estado novo: reusa IDs dos inalterados + os novos
     merged: dict[str, dict] = {}
     for path, entry in current.items():
@@ -375,10 +436,7 @@ def main() -> int:
     MANIFEST_PATH.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"manifesto assinado: {MANIFEST_PATH}")
 
-    manifest_id = publish_manifest(service, state, manifest)
-    state["manifest_file_id"] = manifest_id
-    save_state(state)
-    print(f"sync_manifest.json publicado: id={manifest_id}")
+    manifest_id = _finalize_publish(service, state, previous, to_delete, superseded_ids, manifest)
     print("IMPORTANTE: SYNC_MANIFEST_FILE_ID no updater deve ser", manifest_id)
     return 0
 

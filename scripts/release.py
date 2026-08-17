@@ -361,7 +361,36 @@ def sign_manifest(manifest: dict, key_path: Path, output_path: Path) -> None:
     output_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def verify_build_environment() -> None:
+    """Gate do ambiente de build por VERSÕES (sem depender de caminho absoluto).
+
+    O ambiente aprovado é Python 3.11.0 + PyInstaller 6.21.0 (o hash do
+    SigUpdater reprodutível depende deles). Divergência falha com diagnóstico
+    acionável em vez de produzir um artefato de hash diferente.
+    """
+    problems = []
+    python_version = f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}"
+    if sys.version_info[:3] != (3, 11, 0):
+        problems.append(
+            f"Python em execução: {python_version} (aprovado: 3.11.0). "
+            "Use uma instalação Python 3.11.0 — ver AGENTS.md, seção 'Build do aplicativo'."
+        )
+    try:
+        import PyInstaller
+
+        pyinstaller_version = PyInstaller.__version__
+        if pyinstaller_version != "6.21.0":
+            problems.append(
+                f"PyInstaller em execução: {pyinstaller_version} (aprovado: 6.21.0)."
+            )
+    except ImportError:
+        problems.append("PyInstaller não instalado (aprovado: 6.21.0).")
+    if problems:
+        raise ValidationError("Ambiente de build divergente do aprovado. " + " ".join(problems))
+
+
 def build_release(args: argparse.Namespace) -> int:
+    verify_build_environment()
     root = repo_root()
     source_version = read_app_version(root / "src/sig_app.py")
     version = args.version or source_version
@@ -544,6 +573,7 @@ def build_release(args: argparse.Namespace) -> int:
 
 
 def validate_command(args: argparse.Namespace) -> int:
+    verify_build_environment()
     root = repo_root()
     messages = validate_current(
         root,

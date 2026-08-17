@@ -27,7 +27,7 @@ cópia de segurança para instalações e atualizações.
 As releases do GitHub sempre incluem um pacote **full** para instalação do zero:
 `sig.exe`, `SigUpdater.exe`, `ffmpeg.exe`, `ffplay.exe`, `_internal`, `vad_deps` e `vad_worker.py`.
 
-As atualizações automáticas do aplicativo usam pacotes incrementais publicados no Google Drive. Eles contêm o `sig.exe`, `_internal`, `SigUpdater.exe` e o `build-info.json`; os recursos grandes já presentes na instalação são preservados.
+As atualizações automáticas do aplicativo usam a **sincronização por arquivo** publicada no Google Drive: o `sync_manifest.json` assinado (schema 2) lista cada arquivo com `sha256`, `size`, `drive_id` e `github_url`; o SIG e o `SigUpdater.exe` baixam somente o que mudou e convergem de qualquer versão. A publicação é feita exclusivamente por `scripts/sync_publish.py`. O pacote ZIP incremental (schema 1) foi aposentado e permanece apenas como compatibilidade para instalações antigas.
 
 ## Compilacao
 

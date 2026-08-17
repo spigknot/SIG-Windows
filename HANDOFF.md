@@ -24,12 +24,20 @@ Branch observada durante este handoff:
 
 `agent/blindar-updater`
 
-## Estado atual
+## Estado atual (corrente)
 
 - Nome do aplicativo: `sig`.
-- Versão atual: `20260814_001`.
-- `APP_VERSION` fica em `src\sig_app.py`.
-- O `dist\sig.exe` e o executável do build aprovado contêm a versão `20260814_001`.
+- Versão atual publicada: `20260816_002` (ver `APP_VERSION` em `src\sig_app.py` — a fonte da verdade).
+- Mecanismo de atualização: **sync por arquivo** (`sync_manifest.json` schema 2, publicado por `scripts\sync_publish.py`; ID fixo `1FiuZNZ6Ylub7P10vecwV29UNntoOkySw`). Exes com `github_url` (asset da release GitHub).
+- Canais por release: sync no Drive + release GitHub com `*_full.zip`, `sig.exe`, `SigUpdater.exe` e `sig_setup_<v>.exe` (instalador Inno).
+- O pacote ZIP incremental (schema 1) está APOSENTADO desde 2026-08-15; `latest.json` fica congelado só para instalações antigas chegarem ao sync.
+
+## Registro histórico (20260814_001 — superado, manter apenas como histórico)
+
+As linhas abaixo descrevem o estado no handoff da 20260814_001, quando a rota
+de atualização ainda era o ZIP incremental (schema 1). NÃO usar como rota atual:
+
+- O `dist\sig.exe` e o executável do build aprovado continham a versão `20260814_001`.
 - A incremental `20260814_001.zip` foi publicada no Google Drive.
 - O manifesto local `release\latest.json` corresponde ao manifesto publicado.
 - Último ZIP incremental aprovado:

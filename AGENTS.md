@@ -34,13 +34,10 @@ Estas regras sao obrigatorias para futuras alteracoes, compilacoes e publicacoes
   - `sig.exe`
   - `_internal\python311.dll`
 - O `sig.spec` ja usa `COLLECT`. Nao remover essa etapa.
-- Antes de cada publicacao, atualizar `APP_VERSION` em `src\sig_app.py` para a mesma versao do ZIP e do `latest.json`.
-- O PyInstaller e o `sounddevice` devem estar no mesmo ambiente Python. Ambiente usado nesta maquina:
-  `C:\Users\Gustavo\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe`
-- O Hermes pode atualizar/regenerar esse ambiente. Antes de compilar, confirme que ele continua usando Python
-  `3.11.0` e PyInstaller `6.21.0`; se a versão do Python mudar (por exemplo, para `3.11.15`), use o fallback local
-  `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe`, que contém o conjunto compatível
-  com o `SigUpdater.exe` validado. Nunca troque o hash aprovado do updater apenas por causa de uma atualização do Hermes.
+- Antes de cada publicacao, atualizar `APP_VERSION` em `src\sig_app.py` para a mesma versao do pacote gerado pelo `release.py` e do manifesto sync publicado.
+- O PyInstaller e o `sounddevice` devem estar no mesmo ambiente Python.
+- **Ambiente de build aprovado (por VERSOES, nao por caminho)**: Python `3.11.0` e PyInstaller `6.21.0` (o `release.py` verifica e falha com diagnostico se divergir). Nesta maquina ele costuma viver no venv do Hermes ou no fallback local `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe` — qualquer instalacao que reporte `sys.version_info[:3] == (3, 11, 0)` e `PyInstaller.__version__ == "6.21.0"` serve; os caminhos citados sao so exemplos locais.
+- O Hermes pode atualizar/regenerar o ambiente dele. Antes de compilar, confirmar por versao (o gate faz isso); se o Python divergir (por exemplo, para `3.11.15`), usar outra instalacao `3.11.0` e nao trocar o hash aprovado do updater apenas por causa disso.
 - Antes de compilar nesse ambiente, confirmar:
   `python -c "import sounddevice"`
 - Tambem confirmar:
@@ -69,24 +66,24 @@ Uma instalacao nova precisa conter, na mesma pasta:
 
 Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote completo como asset de uma release do GitHub.
 
-## Atualizacao incremental pelo Drive
+## Atualizacao incremental (sync por arquivo)
+
+A rota VIGENTE de atualizacao incremental e a sincronizacao por arquivo, publicada
+por `scripts\sync_publish.py` e consumida pelo `SigUpdater.exe`/SIG via
+`sync_manifest.json` (schema 2) assinado.
 
 - Publicar exclusivamente pela API do Google Drive. Nao copiar nem sincronizar o pacote pela unidade montada `X:`.
-- Pasta Drive: `1-yrsmFu_lAe0dMPo4sK70QRYGqMFcHJK`
-- Manifesto: `latest.json`
-- ID do manifesto: `1Gompo26SsyhSdliBGNaedLhEfidB244E`
-- O ZIP incremental deve usar a proxima versao `YYYYMMDD_NNN.zip`.
-- A versao precisa ser consistente em tres lugares: `APP_VERSION` em `src\sig_app.py`, `version` em `latest.json` e o nome do ZIP. Nunca publicar quando esses valores forem diferentes.
+- Pasta sync no Drive: `1-yrsmFu_lAe0dMPo4sK70QRYGqMFcHJK`
+- Manifesto: `sync_manifest.json` (schema 2), publicado SEMPRE pelo `scripts\sync_publish.py` (nunca editado a mao).
+- ID do manifesto: `1FiuZNZ6Ylub7P10vecwV29UNntoOkySw` (constante `SYNC_MANIFEST_FILE_ID` no updater e no `sync_common.py`).
+- Ciclo por release: `release.py release --version <v> --incremental` (gera package + `*_full.zip` + instalador) -> `sync_publish.py --package release\generated\<v>\package --version <v> --github-tag <v>` -> `gh release create` (full + exes + instalador).
+- O `--github-tag` adiciona `github_url` para `sig.exe`/`SigUpdater.exe` (defesa contra o falso positivo de malware do Drive nos binarios PyInstaller); os demais arquivos baixam pelo `drive_id`.
+- A versao precisa ser consistente entre `APP_VERSION`, o pacote e o manifesto sync. Nunca publicar quando esses valores forem diferentes.
 - Mesmo uma compilacao sem mudanca funcional precisa receber uma nova versao interna antes de ser publicada.
-- Para uma instalacao onedir, o ZIP incremental deve conter na raiz `sig.exe` e `_internal\` juntos.
-- Nunca publicar um ZIP contendo apenas um `sig.exe` quando a instalacao de destino for onedir.
-- O ZIP deve ser montado a partir da compilacao recem-gerada, nunca de um `sig.exe` antigo que ja estava em `dist`.
-- A publicacao incremental deve ser gerada pelo modo oficial `--incremental`: ele exclui `ffmpeg.exe`, `ffplay.exe`, `vad_worker.py` e `vad_deps` do ZIP do Drive. O pacote full correspondente fica como `*_full.zip` para a release do GitHub.
-- O manifesto deve conter `schema`, `version`, `zip_file_id`, `zip_name`, `sha256`, `size`, `created_at` e `signature`.
-- Assinar usando `release\sign_manifest.py` e a chave privada local.
+- O pacote ZIP incremental (schema 1, `latest.json`) foi APOSENTADO em 2026-08-15: o `latest.json` esta congelado na ultima versao que o tinha e serve apenas para instalacoes antigas chegarem ao sync. Nao publicar ZIP incremental novo, nao atualizar `latest.json` e nao descrever esse fluxo como atual.
 - Nunca enviar `release\update_private_key.pem` ao GitHub ou ao Drive.
-- Depois do upload, conferir o ZIP e o `latest.json` pela API usando os IDs retornados.
-- Atualizar o manifesto existente no Drive pela API; nao criar duas copias de `latest.json` nem reenviar o mesmo ZIP.
+- Nao publicar o mesmo artefato duas vezes: o sync sobe somente o que mudou (reusando IDs comprovadamente iguais) e o manifesto e atualizado no mesmo ID estavel.
+- Depois do publish, conferir o manifesto sync pela API (`updater.fetch_sync_manifest()` deve apontar a versao nova).
 
 ## Seguranca
 
@@ -130,8 +127,8 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
   `python scripts\release.py validate --warn-path build\sig\warn-sig.txt`
   `python scripts\release.py updater-test`
 - Para gerar uma release, usar somente:
-  `python scripts\release.py release --version <APP_VERSION> --zip-file-id <ID_DO_ZIP_NO_DRIVE>`
-- Para uma publicacao incremental no Drive, usar o mesmo comando com `--incremental`. O ZIP sem os recursos grandes e o unico que deve ser enviado ao Drive; o `*_full.zip` deve ser publicado como asset da release correspondente no GitHub.
+  `python scripts\release.py release --version <APP_VERSION> --incremental`
+- O modo `--incremental` faz o clean build, valida o ambiente e o artefato do updater, roda o harness e gera o package, o `*_full.zip` (asset da release GitHub) e o instalador (`sig_setup_<v>.exe`). A publicacao incremental e o passo seguinte, pelo `scripts\sync_publish.py` (sync por arquivo — ver secao acima).
 - Esse comando faz clean build isolado, verifica warnings criticos, inspeciona o executavel congelado, valida layout/dependencias, testa o updater real em pasta temporaria, cria o ZIP e assina o manifesto. Se uma etapa falhar, a release nao e aprovada.
 - `--allow-same` existe somente para smoke test local da versao atual e nunca deve ser usado para publicar.
 - O ZIP nunca deve ser criado manualmente a partir de `dist`. O `sig.exe` precisa vir do clean build desta execucao; os assets externos somente podem vir de um `--runtime-root` explicitamente escolhido e passam pelo gate de layout e pelo hash conhecido do `SigUpdater.exe`.
