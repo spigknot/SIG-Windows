@@ -3308,7 +3308,7 @@ class FfmpegToolsPanel:
         command = [str(self._ffmpeg()), "-hide_banner", "-loglevel", "error"]
         if profile.key == "vaapi":
             command += ["-vaapi_device", "/dev/dri/renderD128"]
-        command += ["-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1", "-frames:v", "1"]
+        command += ["-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1", "-frames:v", "1"]
         if profile.key == "vaapi":
             command += ["-vf", "format=nv12,hwupload"]
         command += ["-c:v", profile.encoder, "-f", "null", "-"]
