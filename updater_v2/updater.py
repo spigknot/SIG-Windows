@@ -872,7 +872,7 @@ def validate_full_install_destination(root: Path) -> None:
         for name in present
         if name not in ALLOWED_TOP_LEVEL_NAMES
         and not name.startswith("updater")
-        and name != ".sig-update.lock"
+        and not _is_update_lock(name)
     )
     if unknown:
         raise UpdateError(
@@ -1016,9 +1016,23 @@ def _recover_interrupted_transactions(target: Path, log_path: Path) -> None:
             _rollback_transaction(transaction, target, log_path)
 
 
+def _is_update_lock(name: str) -> bool:
+    """True para qualquer lock de atualização na raiz da pasta do app.
+
+    O lock vive dentro do target com o formato `<.nome>.sig-update.lock`
+    (ex.: `.SIG.sig-update.lock`); o nome antigo `.sig-update.lock` também é
+    tolerado. Nunca tratado como item desconhecido da instalação.
+    """
+    return name.startswith(".") and name.endswith(".sig-update.lock")
+
+
 @contextmanager
 def _installation_lock(target: Path, log_path: Path):
-    lock_path = target.parent / f".{target.name}.sig-update.lock"
+    # Lock DENTRO da pasta do app (não no pai): numa instalação em
+    # C:\Program Files\SIG o pai não é gravável pelo usuário, o que quebrava
+    # a atualização com Permission denied. A subpasta do app é gravável tanto
+    # na instalação Inno (users-modify) quanto na instalacao portable.
+    lock_path = target / f".{target.name}.sig-update.lock"
     handle = lock_path.open("a+b")
     handle.seek(0)
     handle.write(b"0")

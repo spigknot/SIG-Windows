@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "file": "updater_v2/bin/SigUpdater.exe",
-  "size": 11605267,
-  "sha256": "f0ea020e58a3bd12f22e41be2f3a93ff6156705f52ffeaf0c23e0e945a9ccbf9",
+  "size": 11605521,
+  "sha256": "8fab1ba7058cbd31510e7b1024343c1c385b838a4b493caed1172dab0cc22562",
   "source_status": "Fonte versionada em updater_v2/updater.py; modos CLI e gráfico, build PyInstaller validado pelo harness de falhas."
 }

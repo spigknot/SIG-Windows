@@ -344,6 +344,41 @@ class SyncTransactionLogTests(unittest.TestCase):
             self.assertRegex(text, r"Início da aplicação sync v=v123 run=\S+\.")
             self.assertRegex(text, r"Falha na aplicação sync v=v123 run=\S+: falha simulada")
 
+    def test_installation_lock_is_inside_target_not_parent(self):
+        """Regressão: numa instalação em Program Files o lock deve ficar DENTRO
+        da pasta do app (gravável) e nunca no pai (Permission denied)."""
+        from updater import _installation_lock
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "SIG"
+            target.mkdir()
+            log = root / "updater.log"
+            with _installation_lock(target, log):
+                self.assertTrue((target / ".SIG.sig-update.lock").exists())
+                self.assertFalse((root / ".SIG.sig-update.lock").exists())
+
+    def test_validate_tolerates_lock_with_app_prefix(self):
+        """O lock novo (.SIG.sig-update.lock) dentro da pasta NÃO é tratado como
+        item desconhecido pelo destino de instalação; um arquivo estranho sim."""
+        from updater import UpdateError, _is_update_lock, validate_full_install_destination
+
+        self.assertTrue(_is_update_lock(".SIG.sig-update.lock"))
+        self.assertTrue(_is_update_lock(".sig-update.lock"))
+        self.assertFalse(_is_update_lock("sig.exe"))
+        self.assertFalse(_is_update_lock("_internal"))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "SIG"
+            target.mkdir()
+            (target / ".SIG.sig-update.lock").write_bytes(b"0")
+            # Só o lock: destino de full válido (o lock é tolerado).
+            validate_full_install_destination(target)
+
+            (target / "arquivo_estranho.txt").write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(UpdateError, "itens desconhecidos"):
+                validate_full_install_destination(target)
+
 
 if __name__ == "__main__":
     unittest.main()
