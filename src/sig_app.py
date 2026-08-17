@@ -85,7 +85,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260817_004"
+APP_VERSION = "20260817_006"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
@@ -15149,7 +15149,11 @@ try {
                 "commit": commit,
                 "sample_rate": LIVE_SAMPLE_RATE,
             })
-            return bool(app.send(payload))
+            try:
+                app.send(payload)
+            except Exception:
+                return False
+            return True
 
         def on_open(_app):
             if _app is self.elevenlabs_ws_app:
@@ -15237,7 +15241,7 @@ try {
                 and not self.live_abort_event.is_set()
                 and not self.elevenlabs_ws_done_event.is_set()
             ):
-                self._queue("status", "Desconectado do Scribe; reconectando...")
+                self._queue("status", f"Erro do Scribe: {_error}")
                 self.elevenlabs_ws_lost_event.set()
 
         def on_close(_app, _status_code, _message):
@@ -15251,7 +15255,7 @@ try {
                 and not self.live_abort_event.is_set()
                 and not self.elevenlabs_ws_done_event.is_set()
             ):
-                self._queue("status", "Desconectado do Scribe; reconectando...")
+                self._queue("status", f"Scribe fechou a conexão (código {_status_code}): {_message}")
                 self.elevenlabs_ws_lost_event.set()
 
         def connect() -> bool:
