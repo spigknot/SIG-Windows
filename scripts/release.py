@@ -237,6 +237,48 @@ def latest_snapshot_before(root: Path, version: str) -> tuple[str, dict] | None:
     return max(candidates, key=lambda item: _version_parts(item[0]))
 
 
+def find_iscc() -> Path | None:
+    """Localiza o ISCC.exe do Inno Setup 6 (instalador)."""
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe",
+        Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def build_installer(root: Path, version: str) -> Path | None:
+    """Gera o instalador (Inno Setup) a partir do package validado.
+
+    O setup.exe é um canal ADICIONAL (instalação assistida com atalhos) e só
+    é publicado como asset do GitHub — o mecanismo de atualização continua
+    sendo o sync por arquivo / ZIP.
+    """
+    iscc = find_iscc()
+    if iscc is None:
+        print("AVISO: Inno Setup não encontrado — instalador não gerado.")
+        return None
+    setup_exe = root / "release" / "generated" / version / f"sig_setup_{version}.exe"
+    if setup_exe.exists():
+        setup_exe.unlink()
+    result = subprocess.run(
+        [str(iscc), f"-DAppVersion={version}", str(root / "installer" / "sig_installer.iss")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0 or not setup_exe.exists():
+        print("ERRO: falha ao gerar o instalador:")
+        print(result.stdout[-800:])
+        print(result.stderr[-800:])
+        return None
+    print(f"PASS: instalador gerado para GitHub: {setup_exe}")
+    return setup_exe
+
+
 def write_snapshot_entry(root: Path, version: str, files: dict[str, dict]) -> None:
     """Adiciona/substitui a entrada da versão no snapshot versionado."""
     snapshots = read_content_snapshots(root)
@@ -442,6 +484,7 @@ def build_release(args: argparse.Namespace) -> int:
             )
             print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
             print("PASS: incremental será publicada por sync_publish.py (arquivo por arquivo).")
+            build_installer(root, version)
         else:
             zip_path = output_root / f"{version}.zip"
             zip_directory(package_root, zip_path)
