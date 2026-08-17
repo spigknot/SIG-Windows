@@ -14742,7 +14742,7 @@ try {
         self.live_finalize_thread.start()
 
     def _wait_for_elevenlabs_final_event(self):
-        if self.elevenlabs_ws_done_event.wait(10):
+        if self.elevenlabs_ws_done_event.wait(3):
             return
         if self.live_state == "finalizing" and not self.live_abort_event.is_set():
             self.elevenlabs_ws_intentional_close = True
