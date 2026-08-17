@@ -208,6 +208,11 @@ DEEPSEEK_TEXT_NAME = "deepseek-v4-flash"
 IA_PROXY_NAME = "IA-Proxy"
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
 IA_PROXY_FALLBACK_URL = "http://avare:8500"
+SERVER_GEMMA_NAME = "servidor (gemma-4-26B-A4B-abliterated)"
+SERVER_GEMMA_MODEL = "gemma4"
+SERVER_GEMMA_URL = "http://servidor:8500/v1/chat/completions"
+SERVER_GEMMA_FALLBACK_URL = "http://avare:8500/v1/chat/completions"
+SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
 GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
 DEEPSEEK_API_NAMES = {DEEPSEEK_TEXT_NAME}
 DEFAULT_TRANSCRIPTION_SERVER_CONTENT = (
@@ -4873,6 +4878,24 @@ def read_text_models() -> list[dict]:
             "is_xai_proxy": True,
         },
         {
+            "name": SERVER_GEMMA_NAME,
+            "url": SERVER_GEMMA_URL,
+            "fallback_url": SERVER_GEMMA_FALLBACK_URL,
+            "parameters": {
+                "model": SERVER_GEMMA_MODEL,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "temperature": 0.0,
+                "seed": 1,
+                "top_k": 1,
+                "top_p": 1,
+            },
+            "selected": False,
+            "provider": "servidor",
+            "is_grok_api": False,
+            "is_deepseek_api": False,
+            "is_xai_proxy": False,
+        },
+        {
             "name": GROK_TEXT_NAME,
             "url": GROK_TEXT_URL,
             "parameters": {
@@ -5804,9 +5827,12 @@ def selected_text_model(
         if is_proxy
         else config["name"]
     )
-    if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME}:
+    if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME} | SERVER_GEMMA_NAMES:
         request_model = GROK_TEXT_NAME
     provider = "deepseek" if request_model == DEEPSEEK_TEXT_NAME else "xai"
+    if request_model in SERVER_GEMMA_NAMES:
+        request_model = SERVER_GEMMA_MODEL
+        provider = "servidor"
     reasoning = str(settings.get(reasoning_key) or settings.get(reasoning_fallback) or "").casefold()
     if request_model == DEEPSEEK_TEXT_NAME:
         reasoning = reasoning if reasoning in {"none", "low", "high", "max"} else "none"
@@ -5821,6 +5847,15 @@ def selected_text_model(
             "model": GROK_NON_REASONING_TEXT_NAME,
             "temperature": 0.0,
             "max_output_tokens": 10000,
+        }
+    elif provider == "servidor":
+        parameters = {
+            "model": SERVER_GEMMA_MODEL,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "temperature": 0.0,
+            "seed": 1,
+            "top_k": 1,
+            "top_p": 1,
         }
     else:
         reasoning = reasoning if reasoning in {"low", "medium", "high", "xhigh"} else "low"
@@ -6657,6 +6692,39 @@ class GraniteUploader:
 
 
 class TextModelClient:
+
+    def _count_input_tokens(self, url: str, fallback_url: str, model: str, system_prompt: str, material: str) -> int:
+        """max_tokens = quantidade de tokens do input.
+
+        Pergunta ao endpoint /tokenize do servidor (vLLM: POST {base}/tokenize
+        com {"model", "prompt"} -> {"count", "tokens"}). Quando o servidor não
+        responde, cai na estimativa local (4 caracteres por token).
+        """
+        text = f"{system_prompt}\n{material}"
+        bases = []
+        for candidate in (url, fallback_url):
+            if not candidate:
+                continue
+            if "/v1/chat/completions" in candidate:
+                candidate = candidate.rsplit("/v1/chat/completions", 1)[0]
+            bases.append(candidate.rstrip("/") + "/tokenize")
+        for tokenize_url in bases:
+            try:
+                request = urllib.request.Request(
+                    tokenize_url,
+                    data=json.dumps({"model": model, "prompt": text}, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    root = json.loads(response.read().decode("utf-8", errors="replace"))
+                count = root.get("count") if isinstance(root, dict) else None
+                if isinstance(count, int) and count > 0:
+                    return max(1, count)
+            except Exception:
+                continue
+        return max(1, round(len(text) / 4))
+
     def __init__(self, cancel_event: threading.Event):
         self.cancel_event = cancel_event
         self._lock = threading.Lock()
@@ -6709,6 +6777,19 @@ class TextModelClient:
                 {"role": "user", "content": material},
             ]
             payload.pop("input", None)
+        elif provider == "servidor":
+            payload["messages"] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": material},
+            ]
+            payload.pop("input", None)
+            payload["max_tokens"] = self._count_input_tokens(
+                str(model_config.get("url") or ""),
+                str(model_config.get("fallback_url") or ""),
+                str(payload.get("model") or SERVER_GEMMA_MODEL),
+                system_prompt,
+                material,
+            )
         elif "/api/generate" in parsed.path.lower():
             payload["system"] = system_prompt
             payload["prompt"] = material
