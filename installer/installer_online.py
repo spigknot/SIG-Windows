@@ -165,7 +165,7 @@ class InstallerApp:
             full_url = _github_full_asset_url()
             self._report("Baixando o pacote do GitHub...", 2)
             self.staged_zip = STAGING_DIR / "sig_full.zip"
-            self._download_with_progress(
+            _download_with_progress(
                 full_url, self.staged_zip, lambda d, t: self._report(
                     "Baixando o pacote do GitHub...", 2 + 96 * d / t
                 )
@@ -186,12 +186,12 @@ class InstallerApp:
     def _fallback_drive(self):
         try:
             state = self._download_sync_state(SYNC_MANIFEST_FILE_ID)
-            # O manifesto tem "download" (incremental — pode vir vazio) e
-            # "files" (a lista COMPLETA). Numa instalação, baixamos TUDO.
-            downloads = sorted((state.get("files") or {}).keys())
-            files = state.get("files") or {}
-            if not downloads:
+            # "files" é uma LISTA de dicts {path, sha256, size, drive_id, github_url}
+            entries = state.get("files") or []
+            if not entries:
                 raise RuntimeError("Manifesto do Drive sem arquivos para baixar.")
+            files = {entry.get("path", ""): entry for entry in entries if entry.get("path")}
+            downloads = sorted(files.keys())
             self.staged_files = []
             for index, path in enumerate(downloads):
                 entry = files[path]
