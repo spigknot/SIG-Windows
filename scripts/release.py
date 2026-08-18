@@ -279,6 +279,42 @@ def build_installer(root: Path, version: str) -> Path | None:
     return setup_exe
 
 
+def build_installer_online(root: Path, version: str) -> Path | None:
+    """Gera o instalador online (PyInstaller onefile + UAC).
+
+    O instalador online baixa o pacote full da última release do GitHub
+    (fallback: pasta sync do Drive) e instala com atalhos — sem pacote
+    embutido.
+    """
+    python = sys.executable
+    output = root / "release" / "generated" / version / "instalador-sig-online.exe"
+    if output.exists():
+        output.unlink()
+    work = root / "build" / "installer_online"
+    result = subprocess.run(
+        [
+            str(python), "-m", "PyInstaller", "--onefile", "--windowed", "--uac-admin",
+            "--name", "instalador-sig-online",
+            "--distpath", str(output.parent),
+            "--workpath", str(work),
+            "--specpath", str(work),
+            "--clean", "--noconfirm",
+            str(root / "installer" / "installer_online.py"),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0 or not output.exists():
+        print("ERRO: falha ao gerar o instalador online:")
+        print(result.stdout[-1000:])
+        print(result.stderr[-1000:])
+        return None
+    print(f"PASS: instalador online gerado para GitHub: {output}")
+    return output
+
+
 def write_snapshot_entry(root: Path, version: str, files: dict[str, dict]) -> None:
     """Adiciona/substitui a entrada da versão no snapshot versionado."""
     snapshots = read_content_snapshots(root)
@@ -514,6 +550,7 @@ def build_release(args: argparse.Namespace) -> int:
             print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
             print("PASS: incremental será publicada por sync_publish.py (arquivo por arquivo).")
             build_installer(root, version)
+            build_installer_online(root, version)
         else:
             zip_path = output_root / f"{version}.zip"
             zip_directory(package_root, zip_path)
