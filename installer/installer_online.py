@@ -150,6 +150,24 @@ class InstallerApp:
                         "SIG", f"Não foi possível baixar o pacote:\n{message[1]}"
                     )
                     continue
+                if isinstance(message, tuple) and message[0] == "FAIL_INSTALL":
+                    self.install_button.configure(text="Instalar")
+                    self.install_button.configure(state="normal")
+                    messagebox.showerror(
+                        "SIG", f"Não foi possível instalar:\n{message[1]}"
+                    )
+                    continue
+                if isinstance(message, tuple) and message[0] == "DONE":
+                    app_dir = message[1]
+                    self.status_var.set("SIG instalado com sucesso.")
+                    try:
+                        import subprocess
+                        subprocess.Popen([str(Path(app_dir) / "sig.exe")], cwd=str(app_dir))
+                    except Exception:
+                        pass
+                    messagebox.showinfo("SIG", f"SIG instalado em {app_dir}.")
+                    self.root.destroy()
+                    continue
                 status, percent = message
                 self.status_var.set(status)
                 self.progress["value"] = percent
@@ -226,12 +244,18 @@ class InstallerApp:
             return json.loads(response.read().decode("utf-8", errors="replace"))
 
     def install(self):
+        self.install_button.configure(state="disabled")
+        self.install_button.configure(text="Instalando...")
+        threading.Thread(target=self._install_worker, daemon=True).start()
+
+    def _install_worker(self):
         try:
-            self.install_button.configure(state="disabled")
-            self._report("Instalando...", 0)
-            # NÃO apagar o STAGING_DIR: o download (zip do GitHub ou a pasta
-            # sync/ do Drive) está exatamente nele!
-            self._report("Extraindo os arquivos...", 10)
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+            except Exception:
+                pass
+            self._report("Extraindo os arquivos...", 5)
             if self.staged_zip is not None and self.staged_zip.exists():
                 with zipfile.ZipFile(self.staged_zip) as archive:
                     archive.extractall(STAGING_DIR / "extracted")
@@ -239,28 +263,19 @@ class InstallerApp:
             else:
                 source_root = STAGING_DIR / "sync"
             APP_DIR.mkdir(parents=True, exist_ok=True)
-            files = list(source_root.rglob("*"))
+            files = [item for item in source_root.rglob("*") if item.is_file()]
             for index, item in enumerate(files):
-                if item.is_file():
-                    relative = item.relative_to(source_root)
-                    target = APP_DIR / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, target)
-                self._report("Extraindo os arquivos...", 10 + 70 * index / max(len(files), 1))
-            self._report("Criando os atalhos...", 85)
+                relative = item.relative_to(source_root)
+                target = APP_DIR / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+                self._report("Instalando...", 5 + 85 * index / max(len(files), 1))
+            self._report("Criando os atalhos...", 92)
             self._create_shortcuts()
             self._report("Instalação concluída!", 100)
-            self.status_var.set("SIG instalado com sucesso.")
-            try:
-                import subprocess
-                subprocess.Popen([str(APP_DIR / "sig.exe")], cwd=str(APP_DIR))
-            except Exception:
-                pass
-            messagebox.showinfo("SIG", f"SIG instalado em {APP_DIR}.")
-            self.root.destroy()
+            self._messages.put(("DONE", str(APP_DIR)))
         except Exception as error:
-            self._report(f"Falha na instalação: {error}", 0)
-            messagebox.showerror("SIG", f"Não foi possível instalar:\n{error}")
+            self._messages.put(("FAIL_INSTALL", str(error)))
 
     def _create_shortcuts(self):
         import win32com.client  # pywin32
