@@ -229,11 +229,10 @@ class InstallerApp:
         try:
             self.install_button.configure(state="disabled")
             self._report("Instalando...", 0)
-            if STAGING_DIR.exists():
-                shutil.rmtree(STAGING_DIR, ignore_errors=True)
-            STAGING_DIR.mkdir(parents=True, exist_ok=True)
+            # NÃO apagar o STAGING_DIR: o download (zip do GitHub ou a pasta
+            # sync/ do Drive) está exatamente nele!
             self._report("Extraindo os arquivos...", 10)
-            if self.staged_zip is not None:
+            if self.staged_zip is not None and self.staged_zip.exists():
                 with zipfile.ZipFile(self.staged_zip) as archive:
                     archive.extractall(STAGING_DIR / "extracted")
                 source_root = STAGING_DIR / "extracted"
