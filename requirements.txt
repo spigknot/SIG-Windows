@@ -12,7 +12,6 @@ pillow==12.3.0
 pypdfium2==5.13.0
 sounddevice==0.5.5
 websocket-client==1.9.0
-websockets==15.0.1
 pywin32==311
 # Assinatura do manifesto (release.py):
 cryptography==50.0.0
