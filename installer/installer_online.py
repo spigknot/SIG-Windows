@@ -160,6 +160,7 @@ class InstallerApp:
 
     def _download_worker(self):
         try:
+            STAGING_DIR.mkdir(parents=True, exist_ok=True)
             self._report("Localizando o pacote mais recente no GitHub...", 1)
             full_url = _github_full_asset_url()
             self._report("Baixando o pacote do GitHub...", 2)
@@ -173,13 +174,21 @@ class InstallerApp:
             self._report("Download concluído — clique em Instalar.", 100)
             self._messages.put(("ENABLE", 100))
         except Exception as error:
-            self._report(f"GitHub indisponível ({type(error).__name__}); tentando o Drive...", 2)
+            import traceback
+            detail = traceback.format_exc(limit=4)
+            self._report(
+                f"GitHub indisponível ({type(error).__name__}); tentando o Drive...",
+                2,
+            )
+            print(detail, file=sys.stderr)
             self._fallback_drive()
 
     def _fallback_drive(self):
         try:
             state = self._download_sync_state(SYNC_MANIFEST_FILE_ID)
-            downloads = state.get("download") or []
+            # O manifesto tem "download" (incremental — pode vir vazio) e
+            # "files" (a lista COMPLETA). Numa instalação, baixamos TUDO.
+            downloads = sorted((state.get("files") or {}).keys())
             files = state.get("files") or {}
             if not downloads:
                 raise RuntimeError("Manifesto do Drive sem arquivos para baixar.")
@@ -203,8 +212,10 @@ class InstallerApp:
             self._report("Download concluído — clique em Instalar.", 100)
             self._messages.put(("ENABLE", 100))
         except Exception as error:
+            import traceback
+            detail = traceback.format_exc(limit=3)
             self._report(f"Falha também no Drive: {error}", 0)
-            self._messages.put(("FAIL", str(error)))
+            self._messages.put(("FAIL", f"{error}\n{detail}"))
 
     @staticmethod
     def _download_sync_state(file_id: str) -> dict:
