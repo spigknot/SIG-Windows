@@ -260,7 +260,7 @@ def build_installer(root: Path, version: str) -> Path | None:
     if iscc is None:
         print("AVISO: Inno Setup não encontrado — instalador não gerado.")
         return None
-    setup_exe = root / "release" / "generated" / version / f"sig_setup_{version}.exe"
+    setup_exe = root / "release" / "generated" / version / f"setup_sig_{version}.exe"
     if setup_exe.exists():
         setup_exe.unlink()
     result = subprocess.run(
@@ -287,14 +287,14 @@ def build_installer_online(root: Path, version: str) -> Path | None:
     embutido.
     """
     python = sys.executable
-    output = root / "release" / "generated" / version / "instalador-sig-online.exe"
+    output = root / "release" / "generated" / version / f"online_setup_sig{version}.exe"
     if output.exists():
         output.unlink()
     work = root / "build" / "installer_online"
     result = subprocess.run(
         [
             str(python), "-m", "PyInstaller", "--onefile", "--windowed", "--uac-admin",
-            "--name", "instalador-sig-online",
+            "--name", f"online_setup_sig{version}",
             "--distpath", str(output.parent),
             "--workpath", str(work),
             "--specpath", str(work),
