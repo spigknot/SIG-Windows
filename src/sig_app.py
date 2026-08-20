@@ -12903,9 +12903,6 @@ try {
         frame.bind("<Configure>", _on_cfg_frame_configure)
         win.bind("<MouseWheel>", lambda e: win_canvas.yview_scroll(int(-e.delta / 120), "units"))
         win.update_idletasks()
-        _sw = self.root.winfo_screenwidth()
-        _sh = self.root.winfo_screenheight()
-        win.geometry(f"{min(frame.winfo_reqwidth() + 46, _sw - 40)}x{min(frame.winfo_reqheight() + 46, _sh - 60)}")
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
@@ -14165,6 +14162,10 @@ try {
                 normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
+        win.update_idletasks()
+        _sw = self.root.winfo_screenwidth()
+        _sh = self.root.winfo_screenheight()
+        win.geometry(f"{min(frame.winfo_reqwidth() + 46, _sw - 40)}x{min(frame.winfo_reqheight() + 46, _sh - 60)}")
         win.wait_visibility()
         win.focus()
     def open_about(self):
