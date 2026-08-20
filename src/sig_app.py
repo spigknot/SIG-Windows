@@ -1895,22 +1895,22 @@ class FfmpegToolsPanel:
 
     def _section_title(self, parent, title: str, detail: str) -> None:
         ttk.Label(parent, text=title, font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        ttk.Label(parent, text=detail, style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(3, 14))
+        ttk.Label(parent, text=detail, style="Muted.TLabel", wraplength=self._scaled(850)).pack(anchor="w", pady=(3, 14))
 
     def _file_row(self, parent, variable: StringVar, command, label: str = "Selecionar arquivo") -> None:
         row = ttk.Frame(parent)
         row.pack(fill=X, pady=(0, 12))
         ttk.Button(row, text=label, command=command).pack(side=LEFT)
-        ttk.Label(row, textvariable=variable, style="Muted.TLabel", wraplength=720).pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
+        ttk.Label(row, textvariable=variable, style="Muted.TLabel", wraplength=self._scaled(720)).pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
 
     def _create_stable_preview(self, parent, message: str, size: int = 312) -> Canvas:
         """Área quadrada fixa: a orientação da mídia não altera o layout."""
-        holder = ttk.Frame(parent, width=size, height=size)
+        holder = ttk.Frame(parent, width=self._scaled(size), height=self._scaled(size))
         holder.pack(anchor="center", pady=(0, 6))
         holder.pack_propagate(False)
         canvas = Canvas(holder, highlightthickness=0, background="#f4f7f6")
         canvas.pack(fill=BOTH, expand=True)
-        canvas.create_text(size // 2, size // 2, text=message, fill="#667371", font=("Segoe UI", 10))
+        canvas.create_text(self._scaled(size) // 2, self._scaled(size) // 2, text=message, fill="#667371", font=("Segoe UI", 10))
         return canvas
 
     def _add_preview_speed_controls(self, parent):
@@ -8702,8 +8702,8 @@ try {
         self.live_qualification_text_row.pack(fill=X)
         self.live_qualification_editor_host = ttk.Frame(
             self.live_qualification_text_row,
-            width=346,
-            height=135,
+            width=self._scaled(346),
+            height=self._scaled(135),
         )
         self.live_qualification_editor_host.pack(side=LEFT, fill=Y)
         self.live_qualification_editor_host.pack_propagate(False)
@@ -10083,24 +10083,24 @@ try {
         )
         # Reserva um vão fixo entre a qualificação e o player para o botão
         # "Gerar documento" (equidistante das duas caixas).
-        reserved_gap = 116
+        reserved_gap = self._scaled(116)
         target_left = max(0, round(qualification_right + reserved_gap))
-        available_width = max(220, content.winfo_width() - target_left)
+        available_width = max(self._scaled(220), content.winfo_width() - target_left)
         # The qualification stack is anchored at the bottom of its column. Its
         # editor therefore must fit between its action row and the top of the
         # row. Both boxes (qualification and player) share EXACTLY the same
         # height, including the 1,3 cm preview bonus, so their top and bottom
         # edges stay perfectly aligned on resize or restore.
-        action_height = max(31, self.live_qualification_actions.winfo_height())
+        action_height = max(self._scaled(31), self.live_qualification_actions.winfo_height())
         extra_height = self._document_preview_extra_height()
         stage_height = max(
-            180,
-            min(520, available_height - action_height - 4 - extra_height),
+            self._scaled(180),
+            min(self._scaled(520), available_height - action_height - 4 - extra_height),
         )
         # Keep the document preview comfortably sized without letting the
         # player occupy all of the lower workspace.  The surrounding panel
         # remains in place so the other occurrence controls do not shift.
-        stage_width = max(220, min(1120, round(available_width * 0.77 * 0.92)))
+        stage_width = max(self._scaled(220), min(self._scaled(1120), round(available_width * 0.77 * 0.92)))
         stage.configure(
             width=stage_width,
             height=stage_height + extra_height,
@@ -10133,7 +10133,7 @@ try {
             + qualification_editor.winfo_width()
             - content.winfo_rootx()
         )
-        gap_center_x = round(qualification_right + 116 / 2)
+        gap_center_x = round(qualification_right + self._scaled(116) / 2)
         editor_top = max(0, qualification_editor.winfo_rooty() - content.winfo_rooty())
         editor_height = max(1, qualification_editor.winfo_height())
         box_center_y = editor_top + editor_height // 2
@@ -10142,7 +10142,7 @@ try {
         frame_height = max(1, frame.winfo_reqheight())
         frame.place(
             x=round(gap_center_x - frame_width / 2),
-            y=round(box_center_y - (frame_height - button_height / 2)),
+            y=max(0, round(box_center_y - (frame_height - button_height / 2))),
             width=frame_width,
             height=frame_height,
         )
@@ -14206,31 +14206,31 @@ try {
         try:
             with Image.open(image_path) as source:
                 source = source.convert("RGBA")
-                image_width = 415
+                image_width = self._scaled(415)
                 image_height = round(source.height * image_width / source.width)
                 source = source.resize((image_width, image_height), Image.Resampling.LANCZOS)
                 self.about_image = ImageTk.PhotoImage(source)
-            canvas.create_image(210, 0, anchor="n", image=self.about_image)
+            canvas.create_image(self._scaled(210), 0, anchor="n", image=self.about_image)
         except Exception:
-            canvas.create_rectangle(0, 0, 420, 556, fill="#14201f", outline="")
+            canvas.create_rectangle(0, 0, self._scaled(420), self._scaled(556), fill="#14201f", outline="")
 
         canvas.create_text(
-            210,
-            586,
+            self._scaled(210),
+            self._scaled(586),
             text="Delegacia de Taguaí",
             fill="#ffffff",
             font=("Segoe UI Semibold", 13),
         )
         canvas.create_text(
-            210,
-            612,
+            self._scaled(210),
+            self._scaled(612),
             text="Setor de Investigações Gerais",
             fill="#e1f0ef",
             font=("Segoe UI", 10),
         )
         canvas.create_text(
-            210,
-            628,
+            self._scaled(210),
+            self._scaled(628),
             text=f"Versão: {APP_VERSION}",
             fill="#9bb3b0",
             font=("Segoe UI", 9),
@@ -14242,11 +14242,11 @@ try {
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", close_about)
-        win.geometry(f"{min(420, self.root.winfo_screenwidth() - 40)}x{min(638, self.root.winfo_screenheight() - 40)}")
+        win.geometry(f"{min(self._scaled(420), self.root.winfo_screenwidth() - 40)}x{min(self._scaled(638), self.root.winfo_screenheight() - 40)}")
         win.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
         y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - win.winfo_height()) // 2)
-        win.geometry(f"{min(420, self.root.winfo_screenwidth() - 40)}x{min(638, self.root.winfo_screenheight() - 40)}+{x}+{y}")
+        win.geometry(f"{min(self._scaled(420), self.root.winfo_screenwidth() - 40)}x{min(self._scaled(638), self.root.winfo_screenheight() - 40)}+{x}+{y}")
         win.wait_visibility()
         win.lift()
         win.focus_force()
@@ -14330,7 +14330,7 @@ try {
 
                 # Requisição HTTP
                 try:
-                    conn = _http.HTTPConnection(parsed.hostname, 8100, timeout=5)
+                    conn = _http.HTTPConnection(parsed.hostname, 8100, timeout=1)
                     conn.request("GET", "/health")
                     resp = conn.getresponse()
                     raw = resp.read().decode("utf-8", errors="replace")
@@ -14437,9 +14437,15 @@ try {
                 except Exception as exc:
                     canvas.create_text(
                         center_x, y,
-                        text=f"Erro: {exc}",
+                        text="Offline",
                         fill="#e74c3c",
                         font=("Consolas", 9),
+                    )
+                    canvas.create_text(
+                        center_x, y + 14,
+                        text=str(exc)[:60],
+                        fill="#889493",
+                        font=("Consolas", 8),
                     )
                     y += 16
 
@@ -14448,11 +14454,14 @@ try {
 
             content_height = max_y + 24
 
-        height = min(max(content_height, 200), 1200)
+        height = min(max(content_height, self._scaled(200)), self._scaled(1200))
         canvas.configure(height=height)
-        status_width = 1200 if len(granite_servers) >= 2 else 600
+        status_width = self._scaled(1200) if len(granite_servers) >= 2 else self._scaled(600)
         canvas.configure(width=status_width)
-        win.geometry(f"{status_width}x{height}")
+        win.geometry(
+            f"{min(status_width, self.root.winfo_screenwidth() - 40)}x"
+            f"{min(height, self.root.winfo_screenheight() - 60)}"
+        )
 
         win.transient(self.root)
         win.wait_visibility()
