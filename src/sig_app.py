@@ -1773,17 +1773,8 @@ class FfmpegToolsPanel:
     def _build(self, parent) -> None:
         outer = ttk.Frame(parent)
         outer.pack(fill=BOTH, expand=True)
-        self.ffmpeg_scroll_canvas = Canvas(outer, highlightthickness=0, background="#f4f7f6")
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self.ffmpeg_scroll_canvas.yview)
-        self.ffmpeg_scroll_canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=RIGHT, fill=Y)
-        self.ffmpeg_scroll_canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        frame = ttk.Frame(self.ffmpeg_scroll_canvas)
-        self.ffmpeg_scroll_window = self.ffmpeg_scroll_canvas.create_window((0, 0), window=frame, anchor="nw")
-        frame.bind("<Configure>", self._update_ffmpeg_scroll_region)
-        self.ffmpeg_scroll_canvas.bind("<Configure>", self._resize_ffmpeg_scroll_content)
-        self.ffmpeg_scroll_canvas.bind("<Enter>", lambda _event: self.ffmpeg_scroll_canvas.bind_all("<MouseWheel>", self._scroll_ffmpeg_panel))
-        self.ffmpeg_scroll_canvas.bind("<Leave>", lambda _event: self.ffmpeg_scroll_canvas.unbind_all("<MouseWheel>"))
+        frame = ttk.Frame(outer)
+        frame.pack(fill=BOTH, expand=True)
 
         tool_tab_bar = self.tk.Frame(frame, background="#f4f7f6")
         tool_tab_bar.pack(fill=X, pady=(0, 8))
@@ -1883,15 +1874,6 @@ class FfmpegToolsPanel:
         self.cancel_button = ttk.Button(actions, text="Cancelar", command=self.cancel, state="disabled")
         self.cancel_button.pack(side=LEFT, padx=(8, 0))
 
-
-    def _update_ffmpeg_scroll_region(self, _event=None) -> None:
-        self.ffmpeg_scroll_canvas.configure(scrollregion=self.ffmpeg_scroll_canvas.bbox("all"))
-
-    def _resize_ffmpeg_scroll_content(self, event) -> None:
-        self.ffmpeg_scroll_canvas.itemconfigure(self.ffmpeg_scroll_window, width=event.width)
-
-    def _scroll_ffmpeg_panel(self, event) -> None:
-        self.ffmpeg_scroll_canvas.yview_scroll(-max(1, event.delta // 120), "units")
 
     def _section_title(self, parent, title: str, detail: str) -> None:
         ttk.Label(parent, text=title, font=("Segoe UI Semibold", 14)).pack(anchor="w")
