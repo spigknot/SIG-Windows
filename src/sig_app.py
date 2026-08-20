@@ -12887,7 +12887,7 @@ try {
         win = Toplevel(self.root)
         win.title("Configurações")
         win.resizable(False, False)
-        win_canvas = tk.Canvas(win, highlightthickness=0)
+        win_canvas = tkinter.Canvas(win, highlightthickness=0)
         win_scroll = ttk.Scrollbar(win, orient="vertical", command=win_canvas.yview)
         win_canvas.configure(yscrollcommand=win_scroll.set)
         win_scroll.pack(side=RIGHT, fill=Y)
@@ -12897,7 +12897,8 @@ try {
 
         def _on_cfg_frame_configure(_event):
             win_canvas.configure(scrollregion=win_canvas.bbox("all"))
-            win_canvas.itemconfigure(_cfg_frame_id, width=win_canvas.winfo_width())
+            _w = max(win_canvas.winfo_width(), frame.winfo_reqwidth())
+            win_canvas.itemconfigure(_cfg_frame_id, width=_w)
 
         frame.bind("<Configure>", _on_cfg_frame_configure)
         win.bind("<MouseWheel>", lambda e: win_canvas.yview_scroll(int(-e.delta / 120), "units"))
