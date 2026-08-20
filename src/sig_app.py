@@ -1763,6 +1763,10 @@ class FfmpegToolsPanel:
         self.root.after(33, self._poll_preview_frames)
         threading.Thread(target=self._load_available_accelerations, daemon=True).start()
 
+    def _scaled(self, value: int) -> int:
+        """Aplica o fator de escala da UI (referência 1920x1080)."""
+        return max(1, int(round(value * getattr(self.app, "ui_scale", 1.0))))
+
     @staticmethod
     def _filetypes():
         return [
