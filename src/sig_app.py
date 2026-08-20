@@ -6879,10 +6879,6 @@ class SigApp:
         self.root = root
         self.root.title("sig")
         self._apply_window_icon()
-        self.root.geometry(f"{self._scaled(1260)}x{self._scaled(960)}")
-        self.root.minsize(self._scaled(1220), self._scaled(820))
-        if os.name == "nt":
-            self.root.state("zoomed")
         # Escala proporcional da UI (referência 1920x1080; piso 0.70 — nunca
         # comprime a ponto de ficar ilegível). Multiplica fontes (tk scaling),
         # tamanhos e janela; NÃO move nada do lugar.
@@ -6894,6 +6890,10 @@ class SigApp:
             self.root.tk.call("tk", "scaling", base_scaling * self.ui_scale)
         except Exception:
             self.ui_scale = 1.0
+        self.root.geometry(f"{self._scaled(1260)}x{self._scaled(960)}")
+        self.root.minsize(self._scaled(1220), self._scaled(820))
+        if os.name == "nt":
+            self.root.state("zoomed")
         self.settings = load_settings()
         try:
             self.document_templates = ensure_document_templates()
