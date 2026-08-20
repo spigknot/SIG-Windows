@@ -8714,6 +8714,7 @@ try {
             width=346,
             height=135,
             vertical_padding=(0, 0),
+            stretch=True,
         )
         self.live_qualification_execute_frame = ttk.Frame(self.live_qualification_content)
         self.live_qualification_declarations_check = ttk.Checkbutton(
@@ -11400,10 +11401,12 @@ try {
         width: int = 900,
         height: int = 180,
         vertical_padding: tuple[int, int] = (8, 0),
+        stretch: bool = False,
     ):
         frame = ttk.Frame(parent, width=self._scaled(width), height=self._scaled(height))
-        frame.pack(fill=X, expand=True, pady=vertical_padding)
-        frame.pack_propagate(False)
+        frame.pack(fill=BOTH if stretch else X, expand=stretch, pady=vertical_padding)
+        if not stretch:
+            frame.pack_propagate(False)
         text = Text(frame, width=1, height=8, wrap="word", undo=True, font=("Segoe UI", 10), background="#ffffff", foreground="#10201f", relief="solid", borderwidth=1, padx=8, pady=7)
         placeholder_text = {
             "transcript": "A transcrição da entrevista será gerada aqui.",
@@ -12898,8 +12901,24 @@ try {
         win = Toplevel(self.root)
         win.title("Configurações")
         win.resizable(False, False)
-        frame = ttk.Frame(win, padding=18)
-        frame.pack(fill=BOTH, expand=True)
+        win_canvas = tk.Canvas(win, highlightthickness=0)
+        win_scroll = ttk.Scrollbar(win, orient="vertical", command=win_canvas.yview)
+        win_canvas.configure(yscrollcommand=win_scroll.set)
+        win_scroll.pack(side=RIGHT, fill=Y)
+        win_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        frame = ttk.Frame(win_canvas, padding=18)
+        _cfg_frame_id = win_canvas.create_window((0, 0), window=frame, anchor="nw")
+
+        def _on_cfg_frame_configure(_event):
+            win_canvas.configure(scrollregion=win_canvas.bbox("all"))
+            win_canvas.itemconfigure(_cfg_frame_id, width=win_canvas.winfo_width())
+
+        frame.bind("<Configure>", _on_cfg_frame_configure)
+        win.bind("<MouseWheel>", lambda e: win_canvas.yview_scroll(int(-e.delta / 120), "units"))
+        win.update_idletasks()
+        _sw = self.root.winfo_screenwidth()
+        _sh = self.root.winfo_screenheight()
+        win.geometry(f"{min(frame.winfo_reqwidth() + 46, _sw - 40)}x{min(frame.winfo_reqheight() + 46, _sh - 60)}")
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
@@ -14223,11 +14242,11 @@ try {
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", close_about)
-        win.geometry(f"{self._scaled(420)}x{self._scaled(638)}")
+        win.geometry(f"{min(420, self.root.winfo_screenwidth() - 40)}x{min(638, self.root.winfo_screenheight() - 40)}")
         win.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
         y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - win.winfo_height()) // 2)
-        win.geometry(f"{self._scaled(420)}x{self._scaled(638)}+{x}+{y}")
+        win.geometry(f"{min(420, self.root.winfo_screenwidth() - 40)}x{min(638, self.root.winfo_screenheight() - 40)}+{x}+{y}")
         win.wait_visibility()
         win.lift()
         win.focus_force()
@@ -14242,7 +14261,17 @@ try {
         win.title("Status dos servidores")
         win.resizable(False, False)
         canvas = Canvas(win, width=self._scaled(1200), height=self._scaled(1200), highlightthickness=0, background="#000000")
-        canvas.pack(fill=BOTH, expand=True)
+        canvas.configure(scrollregion=(0, 0, self._scaled(1200), self._scaled(1200)))
+        canvas_scroll = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=canvas_scroll.set)
+        canvas_scroll.pack(side=RIGHT, fill=Y)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        win.update_idletasks()
+        win.geometry(
+            f"{min(self._scaled(1200), self.root.winfo_screenwidth() - 40)}x"
+            f"{min(self._scaled(1200), self.root.winfo_screenheight() - 60)}"
+        )
 
         # Título
         canvas.create_text(
