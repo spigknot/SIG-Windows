@@ -6879,10 +6879,21 @@ class SigApp:
         self.root = root
         self.root.title("sig")
         self._apply_window_icon()
-        self.root.geometry("1260x960")
-        self.root.minsize(1220, 820)
+        self.root.geometry(f"{self._scaled(1260)}x{self._scaled(960)}")
+        self.root.minsize(self._scaled(1220), self._scaled(820))
         if os.name == "nt":
             self.root.state("zoomed")
+        # Escala proporcional da UI (referência 1920x1080; piso 0.70 — nunca
+        # comprime a ponto de ficar ilegível). Multiplica fontes (tk scaling),
+        # tamanhos e janela; NÃO move nada do lugar.
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            self.ui_scale = max(min(screen_w / 1920.0, screen_h / 1080.0), 0.70)
+            base_scaling = float(self.root.tk.call("tk", "scaling"))
+            self.root.tk.call("tk", "scaling", base_scaling * self.ui_scale)
+        except Exception:
+            self.ui_scale = 1.0
         self.settings = load_settings()
         try:
             self.document_templates = ensure_document_templates()
@@ -7153,6 +7164,10 @@ class SigApp:
         self.root.after(100, self._refresh_assistant_progress_clock)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _scaled(self, value: int) -> int:
+        """Aplica o fator de escala da UI (referência 1920x1080)."""
+        return max(1, int(round(value * self.ui_scale)))
 
     def _build_style(self):
         style = ttk.Style()
@@ -8340,7 +8355,7 @@ try {
 
         # The live workflow intentionally keeps transcript, history and statement together,
         # matching the Android screen.  The old assistant frame remains internal only.
-        live_frame = ttk.Frame(self.live_tab, width=900)
+        live_frame = ttk.Frame(self.live_tab, width=self._scaled(900))
         live_frame.pack(fill=BOTH, expand=True, anchor="n")
         live_top = ttk.Frame(live_frame)
         live_top.pack(fill=X)
@@ -8427,7 +8442,7 @@ try {
         )
         self.live_timer_label.pack(side=LEFT)
 
-        self.live_transcript_area = ttk.Frame(live_frame, width=900)
+        self.live_transcript_area = ttk.Frame(live_frame, width=self._scaled(900))
         self.live_transcript_area.pack(fill=X)
         self.live_primary_pane = ttk.Frame(self.live_transcript_area)
         self.live_primary_pane.pack(side=LEFT, fill=X, expand=True)
@@ -8509,7 +8524,7 @@ try {
             )
         self._refresh_primary_transcript_actions(False)
 
-        self.live_history_area = ttk.Frame(live_frame, width=900)
+        self.live_history_area = ttk.Frame(live_frame, width=self._scaled(900))
         self.live_history_area.pack(fill=X)
         self.live_history_area.columnconfigure(0, weight=1, uniform="live_history_panes")
         self.live_history_area.columnconfigure(1, minsize=10)
@@ -8589,7 +8604,7 @@ try {
             self.live_history_secondary_pane, "history2", self.request_live_statement_2, self.live_assistant_part_var_2
         )
 
-        self.live_statement_area = ttk.Frame(live_frame, width=900)
+        self.live_statement_area = ttk.Frame(live_frame, width=self._scaled(900))
         self.live_statement_area.pack(fill=X)
         self.live_statement_area.columnconfigure(0, weight=1, uniform="live_statement_panes")
         self.live_statement_area.columnconfigure(1, minsize=10)
@@ -8648,7 +8663,7 @@ try {
         )
         self._refresh_multi_text_visibility()
 
-        self.live_qualification_row = ttk.Frame(live_frame, width=900)
+        self.live_qualification_row = ttk.Frame(live_frame, width=self._scaled(900))
         self.live_qualification_row.pack(fill=BOTH, expand=True)
         self.live_qualification_content = ttk.Frame(self.live_qualification_row)
         # The lower occurrence workspace must use all remaining height.  Packing
@@ -8657,7 +8672,7 @@ try {
         self.live_qualification_content.pack(fill=BOTH, expand=True)
         self.live_qualification_content.rowconfigure(0, weight=1)
         self.live_qualification_content.columnconfigure(
-            0, minsize=640, weight=0
+            0, minsize=self._scaled(640), weight=0
         )
         self.live_qualification_content.columnconfigure(1, minsize=18, weight=0)
         self.live_qualification_content.columnconfigure(
@@ -8998,7 +9013,7 @@ try {
         imei_frame.pack(fill=BOTH, expand=True)
         ttk.Label(imei_frame, text="IMEI", style="Muted.TLabel").pack(anchor="w", pady=(16, 4))
 
-        imei_inputs = ttk.Frame(imei_frame, width=900)
+        imei_inputs = ttk.Frame(imei_frame, width=self._scaled(900))
         imei_inputs.pack(anchor="w")
         tac_box = ttk.Frame(imei_inputs)
         tac_box.pack(side=LEFT, padx=(0, 7))
@@ -9052,7 +9067,7 @@ try {
             style="Muted.TLabel",
         ).pack(anchor="center", pady=(4, 0))
 
-        self.imei_history_container = ttk.Frame(imei_frame, width=900)
+        self.imei_history_container = ttk.Frame(imei_frame, width=self._scaled(900))
         self.imei_history_container.pack(anchor="w", pady=(28, 0))
         history_header = ttk.Frame(self.imei_history_container)
         history_header.pack(fill=X)
@@ -9201,7 +9216,7 @@ try {
         self.tree.heading("arquivo", text="Arquivo original")
         self.tree.heading("tamanho", text="Tamanho")
         self.tree.heading("status", text="Status")
-        self.tree.column("arquivo", width=440, anchor="w")
+        self.tree.column("arquivo", width=self._scaled(440), anchor="w")
         self.tree.column("tamanho", width=90, anchor="center")
         self.tree.column("status", width=230, anchor="w")
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
@@ -9222,7 +9237,7 @@ try {
 
     def _build_qualification_tab(self) -> None:
         """Monta a área de entrada e saída da ferramenta Qualificação."""
-        frame = ttk.Frame(self.qualification_tab, width=900)
+        frame = ttk.Frame(self.qualification_tab, width=self._scaled(900))
         frame.pack(fill=X, anchor="n")
 
         self.qualification_select_all_check = ttk.Checkbutton(
@@ -11386,7 +11401,7 @@ try {
         height: int = 180,
         vertical_padding: tuple[int, int] = (8, 0),
     ):
-        frame = ttk.Frame(parent, width=width, height=height)
+        frame = ttk.Frame(parent, width=self._scaled(width), height=self._scaled(height))
         frame.pack(fill=X, expand=True, pady=vertical_padding)
         frame.pack_propagate(False)
         text = Text(frame, width=1, height=8, wrap="word", undo=True, font=("Segoe UI", 10), background="#ffffff", foreground="#10201f", relief="solid", borderwidth=1, padx=8, pady=7)
@@ -11918,7 +11933,7 @@ try {
         viewer = Toplevel(self.root)
         viewer.title(f"Visualizar documento — {document_path.stem}")
         viewer.transient(self.root)
-        viewer.geometry("640x480")
+        viewer.geometry(f"{self._scaled(640)}x{self._scaled(480)}")
         viewer_frame = ttk.Frame(viewer, padding=(10, 10))
         viewer_frame.pack(fill=BOTH, expand=True)
         canvas = Canvas(
@@ -12521,12 +12536,12 @@ try {
     def _refresh_multi_model_layout(self):
         enabled = bool(self.multi_model_var.get() and self.multi_model_secondary)
         if enabled:
-            self.live_text._editor_frame.configure(width=440)
+            self.live_text._editor_frame.configure(width=self._scaled(440))
             if not self.live_secondary_pane.winfo_manager():
                 self.live_secondary_pane.pack(side=LEFT, fill=X, expand=True, padx=(10, 0))
         else:
             self.live_secondary_pane.pack_forget()
-            self.live_text._editor_frame.configure(width=900)
+            self.live_text._editor_frame.configure(width=self._scaled(900))
         self._refresh_primary_transcript_actions(enabled)
         self._refresh_assistant_model_label()
 
@@ -12550,7 +12565,7 @@ try {
                 area.columnconfigure(0, weight=1, uniform="live_multi_text_panes")
                 area.columnconfigure(1, minsize=10)
                 area.columnconfigure(2, weight=1, uniform="live_multi_text_panes")
-                primary_text._editor_frame.configure(width=440)
+                primary_text._editor_frame.configure(width=self._scaled(440))
                 if not secondary_pane.winfo_manager():
                     secondary_pane.grid(row=0, column=2, sticky="ew")
             else:
@@ -12558,7 +12573,7 @@ try {
                 area.columnconfigure(0, weight=1, uniform="")
                 area.columnconfigure(1, minsize=0)
                 area.columnconfigure(2, weight=0, uniform="")
-                primary_text._editor_frame.configure(width=900)
+                primary_text._editor_frame.configure(width=self._scaled(900))
         self._refresh_assistant_model_label()
 
     def _refresh_primary_transcript_actions(self, compact: bool):
@@ -14165,7 +14180,7 @@ try {
         win.resizable(False, False)
         win.transient(self.root)
         win.configure(background="#000000")
-        canvas = Canvas(win, width=420, height=650, highlightthickness=0, background="#000000")
+        canvas = Canvas(win, width=self._scaled(420), height=self._scaled(650), highlightthickness=0, background="#000000")
         canvas.pack(fill=BOTH, expand=True)
 
         image_path = resource_path("assets/appwin.png")
@@ -14208,11 +14223,11 @@ try {
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", close_about)
-        win.geometry("420x638")
+        win.geometry(f"{self._scaled(420)}x{self._scaled(638)}")
         win.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
         y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - win.winfo_height()) // 2)
-        win.geometry(f"420x638+{x}+{y}")
+        win.geometry(f"{self._scaled(420)}x{self._scaled(638)}+{x}+{y}")
         win.wait_visibility()
         win.lift()
         win.focus_force()
@@ -14226,7 +14241,7 @@ try {
         win = Toplevel(self.root)
         win.title("Status dos servidores")
         win.resizable(False, False)
-        canvas = Canvas(win, width=1200, height=1200, highlightthickness=0, background="#000000")
+        canvas = Canvas(win, width=self._scaled(1200), height=self._scaled(1200), highlightthickness=0, background="#000000")
         canvas.pack(fill=BOTH, expand=True)
 
         # Título
