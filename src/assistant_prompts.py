@@ -6,6 +6,7 @@ fallback incluído pelo PyInstaller.
 """
 
 from pathlib import Path
+import re
 import sys
 
 
@@ -27,6 +28,20 @@ def _prompt_path(filename: str) -> Path:
 
 def _read_prompt(filename: str) -> str:
     return _prompt_path(filename).read_text(encoding="utf-8").strip()
+
+
+def _fill_prompt_markers(template: str, value: str, *names: str) -> str:
+    """Substitui marcadores com duas ou três chaves, inclusive com espaços."""
+    rendered = str(template or "")
+    replacement = str(value or "").strip()
+    for name in names:
+        pattern = re.compile(
+            r"\{\{\{?\s*"
+            + re.escape(name)
+            + r"\s*\}?\}\}"
+        )
+        rendered = pattern.sub(lambda _match: replacement, rendered)
+    return rendered.strip()
 
 
 DEFAULT_PARTS_PROMPT = _read_prompt("partes_system.txt")
@@ -84,26 +99,29 @@ def qualification_user_prompt(field_ids: list[str], raw_text: str) -> str:
 
 def history_user_prompt(transcription: str) -> str:
     """Monta o prompt variável do histórico com a transcrição atual."""
-    return DEFAULT_HISTORY_USER_TEMPLATE.replace(
-        "{{conteudo_caixa_transcricao}}",
-        transcription.strip(),
-    ).strip()
+    return _fill_prompt_markers(
+        DEFAULT_HISTORY_USER_TEMPLATE,
+        transcription,
+        "conteudo_caixa_transcricao",
+    )
 
 
 def parts_user_prompt_from_transcription(transcription: str) -> str:
     """Monta o prompt do botão Histórico a partir da transcrição."""
-    return DEFAULT_PARTS_USER_HISTORY_TEMPLATE.replace(
-        "{{{conteudo_caixa_transcricao}}}",
-        transcription.strip(),
-    ).strip()
+    return _fill_prompt_markers(
+        DEFAULT_PARTS_USER_HISTORY_TEMPLATE,
+        transcription,
+        "conteudo_caixa_transcricao",
+    )
 
 
 def parts_user_prompt_from_history(history: str) -> str:
     """Monta o prompt do botão Detectar a partir do histórico atual."""
-    return DEFAULT_PARTS_USER_DETECT_TEMPLATE.replace(
-        "{{{conteudo_caixa_historico}}}",
-        history.strip(),
-    ).strip()
+    return _fill_prompt_markers(
+        DEFAULT_PARTS_USER_DETECT_TEMPLATE,
+        history,
+        "conteudo_caixa_historico",
+    )
 
 
 def statement_prompt(selected_name: str | None) -> str:

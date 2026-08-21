@@ -85,7 +85,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260817_010"
+APP_VERSION = "20260817_011"
 UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
 UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 SUPPORTED_EXTENSIONS = {
@@ -121,27 +121,17 @@ DEFAULT_SETTINGS = {
     "grok_chunk_ms": 100,
     "grok_rest_requests": False,
     "transcription_server": "avare",
-    "transcription_server_2": "",
+    "multi_transcription_models": [],
     "text_model": "IA-Proxy",
-    "text_model_2": "",
     "text_reasoning": "low",
-    "text_reasoning_2": "low",
     "ia_proxy_model": "grok-4.6",
-    "ia_proxy_model_2": "grok-4.6",
     "ia_proxy_provider": "grok",
-    "ia_proxy_provider_2": "grok",
     "history_model": "IA-Proxy",
-    "history_model_2": "",
     "history_reasoning": "low",
-    "history_reasoning_2": "low",
     "history_proxy_model": "grok-4.6",
-    "history_proxy_model_2": "grok-4.6",
     "statement_model": "IA-Proxy",
-    "statement_model_2": "",
     "statement_reasoning": "low",
-    "statement_reasoning_2": "low",
     "statement_proxy_model": "grok-4.6",
-    "statement_proxy_model_2": "grok-4.6",
     "parts_extraction": "uppercase",
     "parts_model": "IA-Proxy",
     "parts_proxy_model": "grok-4.6",
@@ -330,8 +320,10 @@ class AudioJob:
     converted_path: Path | None = None
     txt_path: Path | None = None
     txt_path_2: Path | None = None
+    txt_path_3: Path | None = None
     raw_path: Path | None = None
     raw_path_2: Path | None = None
+    raw_path_3: Path | None = None
     log_path: Path | None = None
     vad_output_path: Path | None = None
     vad_input_bytes: int = 0
@@ -344,10 +336,13 @@ class AudioJob:
     status: str = "Aguardando"
     transcription: str = ""
     transcription_2: str = ""
+    transcription_3: str = ""
     error: str = ""
     error_2: str = ""
+    error_3: str = ""
     model_name: str = "Modelo 1"
     model_name_2: str = ""
+    model_name_3: str = ""
 
 
 def resource_path(relative: str) -> Path:
@@ -5058,18 +5053,15 @@ def normalize_settings(data: dict) -> dict:
         if transcription_server in server_names
         else selected_transcription_server({})["name"]
     )
-    transcription_server_2 = str(data.get("transcription_server_2") or "")
-    transcription_server_2 = {
-        "Avare-speech": "avare",
-        "Taguai-speech": "servidor",
-        "Grok (API)": GROK_API_NAME,
-    }.get(transcription_server_2, transcription_server_2)
-    clean["transcription_server_2"] = (
-        transcription_server_2
-        if transcription_server_2 in server_names
-        and transcription_server_2 != clean["transcription_server"]
-        else ""
-    )
+    multi_models = data.get("multi_transcription_models")
+    if not isinstance(multi_models, (list, tuple)):
+        multi_models = []
+    clean["multi_transcription_models"] = list(dict.fromkeys(
+        str(name).strip()
+        for name in multi_models
+        if str(name).strip() in server_names
+        and str(name).strip() != ELEVENLABS_API_NAME
+    ))[:3]
     text_model_names = {model["name"] for model in read_text_models()}
 
     def proxy_model(value, provider):
@@ -5078,12 +5070,14 @@ def normalize_settings(data: dict) -> dict:
             return candidate
         return DEEPSEEK_TEXT_NAME if str(provider or "").casefold() == "deepseek" else GROK_TEXT_NAME
 
-    def normalize_reasoning(value, model_name):
+    def normalize_reasoning(value, model_name, *, via_proxy: bool = False):
         candidate = str(value or "").casefold()
         if not model_name:
             return ""
         if model_name == GROK_NON_REASONING_TEXT_NAME:
             return ""
+        if via_proxy:
+            return "none" if model_name == DEEPSEEK_TEXT_NAME else "low"
         if model_name == DEEPSEEK_TEXT_NAME:
             return candidate if candidate in {"none", "low", "high", "max"} else "none"
         return candidate if candidate in {"low", "medium", "high", "xhigh"} else "low"
@@ -5100,40 +5094,17 @@ def normalize_settings(data: dict) -> dict:
         text_model = DEEPSEEK_TEXT_NAME
     clean["text_model"] = text_model if text_model in text_model_names else selected_text_model_config({})["name"]
 
-    text_model_2 = str(data.get("text_model_2") or "")
-    if text_model_2.casefold() in {GROK_NON_REASONING_LEGACY_NAME, GROK_NON_REASONING_TEXT_NAME}:
-        text_model_2 = GROK_NON_REASONING_TEXT_NAME
-    elif text_model_2.casefold().startswith("grok-4."):
-        text_model_2 = GROK_TEXT_NAME
-    elif text_model_2.casefold().startswith("deepseek-v4-") or text_model_2.casefold().startswith("deepseek v4"):
-        text_model_2 = DEEPSEEK_TEXT_NAME
-    clean["text_model_2"] = (
-        text_model_2
-        if text_model_2 in text_model_names
-        and (text_model_2 != clean["text_model"] or text_model_2 == IA_PROXY_NAME)
-        else ""
-    )
-
     proxy_model_1 = proxy_model(
         data.get("ia_proxy_model"), data.get("ia_proxy_provider") or DEFAULT_SETTINGS["ia_proxy_provider"]
     )
-    proxy_model_2 = proxy_model(
-        data.get("ia_proxy_model_2"), data.get("ia_proxy_provider_2") or DEFAULT_SETTINGS["ia_proxy_provider_2"]
-    )
     clean["ia_proxy_model"] = proxy_model_1
-    clean["ia_proxy_model_2"] = proxy_model_2
     clean["ia_proxy_provider"] = "deepseek" if proxy_model_1 == DEEPSEEK_TEXT_NAME else "grok"
-    clean["ia_proxy_provider_2"] = "deepseek" if proxy_model_2 == DEEPSEEK_TEXT_NAME else "grok"
-    if (
-        clean["text_model"] == IA_PROXY_NAME
-        and clean["text_model_2"] == IA_PROXY_NAME
-        and clean["ia_proxy_model"] == clean["ia_proxy_model_2"]
-    ):
-        clean["text_model_2"] = ""
     actual_model = proxy_model_1 if clean["text_model"] == IA_PROXY_NAME else clean["text_model"]
-    actual_model_2 = proxy_model_2 if clean["text_model_2"] == IA_PROXY_NAME else clean["text_model_2"]
-    clean["text_reasoning"] = normalize_reasoning(data.get("text_reasoning"), actual_model)
-    clean["text_reasoning_2"] = normalize_reasoning(data.get("text_reasoning_2"), actual_model_2)
+    clean["text_reasoning"] = normalize_reasoning(
+        data.get("text_reasoning"),
+        actual_model,
+        via_proxy=clean["text_model"] == IA_PROXY_NAME,
+    )
     extraction = str(data.get("parts_extraction") or DEFAULT_SETTINGS["parts_extraction"])
     clean["parts_extraction"] = (
         extraction if extraction in PARTS_EXTRACTION_LABELS else DEFAULT_SETTINGS["parts_extraction"]
@@ -5178,12 +5149,8 @@ def normalize_settings(data: dict) -> dict:
     clean["police_city"] = str(data.get("police_city") or "").strip()
     if clean["text_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
         clean["text_model"] = IA_PROXY_NAME
-    if clean["text_model_2"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
-        clean["text_model_2"] = ""
     if clean["text_model"] in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
         clean["text_model"] = IA_PROXY_NAME
-    if clean["text_model_2"] in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
-        clean["text_model_2"] = ""
     if clean["parts_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
         clean["parts_model"] = IA_PROXY_NAME
     if clean["parts_model"] == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
@@ -5192,26 +5159,22 @@ def normalize_settings(data: dict) -> dict:
     # partes: preservados com fallback para as chaves gerais de texto.
     task_preserved: dict[str, object] = {}
     for task, keys in TEXT_TASK_KEYS.items():
-        suffixes = ("", "_2") if task in ("history", "statement") else ("",)
-        for suffix in suffixes:
-            model_key, reasoning_key, proxy_key = (key + suffix for key in keys)
-            raw_model = str(data.get(model_key) or "")
-            fallback_model = str(clean.get("text_model" + suffix) or clean["text_model"])
-            model_value = raw_model if raw_model in text_model_names else fallback_model
-            task_preserved[model_key] = model_value
-            task_preserved[proxy_key] = proxy_model(data.get(proxy_key), "grok")
-            effective_model = (
-                task_preserved[proxy_key]
-                if model_value == IA_PROXY_NAME
-                else model_value
-            )
-            task_preserved[reasoning_key] = normalize_reasoning(
-                data.get(reasoning_key), effective_model
-            )
+        model_key, reasoning_key, proxy_key = keys
+        raw_model = str(data.get(model_key) or "")
+        model_value = raw_model if raw_model in text_model_names else clean["text_model"]
+        task_preserved[model_key] = model_value
+        task_preserved[proxy_key] = proxy_model(data.get(proxy_key), "grok")
+        effective_model = task_preserved[proxy_key] if model_value == IA_PROXY_NAME else model_value
+        task_preserved[reasoning_key] = normalize_reasoning(
+            data.get(reasoning_key),
+            effective_model,
+            via_proxy=model_value == IA_PROXY_NAME,
+        )
     clean.update(task_preserved)
     clean["parts_reasoning"] = normalize_reasoning(
         data.get("parts_reasoning"),
         clean["parts_proxy_model"] if clean["parts_model"] == IA_PROXY_NAME else clean["parts_model"],
+        via_proxy=clean["parts_model"] == IA_PROXY_NAME,
     )
     # VAD removido
     return clean
@@ -5221,21 +5184,9 @@ def settings_for_text_model(settings: dict, model_name: str, secondary: bool = F
     selected = dict(settings)
     if task:
         model_key, reasoning_key, proxy_key = TEXT_TASK_KEYS[task]
-        suffix = "_2" if secondary else ""
-        selected[model_key + suffix] = model_name
-        if secondary:
-            selected[reasoning_key + suffix] = str(settings.get(reasoning_key + "_2") or "low")
-            selected[proxy_key + suffix] = str(
-                settings.get(proxy_key + "_2") or settings.get(proxy_key) or GROK_TEXT_NAME
-            )
+        selected[model_key] = model_name
         return selected
     selected["text_model"] = model_name
-    if secondary:
-        selected["text_reasoning"] = str(settings.get("text_reasoning_2") or "low")
-        selected["ia_proxy_provider"] = str(settings.get("ia_proxy_provider_2") or "grok")
-        selected["ia_proxy_model"] = str(
-            settings.get("ia_proxy_model_2") or settings.get("ia_proxy_model") or GROK_TEXT_NAME
-        )
     return selected
 
 
@@ -5834,6 +5785,8 @@ def selected_text_model(
         request_model = SERVER_GEMMA_MODEL
         provider = "servidor"
     reasoning = str(settings.get(reasoning_key) or settings.get(reasoning_fallback) or "").casefold()
+    if is_proxy:
+        reasoning = "none" if request_model == DEEPSEEK_TEXT_NAME else "low"
     if request_model == DEEPSEEK_TEXT_NAME:
         reasoning = reasoning if reasoning in {"none", "low", "high", "max"} else "none"
         parameters = {
@@ -5897,15 +5850,14 @@ def selected_text_model_for(settings: dict, task: str, *, secondary: bool = Fals
     de versões anteriores), as configurações gerais de texto são usadas.
     """
     model_key, reasoning_key, proxy_key = TEXT_TASK_KEYS[task]
-    suffix = "_2" if secondary else ""
     return selected_text_model(
         settings,
-        model_key=model_key + suffix,
-        reasoning_key=reasoning_key + suffix,
-        proxy_key=proxy_key + suffix,
-        model_fallback="text_model" + suffix,
-        reasoning_fallback="text_reasoning" + suffix,
-        proxy_fallback="ia_proxy_model" + suffix,
+        model_key=model_key,
+        reasoning_key=reasoning_key,
+        proxy_key=proxy_key,
+        model_fallback="text_model",
+        reasoning_fallback="text_reasoning",
+        proxy_fallback="ia_proxy_model",
     )
 
 
@@ -6323,9 +6275,20 @@ def job_problem_reason(job: AudioJob, transcript: str) -> str:
     return ""
 
 
-def job_problem_reason_2(job: AudioJob, transcript: str) -> str:
+def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
+    if model_index == 1:
+        return job_transcript_text(job)
+    transcript = getattr(job, f"transcription_{model_index}", "")
+    path = getattr(job, f"txt_path_{model_index}", None)
+    if not transcript and path and path.exists():
+        transcript = path.read_text(encoding="utf-8", errors="replace")
+    return transcript or ""
+
+
+def job_problem_reason_for_model(job: AudioJob, transcript: str, model_index: int) -> str:
     clean = transcript.strip()
-    if job.error_2:
+    error = getattr(job, "error" if model_index == 1 else f"error_{model_index}", "")
+    if error:
         return "Erro na transcrição/conversão"
     if not clean:
         return "Transcrição vazia"
@@ -6408,39 +6371,54 @@ td {{ white-space: pre-wrap; line-height: 1.45; }}
 
 
 def write_html_report(jobs: list[AudioJob], html_path: Path, stats: list[tuple[str, str]] | None = None) -> Path:
-    valid_rows = []
-    problem_rows = []
-    multi_model = any(job.model_name_2 for job in jobs)
+    valid_rows: list[str] = []
+    problem_rows: list[str] = []
+
+    # O número de colunas vem dos modelos efetivamente registrados nos jobs,
+    # e não de uma suposição fixa de dois modelos. Isso mantém o relatório
+    # compatível com lotes antigos e permite 2 ou 3 modelos novos.
+    model_names: list[str] = []
     for job in jobs:
-        transcript = job_transcript_text(job)
-        transcript_2 = job.transcription_2
-        if not transcript_2 and job.txt_path_2 and job.txt_path_2.exists():
-            transcript_2 = job.txt_path_2.read_text(encoding="utf-8", errors="replace")
-        problem = job_problem_reason(job, transcript)
-        problem_2 = job_problem_reason_2(job, transcript_2) if multi_model else ""
+        for index in range(1, 4):
+            name = str(getattr(job, "model_name" if index == 1 else f"model_name_{index}", "") or "").strip()
+            if name and name not in model_names:
+                model_names.append(name)
+    model_names = model_names[:3]
+    multi_model = len(model_names) > 1
+
+    for job in jobs:
+        transcripts = [job_transcript_for_model(job, index) for index in range(1, len(model_names) + 1)]
+        problems = [
+            job_problem_reason_for_model(job, transcript, index)
+            for index, transcript in enumerate(transcripts, start=1)
+        ]
         if multi_model:
-            if not problem or not problem_2:
-                valid_rows.append(
+            # Uma linha continua útil quando ao menos um modelo respondeu;
+            # o retorno ausente fica marcado na coluna correspondente e é
+            # detalhado também no relatório separado de problemas.
+            if any(not problem for problem in problems):
+                cells = [f"<td>{html.escape(job.original_name)}</td>"]
+                cells.extend(
+                    f"<td>{html.escape(transcript) if not problem else '<em>Falhou</em>'}</td>"
+                    for transcript, problem in zip(transcripts, problems)
+                )
+                valid_rows.append("<tr>" + "".join(cells) + "</tr>")
+            for index, (problem, transcript) in enumerate(zip(problems, transcripts), start=1):
+                if not problem:
+                    continue
+                error = getattr(job, "error" if index == 1 else f"error_{index}", "")
+                problem_rows.append(
                     "<tr>"
                     f"<td>{html.escape(job.original_name)}</td>"
-                    f"<td>{html.escape(transcript) if not problem else '<em>Falhou</em>'}</td>"
-                    f"<td>{html.escape(transcript_2) if not problem_2 else '<em>Falhou</em>'}</td>"
+                    f"<td>{html.escape(model_names[index - 1])}</td>"
+                    f"<td>{html.escape(problem)}</td>"
+                    f"<td>{html.escape(error or transcript or '(sem retorno)')}</td>"
                     "</tr>"
                 )
-            for index, current_problem, current_error, current_text in (
-                (1, problem, job.error, transcript),
-                (2, problem_2, job.error_2, transcript_2),
-            ):
-                if current_problem:
-                    problem_rows.append(
-                        "<tr>"
-                        f"<td>{html.escape(job.original_name)}</td>"
-                        f"<td>Modelo {index}</td>"
-                        f"<td>{html.escape(current_problem)}</td>"
-                        f"<td>{html.escape(current_error or current_text or '(sem retorno)')}</td>"
-                        "</tr>"
-                    )
             continue
+
+        transcript = transcripts[0] if transcripts else ""
+        problem = problems[0] if problems else job_problem_reason(job, transcript)
         if problem:
             details = job.error or transcript or "(sem retorno)"
             sent_name = job.upload_path.name if job.upload_path else "(não enviado)"
@@ -6459,8 +6437,9 @@ def write_html_report(jobs: list[AudioJob], html_path: Path, stats: list[tuple[s
                 f"<td>{html.escape(transcript)}</td>"
                 "</tr>"
             )
+
     headers = (
-        ("Arquivo original", jobs[0].model_name if jobs else "Modelo 1", jobs[0].model_name_2 if jobs else "Modelo 2")
+        ("Arquivo original", *model_names)
         if multi_model
         else ("Arquivo original", "Transcrição")
     )
@@ -6746,6 +6725,12 @@ class TextModelClient:
                 pass
 
     def post(self, model_config: dict, system_prompt: str, material: str) -> str:
+        system_prompt = str(system_prompt or "").strip()
+        material = str(material or "").strip()
+        if not system_prompt:
+            raise RuntimeError("Prompt de sistema vazio.")
+        if not material:
+            raise RuntimeError("Prompt de usuário vazio.")
         url = model_config["url"]
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -6777,7 +6762,20 @@ class TextModelClient:
                 if str((payload.get("reasoning") or {}).get("effort") or "").casefold() == "none":
                     payload["reasoning"] = {**payload["reasoning"], "effort": "low"}
             payload.pop("max_tokens", None)
-        if is_deepseek_request:
+        if is_xai_proxy:
+            if is_deepseek_request:
+                payload["reasoning_effort"] = "none"
+                payload.pop("reasoning", None)
+            elif is_xai_request:
+                if is_non_reasoning_grok:
+                    payload.pop("reasoning", None)
+                else:
+                    payload["reasoning"] = {"effort": "low"}
+                payload.pop("reasoning_effort", None)
+        # O backend IA-Proxy expõe um contrato Chat Completions comum para
+        # ambos os modelos. As APIs diretas permanecem em seus formatos
+        # nativos: DeepSeek usa messages e xAI usa input.
+        if is_deepseek_request or is_xai_proxy:
             payload["messages"] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": material},
@@ -7070,9 +7068,10 @@ class SigApp:
         self.transcription_model_display_var = StringVar()
         self.text_model_display_var = StringVar()
         self.multi_model_var = BooleanVar(value=False)
-        self.multi_model_secondary = str(self.settings.get("transcription_server_2") or "")
+        self.multi_transcription_model_vars: dict[str, BooleanVar] = {}
+        self.multi_transcription_model_labels: dict[str, str] = {}
         self.multi_text_model_var = BooleanVar(value=False)
-        self.multi_text_secondary = str(self.settings.get("text_model_2") or "")
+        self.multi_text_secondary = ""
         self.imei_tac_var = StringVar()
         self.imei_sn_var = StringVar()
         self.imei_result_var = StringVar(value="Dígito: —")
@@ -8186,34 +8185,6 @@ try {
             textvariable=self.text_model_display_var,
             style="ModelSummary.TLabel",
         ).grid(row=1, column=1, sticky="w", padx=(8, 0))
-        self.multi_controls = ttk.Frame(top)
-        self.multi_transcription_check = ttk.Checkbutton(
-            self.multi_controls,
-            text="Multi model - transcrição",
-            variable=self.multi_model_var,
-            command=self._toggle_multi_model,
-        )
-        self.multi_transcription_check.grid(row=0, column=0, sticky="e")
-        ttk.Button(
-            self.multi_controls,
-            text="?",
-            width=2,
-            command=self._show_multi_model_help,
-        ).grid(row=0, column=1, sticky="w", padx=(4, 0))
-        self.multi_text_check = ttk.Checkbutton(
-            self.multi_controls,
-            text="Multi model - texto",
-            variable=self.multi_text_model_var,
-            command=self._toggle_multi_text_model,
-        )
-        self.multi_text_check.grid(row=1, column=0, sticky="w")
-        self.multi_text_help_button = ttk.Button(
-            self.multi_controls,
-            text="?",
-            width=2,
-            command=self._show_multi_text_help,
-        )
-        self.multi_text_help_button.grid(row=1, column=1, sticky="w", padx=(4, 0))
 
         tab_bar = tk.Frame(outer, background="#f4f7f6")
         tab_bar.pack(fill=X, pady=(12, 0))
@@ -8281,8 +8252,6 @@ try {
         self.qualification_tab_button.bind(
             "<Button-1>", lambda _event: self.select_main_tab("qualification")
         )
-        self.root.after_idle(self._align_multi_controls)
-
         workspace = ttk.Frame(outer)
         workspace.pack(fill=BOTH, expand=True)
         self.tab_content = ttk.Frame(workspace, width=1)
@@ -9194,6 +9163,26 @@ try {
         self.zip_level_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_tree_modes())
         self._refresh_zip_controls()
 
+        self.files_multi_model_frame = ttk.Frame(self.files_controls_frame)
+        self.files_multi_model_check = ttk.Checkbutton(
+            self.files_multi_model_frame,
+            text="Multi model - transcrição",
+            variable=self.multi_model_var,
+            command=self._toggle_multi_model,
+        )
+        self.files_multi_model_check.pack(side=LEFT)
+        self.files_multi_model_help = ttk.Button(
+            self.files_multi_model_frame,
+            text="?",
+            width=2,
+            command=self._show_multi_model_help,
+        )
+        self.files_multi_model_help.pack(side=LEFT, padx=(4, 10))
+        self.files_multi_model_list = ttk.Frame(self.files_multi_model_frame)
+        self.files_multi_model_list.pack(side=LEFT, fill=X, expand=True)
+        self.files_multi_model_frame.pack(fill=X, pady=(0, 8))
+        self._refresh_file_multi_model_controls()
+
         list_frame = ttk.Frame(self.files_tab)
         list_frame.pack(fill=BOTH, expand=True)
         columns = ("arquivo", "tamanho", "status")
@@ -9566,6 +9555,7 @@ try {
                 frame.pack_forget()
         if tab_name == "files":
             self.files_tab.pack(fill=BOTH, expand=True)
+            self._refresh_file_multi_model_controls()
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.files_tab_button.configure(background=active_bg, foreground=active_fg)
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -9607,31 +9597,11 @@ try {
         text = selected_text_model_for(self.settings, "qualification")
         text_model = text["parameters"].get("model", "modelo não informado")
         transcription_display = transcription_server_label(transcription)
-        secondary_name = str(getattr(self, "multi_model_secondary", "") or "")
-        if getattr(self, "multi_model_var", None) is not None and self.multi_model_var.get() and secondary_name:
-            secondary_settings = settings_for_transcription_server(self.settings, secondary_name)
-            secondary = selected_transcription_server(secondary_settings)
-            secondary_model = secondary["parameters"].get("model", "modelo não informado")
-            transcription_display += f" + {transcription_server_label(secondary)}"
         self.transcription_model_display_var.set(transcription_display)
         if text.get("is_grok_api") or text.get("is_deepseek_api"):
             text_display = text["name"]
         else:
             text_display = f"{text['name']} ({text_model})"
-        secondary_text_name = str(getattr(self, "multi_text_secondary", "") or "")
-        multi_text_enabled = bool(
-            getattr(self, "multi_text_model_var", None) is not None
-            and self.multi_text_model_var.get()
-        )
-        if multi_text_enabled and secondary_text_name:
-            secondary_text = selected_text_model_for(self.settings, "qualification", secondary=True)
-            secondary_model = secondary_text["parameters"].get("model", "modelo não informado")
-            secondary_display = (
-                secondary_text["name"]
-                if secondary_text.get("is_grok_api") or secondary_text.get("is_deepseek_api")
-                else f"{secondary_text['name']} ({secondary_model})"
-            )
-            text_display += f" + {secondary_display}"
         self.text_model_display_var.set(text_display)
 
     def _update_imei_inputs(self):
@@ -12439,8 +12409,9 @@ try {
     def _show_multi_model_help(self):
         messagebox.showinfo(
             "Multi model",
-            "Ferramenta experimental. O SIG envia o mesmo áudio simultaneamente para os dois endpoints "
-            "de transcrição definidos nas Configurações e mostra os resultados lado a lado.",
+            "O SIG envia o mesmo áudio simultaneamente para os modelos marcados nesta aba "
+            "e mostra uma coluna para cada resposta. Escolha dois ou três modelos. "
+            "O modelo ElevenLabs não está disponível nesta opção.",
             parent=self.root,
         )
 
@@ -12455,80 +12426,97 @@ try {
         )
 
     def _align_multi_controls(self):
-        if not getattr(self, "multi_controls", None) or not self.multi_controls.winfo_exists():
-            return
-        top = self.multi_controls.master
-        top.update_idletasks()
-        self.multi_controls.update_idletasks()
-        top.configure(height=max(top.winfo_reqheight(), self.multi_controls.winfo_reqheight()))
-        top.pack_propagate(False)
-        self.multi_controls.place(
-            relx=0.66,
-            x=0,
-            y=0,
-            anchor="n",
-        )
+        # Mantido como ponto de compatibilidade com instalações antigas. O
+        # seletor de multi-modelo agora vive exclusivamente na aba Transcrição.
+        return
 
     def _toggle_multi_text_model(self):
-        self.settings = load_settings()
-        self.multi_text_secondary = str(self.settings.get("text_model_2") or "")
-        if self.multi_text_model_var.get() and not self.multi_text_secondary:
-            self.multi_text_model_var.set(False)
-            messagebox.showinfo(
-                "Multi model - texto",
-                "Selecione primeiro o Modelo de texto 2 nas Configurações.",
-                parent=self.root,
-            )
-            return
-        if self.assistant_busy:
-            self.multi_text_model_var.set(not self.multi_text_model_var.get())
-            return
+        # Compatibilidade com layouts de versões antigas. A opção de
+        # multi-modelo agora existe apenas para transcrição de arquivos.
+        self.multi_text_model_var.set(False)
+        self.multi_text_secondary = ""
         self._refresh_multi_text_layout()
 
     def _refresh_multi_text_visibility(self):
-        available = bool(self.multi_text_secondary)
-        if available:
-            self.multi_text_check.grid()
-            self.multi_text_help_button.grid()
-        else:
-            self.multi_text_model_var.set(False)
-            self.multi_text_check.grid_remove()
-            self.multi_text_help_button.grid_remove()
+        self.multi_text_model_var.set(False)
         self._refresh_multi_text_layout()
-        self.root.after_idle(self._align_multi_controls)
 
     def _toggle_multi_model(self):
-        if self.live_state != "idle":
-            self.multi_model_var.set(self.live_secondary_active)
-            messagebox.showinfo(
-                "Multi model",
-                "Pare a transcrição ao vivo antes de ativar ou desativar o Multi model.",
-                parent=self.root,
-            )
-            return
-        self.settings = load_settings()
-        self.multi_model_secondary = str(self.settings.get("transcription_server_2") or "")
-        if self.multi_model_var.get() and not self.multi_model_secondary:
+        if self.running:
             self.multi_model_var.set(False)
+            messagebox.showinfo("Multi model", "Aguarde o lote atual terminar antes de alterar esta opção.", parent=self.root)
+            return
+        self._refresh_file_multi_model_controls()
+        if self.multi_model_var.get() and len(self._selected_multi_transcription_model_names()) < 2:
             messagebox.showinfo(
                 "Multi model",
-                "Selecione primeiro o Modelo de transcrição 2 nas Configurações.",
+                "Marque pelo menos dois modelos de transcrição na lista exibida.",
                 parent=self.root,
             )
-            return
-        self._refresh_multi_model_layout()
 
     def _refresh_multi_model_layout(self):
-        enabled = bool(self.multi_model_var.get() and self.multi_model_secondary)
-        if enabled:
-            self.live_text._editor_frame.configure(width=440)
-            if not self.live_secondary_pane.winfo_manager():
-                self.live_secondary_pane.pack(side=LEFT, fill=X, expand=True, padx=(10, 0))
+        self._refresh_file_multi_model_controls()
+
+    def _available_multi_transcription_models(self) -> dict[str, str]:
+        settings = load_settings()
+        available = {}
+        for server in read_transcription_servers():
+            name = server["name"]
+            if name == ELEVENLABS_API_NAME:
+                continue
+            if name == GROK_API_NAME and not plausible_xai_api_key(settings.get("grok_api_key", "")):
+                continue
+            if name == DEEPGRAM_API_NAME and not settings.get("deepgram_api_key", "").strip():
+                continue
+            if name == ASSEMBLYAI_API_NAME and not plausible_assemblyai_api_key(settings.get("assemblyai_api_key", "")):
+                continue
+            available[transcription_server_label(server)] = name
+        return available
+
+    def _selected_multi_transcription_model_names(self) -> list[str]:
+        return [
+            name for name, variable in self.multi_transcription_model_vars.items()
+            if variable.get()
+        ]
+
+    def _multi_transcription_model_changed(self, name: str):
+        selected = self._selected_multi_transcription_model_names()
+        if len(selected) > 3:
+            self.multi_transcription_model_vars[name].set(False)
+            messagebox.showinfo("Multi model", "Escolha no máximo três modelos de transcrição.", parent=self.root)
+        self.settings["multi_transcription_models"] = self._selected_multi_transcription_model_names()
+
+    def _refresh_file_multi_model_controls(self):
+        frame = getattr(self, "files_multi_model_frame", None)
+        model_list = getattr(self, "files_multi_model_list", None)
+        if frame is None or model_list is None:
+            return
+        available = self._available_multi_transcription_models()
+        previous = set(self._selected_multi_transcription_model_names())
+        if not previous:
+            previous = set(
+                name for name in load_settings().get("multi_transcription_models", [])
+                if name in available.values()
+            )
+        if not previous and self.settings.get("transcription_server") in available.values():
+            previous.add(self.settings["transcription_server"])
+        for child in model_list.winfo_children():
+            child.destroy()
+        self.multi_transcription_model_vars = {}
+        self.multi_transcription_model_labels = available
+        for label, name in available.items():
+            variable = BooleanVar(value=name in previous)
+            self.multi_transcription_model_vars[name] = variable
+            ttk.Checkbutton(
+                model_list,
+                text=label,
+                variable=variable,
+                command=lambda selected=name: self._multi_transcription_model_changed(selected),
+            ).pack(side=LEFT, padx=(0, 10))
+        if self.multi_model_var.get():
+            model_list.pack(side=LEFT, fill=X, expand=True)
         else:
-            self.live_secondary_pane.pack_forget()
-            self.live_text._editor_frame.configure(width=900)
-        self._refresh_primary_transcript_actions(enabled)
-        self._refresh_assistant_model_label()
+            model_list.pack_forget()
 
     def _refresh_multi_text_layout(self):
         if not getattr(self, "live_history_primary_pane", None):
@@ -12892,25 +12880,15 @@ try {
         req_var = IntVar(value=self.settings["transcribe_parallel"])
         transcription_labels = {}
         transcription_server_var = StringVar()
-        transcription_server_2_labels = {"Nenhum": ""}
-        transcription_server_2_var = StringVar(value="Nenhum")
         refreshing_transcription_servers = False
         history_model_labels = {}
         history_model_var = StringVar()
-        history_model_2_labels = {"Nenhum": ""}
-        history_model_2_var = StringVar(value="Nenhum")
         history_reasoning_var = StringVar(value=self.settings.get("history_reasoning", "low"))
         history_proxy_model_var = StringVar(value=self.settings.get("history_proxy_model", GROK_TEXT_NAME))
-        history_reasoning_2_var = StringVar(value=self.settings.get("history_reasoning_2", "low"))
-        history_proxy_model_2_var = StringVar(value=self.settings.get("history_proxy_model_2", GROK_TEXT_NAME))
         statement_model_labels = {}
         statement_model_var = StringVar()
-        statement_model_2_labels = {"Nenhum": ""}
-        statement_model_2_var = StringVar(value="Nenhum")
         statement_reasoning_var = StringVar(value=self.settings.get("statement_reasoning", "low"))
         statement_proxy_model_var = StringVar(value=self.settings.get("statement_proxy_model", GROK_TEXT_NAME))
-        statement_reasoning_2_var = StringVar(value=self.settings.get("statement_reasoning_2", "low"))
-        statement_proxy_model_2_var = StringVar(value=self.settings.get("statement_proxy_model_2", GROK_TEXT_NAME))
         extraction_var = StringVar(value=PARTS_EXTRACTION_LABELS[self.settings["parts_extraction"]])
         parts_model_var = StringVar(value=self.settings.get("parts_model", IA_PROXY_NAME))
         parts_proxy_model_var = StringVar(
@@ -13109,7 +13087,7 @@ try {
         transcription_server_combo.grid(row=transcription_server_row, column=1, sticky="ew", pady=5)
 
         def refresh_transcription_servers(preferred_name: str | None = None):
-            nonlocal transcription_labels, transcription_server_2_labels, refreshing_transcription_servers
+            nonlocal transcription_labels, refreshing_transcription_servers
             if refreshing_transcription_servers:
                 return
             refreshing_transcription_servers = True
@@ -13141,24 +13119,6 @@ try {
                 next(iter(transcription_labels), ""),
             )
             transcription_server_var.set(selected_label)
-            primary_name = transcription_labels.get(selected_label, "")
-            transcription_server_2_labels = {"Nenhum": ""}
-            transcription_server_2_labels.update(
-                {
-                    transcription_server_label(server): server["name"]
-                    for server in transcription_servers
-                    if server["name"] != primary_name
-                }
-            )
-            transcription_server_2_combo.configure(values=list(transcription_server_2_labels))
-            target_secondary = str(self.settings.get("transcription_server_2") or "")
-            current_secondary = transcription_server_2_labels.get(transcription_server_2_var.get(), "")
-            wanted_secondary = current_secondary or target_secondary
-            secondary_label = next(
-                (label for label, name in transcription_server_2_labels.items() if name == wanted_secondary),
-                "Nenhum",
-            )
-            transcription_server_2_var.set(secondary_label)
             refreshing_transcription_servers = False
 
         def add_server():
@@ -13218,24 +13178,11 @@ try {
                     self.settings = save_settings({**self.settings, "transcription_server": replacement})
                     self._refresh_server_label()
 
-        transcription_server_2_row = transcription_server_row + 1
-        transcription_server_2_label = ttk.Label(transcription_frame, text="Modelo de transcrição 2")
-        transcription_server_2_label.grid(
-            row=transcription_server_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        transcription_server_2_combo = ttk.Combobox(
-            transcription_frame,
-            textvariable=transcription_server_2_var,
-            state="readonly",
-            width=44,
-        )
-        transcription_server_2_combo.grid(row=transcription_server_2_row, column=1, sticky="ew", pady=5)
-
         def primary_server_changed(*_args):
             refresh_transcription_servers(transcription_labels.get(transcription_server_var.get()))
             refresh_chunk_visibility()
 
-        chunk_size_row = transcription_server_row + 2
+        chunk_size_row = transcription_server_row + 1
         chunk_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
         chunk_label = ttk.Label(
             chunk_controls,
@@ -13295,35 +13242,17 @@ try {
 
         def refresh_chunk_visibility(*_args):
             selected_name = transcription_labels.get(transcription_server_var.get(), "")
-            selected_name_2 = transcription_server_2_labels.get(transcription_server_2_var.get(), "")
             if selected_name == GROK_API_NAME:
-                chunk_row = transcription_server_2_row
-                rest_row = chunk_row + 1
-                secondary_row = rest_row + 1
-                chunk_controls.grid_configure(row=chunk_row, column=1)
-                rest_controls.grid_configure(row=rest_row, column=1, sticky="w")
-                transcription_server_2_label.grid_configure(row=secondary_row)
-                transcription_server_2_combo.grid_configure(row=secondary_row)
-                chunk_controls.grid()
-                rest_controls.grid()
-            elif selected_name_2 == GROK_API_NAME:
-                chunk_row = chunk_size_row
-                rest_row = chunk_row + 1
-                chunk_controls.grid_configure(row=chunk_row, column=1)
-                rest_controls.grid_configure(row=rest_row, column=1, sticky="w")
-                transcription_server_2_label.grid_configure(row=transcription_server_2_row)
-                transcription_server_2_combo.grid_configure(row=transcription_server_2_row)
+                chunk_controls.grid_configure(row=chunk_size_row, column=1)
+                rest_controls.grid_configure(row=chunk_size_row + 1, column=1, sticky="w")
                 chunk_controls.grid()
                 rest_controls.grid()
             else:
-                transcription_server_2_label.grid_configure(row=transcription_server_2_row)
-                transcription_server_2_combo.grid_configure(row=transcription_server_2_row)
                 chunk_controls.grid_remove()
                 rest_controls.grid_remove()
 
         refresh_transcription_servers()
         transcription_server_var.trace_add("write", primary_server_changed)
-        transcription_server_2_var.trace_add("write", refresh_chunk_visibility)
         refresh_chunk_visibility()
 
         proxy_model_options = (
@@ -13369,6 +13298,13 @@ try {
                 proxy_model_frame.grid(row=proxy_model_row, column=1, columnspan=3, sticky="w", pady=5)
                 configure_menu(proxy_model_menu, proxy_model_var, proxy_model_display, proxy_model_options)
                 actual_model = proxy_model_var.get()
+                # IA-Proxy usa reasoning fixo: low para Grok e none para
+                # DeepSeek. Os níveis avançados só ficam disponíveis nas
+                # opções de acesso direto, com a respectiva API key.
+                current_reasoning_frame.grid_remove()
+                reasoning_var.set("none" if actual_model == DEEPSEEK_TEXT_NAME else "low")
+                reasoning_display.set(reasoning_var.get())
+                return
             else:
                 proxy_model_frame.grid_remove()
                 actual_model = selected_name
@@ -13605,39 +13541,136 @@ try {
                 "refresh": refresh,
             }
 
-        history_ui = make_two_model_section(
+        def make_single_text_section(
+            section_frame,
+            *,
+            model_var,
+            reasoning_var,
+            proxy_var,
+            settings_model_key,
+            settings_reasoning_key,
+            settings_proxy_key,
+            model_labels_holder,
+            label_text,
+        ):
+            model_label = ttk.Label(section_frame, text=label_text)
+            model_label.grid(row=0, column=0, sticky="w", pady=5, padx=(0, 12))
+            model_combo = ttk.Combobox(
+                section_frame, textvariable=model_var, state="readonly", width=44
+            )
+            model_combo.grid(row=0, column=1, sticky="ew", pady=5)
+
+            proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            ttk.Label(
+                proxy_model_frame,
+                text="Modelo",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            ).pack(side=LEFT, padx=(0, 10))
+            proxy_display_var = StringVar(value=proxy_var.get())
+            proxy_button = ttk.Menubutton(proxy_model_frame, textvariable=proxy_display_var, width=30)
+            proxy_menu = tk.Menu(proxy_button, tearoff=False)
+            proxy_button.configure(menu=proxy_menu)
+            proxy_button.pack(side=LEFT)
+
+            reasoning_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            ttk.Label(
+                reasoning_frame,
+                text="Raciocínio:",
+                width=12,
+                anchor="w",
+                style="Settings.TLabel",
+            ).pack(side=LEFT, padx=(0, 10))
+            reasoning_display_var = StringVar(value=reasoning_var.get())
+            reasoning_button = ttk.Menubutton(
+                reasoning_frame, textvariable=reasoning_display_var, width=12
+            )
+            reasoning_menu = tk.Menu(reasoning_button, tearoff=False)
+            reasoning_button.configure(menu=reasoning_menu)
+            reasoning_button.pack(side=LEFT)
+
+            def refresh(preferred_name: str | None = None):
+                available_models = [
+                    model for model in read_text_models()
+                    if (
+                        model["name"] not in GROK_TEXT_API_NAMES
+                        or plausible_xai_api_key(grok_api_key_var.get())
+                    ) and (
+                        model["name"] not in DEEPSEEK_API_NAMES
+                        or plausible_deepseek_api_key(deepseek_api_key_var.get())
+                    )
+                ]
+                model_labels_holder.clear()
+                model_labels_holder.update({
+                    (
+                        model["name"]
+                        if model["name"] == IA_PROXY_NAME
+                        or model["name"] in GROK_TEXT_API_NAMES
+                        or model["name"] in DEEPSEEK_API_NAMES
+                        else f"{model['name']} ({model['parameters'].get('model', 'modelo não informado')})"
+                    ): model["name"]
+                    for model in available_models
+                })
+                model_combo.configure(values=list(model_labels_holder))
+                target = preferred_name or str(self.settings.get(settings_model_key) or "")
+                if target not in model_labels_holder.values():
+                    target = self.settings.get("text_model") or IA_PROXY_NAME
+                label = next(
+                    (item for item, name in model_labels_holder.items() if name == target),
+                    next(iter(model_labels_holder), ""),
+                )
+                model_var.set(label)
+                configure_menu(proxy_menu, proxy_var, proxy_display_var, proxy_model_options)
+                refresh_reasoning_controls()
+
+            def refresh_reasoning_controls(*_args):
+                refresh_model_reasoning_controls(
+                    model_labels_holder.get(model_var.get(), ""),
+                    proxy_var,
+                    proxy_model_frame,
+                    proxy_menu,
+                    proxy_display_var,
+                    reasoning_var,
+                    reasoning_frame,
+                    reasoning_menu,
+                    reasoning_display_var,
+                    1,
+                    2,
+                )
+
+            refresh()
+            model_var.trace_add("write", refresh_reasoning_controls)
+            proxy_var.trace_add("write", refresh_reasoning_controls)
+            return {
+                "labels": model_labels_holder,
+                "refresh": refresh,
+                "label": model_label,
+                "combo": model_combo,
+                "hideable": [model_label, model_combo, proxy_model_frame, reasoning_frame],
+            }
+
+        history_ui = make_single_text_section(
             history_frame,
             model_var=history_model_var,
-            model_2_var=history_model_2_var,
             reasoning_var=history_reasoning_var,
-            reasoning_2_var=history_reasoning_2_var,
             proxy_var=history_proxy_model_var,
-            proxy_2_var=history_proxy_model_2_var,
             settings_model_key="history_model",
-            settings_model_2_key="history_model_2",
             settings_reasoning_key="history_reasoning",
-            settings_reasoning_2_key="history_reasoning_2",
             settings_proxy_key="history_proxy_model",
-            settings_proxy_2_key="history_proxy_model_2",
-            label_first="Modelo de histórico 1",
-            label_second="Modelo de histórico 2",
+            model_labels_holder=history_model_labels,
+            label_text="Modelo de histórico",
         )
-        statement_ui = make_two_model_section(
+        statement_ui = make_single_text_section(
             statement_frame,
             model_var=statement_model_var,
-            model_2_var=statement_model_2_var,
             reasoning_var=statement_reasoning_var,
-            reasoning_2_var=statement_reasoning_2_var,
             proxy_var=statement_proxy_model_var,
-            proxy_2_var=statement_proxy_model_2_var,
             settings_model_key="statement_model",
-            settings_model_2_key="statement_model_2",
             settings_reasoning_key="statement_reasoning",
-            settings_reasoning_2_key="statement_reasoning_2",
             settings_proxy_key="statement_proxy_model",
-            settings_proxy_2_key="statement_proxy_model_2",
-            label_first="Modelo de oitiva 1",
-            label_second="Modelo de oitiva 2",
+            model_labels_holder=statement_model_labels,
+            label_text="Modelo de oitiva",
         )
 
         def make_single_model_section(
@@ -13940,11 +13973,8 @@ try {
 
         def save_and_close():
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
-            selected_transcription_2 = transcription_server_2_labels.get(transcription_server_2_var.get(), "")
             selected_history = history_ui["labels"].get(history_model_var.get(), "")
-            selected_history_2 = history_ui["labels_2"].get(history_model_2_var.get(), "")
             selected_statement = statement_ui["labels"].get(statement_model_var.get(), "")
-            selected_statement_2 = statement_ui["labels_2"].get(statement_model_2_var.get(), "")
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
             deepgram_api_key = deepgram_api_key_var.get().strip()
@@ -13981,11 +14011,8 @@ try {
                 return
             selected_models = (
                 selected_transcription,
-                selected_transcription_2,
                 selected_history,
-                selected_history_2,
                 selected_statement,
-                selected_statement_2,
             )
             if any(model in GROK_TEXT_API_NAMES for model in selected_models) and not api_key:
                 messagebox.showerror("sig", "Insira uma chave API válida da xAI para selecionar este modelo.", parent=win)
@@ -13997,21 +14024,6 @@ try {
                     parent=win,
                 )
                 return
-            for section_name, model_1, model_2, proxy_1, proxy_2 in (
-                ("Histórico", selected_history, selected_history_2, history_proxy_model_var.get(), history_proxy_model_2_var.get()),
-                ("Oitiva", selected_statement, selected_statement_2, statement_proxy_model_var.get(), statement_proxy_model_2_var.get()),
-            ):
-                if (
-                    model_1 == IA_PROXY_NAME
-                    and model_2 == IA_PROXY_NAME
-                    and proxy_1 == proxy_2
-                ):
-                    messagebox.showerror(
-                        "sig",
-                        f"Ao selecionar IA-Proxy duas vezes em {section_name}, escolha modelos diferentes nos dois seletores.",
-                        parent=win,
-                    )
-                    return
             try:
                 grok_chunk_ms = int(grok_chunk_ms_var.get().strip())
             except ValueError:
@@ -14076,19 +14088,12 @@ try {
                     "grok_chunk_ms": grok_chunk_ms,
                     "grok_rest_requests": bool(grok_rest_var.get()),
                     "transcription_server": selected_transcription,
-                    "transcription_server_2": selected_transcription_2,
                     "history_model": selected_history,
-                    "history_model_2": selected_history_2,
                     "history_reasoning": history_reasoning_var.get(),
-                    "history_reasoning_2": history_reasoning_2_var.get(),
                     "history_proxy_model": history_proxy_model_var.get(),
-                    "history_proxy_model_2": history_proxy_model_2_var.get(),
                     "statement_model": selected_statement,
-                    "statement_model_2": selected_statement_2,
                     "statement_reasoning": statement_reasoning_var.get(),
-                    "statement_reasoning_2": statement_reasoning_2_var.get(),
                     "statement_proxy_model": statement_proxy_model_var.get(),
-                    "statement_proxy_model_2": statement_proxy_model_2_var.get(),
                     "parts_extraction": extraction_key,
                     "parts_model": selected_parts_model_name,
                     "parts_proxy_model": selected_parts_proxy_model,
@@ -14118,12 +14123,7 @@ try {
             self._refresh_server_label()
             self._refresh_assistant_model_label()
             self._refresh_live_grok_controls()
-            self.multi_model_secondary = selected_transcription_2
-            self.multi_text_secondary = selected_history_2
-            if self.multi_model_var.get() and not selected_transcription_2:
-                self.multi_model_var.set(False)
-            self._refresh_multi_model_layout()
-            self._refresh_multi_text_visibility()
+            self._refresh_file_multi_model_controls()
             win.destroy()
 
         ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
@@ -14462,36 +14462,17 @@ try {
             )
             return
         self.settings = load_settings()
-        self.multi_model_secondary = str(self.settings.get("transcription_server_2") or "")
-        self._refresh_multi_model_layout()
         self._refresh_live_grok_controls()
-        secondary_settings = (
-            settings_for_transcription_server(self.settings, self.multi_model_secondary)
-            if self.multi_model_var.get() and self.multi_model_secondary
-            else None
-        )
-        if (
-            is_grok_transcription(self.settings)
-            or (secondary_settings is not None and is_grok_transcription(secondary_settings))
-        ) and not self.settings.get("grok_api_key"):
+        if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de iniciar.")
             return
-        if (
-            is_deepgram_transcription(self.settings)
-            or (secondary_settings is not None and is_deepgram_transcription(secondary_settings))
-        ) and not self.settings.get("deepgram_api_key"):
+        if is_deepgram_transcription(self.settings) and not self.settings.get("deepgram_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Deepgram nas configurações antes de iniciar.")
             return
-        if (
-            is_assemblyai_transcription(self.settings)
-            or (secondary_settings is not None and is_assemblyai_transcription(secondary_settings))
-        ) and not self.settings.get("assemblyai_api_key"):
+        if is_assemblyai_transcription(self.settings) and not self.settings.get("assemblyai_api_key"):
             messagebox.showerror("sig", "Insira a chave API da AssemblyAI nas configurações antes de iniciar.")
             return
-        if (
-            is_elevenlabs_transcription(self.settings)
-            or (secondary_settings is not None and is_elevenlabs_transcription(secondary_settings))
-        ) and not self.settings.get("elevenlabs_api_key"):
+        if is_elevenlabs_transcription(self.settings) and not self.settings.get("elevenlabs_api_key"):
             messagebox.showerror("sig", "Insira a chave API da ElevenLabs nas configurações antes de iniciar.")
             return
         self.live_stop_event.clear()
@@ -16414,10 +16395,18 @@ try {
         if not self.selected_paths:
             messagebox.showinfo("sig", "Selecione pelo menos um arquivo ou uma pasta.")
             return
+        # Capture a seleção feita na aba antes de recarregar as preferências;
+        # essa seleção é local ao lote e não deve desaparecer no reload.
+        multi_model_enabled = bool(self.multi_model_var.get())
+        multi_model_names = self._selected_multi_transcription_model_names() if multi_model_enabled else []
         self.settings = load_settings()
-        multi_transcription = bool(
-            self.multi_model_var.get() and self.settings.get("transcription_server_2")
-        )
+        if multi_model_enabled and not 2 <= len(multi_model_names) <= 3:
+            messagebox.showinfo(
+                "Multi model",
+                "Escolha de 2 a 3 modelos de transcrição na lista da aba Transcrição.",
+            )
+            return
+        multi_transcription = bool(multi_model_names)
         if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de transcrever.")
             return
@@ -16449,6 +16438,7 @@ try {
         zip_level = self.zip_level_var.get()
         workflow_settings = self.settings.copy()
         workflow_settings["_multi_transcription"] = multi_transcription
+        workflow_settings["_multi_transcription_models"] = list(multi_model_names)
         self.worker_thread = threading.Thread(
             target=self._workflow,
             args=(paths, mode, convert_only, vad_only, vad_mode, transcribe_after_convert, send_zip, zip_level, workflow_settings),
@@ -16510,8 +16500,12 @@ try {
         stems = safe_stems(paths)
         jobs = []
         primary_server = selected_transcription_server(settings)
-        secondary_server_name = str(settings.get("transcription_server_2") or "")
-        multi_transcription = bool(settings.get("_multi_transcription") and secondary_server_name)
+        selected_model_names = list(settings.get("_multi_transcription_models") or [])
+        if settings.get("_multi_transcription") and len(selected_model_names) >= 2:
+            transcription_model_names = selected_model_names[:3]
+        else:
+            transcription_model_names = [primary_server["name"]]
+        multi_transcription = len(transcription_model_names) >= 2
         use_vad = vad_mode != "Off" and not convert_only
         for path in paths:
             stem = stems[path]
@@ -16522,11 +16516,14 @@ try {
                 mode=mode,
                 txt_path=temp_dir / f"{stem}.txt",
                 txt_path_2=temp_dir / f"{stem}.modelo_2.txt" if multi_transcription else None,
+                txt_path_3=temp_dir / f"{stem}.modelo_3.txt" if len(transcription_model_names) >= 3 else None,
                 raw_path=raw_dir / f"{stem}.json",
                 raw_path_2=raw_dir / f"{stem}.modelo_2.json" if multi_transcription else None,
+                raw_path_3=raw_dir / f"{stem}.modelo_3.json" if len(transcription_model_names) >= 3 else None,
                 log_path=log_dir / f"{stem}.ffmpeg.log",
-                model_name=primary_server["name"],
-                model_name_2=secondary_server_name if multi_transcription else "",
+                model_name=transcription_model_names[0],
+                model_name_2=transcription_model_names[1] if len(transcription_model_names) >= 2 else "",
+                model_name_3=transcription_model_names[2] if len(transcription_model_names) >= 3 else "",
             )
             if use_vad or vad_only:
                 # Todo VAD recebe exatamente WAV PCM 16 kHz, mono e 16-bit.
@@ -16810,7 +16807,19 @@ try {
     ) -> list[tuple[str, str]]:
         valid_count = 0
         for job in jobs:
-            if not job_problem_reason(job, job_transcript_text(job)):
+            model_names = list(settings.get("_multi_transcription_models") or [])
+            if settings.get("_multi_transcription") and len(model_names) >= 2:
+                valid = any(
+                    not job_problem_reason_for_model(
+                        job,
+                        job_transcript_for_model(job, index),
+                        index,
+                    )
+                    for index in range(1, min(3, len(model_names)) + 1)
+                )
+            else:
+                valid = not job_problem_reason(job, job_transcript_text(job))
+            if valid:
                 valid_count += 1
         upload_paths = {
             job.upload_path.resolve(): job.upload_path
@@ -16823,8 +16832,9 @@ try {
             ("Modo", mode_label_from_value(mode)),
             ("Servidor", selected_transcription_server(settings)["name"]),
         ]
-        if settings.get("_multi_transcription") and settings.get("transcription_server_2"):
-            stats.append(("Servidor 2", str(settings["transcription_server_2"])))
+        if settings.get("_multi_transcription"):
+            for index, name in enumerate(settings.get("_multi_transcription_models") or [], start=1):
+                stats.append((f"Modelo {index}", str(name)))
         if send_zip:
             stats.append(("Nível ZIP", zip_level))
             if zip_stats:
@@ -17261,7 +17271,7 @@ try {
 
 
     def _run_transcriptions(self, jobs: list[AudioJob], settings: dict):
-        if settings.get("_multi_transcription") and settings.get("transcription_server_2"):
+        if settings.get("_multi_transcription") and len(settings.get("_multi_transcription_models") or []) >= 2:
             self._run_multi_transcriptions(jobs, settings)
             return
         candidates = [job for job in jobs if not job.error]
@@ -17332,26 +17342,44 @@ try {
         total = len(candidates)
         if total == 0:
             return
-        secondary_settings = settings_for_transcription_server(
-            settings, str(settings["transcription_server_2"])
-        )
-        model_settings = (settings, secondary_settings)
+        model_names = list(settings.get("_multi_transcription_models") or [])[:3]
+        if len(model_names) < 2:
+            raise RuntimeError("O multi-modelo precisa de pelo menos dois modelos selecionados.")
+        model_settings = [
+            settings_for_transcription_server(settings, name)
+            for name in model_names
+        ]
         uploaders = [
             create_transcription_uploader(self.cancel_event, item_settings)
             for item_settings in model_settings
         ]
         self.uploaders = uploaders
-        done = [0, 0]
+        done = [0] * len(model_settings)
         progress_lock = threading.Lock()
 
         def update_progress(index: int):
             with progress_lock:
                 done[index - 1] += 1
-                first, second = done
-            self._queue("progress", int(((first + second) / (total * 2)) * 100 + 0.5))
-            self._queue("status", f"Modelo 1: {first}/{total}  |  Modelo 2: {second}/{total}")
+                snapshot = list(done)
+            self._queue("progress", int((sum(snapshot) / (total * len(model_settings))) * 100 + 0.5))
+            self._queue(
+                "status",
+                "  |  ".join(
+                    f"Modelo {model_index}: {count}/{total}"
+                    for model_index, count in enumerate(snapshot, start=1)
+                ),
+            )
 
-        self._queue("status", f"Modelo 1: 0/{total}  |  Modelo 2: 0/{total}")
+        self._queue(
+            "status",
+            "  |  ".join(
+                f"Modelo {model_index}: 0/{total}"
+                for model_index in range(1, len(model_settings) + 1)
+            ),
+        )
+
+        def job_attr(job: AudioJob, base: str, index: int):
+            return getattr(job, base if index == 1 else f"{base}_{index}")
 
         def model_runner(index: int):
             current_settings = model_settings[index - 1]
@@ -17384,14 +17412,10 @@ try {
                             raise
                         except Exception as exc:
                             detail = f"ERRO transcrição modelo {index}: {exc}"
-                            if index == 1:
-                                job.error = detail
-                                if job.txt_path:
-                                    job.txt_path.write_text(detail, encoding="utf-8")
-                            else:
-                                job.error_2 = detail
-                                if job.txt_path_2:
-                                    job.txt_path_2.write_text(detail, encoding="utf-8")
+                            setattr(job, "error" if index == 1 else f"error_{index}", detail)
+                            txt_path = job_attr(job, "txt_path", index)
+                            if txt_path:
+                                txt_path.write_text(detail, encoding="utf-8")
                         finally:
                             update_progress(index)
 
@@ -17413,18 +17437,22 @@ try {
             run_group(medium, min(configured_parallelism, 2))
             run_group(large, 1)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(model_runner, index) for index in (1, 2)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(model_settings)) as executor:
+            futures = [executor.submit(model_runner, index) for index in range(1, len(model_settings) + 1)]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
         for job in candidates:
-            if job.error and job.error_2:
-                self._queue("job", job.original_path, "Erro nos dois modelos")
-            elif job.error or job.error_2:
+            errors = [
+                getattr(job, "error" if index == 1 else f"error_{index}")
+                for index in range(1, len(model_settings) + 1)
+            ]
+            if all(errors):
+                self._queue("job", job.original_path, "Erro nos modelos")
+            elif any(errors):
                 self._queue("job", job.original_path, "Transcrito parcialmente")
             else:
-                self._queue("job", job.original_path, "Transcrito nos dois modelos")
+                self._queue("job", job.original_path, f"Transcrito nos {len(model_settings)} modelos")
 
     def _transcribe_job(
         self,
@@ -17446,8 +17474,8 @@ try {
         request_settings = request_settings or self.settings
         if not uploader:
             raise RuntimeError("uploader não inicializado")
-        raw_path = job.raw_path if model_index == 1 else job.raw_path_2
-        txt_path = job.txt_path if model_index == 1 else job.txt_path_2
+        raw_path = getattr(job, "raw_path" if model_index == 1 else f"raw_path_{model_index}")
+        txt_path = getattr(job, "txt_path" if model_index == 1 else f"txt_path_{model_index}")
         if raw_path is None or txt_path is None:
             raise RuntimeError(f"arquivos de saída do modelo {model_index} não definidos")
         # AssemblyAI: áudios com 2 minutos ou mais vão pelo fluxo assíncrono
@@ -17457,10 +17485,7 @@ try {
             and probe_duration_ms(job.upload_path) >= 120000
         ):
             result = self._assemblyai_async_transcribe(job, request_settings)
-            if model_index == 1:
-                job.transcription = result
-            else:
-                job.transcription_2 = result
+            setattr(job, "transcription" if model_index == 1 else f"transcription_{model_index}", result)
             txt_path.write_text(result, encoding="utf-8")
             return
         status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
@@ -17492,10 +17517,7 @@ try {
             raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
             raise RuntimeError(f"HTTP {status}\n{raw}")
         result = transcript or "(sem transcrição)"
-        if model_index == 1:
-            job.transcription = result
-        else:
-            job.transcription_2 = result
+        setattr(job, "transcription" if model_index == 1 else f"transcription_{model_index}", result)
         txt_path.write_text(result, encoding="utf-8")
 
     def _assemblyai_async_transcribe(self, job: AudioJob, request_settings: dict) -> str:

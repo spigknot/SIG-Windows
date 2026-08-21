@@ -1,0 +1,14 @@
+AVISO: release/content_snapshot.json foi atualizado; commite-o junto com a publicação.
+PASS: pacote full local preservado para GitHub: D:\Projetos\SIG Windows\release\generated\20260817_011\20260817_011_full.zip
+PASS: incremental será publicada por sync_publish.py (arquivo por arquivo).
+PASS: instalador gerado para GitHub: D:\Projetos\SIG Windows\release\generated\20260817_011\setup_sig_20260817_011.exe
+PASS: instalador online gerado para GitHub: D:\Projetos\SIG Windows\release\generated\20260817_011\online_setup_sig20260817_011.exe
+PASS: pacotes incompletos, traversal, g, _MEI e dist foram rejeitados
+PASS: processo ativo foi bloqueado sem modificar a instalação
+PASS: atualização onedir completa executou e iniciou o aplicativo
+PASS: falha de inicialização acionou rollback e restaurou a versão anterior
+PASS: diff incremental aplicou arquivos novos, removeu os listados e preservou os intactos
+PASS: removidos.txt malicioso foi rejeitado sem alterar a instalação
+PASS: rollback do diff restaurou a versão anterior
+PASS: sync por arquivo restaurou o canônico, removeu órfãos e preservou os intactos
+PASS: rollback do sync restaurou a instalação anterior sem corromper o _internal
