@@ -1910,24 +1910,24 @@ class FfmpegToolsPanel:
             icon_row,
             "slower",
             lambda: self._change_preview_speed(-1),
-            width=58,
-            height=48,
+            width=self._scaled(58),
+            height=self._scaled(48),
         )
         slower.pack(side=LEFT, padx=(0, 18))
         play = PreviewIconButton(
             icon_row,
             "play",
             self._toggle_preview,
-            width=76,
-            height=60,
+            width=self._scaled(76),
+            height=self._scaled(60),
         )
         play.pack(side=LEFT)
         faster = PreviewIconButton(
             icon_row,
             "faster",
             lambda: self._change_preview_speed(1),
-            width=58,
-            height=48,
+            width=self._scaled(58),
+            height=self._scaled(48),
         )
         faster.pack(side=LEFT, padx=(18, 0))
         create_tooltip(slower, "Diminuir velocidade")
@@ -2138,8 +2138,8 @@ class FfmpegToolsPanel:
         self.insert_secondary_button.pack(side=LEFT, padx=(10, 0))
         names = ttk.Frame(self.insert_tab)
         names.pack(fill=X, pady=(0, 8))
-        ttk.Label(names, textvariable=self.insert_main_var, style="Muted.TLabel", wraplength=780).pack(anchor="w")
-        self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=780)
+        ttk.Label(names, textvariable=self.insert_main_var, style="Muted.TLabel", wraplength=self._scaled(780)).pack(anchor="w")
+        self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=self._scaled(780))
         self.insert_secondary_label.pack(anchor="w", pady=(2, 0))
 
         self.insert_play_button = self._add_preview_speed_controls(self.insert_tab)
@@ -7238,7 +7238,7 @@ class SigApp:
         )
         style.configure("TNotebook", background="#f4f7f6", borderwidth=0)
         style.configure("TNotebook.Tab", font=("Segoe UI Semibold", 10), padding=(18, 8))
-        style.configure("Treeview", font=("Segoe UI", 10), rowheight=28)
+        style.configure("Treeview", font=("Segoe UI", 10), rowheight=self._scaled(28))
         style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
 
     def _apply_window_icon(self):
@@ -8392,16 +8392,16 @@ try {
         self.live_grok_controls.pack(side=LEFT)
         self.live_top_spacer = ttk.Frame(live_top)
         self.live_top_spacer.pack(side=LEFT, fill=X, expand=True)
-        self.live_normal_mic_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
+        self.live_normal_mic_canvas = Canvas(live_top, width=self._scaled(44), height=self._scaled(44), highlightthickness=0, background="#f4f7f6")
         self.live_normal_mic_canvas.pack(side=LEFT, padx=(0, 8))
         self.live_normal_mic_canvas.bind("<Button-1>", lambda _event: self.start_normal_live_recording())
         self._draw_normal_live_mic_button()
-        self.live_pause_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
+        self.live_pause_canvas = Canvas(live_top, width=self._scaled(44), height=self._scaled(44), highlightthickness=0, background="#f4f7f6")
         self.live_pause_canvas.pack(side=LEFT, padx=(0, 8))
         self.live_pause_canvas.bind("<Button-1>", lambda _event: self.toggle_live_mic())
         # Keep the red live microphone at its original row height. The optional
         # integral-audio recovery button is overlaid at the far right below.
-        self.live_mic_stack = ttk.Frame(live_top, width=44, height=44)
+        self.live_mic_stack = ttk.Frame(live_top, width=self._scaled(44), height=self._scaled(44))
         self.live_mic_stack.pack(side=LEFT, padx=(0, 8))
         self.live_mic_stack.pack_propagate(False)
         self.live_recover_audio_button = ttk.Button(
@@ -8416,8 +8416,8 @@ try {
         )
         self.live_mic_canvas = Canvas(
             self.live_mic_stack,
-            width=44,
-            height=44,
+            width=self._scaled(44),
+            height=self._scaled(44),
             highlightthickness=0,
             background="#f4f7f6",
         )
@@ -8513,7 +8513,7 @@ try {
         self.live_history_area = ttk.Frame(live_frame, width=self._scaled(900))
         self.live_history_area.pack(fill=X)
         self.live_history_area.columnconfigure(0, weight=1, uniform="live_history_panes")
-        self.live_history_area.columnconfigure(1, minsize=10)
+        self.live_history_area.columnconfigure(1, minsize=self._scaled(10))
         self.live_history_area.columnconfigure(2, weight=1, uniform="live_history_panes")
         self.live_history_primary_pane = ttk.Frame(self.live_history_area)
         self.live_history_primary_pane.grid(row=0, column=0, sticky="ew")
@@ -8593,7 +8593,7 @@ try {
         self.live_statement_area = ttk.Frame(live_frame, width=self._scaled(900))
         self.live_statement_area.pack(fill=X)
         self.live_statement_area.columnconfigure(0, weight=1, uniform="live_statement_panes")
-        self.live_statement_area.columnconfigure(1, minsize=10)
+        self.live_statement_area.columnconfigure(1, minsize=self._scaled(10))
         self.live_statement_area.columnconfigure(2, weight=1, uniform="live_statement_panes")
         self.live_statement_primary_pane = ttk.Frame(self.live_statement_area)
         self.live_statement_primary_pane.grid(row=0, column=0, sticky="ew")
@@ -8660,7 +8660,7 @@ try {
         self.live_qualification_content.columnconfigure(
             0, minsize=self._scaled(640), weight=0
         )
-        self.live_qualification_content.columnconfigure(1, minsize=18, weight=0)
+        self.live_qualification_content.columnconfigure(1, minsize=self._scaled(18), weight=0)
         self.live_qualification_content.columnconfigure(
             2, weight=1
         )
@@ -8975,8 +8975,8 @@ try {
             insertbackground="#10201f",
             relief="solid",
             borderwidth=1,
-            padx=10,
-            pady=10,
+            padx=self._scaled(10),
+            pady=self._scaled(10),
         )
         assistant_scroll = ttk.Scrollbar(
             assistant_text_frame,
@@ -9072,8 +9072,8 @@ try {
             foreground="#10201f",
             relief="solid",
             borderwidth=1,
-            padx=10,
-            pady=10,
+            padx=self._scaled(10),
+            pady=self._scaled(10),
         )
         imei_history_scroll = ttk.Scrollbar(history_frame, orient="vertical", command=self.imei_history_text.yview)
         self.imei_history_text.configure(yscrollcommand=imei_history_scroll.set, state="disabled")
@@ -9241,7 +9241,7 @@ try {
         self.qualification_fields_frame = fields_frame
         self.qualification_field_checks = []
         for column in range(4):
-            fields_frame.columnconfigure(column, minsize=180)
+            fields_frame.columnconfigure(column, minsize=self._scaled(180))
         for index, (field_id, label) in enumerate(self.qualification_fields):
             row, column = divmod(index, 4)
             check = ttk.Checkbutton(
@@ -12236,7 +12236,7 @@ try {
         buttons = ttk.Frame(frame)
         buttons.pack(fill=X, pady=(4, 0))
         ttk.Button(buttons, text="Voltar", command=win.destroy).pack(side=LEFT)
-        ttk.Button(buttons, text="?", width=3, command=show_help).pack(side=LEFT, padx=6)
+        ttk.Button(buttons, text="?", width=3, command=show_help).pack(side=LEFT, padx=self._scaled(6))
         ttk.Button(buttons, text="OK", command=apply_codes).pack(side=RIGHT)
 
     def _format_grok_diarized_transcript(self, payload: dict, fallback: str) -> str:
@@ -12552,7 +12552,7 @@ try {
             area = secondary_pane.master
             if enabled:
                 area.columnconfigure(0, weight=1, uniform="live_multi_text_panes")
-                area.columnconfigure(1, minsize=10)
+                area.columnconfigure(1, minsize=self._scaled(10))
                 area.columnconfigure(2, weight=1, uniform="live_multi_text_panes")
                 primary_text._editor_frame.configure(width=self._scaled(440))
                 if not secondary_pane.winfo_manager():
@@ -12691,7 +12691,7 @@ try {
         tw.wm_geometry(f"+{x}+{y}")
         label = tk.Label(tw, text="0 = menos agressivo (detecta mais voz)\n3 = mais agressivo (filtra mais)",
                          background="#ffffcc", relief="solid", borderwidth=1,
-                         font=("Segoe UI", 9), justify="left", padx=6, pady=4)
+                         font=("Segoe UI", 9), justify="left", padx=self._scaled(6), pady=self._scaled(4))
         label.pack()
         self._vad_tooltip_window = tw
 
@@ -12745,9 +12745,9 @@ try {
             background="#172024",
             foreground="#edf7f5",
             justify="left",
-            wraplength=420,
-            padx=12,
-            pady=10,
+            wraplength=self._scaled(420),
+            padx=self._scaled(12),
+            pady=self._scaled(10),
             font=("Segoe UI", 9),
         ).pack()
         win.geometry(f"+{x}+{y}")
@@ -12983,7 +12983,7 @@ try {
                     style="Settings.TLabelframe",
                 )
                 section.grid(row=len(column_sections), column=0, sticky="ew", pady=(self._scaled(0), self._scaled(8)))
-                section.columnconfigure(0, minsize=170)
+                section.columnconfigure(0, minsize=self._scaled(170))
                 section.columnconfigure(1, weight=1)
                 column_sections.append(section)
             columns.append(column_sections)
