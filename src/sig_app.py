@@ -1763,10 +1763,6 @@ class FfmpegToolsPanel:
         self.root.after(33, self._poll_preview_frames)
         threading.Thread(target=self._load_available_accelerations, daemon=True).start()
 
-    def _scaled(self, value: int) -> int:
-        """Aplica o fator de escala da UI (referência 1920x1080)."""
-        return max(1, int(round(value * getattr(self.app, "ui_scale", 1.0))))
-
     @staticmethod
     def _filetypes():
         return [
@@ -1777,8 +1773,17 @@ class FfmpegToolsPanel:
     def _build(self, parent) -> None:
         outer = ttk.Frame(parent)
         outer.pack(fill=BOTH, expand=True)
-        frame = ttk.Frame(outer)
-        frame.pack(fill=BOTH, expand=True)
+        self.ffmpeg_scroll_canvas = Canvas(outer, highlightthickness=0, background="#f4f7f6")
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self.ffmpeg_scroll_canvas.yview)
+        self.ffmpeg_scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        self.ffmpeg_scroll_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        frame = ttk.Frame(self.ffmpeg_scroll_canvas)
+        self.ffmpeg_scroll_window = self.ffmpeg_scroll_canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", self._update_ffmpeg_scroll_region)
+        self.ffmpeg_scroll_canvas.bind("<Configure>", self._resize_ffmpeg_scroll_content)
+        self.ffmpeg_scroll_canvas.bind("<Enter>", lambda _event: self.ffmpeg_scroll_canvas.bind_all("<MouseWheel>", self._scroll_ffmpeg_panel))
+        self.ffmpeg_scroll_canvas.bind("<Leave>", lambda _event: self.ffmpeg_scroll_canvas.unbind_all("<MouseWheel>"))
 
         tool_tab_bar = self.tk.Frame(frame, background="#f4f7f6")
         tool_tab_bar.pack(fill=X, pady=(0, 8))
@@ -1879,24 +1884,33 @@ class FfmpegToolsPanel:
         self.cancel_button.pack(side=LEFT, padx=(8, 0))
 
 
+    def _update_ffmpeg_scroll_region(self, _event=None) -> None:
+        self.ffmpeg_scroll_canvas.configure(scrollregion=self.ffmpeg_scroll_canvas.bbox("all"))
+
+    def _resize_ffmpeg_scroll_content(self, event) -> None:
+        self.ffmpeg_scroll_canvas.itemconfigure(self.ffmpeg_scroll_window, width=event.width)
+
+    def _scroll_ffmpeg_panel(self, event) -> None:
+        self.ffmpeg_scroll_canvas.yview_scroll(-max(1, event.delta // 120), "units")
+
     def _section_title(self, parent, title: str, detail: str) -> None:
         ttk.Label(parent, text=title, font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        ttk.Label(parent, text=detail, style="Muted.TLabel", wraplength=self._scaled(850)).pack(anchor="w", pady=(3, 14))
+        ttk.Label(parent, text=detail, style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(3, 14))
 
     def _file_row(self, parent, variable: StringVar, command, label: str = "Selecionar arquivo") -> None:
         row = ttk.Frame(parent)
         row.pack(fill=X, pady=(0, 12))
         ttk.Button(row, text=label, command=command).pack(side=LEFT)
-        ttk.Label(row, textvariable=variable, style="Muted.TLabel", wraplength=self._scaled(720)).pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
+        ttk.Label(row, textvariable=variable, style="Muted.TLabel", wraplength=720).pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
 
     def _create_stable_preview(self, parent, message: str, size: int = 312) -> Canvas:
         """Área quadrada fixa: a orientação da mídia não altera o layout."""
-        holder = ttk.Frame(parent, width=self._scaled(size), height=self._scaled(size))
+        holder = ttk.Frame(parent, width=size, height=size)
         holder.pack(anchor="center", pady=(0, 6))
         holder.pack_propagate(False)
         canvas = Canvas(holder, highlightthickness=0, background="#f4f7f6")
         canvas.pack(fill=BOTH, expand=True)
-        canvas.create_text(self._scaled(size) // 2, self._scaled(size) // 2, text=message, fill="#667371", font=("Segoe UI", 10))
+        canvas.create_text(size // 2, size // 2, text=message, fill="#667371", font=("Segoe UI", 10))
         return canvas
 
     def _add_preview_speed_controls(self, parent):
@@ -1910,24 +1924,24 @@ class FfmpegToolsPanel:
             icon_row,
             "slower",
             lambda: self._change_preview_speed(-1),
-            width=self._scaled(58),
-            height=self._scaled(48),
+            width=58,
+            height=48,
         )
         slower.pack(side=LEFT, padx=(0, 18))
         play = PreviewIconButton(
             icon_row,
             "play",
             self._toggle_preview,
-            width=self._scaled(76),
-            height=self._scaled(60),
+            width=76,
+            height=60,
         )
         play.pack(side=LEFT)
         faster = PreviewIconButton(
             icon_row,
             "faster",
             lambda: self._change_preview_speed(1),
-            width=self._scaled(58),
-            height=self._scaled(48),
+            width=58,
+            height=48,
         )
         faster.pack(side=LEFT, padx=(18, 0))
         create_tooltip(slower, "Diminuir velocidade")
@@ -2138,8 +2152,8 @@ class FfmpegToolsPanel:
         self.insert_secondary_button.pack(side=LEFT, padx=(10, 0))
         names = ttk.Frame(self.insert_tab)
         names.pack(fill=X, pady=(0, 8))
-        ttk.Label(names, textvariable=self.insert_main_var, style="Muted.TLabel", wraplength=self._scaled(780)).pack(anchor="w")
-        self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=self._scaled(780))
+        ttk.Label(names, textvariable=self.insert_main_var, style="Muted.TLabel", wraplength=780).pack(anchor="w")
+        self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=780)
         self.insert_secondary_label.pack(anchor="w", pady=(2, 0))
 
         self.insert_play_button = self._add_preview_speed_controls(self.insert_tab)
@@ -6865,19 +6879,8 @@ class SigApp:
         self.root = root
         self.root.title("sig")
         self._apply_window_icon()
-        # Escala proporcional da UI (referência 1920x1080). Fator exato
-        # (largura e altura limitam), sem piso — o usuário quer a proporção real.
-        # Multiplica fontes (tk scaling), tamanhos e janela; NÃO move nada.
-        try:
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            self.ui_scale = min(screen_w / 1920.0, screen_h / 1080.0)
-            base_scaling = float(self.root.tk.call("tk", "scaling"))
-            self.root.tk.call("tk", "scaling", base_scaling * self.ui_scale)
-        except Exception:
-            self.ui_scale = 1.0
-        self.root.geometry(f"{self._scaled(1260)}x{self._scaled(960)}")
-        self.root.minsize(self._scaled(1220), self._scaled(820))
+        self.root.geometry("1260x960")
+        self.root.minsize(1220, 820)
         if os.name == "nt":
             self.root.state("zoomed")
         self.settings = load_settings()
@@ -7151,10 +7154,6 @@ class SigApp:
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _scaled(self, value: int) -> int:
-        """Aplica o fator de escala da UI (referência 1920x1080)."""
-        return max(1, int(round(value * self.ui_scale)))
-
     def _build_style(self):
         style = ttk.Style()
         try:
@@ -7238,7 +7237,7 @@ class SigApp:
         )
         style.configure("TNotebook", background="#f4f7f6", borderwidth=0)
         style.configure("TNotebook.Tab", font=("Segoe UI Semibold", 10), padding=(18, 8))
-        style.configure("Treeview", font=("Segoe UI", 10), rowheight=self._scaled(28))
+        style.configure("Treeview", font=("Segoe UI", 10), rowheight=28)
         style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
 
     def _apply_window_icon(self):
@@ -8341,7 +8340,7 @@ try {
 
         # The live workflow intentionally keeps transcript, history and statement together,
         # matching the Android screen.  The old assistant frame remains internal only.
-        live_frame = ttk.Frame(self.live_tab, width=self._scaled(900))
+        live_frame = ttk.Frame(self.live_tab, width=900)
         live_frame.pack(fill=BOTH, expand=True, anchor="n")
         live_top = ttk.Frame(live_frame)
         live_top.pack(fill=X)
@@ -8392,16 +8391,16 @@ try {
         self.live_grok_controls.pack(side=LEFT)
         self.live_top_spacer = ttk.Frame(live_top)
         self.live_top_spacer.pack(side=LEFT, fill=X, expand=True)
-        self.live_normal_mic_canvas = Canvas(live_top, width=self._scaled(44), height=self._scaled(44), highlightthickness=0, background="#f4f7f6")
+        self.live_normal_mic_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
         self.live_normal_mic_canvas.pack(side=LEFT, padx=(0, 8))
         self.live_normal_mic_canvas.bind("<Button-1>", lambda _event: self.start_normal_live_recording())
         self._draw_normal_live_mic_button()
-        self.live_pause_canvas = Canvas(live_top, width=self._scaled(44), height=self._scaled(44), highlightthickness=0, background="#f4f7f6")
+        self.live_pause_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
         self.live_pause_canvas.pack(side=LEFT, padx=(0, 8))
         self.live_pause_canvas.bind("<Button-1>", lambda _event: self.toggle_live_mic())
         # Keep the red live microphone at its original row height. The optional
         # integral-audio recovery button is overlaid at the far right below.
-        self.live_mic_stack = ttk.Frame(live_top, width=self._scaled(44), height=self._scaled(44))
+        self.live_mic_stack = ttk.Frame(live_top, width=44, height=44)
         self.live_mic_stack.pack(side=LEFT, padx=(0, 8))
         self.live_mic_stack.pack_propagate(False)
         self.live_recover_audio_button = ttk.Button(
@@ -8416,8 +8415,8 @@ try {
         )
         self.live_mic_canvas = Canvas(
             self.live_mic_stack,
-            width=self._scaled(44),
-            height=self._scaled(44),
+            width=44,
+            height=44,
             highlightthickness=0,
             background="#f4f7f6",
         )
@@ -8428,7 +8427,7 @@ try {
         )
         self.live_timer_label.pack(side=LEFT)
 
-        self.live_transcript_area = ttk.Frame(live_frame, width=self._scaled(900))
+        self.live_transcript_area = ttk.Frame(live_frame, width=900)
         self.live_transcript_area.pack(fill=X)
         self.live_primary_pane = ttk.Frame(self.live_transcript_area)
         self.live_primary_pane.pack(side=LEFT, fill=X, expand=True)
@@ -8510,10 +8509,10 @@ try {
             )
         self._refresh_primary_transcript_actions(False)
 
-        self.live_history_area = ttk.Frame(live_frame, width=self._scaled(900))
+        self.live_history_area = ttk.Frame(live_frame, width=900)
         self.live_history_area.pack(fill=X)
         self.live_history_area.columnconfigure(0, weight=1, uniform="live_history_panes")
-        self.live_history_area.columnconfigure(1, minsize=self._scaled(10))
+        self.live_history_area.columnconfigure(1, minsize=10)
         self.live_history_area.columnconfigure(2, weight=1, uniform="live_history_panes")
         self.live_history_primary_pane = ttk.Frame(self.live_history_area)
         self.live_history_primary_pane.grid(row=0, column=0, sticky="ew")
@@ -8590,10 +8589,10 @@ try {
             self.live_history_secondary_pane, "history2", self.request_live_statement_2, self.live_assistant_part_var_2
         )
 
-        self.live_statement_area = ttk.Frame(live_frame, width=self._scaled(900))
+        self.live_statement_area = ttk.Frame(live_frame, width=900)
         self.live_statement_area.pack(fill=X)
         self.live_statement_area.columnconfigure(0, weight=1, uniform="live_statement_panes")
-        self.live_statement_area.columnconfigure(1, minsize=self._scaled(10))
+        self.live_statement_area.columnconfigure(1, minsize=10)
         self.live_statement_area.columnconfigure(2, weight=1, uniform="live_statement_panes")
         self.live_statement_primary_pane = ttk.Frame(self.live_statement_area)
         self.live_statement_primary_pane.grid(row=0, column=0, sticky="ew")
@@ -8649,7 +8648,7 @@ try {
         )
         self._refresh_multi_text_visibility()
 
-        self.live_qualification_row = ttk.Frame(live_frame, width=self._scaled(900))
+        self.live_qualification_row = ttk.Frame(live_frame, width=900)
         self.live_qualification_row.pack(fill=BOTH, expand=True)
         self.live_qualification_content = ttk.Frame(self.live_qualification_row)
         # The lower occurrence workspace must use all remaining height.  Packing
@@ -8658,9 +8657,9 @@ try {
         self.live_qualification_content.pack(fill=BOTH, expand=True)
         self.live_qualification_content.rowconfigure(0, weight=1)
         self.live_qualification_content.columnconfigure(
-            0, minsize=self._scaled(640), weight=0
+            0, minsize=640, weight=0
         )
-        self.live_qualification_content.columnconfigure(1, minsize=self._scaled(18), weight=0)
+        self.live_qualification_content.columnconfigure(1, minsize=18, weight=0)
         self.live_qualification_content.columnconfigure(
             2, weight=1
         )
@@ -8688,8 +8687,8 @@ try {
         self.live_qualification_text_row.pack(fill=X)
         self.live_qualification_editor_host = ttk.Frame(
             self.live_qualification_text_row,
-            width=self._scaled(346),
-            height=self._scaled(135),
+            width=346,
+            height=135,
         )
         self.live_qualification_editor_host.pack(side=LEFT, fill=Y)
         self.live_qualification_editor_host.pack_propagate(False)
@@ -8700,7 +8699,6 @@ try {
             width=346,
             height=135,
             vertical_padding=(0, 0),
-            stretch=True,
         )
         self.live_qualification_execute_frame = ttk.Frame(self.live_qualification_content)
         self.live_qualification_declarations_check = ttk.Checkbutton(
@@ -8975,8 +8973,8 @@ try {
             insertbackground="#10201f",
             relief="solid",
             borderwidth=1,
-            padx=self._scaled(10),
-            pady=self._scaled(10),
+            padx=10,
+            pady=10,
         )
         assistant_scroll = ttk.Scrollbar(
             assistant_text_frame,
@@ -9000,7 +8998,7 @@ try {
         imei_frame.pack(fill=BOTH, expand=True)
         ttk.Label(imei_frame, text="IMEI", style="Muted.TLabel").pack(anchor="w", pady=(16, 4))
 
-        imei_inputs = ttk.Frame(imei_frame, width=self._scaled(900))
+        imei_inputs = ttk.Frame(imei_frame, width=900)
         imei_inputs.pack(anchor="w")
         tac_box = ttk.Frame(imei_inputs)
         tac_box.pack(side=LEFT, padx=(0, 7))
@@ -9054,7 +9052,7 @@ try {
             style="Muted.TLabel",
         ).pack(anchor="center", pady=(4, 0))
 
-        self.imei_history_container = ttk.Frame(imei_frame, width=self._scaled(900))
+        self.imei_history_container = ttk.Frame(imei_frame, width=900)
         self.imei_history_container.pack(anchor="w", pady=(28, 0))
         history_header = ttk.Frame(self.imei_history_container)
         history_header.pack(fill=X)
@@ -9072,8 +9070,8 @@ try {
             foreground="#10201f",
             relief="solid",
             borderwidth=1,
-            padx=self._scaled(10),
-            pady=self._scaled(10),
+            padx=10,
+            pady=10,
         )
         imei_history_scroll = ttk.Scrollbar(history_frame, orient="vertical", command=self.imei_history_text.yview)
         self.imei_history_text.configure(yscrollcommand=imei_history_scroll.set, state="disabled")
@@ -9203,7 +9201,7 @@ try {
         self.tree.heading("arquivo", text="Arquivo original")
         self.tree.heading("tamanho", text="Tamanho")
         self.tree.heading("status", text="Status")
-        self.tree.column("arquivo", width=self._scaled(440), anchor="w")
+        self.tree.column("arquivo", width=440, anchor="w")
         self.tree.column("tamanho", width=90, anchor="center")
         self.tree.column("status", width=230, anchor="w")
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
@@ -9224,7 +9222,7 @@ try {
 
     def _build_qualification_tab(self) -> None:
         """Monta a área de entrada e saída da ferramenta Qualificação."""
-        frame = ttk.Frame(self.qualification_tab, width=self._scaled(900))
+        frame = ttk.Frame(self.qualification_tab, width=900)
         frame.pack(fill=X, anchor="n")
 
         self.qualification_select_all_check = ttk.Checkbutton(
@@ -9241,7 +9239,7 @@ try {
         self.qualification_fields_frame = fields_frame
         self.qualification_field_checks = []
         for column in range(4):
-            fields_frame.columnconfigure(column, minsize=self._scaled(180))
+            fields_frame.columnconfigure(column, minsize=180)
         for index, (field_id, label) in enumerate(self.qualification_fields):
             row, column = divmod(index, 4)
             check = ttk.Checkbutton(
@@ -10069,24 +10067,24 @@ try {
         )
         # Reserva um vão fixo entre a qualificação e o player para o botão
         # "Gerar documento" (equidistante das duas caixas).
-        reserved_gap = self._scaled(116)
+        reserved_gap = 116
         target_left = max(0, round(qualification_right + reserved_gap))
-        available_width = max(self._scaled(220), content.winfo_width() - target_left)
+        available_width = max(220, content.winfo_width() - target_left)
         # The qualification stack is anchored at the bottom of its column. Its
         # editor therefore must fit between its action row and the top of the
         # row. Both boxes (qualification and player) share EXACTLY the same
         # height, including the 1,3 cm preview bonus, so their top and bottom
         # edges stay perfectly aligned on resize or restore.
-        action_height = max(self._scaled(31), self.live_qualification_actions.winfo_height())
+        action_height = max(31, self.live_qualification_actions.winfo_height())
         extra_height = self._document_preview_extra_height()
         stage_height = max(
-            self._scaled(180),
-            min(self._scaled(520), available_height - action_height - 4 - extra_height),
+            180,
+            min(520, available_height - action_height - 4 - extra_height),
         )
         # Keep the document preview comfortably sized without letting the
         # player occupy all of the lower workspace.  The surrounding panel
         # remains in place so the other occurrence controls do not shift.
-        stage_width = max(self._scaled(220), min(self._scaled(1120), round(available_width * 0.77 * 0.92)))
+        stage_width = max(220, min(1120, round(available_width * 0.77 * 0.92)))
         stage.configure(
             width=stage_width,
             height=stage_height + extra_height,
@@ -10119,7 +10117,7 @@ try {
             + qualification_editor.winfo_width()
             - content.winfo_rootx()
         )
-        gap_center_x = round(qualification_right + self._scaled(116) / 2)
+        gap_center_x = round(qualification_right + 116 / 2)
         editor_top = max(0, qualification_editor.winfo_rooty() - content.winfo_rooty())
         editor_height = max(1, qualification_editor.winfo_height())
         box_center_y = editor_top + editor_height // 2
@@ -10128,7 +10126,7 @@ try {
         frame_height = max(1, frame.winfo_reqheight())
         frame.place(
             x=round(gap_center_x - frame_width / 2),
-            y=max(0, round(box_center_y - (frame_height - button_height / 2))),
+            y=round(box_center_y - (frame_height - button_height / 2)),
             width=frame_width,
             height=frame_height,
         )
@@ -11387,12 +11385,10 @@ try {
         width: int = 900,
         height: int = 180,
         vertical_padding: tuple[int, int] = (8, 0),
-        stretch: bool = False,
     ):
-        frame = ttk.Frame(parent, width=self._scaled(width), height=self._scaled(height))
-        frame.pack(fill=BOTH if stretch else X, expand=stretch, pady=vertical_padding)
-        if not stretch:
-            frame.pack_propagate(False)
+        frame = ttk.Frame(parent, width=width, height=height)
+        frame.pack(fill=X, expand=True, pady=vertical_padding)
+        frame.pack_propagate(False)
         text = Text(frame, width=1, height=8, wrap="word", undo=True, font=("Segoe UI", 10), background="#ffffff", foreground="#10201f", relief="solid", borderwidth=1, padx=8, pady=7)
         placeholder_text = {
             "transcript": "A transcrição da entrevista será gerada aqui.",
@@ -11922,7 +11918,7 @@ try {
         viewer = Toplevel(self.root)
         viewer.title(f"Visualizar documento — {document_path.stem}")
         viewer.transient(self.root)
-        viewer.geometry(f"{self._scaled(640)}x{self._scaled(480)}")
+        viewer.geometry("640x480")
         viewer_frame = ttk.Frame(viewer, padding=(10, 10))
         viewer_frame.pack(fill=BOTH, expand=True)
         canvas = Canvas(
@@ -12236,7 +12232,7 @@ try {
         buttons = ttk.Frame(frame)
         buttons.pack(fill=X, pady=(4, 0))
         ttk.Button(buttons, text="Voltar", command=win.destroy).pack(side=LEFT)
-        ttk.Button(buttons, text="?", width=3, command=show_help).pack(side=LEFT, padx=self._scaled(6))
+        ttk.Button(buttons, text="?", width=3, command=show_help).pack(side=LEFT, padx=6)
         ttk.Button(buttons, text="OK", command=apply_codes).pack(side=RIGHT)
 
     def _format_grok_diarized_transcript(self, payload: dict, fallback: str) -> str:
@@ -12525,12 +12521,12 @@ try {
     def _refresh_multi_model_layout(self):
         enabled = bool(self.multi_model_var.get() and self.multi_model_secondary)
         if enabled:
-            self.live_text._editor_frame.configure(width=self._scaled(440))
+            self.live_text._editor_frame.configure(width=440)
             if not self.live_secondary_pane.winfo_manager():
                 self.live_secondary_pane.pack(side=LEFT, fill=X, expand=True, padx=(10, 0))
         else:
             self.live_secondary_pane.pack_forget()
-            self.live_text._editor_frame.configure(width=self._scaled(900))
+            self.live_text._editor_frame.configure(width=900)
         self._refresh_primary_transcript_actions(enabled)
         self._refresh_assistant_model_label()
 
@@ -12552,9 +12548,9 @@ try {
             area = secondary_pane.master
             if enabled:
                 area.columnconfigure(0, weight=1, uniform="live_multi_text_panes")
-                area.columnconfigure(1, minsize=self._scaled(10))
+                area.columnconfigure(1, minsize=10)
                 area.columnconfigure(2, weight=1, uniform="live_multi_text_panes")
-                primary_text._editor_frame.configure(width=self._scaled(440))
+                primary_text._editor_frame.configure(width=440)
                 if not secondary_pane.winfo_manager():
                     secondary_pane.grid(row=0, column=2, sticky="ew")
             else:
@@ -12562,7 +12558,7 @@ try {
                 area.columnconfigure(0, weight=1, uniform="")
                 area.columnconfigure(1, minsize=0)
                 area.columnconfigure(2, weight=0, uniform="")
-                primary_text._editor_frame.configure(width=self._scaled(900))
+                primary_text._editor_frame.configure(width=900)
         self._refresh_assistant_model_label()
 
     def _refresh_primary_transcript_actions(self, compact: bool):
@@ -12691,7 +12687,7 @@ try {
         tw.wm_geometry(f"+{x}+{y}")
         label = tk.Label(tw, text="0 = menos agressivo (detecta mais voz)\n3 = mais agressivo (filtra mais)",
                          background="#ffffcc", relief="solid", borderwidth=1,
-                         font=("Segoe UI", 9), justify="left", padx=self._scaled(6), pady=self._scaled(4))
+                         font=("Segoe UI", 9), justify="left", padx=6, pady=4)
         label.pack()
         self._vad_tooltip_window = tw
 
@@ -12745,9 +12741,9 @@ try {
             background="#172024",
             foreground="#edf7f5",
             justify="left",
-            wraplength=self._scaled(420),
-            padx=self._scaled(12),
-            pady=self._scaled(10),
+            wraplength=420,
+            padx=12,
+            pady=10,
             font=("Segoe UI", 9),
         ).pack()
         win.geometry(f"+{x}+{y}")
@@ -12887,22 +12883,8 @@ try {
         win = Toplevel(self.root)
         win.title("Configurações")
         win.resizable(False, False)
-        win_canvas = Canvas(win, highlightthickness=0)
-        win_scroll = ttk.Scrollbar(win, orient="vertical", command=win_canvas.yview)
-        win_canvas.configure(yscrollcommand=win_scroll.set)
-        win_scroll.pack(side=RIGHT, fill=Y)
-        win_canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        frame = ttk.Frame(win_canvas, padding=18)
-        _cfg_frame_id = win_canvas.create_window((0, 0), window=frame, anchor="nw")
-
-        def _on_cfg_frame_configure(_event):
-            win_canvas.configure(scrollregion=win_canvas.bbox("all"))
-            _w = max(win_canvas.winfo_width(), frame.winfo_reqwidth())
-            win_canvas.itemconfigure(_cfg_frame_id, width=_w)
-
-        frame.bind("<Configure>", _on_cfg_frame_configure)
-        win.bind("<MouseWheel>", lambda e: win_canvas.yview_scroll(int(-e.delta / 120), "units"))
-        win.update_idletasks()
+        frame = ttk.Frame(win, padding=18)
+        frame.pack(fill=BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
@@ -12972,7 +12954,7 @@ try {
                 row=0,
                 column=col_index,
                 sticky="n",
-                padx=(self._scaled(0), self._scaled(9)) if col_index == 0 else (9, 0),
+                padx=(0, 9) if col_index == 0 else (9, 0),
             )
             column_sections = []
             for title in titles:
@@ -12982,8 +12964,8 @@ try {
                     padding=(12, 8),
                     style="Settings.TLabelframe",
                 )
-                section.grid(row=len(column_sections), column=0, sticky="ew", pady=(self._scaled(0), self._scaled(8)))
-                section.columnconfigure(0, minsize=self._scaled(170))
+                section.grid(row=len(column_sections), column=0, sticky="ew", pady=(0, 8))
+                section.columnconfigure(0, minsize=170)
                 section.columnconfigure(1, weight=1)
                 column_sections.append(section)
             columns.append(column_sections)
@@ -13010,7 +12992,7 @@ try {
             values: list[int] | None = None,
         ):
             ttk.Label(parallel_frame, text=label).grid(
-                row=row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+                row=row, column=0, sticky="w", pady=5, padx=(0, 12)
             )
             label_var = StringVar(value=str(variable.get()))
             button = ttk.Menubutton(parallel_frame, textvariable=label_var, width=3)
@@ -13022,7 +13004,7 @@ try {
                     command=lambda selected=value: (variable.set(selected), label_var.set(str(selected))),
                 )
             button.configure(menu=menu)
-            button.grid(row=row, column=1, sticky="w", pady=self._scaled(5))
+            button.grid(row=row, column=1, sticky="w", pady=5)
             return button
 
         cpu_options = cpu_parallel_options(cpu_count)
@@ -13033,18 +13015,18 @@ try {
 
         grok_key_row = 0
         ttk.Label(api_frame, text="Chave API da xAI").grid(
-            row=grok_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=grok_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         grok_key_entry = ttk.Entry(api_frame, textvariable=grok_api_key_var, show="*", width=44)
-        grok_key_entry.grid(row=grok_key_row, column=1, sticky="ew", pady=self._scaled(5))
+        grok_key_entry.grid(row=grok_key_row, column=1, sticky="ew", pady=5)
         create_tooltip(grok_key_entry, "Obrigatória para selecionar modelos da xAI em transcrição ou texto.")
 
         deepseek_key_row = grok_key_row + 1
         ttk.Label(api_frame, text="Chave API do Deepseek").grid(
-            row=deepseek_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=deepseek_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         deepseek_key_entry = ttk.Entry(api_frame, textvariable=deepseek_api_key_var, show="*", width=44)
-        deepseek_key_entry.grid(row=deepseek_key_row, column=1, sticky="ew", pady=self._scaled(5))
+        deepseek_key_entry.grid(row=deepseek_key_row, column=1, sticky="ew", pady=5)
         create_tooltip(
             deepseek_key_entry,
             "Obrigatória para selecionar DeepSeek V4 Flash ou DeepSeek V4 Pro.",
@@ -13052,19 +13034,19 @@ try {
 
         imei_key_row = deepseek_key_row + 1
         ttk.Label(api_frame, text="Chave API do IMEI Check").grid(
-            row=imei_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=imei_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         imei_key_entry = ttk.Entry(api_frame, textvariable=imei_api_key_var, show="*", width=44)
-        imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=self._scaled(5))
+        imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=5)
 
         deepgram_key_row = imei_key_row + 1
         ttk.Label(api_frame, text="Chave API do Deepgram").grid(
-            row=deepgram_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=deepgram_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         deepgram_key_entry = ttk.Entry(
             api_frame, textvariable=deepgram_api_key_var, show="*", width=44
         )
-        deepgram_key_entry.grid(row=deepgram_key_row, column=1, sticky="ew", pady=self._scaled(5))
+        deepgram_key_entry.grid(row=deepgram_key_row, column=1, sticky="ew", pady=5)
         create_tooltip(
             deepgram_key_entry,
             "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
@@ -13072,12 +13054,12 @@ try {
 
         deepgram_keyterms_row = deepgram_key_row + 1
         ttk.Label(api_frame, text="Palavras-chave do Deepgram").grid(
-            row=deepgram_keyterms_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=deepgram_keyterms_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         deepgram_keyterms_entry = ttk.Entry(
             api_frame, textvariable=deepgram_keyterms_var, width=44
         )
-        deepgram_keyterms_entry.grid(row=deepgram_keyterms_row, column=1, sticky="ew", pady=self._scaled(5))
+        deepgram_keyterms_entry.grid(row=deepgram_keyterms_row, column=1, sticky="ew", pady=5)
         create_tooltip(
             deepgram_keyterms_entry,
             "Termos que o Nova 3 deve priorizar na transcrição, separados por vírgula "
@@ -13086,12 +13068,12 @@ try {
 
         assemblyai_key_row = deepgram_keyterms_row + 1
         ttk.Label(api_frame, text="Chave API da AssemblyAI").grid(
-            row=assemblyai_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=assemblyai_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         assemblyai_key_entry = ttk.Entry(
             api_frame, textvariable=assemblyai_api_key_var, show="*", width=44
         )
-        assemblyai_key_entry.grid(row=assemblyai_key_row, column=1, sticky="ew", pady=self._scaled(5))
+        assemblyai_key_entry.grid(row=assemblyai_key_row, column=1, sticky="ew", pady=5)
         create_tooltip(
             assemblyai_key_entry,
             "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
@@ -13099,12 +13081,12 @@ try {
 
         elevenlabs_key_row = assemblyai_key_row + 1
         ttk.Label(api_frame, text="Chave API da ElevenLabs").grid(
-            row=elevenlabs_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=elevenlabs_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         elevenlabs_key_entry = ttk.Entry(
             api_frame, textvariable=elevenlabs_api_key_var, show="*", width=44
         )
-        elevenlabs_key_entry.grid(row=elevenlabs_key_row, column=1, sticky="ew", pady=self._scaled(5))
+        elevenlabs_key_entry.grid(row=elevenlabs_key_row, column=1, sticky="ew", pady=5)
         create_tooltip(
             elevenlabs_key_entry,
             "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
@@ -13115,8 +13097,8 @@ try {
             row=transcription_server_row,
             column=0,
             sticky="w",
-            pady=self._scaled(5),
-            padx=(self._scaled(0), self._scaled(12)),
+            pady=5,
+            padx=(0, 12),
         )
         transcription_server_combo = ttk.Combobox(
             transcription_frame,
@@ -13124,7 +13106,7 @@ try {
             state="readonly",
             width=44,
         )
-        transcription_server_combo.grid(row=transcription_server_row, column=1, sticky="ew", pady=self._scaled(5))
+        transcription_server_combo.grid(row=transcription_server_row, column=1, sticky="ew", pady=5)
 
         def refresh_transcription_servers(preferred_name: str | None = None):
             nonlocal transcription_labels, transcription_server_2_labels, refreshing_transcription_servers
@@ -13193,14 +13175,14 @@ try {
             for row, (label, variable) in enumerate(
                 (("Nome do servidor", name_var), ("URL", url_var), ("Nome do modelo", model_var))
             ):
-                ttk.Label(dialog_frame, text=label).grid(row=row, column=0, sticky="w", pady=self._scaled(4), padx=(self._scaled(0), self._scaled(10)))
+                ttk.Label(dialog_frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
                 entry = ttk.Entry(dialog_frame, textvariable=variable, width=46)
-                entry.grid(row=row, column=1, sticky="ew", pady=self._scaled(4))
+                entry.grid(row=row, column=1, sticky="ew", pady=4)
                 if row == 0:
                     entry.focus_set()
 
             dialog_buttons = ttk.Frame(dialog_frame)
-            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(self._scaled(12), self._scaled(0)))
+            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
             def confirm_add():
                 added, reason = add_transcription_server(name_var.get(), url_var.get(), model_var.get())
@@ -13211,7 +13193,7 @@ try {
                 refresh_transcription_servers(current_name)
                 dialog.destroy()
 
-            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(self._scaled(0), self._scaled(8)))
+            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(0, 8))
             ttk.Button(dialog_buttons, text="Adicionar", command=confirm_add).pack(side=LEFT)
             dialog.bind("<Return>", lambda _event: confirm_add())
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -13239,7 +13221,7 @@ try {
         transcription_server_2_row = transcription_server_row + 1
         transcription_server_2_label = ttk.Label(transcription_frame, text="Modelo de transcrição 2")
         transcription_server_2_label.grid(
-            row=transcription_server_2_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=transcription_server_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         transcription_server_2_combo = ttk.Combobox(
             transcription_frame,
@@ -13247,7 +13229,7 @@ try {
             state="readonly",
             width=44,
         )
-        transcription_server_2_combo.grid(row=transcription_server_2_row, column=1, sticky="ew", pady=self._scaled(5))
+        transcription_server_2_combo.grid(row=transcription_server_2_row, column=1, sticky="ew", pady=5)
 
         def primary_server_changed(*_args):
             refresh_transcription_servers(transcription_labels.get(transcription_server_var.get()))
@@ -13262,7 +13244,7 @@ try {
             anchor="w",
             style="Settings.TLabel",
         )
-        chunk_label.pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
+        chunk_label.pack(side=LEFT, padx=(0, 10))
         grok_chunk_entry = ttk.Combobox(
             chunk_controls,
             textvariable=grok_chunk_ms_var,
@@ -13282,8 +13264,8 @@ try {
             )
 
         chunk_help = ttk.Button(chunk_controls, text="?", width=2, command=show_chunk_help)
-        chunk_help.pack(side=LEFT, padx=(self._scaled(5), self._scaled(0)))
-        chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=self._scaled(5))
+        chunk_help.pack(side=LEFT, padx=(5, 0))
+        chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=5)
 
         rest_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
 
@@ -13384,7 +13366,7 @@ try {
         ):
             is_proxy = selected_name == IA_PROXY_NAME
             if is_proxy:
-                proxy_model_frame.grid(row=proxy_model_row, column=1, columnspan=3, sticky="w", pady=self._scaled(5))
+                proxy_model_frame.grid(row=proxy_model_row, column=1, columnspan=3, sticky="w", pady=5)
                 configure_menu(proxy_model_menu, proxy_model_var, proxy_model_display, proxy_model_options)
                 actual_model = proxy_model_var.get()
             else:
@@ -13399,7 +13381,7 @@ try {
                 return
             configure_menu(reasoning_menu, reasoning_var, reasoning_display, reasoning_options)
             current_reasoning_frame.grid(
-                row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=self._scaled(5)
+                row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=5
             )
 
         def make_two_model_section(
@@ -13427,8 +13409,8 @@ try {
                 row=model_row,
                 column=0,
                 sticky="w",
-                pady=self._scaled(5),
-                padx=(self._scaled(0), self._scaled(12)),
+                pady=5,
+                padx=(0, 12),
             )
             model_combo = ttk.Combobox(
                 section_frame,
@@ -13436,15 +13418,15 @@ try {
                 state="readonly",
                 width=44,
             )
-            model_combo.grid(row=model_row, column=1, sticky="ew", pady=self._scaled(5))
+            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
             model_2_row = model_row + 3
             ttk.Label(section_frame, text=label_second).grid(
-                row=model_2_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+                row=model_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
             )
             model_2_combo = ttk.Combobox(
                 section_frame, textvariable=model_2_var, state="readonly", width=44
             )
-            model_2_combo.grid(row=model_2_row, column=1, sticky="ew", pady=self._scaled(5))
+            model_2_combo.grid(row=model_2_row, column=1, sticky="ew", pady=5)
 
             proxy_model_row = model_row + 1
             proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
@@ -13455,7 +13437,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(
-                side=LEFT, padx=(self._scaled(0), self._scaled(10))
+                side=LEFT, padx=(0, 10)
             )
             proxy_model_display_var = StringVar(value=proxy_var.get())
             proxy_model_button = ttk.Menubutton(
@@ -13474,7 +13456,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             )
-            reasoning_label.pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
+            reasoning_label.pack(side=LEFT, padx=(0, 10))
             reasoning_display_var = StringVar(value=reasoning_var.get())
             reasoning_button = ttk.Menubutton(
                 reasoning_frame, textvariable=reasoning_display_var, width=12
@@ -13492,7 +13474,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(
-                side=LEFT, padx=(self._scaled(0), self._scaled(10))
+                side=LEFT, padx=(0, 10)
             )
             proxy_model_2_display_var = StringVar(value=proxy_2_var.get())
             proxy_model_2_button = ttk.Menubutton(
@@ -13511,7 +13493,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             )
-            reasoning_2_label.pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
+            reasoning_2_label.pack(side=LEFT, padx=(0, 10))
             reasoning_2_display_var = StringVar(value=reasoning_2_var.get())
             reasoning_2_button = ttk.Menubutton(
                 reasoning_2_frame, textvariable=reasoning_2_display_var, width=12
@@ -13672,14 +13654,14 @@ try {
         ):
             model_row = start_row
             model_label = ttk.Label(section_frame, text="Modelo:")
-            model_label.grid(row=model_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12)))
+            model_label.grid(row=model_row, column=0, sticky="w", pady=5, padx=(0, 12))
             model_combo = ttk.Combobox(
                 section_frame,
                 textvariable=model_var,
                 state="readonly",
                 width=44,
             )
-            model_combo.grid(row=model_row, column=1, sticky="ew", pady=self._scaled(5))
+            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
 
             proxy_model_row = model_row + 1
             proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
@@ -13690,7 +13672,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(
-                side=LEFT, padx=(self._scaled(0), self._scaled(10))
+                side=LEFT, padx=(0, 10)
             )
             proxy_model_display_var = StringVar(value=proxy_var.get())
             proxy_model_button = ttk.Menubutton(
@@ -13708,7 +13690,7 @@ try {
                 width=12,
                 anchor="w",
                 style="Settings.TLabel",
-            ).pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
+            ).pack(side=LEFT, padx=(0, 10))
             reasoning_display_var = StringVar(value=reasoning_var.get())
             reasoning_button = ttk.Menubutton(
                 reasoning_frame, textvariable=reasoning_display_var, width=12
@@ -13765,8 +13747,8 @@ try {
             row=extraction_row,
             column=0,
             sticky="w",
-            pady=self._scaled(5),
-            padx=(self._scaled(0), self._scaled(12)),
+            pady=5,
+            padx=(0, 12),
         )
         extraction_combo = ttk.Combobox(
             extraction_frame,
@@ -13775,7 +13757,7 @@ try {
             state="readonly",
             width=25,
         )
-        extraction_combo.grid(row=extraction_row, column=1, sticky="ew", pady=self._scaled(5))
+        extraction_combo.grid(row=extraction_row, column=1, sticky="ew", pady=5)
 
         extraction_ui = make_single_model_section(
             extraction_frame,
@@ -13825,26 +13807,26 @@ try {
         )
 
         ttk.Label(police_frame, text="Nome").grid(
-            row=0, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=0, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         ttk.Entry(police_frame, textvariable=police_name_var, width=44).grid(
-            row=0, column=1, sticky="ew", pady=self._scaled(5)
+            row=0, column=1, sticky="ew", pady=5
         )
         ttk.Label(police_frame, text="Cargo").grid(
-            row=1, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=1, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         ttk.Entry(police_frame, textvariable=police_role_var, width=44).grid(
-            row=1, column=1, sticky="ew", pady=self._scaled(5)
+            row=1, column=1, sticky="ew", pady=5
         )
         ttk.Label(police_frame, text="Delegacia").grid(
-            row=2, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=2, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         police_station_entry = ttk.Entry(
             police_frame,
             textvariable=police_station_var,
             width=44,
         )
-        police_station_entry.grid(row=2, column=1, sticky="ew", pady=self._scaled(5))
+        police_station_entry.grid(row=2, column=1, sticky="ew", pady=5)
 
         def restore_station_placeholder(_event=None):
             if police_station_entry.get().strip():
@@ -13865,20 +13847,20 @@ try {
         restore_station_placeholder()
 
         ttk.Label(police_frame, text="Delegado").grid(
-            row=3, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=3, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         ttk.Entry(police_frame, textvariable=police_delegate_var, width=44).grid(
-            row=3, column=1, sticky="ew", pady=self._scaled(5)
+            row=3, column=1, sticky="ew", pady=5
         )
         ttk.Label(police_frame, text="Cidade").grid(
-            row=4, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
+            row=4, column=0, sticky="w", pady=5, padx=(0, 12)
         )
         police_city_entry = ttk.Entry(
             police_frame,
             textvariable=police_city_var,
             width=44,
         )
-        police_city_entry.grid(row=4, column=1, sticky="ew", pady=self._scaled(5))
+        police_city_entry.grid(row=4, column=1, sticky="ew", pady=5)
 
         def restore_city_placeholder(_event=None):
             if police_city_entry.get().strip():
@@ -13909,13 +13891,13 @@ try {
             ttk.Label(
                 dialog_frame,
                 text="A base é usada quando a opção Base de nomes está selecionada.",
-            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(self._scaled(0), self._scaled(8)))
+            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
             name_var = StringVar()
             entry = ttk.Entry(dialog_frame, textvariable=name_var, width=38)
             entry.grid(row=1, column=0, columnspan=2, sticky="ew")
             entry.focus_set()
             dialog_buttons = ttk.Frame(dialog_frame)
-            dialog_buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(self._scaled(12), self._scaled(0)))
+            dialog_buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
             def confirm_edit():
                 changed = add_name_to_database(name_var.get()) if add else remove_name_from_database(name_var.get())
@@ -13929,7 +13911,7 @@ try {
                         parent=dialog,
                     )
 
-            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(self._scaled(0), self._scaled(8)))
+            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(0, 8))
             ttk.Button(dialog_buttons, text="Adicionar" if add else "Remover", command=confirm_edit).pack(side=LEFT)
             dialog.bind("<Return>", lambda _event: confirm_edit())
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -13954,7 +13936,7 @@ try {
         deepseek_api_key_var.trace_add("write", deepseek_api_key_changed)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=1, column=0, columnspan=2, sticky="e", pady=(self._scaled(6), self._scaled(0)))
+        buttons.grid(row=1, column=0, columnspan=2, sticky="e", pady=(6, 0))
 
         def save_and_close():
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
@@ -14144,7 +14126,7 @@ try {
             self._refresh_multi_text_visibility()
             win.destroy()
 
-        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(self._scaled(0), self._scaled(8)))
+        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
         ttk.Button(buttons, text="Salvar", command=save_and_close).pack(side=LEFT)
 
         def normalize_settings_surface(widget):
@@ -14162,14 +14144,6 @@ try {
                 normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
-        win.update_idletasks()
-        _sw = self.root.winfo_screenwidth()
-        _sh = self.root.winfo_screenheight()
-        # O win acompanha o conteúdo real (já escalado) + o scrollbar — o conteúdo
-        # inteiro fica visível sem barra de rolagem.
-        _rw = max(frame.winfo_reqwidth(), 300) + 22
-        _rh = max(frame.winfo_reqheight(), 250) + 22
-        win.geometry(f"{min(_rw, _sw - 40)}x{min(_rh, _sh - 60)}")
         win.wait_visibility()
         win.focus()
     def open_about(self):
@@ -14191,38 +14165,38 @@ try {
         win.resizable(False, False)
         win.transient(self.root)
         win.configure(background="#000000")
-        canvas = Canvas(win, width=self._scaled(420), height=self._scaled(650), highlightthickness=0, background="#000000")
+        canvas = Canvas(win, width=420, height=650, highlightthickness=0, background="#000000")
         canvas.pack(fill=BOTH, expand=True)
 
         image_path = resource_path("assets/appwin.png")
         try:
             with Image.open(image_path) as source:
                 source = source.convert("RGBA")
-                image_width = self._scaled(415)
+                image_width = 415
                 image_height = round(source.height * image_width / source.width)
                 source = source.resize((image_width, image_height), Image.Resampling.LANCZOS)
                 self.about_image = ImageTk.PhotoImage(source)
-            canvas.create_image(self._scaled(210), 0, anchor="n", image=self.about_image)
+            canvas.create_image(210, 0, anchor="n", image=self.about_image)
         except Exception:
-            canvas.create_rectangle(0, 0, self._scaled(420), self._scaled(556), fill="#14201f", outline="")
+            canvas.create_rectangle(0, 0, 420, 556, fill="#14201f", outline="")
 
         canvas.create_text(
-            self._scaled(210),
-            self._scaled(586),
+            210,
+            586,
             text="Delegacia de Taguaí",
             fill="#ffffff",
             font=("Segoe UI Semibold", 13),
         )
         canvas.create_text(
-            self._scaled(210),
-            self._scaled(612),
+            210,
+            612,
             text="Setor de Investigações Gerais",
             fill="#e1f0ef",
             font=("Segoe UI", 10),
         )
         canvas.create_text(
-            self._scaled(210),
-            self._scaled(628),
+            210,
+            628,
             text=f"Versão: {APP_VERSION}",
             fill="#9bb3b0",
             font=("Segoe UI", 9),
@@ -14234,11 +14208,11 @@ try {
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", close_about)
-        win.geometry(f"{min(self._scaled(420), self.root.winfo_screenwidth() - 40)}x{min(self._scaled(638), self.root.winfo_screenheight() - 40)}")
+        win.geometry("420x638")
         win.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
         y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - win.winfo_height()) // 2)
-        win.geometry(f"{min(self._scaled(420), self.root.winfo_screenwidth() - 40)}x{min(self._scaled(638), self.root.winfo_screenheight() - 40)}+{x}+{y}")
+        win.geometry(f"420x638+{x}+{y}")
         win.wait_visibility()
         win.lift()
         win.focus_force()
@@ -14252,18 +14226,8 @@ try {
         win = Toplevel(self.root)
         win.title("Status dos servidores")
         win.resizable(False, False)
-        canvas = Canvas(win, width=self._scaled(1200), height=self._scaled(1200), highlightthickness=0, background="#000000")
-        canvas.configure(scrollregion=(0, 0, self._scaled(1200), self._scaled(1200)))
-        canvas_scroll = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=canvas_scroll.set)
-        canvas_scroll.pack(side=RIGHT, fill=Y)
-        canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-        win.update_idletasks()
-        win.geometry(
-            f"{min(self._scaled(1200), self.root.winfo_screenwidth() - 40)}x"
-            f"{min(self._scaled(1200), self.root.winfo_screenheight() - 60)}"
-        )
+        canvas = Canvas(win, width=1200, height=1200, highlightthickness=0, background="#000000")
+        canvas.pack(fill=BOTH, expand=True)
 
         # Título
         canvas.create_text(
@@ -14322,7 +14286,7 @@ try {
 
                 # Requisição HTTP
                 try:
-                    conn = _http.HTTPConnection(parsed.hostname, 8100, timeout=1)
+                    conn = _http.HTTPConnection(parsed.hostname, 8100, timeout=5)
                     conn.request("GET", "/health")
                     resp = conn.getresponse()
                     raw = resp.read().decode("utf-8", errors="replace")
@@ -14429,15 +14393,9 @@ try {
                 except Exception as exc:
                     canvas.create_text(
                         center_x, y,
-                        text="Offline",
+                        text=f"Erro: {exc}",
                         fill="#e74c3c",
                         font=("Consolas", 9),
-                    )
-                    canvas.create_text(
-                        center_x, y + 14,
-                        text=str(exc)[:60],
-                        fill="#889493",
-                        font=("Consolas", 8),
                     )
                     y += 16
 
@@ -14446,14 +14404,11 @@ try {
 
             content_height = max_y + 24
 
-        height = min(max(content_height, self._scaled(200)), self._scaled(1200))
+        height = min(max(content_height, 200), 1200)
         canvas.configure(height=height)
-        status_width = self._scaled(1200) if len(granite_servers) >= 2 else self._scaled(600)
+        status_width = 1200 if len(granite_servers) >= 2 else 600
         canvas.configure(width=status_width)
-        win.geometry(
-            f"{min(status_width, self.root.winfo_screenwidth() - 40)}x"
-            f"{min(height, self.root.winfo_screenheight() - 60)}"
-        )
+        win.geometry(f"{status_width}x{height}")
 
         win.transient(self.root)
         win.wait_visibility()
