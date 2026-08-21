@@ -174,7 +174,33 @@ gh release delete <VERSAO_ANTERIOR> --repo spigknot/SIG-Windows --yes
 - **Caminhos do gh**: o shell do terminal é MSYS/zsh — `C:/Projetos/...` vira
   `no matches found`. Entre no diretório e use `./nome.ext`.
 
-### 4. Fechar
+### 4. PITFALL: Google marca o .exe como malware (o updater não baixa)
+
+O Google Drive **às vezes flagra o `SigUpdater.exe` (o updater compilado, ~11MB)
+como malware/spam** — `reason: cannotDownloadAbusiveFile`. Nesse caso o download
+público dá **404** e o autenticado dá **403** (diferente do "warning" do sig.exe,
+que ainda baixa com o `confirm`). **Sintoma**: o updater baixa os arquivos e falha
+exatamente no `sig.exe`/`SigUpdater.exe` com `HTTP Error 404`.
+
+**Correção — o updater já suporta o `github_url` como fonte alternativa** (o
+GitHub não faz esse bloqueio):
+
+```bash
+# 1) Subir o sig.exe + SigUpdater.exe como ASSETS individuais na release:
+cd "release/generated/<VERSAO>/package"
+gh release upload <VERSAO> ./sig.exe ./SigUpdater.exe --repo spigknot/SIG-Windows --clobber
+
+# 2) Re-rodar o sync COM o --github-tag → o manifest adiciona o github_url
+#    (sig.exe + SigUpdater.exe) → o updater baixa esses do GitHub:
+python scripts/sync_publish.py --package release/generated/<VERSAO>/package \
+  --version <VERSAO> --github-tag <VERSAO>
+```
+
+- O sig.exe pode ter o mesmo problema (o Google flagra os .exe PyInstaller de
+  forma arbitrária) — subir AMBOS como assets + o `--github-tag` cobre os dois.
+- Testar após o sync: o updater baixa o `SigUpdater.exe` do GitHub (200, ~11MB).
+
+### 5. Fechar
 
 ```bash
 # commit do content_snapshot.json + sync_manifest.json (o release pede):
