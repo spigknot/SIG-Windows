@@ -14162,11 +14162,14 @@ try {
                 normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
+        win.update_idletasks()
         _sw = self.root.winfo_screenwidth()
         _sh = self.root.winfo_screenheight()
-        # Janela de Configurações: 1093x782 no 1920x1080 (observado) × fator exato —
-        # mesma proporção da tela em qualquer resolução.
-        win.geometry(f"{min(self._scaled(1093), _sw - 40)}x{min(self._scaled(782), _sh - 60)}")
+        # O win acompanha o conteúdo real (já escalado) + o scrollbar — o conteúdo
+        # inteiro fica visível sem barra de rolagem.
+        _rw = max(frame.winfo_reqwidth(), 300) + 22
+        _rh = max(frame.winfo_reqheight(), 250) + 22
+        win.geometry(f"{min(_rw, _sw - 40)}x{min(_rh, _sh - 60)}")
         win.wait_visibility()
         win.focus()
     def open_about(self):
