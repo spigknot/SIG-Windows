@@ -12972,7 +12972,7 @@ try {
                 row=0,
                 column=col_index,
                 sticky="n",
-                padx=(0, 9) if col_index == 0 else (9, 0),
+                padx=(self._scaled(0), self._scaled(9)) if col_index == 0 else (9, 0),
             )
             column_sections = []
             for title in titles:
@@ -12982,7 +12982,7 @@ try {
                     padding=(12, 8),
                     style="Settings.TLabelframe",
                 )
-                section.grid(row=len(column_sections), column=0, sticky="ew", pady=(0, 8))
+                section.grid(row=len(column_sections), column=0, sticky="ew", pady=(self._scaled(0), self._scaled(8)))
                 section.columnconfigure(0, minsize=170)
                 section.columnconfigure(1, weight=1)
                 column_sections.append(section)
@@ -13010,7 +13010,7 @@ try {
             values: list[int] | None = None,
         ):
             ttk.Label(parallel_frame, text=label).grid(
-                row=row, column=0, sticky="w", pady=5, padx=(0, 12)
+                row=row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
             )
             label_var = StringVar(value=str(variable.get()))
             button = ttk.Menubutton(parallel_frame, textvariable=label_var, width=3)
@@ -13022,7 +13022,7 @@ try {
                     command=lambda selected=value: (variable.set(selected), label_var.set(str(selected))),
                 )
             button.configure(menu=menu)
-            button.grid(row=row, column=1, sticky="w", pady=5)
+            button.grid(row=row, column=1, sticky="w", pady=self._scaled(5))
             return button
 
         cpu_options = cpu_parallel_options(cpu_count)
@@ -13033,18 +13033,18 @@ try {
 
         grok_key_row = 0
         ttk.Label(api_frame, text="Chave API da xAI").grid(
-            row=grok_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=grok_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         grok_key_entry = ttk.Entry(api_frame, textvariable=grok_api_key_var, show="*", width=44)
-        grok_key_entry.grid(row=grok_key_row, column=1, sticky="ew", pady=5)
+        grok_key_entry.grid(row=grok_key_row, column=1, sticky="ew", pady=self._scaled(5))
         create_tooltip(grok_key_entry, "Obrigatória para selecionar modelos da xAI em transcrição ou texto.")
 
         deepseek_key_row = grok_key_row + 1
         ttk.Label(api_frame, text="Chave API do Deepseek").grid(
-            row=deepseek_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=deepseek_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         deepseek_key_entry = ttk.Entry(api_frame, textvariable=deepseek_api_key_var, show="*", width=44)
-        deepseek_key_entry.grid(row=deepseek_key_row, column=1, sticky="ew", pady=5)
+        deepseek_key_entry.grid(row=deepseek_key_row, column=1, sticky="ew", pady=self._scaled(5))
         create_tooltip(
             deepseek_key_entry,
             "Obrigatória para selecionar DeepSeek V4 Flash ou DeepSeek V4 Pro.",
@@ -13052,19 +13052,19 @@ try {
 
         imei_key_row = deepseek_key_row + 1
         ttk.Label(api_frame, text="Chave API do IMEI Check").grid(
-            row=imei_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=imei_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         imei_key_entry = ttk.Entry(api_frame, textvariable=imei_api_key_var, show="*", width=44)
-        imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=5)
+        imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=self._scaled(5))
 
         deepgram_key_row = imei_key_row + 1
         ttk.Label(api_frame, text="Chave API do Deepgram").grid(
-            row=deepgram_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=deepgram_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         deepgram_key_entry = ttk.Entry(
             api_frame, textvariable=deepgram_api_key_var, show="*", width=44
         )
-        deepgram_key_entry.grid(row=deepgram_key_row, column=1, sticky="ew", pady=5)
+        deepgram_key_entry.grid(row=deepgram_key_row, column=1, sticky="ew", pady=self._scaled(5))
         create_tooltip(
             deepgram_key_entry,
             "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
@@ -13072,12 +13072,12 @@ try {
 
         deepgram_keyterms_row = deepgram_key_row + 1
         ttk.Label(api_frame, text="Palavras-chave do Deepgram").grid(
-            row=deepgram_keyterms_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=deepgram_keyterms_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         deepgram_keyterms_entry = ttk.Entry(
             api_frame, textvariable=deepgram_keyterms_var, width=44
         )
-        deepgram_keyterms_entry.grid(row=deepgram_keyterms_row, column=1, sticky="ew", pady=5)
+        deepgram_keyterms_entry.grid(row=deepgram_keyterms_row, column=1, sticky="ew", pady=self._scaled(5))
         create_tooltip(
             deepgram_keyterms_entry,
             "Termos que o Nova 3 deve priorizar na transcrição, separados por vírgula "
@@ -13086,12 +13086,12 @@ try {
 
         assemblyai_key_row = deepgram_keyterms_row + 1
         ttk.Label(api_frame, text="Chave API da AssemblyAI").grid(
-            row=assemblyai_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=assemblyai_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         assemblyai_key_entry = ttk.Entry(
             api_frame, textvariable=assemblyai_api_key_var, show="*", width=44
         )
-        assemblyai_key_entry.grid(row=assemblyai_key_row, column=1, sticky="ew", pady=5)
+        assemblyai_key_entry.grid(row=assemblyai_key_row, column=1, sticky="ew", pady=self._scaled(5))
         create_tooltip(
             assemblyai_key_entry,
             "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
@@ -13099,12 +13099,12 @@ try {
 
         elevenlabs_key_row = assemblyai_key_row + 1
         ttk.Label(api_frame, text="Chave API da ElevenLabs").grid(
-            row=elevenlabs_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=elevenlabs_key_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         elevenlabs_key_entry = ttk.Entry(
             api_frame, textvariable=elevenlabs_api_key_var, show="*", width=44
         )
-        elevenlabs_key_entry.grid(row=elevenlabs_key_row, column=1, sticky="ew", pady=5)
+        elevenlabs_key_entry.grid(row=elevenlabs_key_row, column=1, sticky="ew", pady=self._scaled(5))
         create_tooltip(
             elevenlabs_key_entry,
             "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
@@ -13115,8 +13115,8 @@ try {
             row=transcription_server_row,
             column=0,
             sticky="w",
-            pady=5,
-            padx=(0, 12),
+            pady=self._scaled(5),
+            padx=(self._scaled(0), self._scaled(12)),
         )
         transcription_server_combo = ttk.Combobox(
             transcription_frame,
@@ -13124,7 +13124,7 @@ try {
             state="readonly",
             width=44,
         )
-        transcription_server_combo.grid(row=transcription_server_row, column=1, sticky="ew", pady=5)
+        transcription_server_combo.grid(row=transcription_server_row, column=1, sticky="ew", pady=self._scaled(5))
 
         def refresh_transcription_servers(preferred_name: str | None = None):
             nonlocal transcription_labels, transcription_server_2_labels, refreshing_transcription_servers
@@ -13193,14 +13193,14 @@ try {
             for row, (label, variable) in enumerate(
                 (("Nome do servidor", name_var), ("URL", url_var), ("Nome do modelo", model_var))
             ):
-                ttk.Label(dialog_frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
+                ttk.Label(dialog_frame, text=label).grid(row=row, column=0, sticky="w", pady=self._scaled(4), padx=(self._scaled(0), self._scaled(10)))
                 entry = ttk.Entry(dialog_frame, textvariable=variable, width=46)
-                entry.grid(row=row, column=1, sticky="ew", pady=4)
+                entry.grid(row=row, column=1, sticky="ew", pady=self._scaled(4))
                 if row == 0:
                     entry.focus_set()
 
             dialog_buttons = ttk.Frame(dialog_frame)
-            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(self._scaled(12), self._scaled(0)))
 
             def confirm_add():
                 added, reason = add_transcription_server(name_var.get(), url_var.get(), model_var.get())
@@ -13211,7 +13211,7 @@ try {
                 refresh_transcription_servers(current_name)
                 dialog.destroy()
 
-            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(0, 8))
+            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(self._scaled(0), self._scaled(8)))
             ttk.Button(dialog_buttons, text="Adicionar", command=confirm_add).pack(side=LEFT)
             dialog.bind("<Return>", lambda _event: confirm_add())
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -13239,7 +13239,7 @@ try {
         transcription_server_2_row = transcription_server_row + 1
         transcription_server_2_label = ttk.Label(transcription_frame, text="Modelo de transcrição 2")
         transcription_server_2_label.grid(
-            row=transcription_server_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=transcription_server_2_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         transcription_server_2_combo = ttk.Combobox(
             transcription_frame,
@@ -13247,7 +13247,7 @@ try {
             state="readonly",
             width=44,
         )
-        transcription_server_2_combo.grid(row=transcription_server_2_row, column=1, sticky="ew", pady=5)
+        transcription_server_2_combo.grid(row=transcription_server_2_row, column=1, sticky="ew", pady=self._scaled(5))
 
         def primary_server_changed(*_args):
             refresh_transcription_servers(transcription_labels.get(transcription_server_var.get()))
@@ -13262,7 +13262,7 @@ try {
             anchor="w",
             style="Settings.TLabel",
         )
-        chunk_label.pack(side=LEFT, padx=(0, 10))
+        chunk_label.pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
         grok_chunk_entry = ttk.Combobox(
             chunk_controls,
             textvariable=grok_chunk_ms_var,
@@ -13282,8 +13282,8 @@ try {
             )
 
         chunk_help = ttk.Button(chunk_controls, text="?", width=2, command=show_chunk_help)
-        chunk_help.pack(side=LEFT, padx=(5, 0))
-        chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=5)
+        chunk_help.pack(side=LEFT, padx=(self._scaled(5), self._scaled(0)))
+        chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=self._scaled(5))
 
         rest_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
 
@@ -13384,7 +13384,7 @@ try {
         ):
             is_proxy = selected_name == IA_PROXY_NAME
             if is_proxy:
-                proxy_model_frame.grid(row=proxy_model_row, column=1, columnspan=3, sticky="w", pady=5)
+                proxy_model_frame.grid(row=proxy_model_row, column=1, columnspan=3, sticky="w", pady=self._scaled(5))
                 configure_menu(proxy_model_menu, proxy_model_var, proxy_model_display, proxy_model_options)
                 actual_model = proxy_model_var.get()
             else:
@@ -13399,7 +13399,7 @@ try {
                 return
             configure_menu(reasoning_menu, reasoning_var, reasoning_display, reasoning_options)
             current_reasoning_frame.grid(
-                row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=5
+                row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=self._scaled(5)
             )
 
         def make_two_model_section(
@@ -13427,8 +13427,8 @@ try {
                 row=model_row,
                 column=0,
                 sticky="w",
-                pady=5,
-                padx=(0, 12),
+                pady=self._scaled(5),
+                padx=(self._scaled(0), self._scaled(12)),
             )
             model_combo = ttk.Combobox(
                 section_frame,
@@ -13436,15 +13436,15 @@ try {
                 state="readonly",
                 width=44,
             )
-            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
+            model_combo.grid(row=model_row, column=1, sticky="ew", pady=self._scaled(5))
             model_2_row = model_row + 3
             ttk.Label(section_frame, text=label_second).grid(
-                row=model_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
+                row=model_2_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
             )
             model_2_combo = ttk.Combobox(
                 section_frame, textvariable=model_2_var, state="readonly", width=44
             )
-            model_2_combo.grid(row=model_2_row, column=1, sticky="ew", pady=5)
+            model_2_combo.grid(row=model_2_row, column=1, sticky="ew", pady=self._scaled(5))
 
             proxy_model_row = model_row + 1
             proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
@@ -13455,7 +13455,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(
-                side=LEFT, padx=(0, 10)
+                side=LEFT, padx=(self._scaled(0), self._scaled(10))
             )
             proxy_model_display_var = StringVar(value=proxy_var.get())
             proxy_model_button = ttk.Menubutton(
@@ -13474,7 +13474,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             )
-            reasoning_label.pack(side=LEFT, padx=(0, 10))
+            reasoning_label.pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
             reasoning_display_var = StringVar(value=reasoning_var.get())
             reasoning_button = ttk.Menubutton(
                 reasoning_frame, textvariable=reasoning_display_var, width=12
@@ -13492,7 +13492,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(
-                side=LEFT, padx=(0, 10)
+                side=LEFT, padx=(self._scaled(0), self._scaled(10))
             )
             proxy_model_2_display_var = StringVar(value=proxy_2_var.get())
             proxy_model_2_button = ttk.Menubutton(
@@ -13511,7 +13511,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             )
-            reasoning_2_label.pack(side=LEFT, padx=(0, 10))
+            reasoning_2_label.pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
             reasoning_2_display_var = StringVar(value=reasoning_2_var.get())
             reasoning_2_button = ttk.Menubutton(
                 reasoning_2_frame, textvariable=reasoning_2_display_var, width=12
@@ -13672,14 +13672,14 @@ try {
         ):
             model_row = start_row
             model_label = ttk.Label(section_frame, text="Modelo:")
-            model_label.grid(row=model_row, column=0, sticky="w", pady=5, padx=(0, 12))
+            model_label.grid(row=model_row, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12)))
             model_combo = ttk.Combobox(
                 section_frame,
                 textvariable=model_var,
                 state="readonly",
                 width=44,
             )
-            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
+            model_combo.grid(row=model_row, column=1, sticky="ew", pady=self._scaled(5))
 
             proxy_model_row = model_row + 1
             proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
@@ -13690,7 +13690,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(
-                side=LEFT, padx=(0, 10)
+                side=LEFT, padx=(self._scaled(0), self._scaled(10))
             )
             proxy_model_display_var = StringVar(value=proxy_var.get())
             proxy_model_button = ttk.Menubutton(
@@ -13708,7 +13708,7 @@ try {
                 width=12,
                 anchor="w",
                 style="Settings.TLabel",
-            ).pack(side=LEFT, padx=(0, 10))
+            ).pack(side=LEFT, padx=(self._scaled(0), self._scaled(10)))
             reasoning_display_var = StringVar(value=reasoning_var.get())
             reasoning_button = ttk.Menubutton(
                 reasoning_frame, textvariable=reasoning_display_var, width=12
@@ -13765,8 +13765,8 @@ try {
             row=extraction_row,
             column=0,
             sticky="w",
-            pady=5,
-            padx=(0, 12),
+            pady=self._scaled(5),
+            padx=(self._scaled(0), self._scaled(12)),
         )
         extraction_combo = ttk.Combobox(
             extraction_frame,
@@ -13775,7 +13775,7 @@ try {
             state="readonly",
             width=25,
         )
-        extraction_combo.grid(row=extraction_row, column=1, sticky="ew", pady=5)
+        extraction_combo.grid(row=extraction_row, column=1, sticky="ew", pady=self._scaled(5))
 
         extraction_ui = make_single_model_section(
             extraction_frame,
@@ -13825,26 +13825,26 @@ try {
         )
 
         ttk.Label(police_frame, text="Nome").grid(
-            row=0, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=0, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         ttk.Entry(police_frame, textvariable=police_name_var, width=44).grid(
-            row=0, column=1, sticky="ew", pady=5
+            row=0, column=1, sticky="ew", pady=self._scaled(5)
         )
         ttk.Label(police_frame, text="Cargo").grid(
-            row=1, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=1, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         ttk.Entry(police_frame, textvariable=police_role_var, width=44).grid(
-            row=1, column=1, sticky="ew", pady=5
+            row=1, column=1, sticky="ew", pady=self._scaled(5)
         )
         ttk.Label(police_frame, text="Delegacia").grid(
-            row=2, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=2, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         police_station_entry = ttk.Entry(
             police_frame,
             textvariable=police_station_var,
             width=44,
         )
-        police_station_entry.grid(row=2, column=1, sticky="ew", pady=5)
+        police_station_entry.grid(row=2, column=1, sticky="ew", pady=self._scaled(5))
 
         def restore_station_placeholder(_event=None):
             if police_station_entry.get().strip():
@@ -13865,20 +13865,20 @@ try {
         restore_station_placeholder()
 
         ttk.Label(police_frame, text="Delegado").grid(
-            row=3, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=3, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         ttk.Entry(police_frame, textvariable=police_delegate_var, width=44).grid(
-            row=3, column=1, sticky="ew", pady=5
+            row=3, column=1, sticky="ew", pady=self._scaled(5)
         )
         ttk.Label(police_frame, text="Cidade").grid(
-            row=4, column=0, sticky="w", pady=5, padx=(0, 12)
+            row=4, column=0, sticky="w", pady=self._scaled(5), padx=(self._scaled(0), self._scaled(12))
         )
         police_city_entry = ttk.Entry(
             police_frame,
             textvariable=police_city_var,
             width=44,
         )
-        police_city_entry.grid(row=4, column=1, sticky="ew", pady=5)
+        police_city_entry.grid(row=4, column=1, sticky="ew", pady=self._scaled(5))
 
         def restore_city_placeholder(_event=None):
             if police_city_entry.get().strip():
@@ -13909,13 +13909,13 @@ try {
             ttk.Label(
                 dialog_frame,
                 text="A base é usada quando a opção Base de nomes está selecionada.",
-            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(self._scaled(0), self._scaled(8)))
             name_var = StringVar()
             entry = ttk.Entry(dialog_frame, textvariable=name_var, width=38)
             entry.grid(row=1, column=0, columnspan=2, sticky="ew")
             entry.focus_set()
             dialog_buttons = ttk.Frame(dialog_frame)
-            dialog_buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+            dialog_buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(self._scaled(12), self._scaled(0)))
 
             def confirm_edit():
                 changed = add_name_to_database(name_var.get()) if add else remove_name_from_database(name_var.get())
@@ -13929,7 +13929,7 @@ try {
                         parent=dialog,
                     )
 
-            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(0, 8))
+            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(self._scaled(0), self._scaled(8)))
             ttk.Button(dialog_buttons, text="Adicionar" if add else "Remover", command=confirm_edit).pack(side=LEFT)
             dialog.bind("<Return>", lambda _event: confirm_edit())
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -13954,7 +13954,7 @@ try {
         deepseek_api_key_var.trace_add("write", deepseek_api_key_changed)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=1, column=0, columnspan=2, sticky="e", pady=(6, 0))
+        buttons.grid(row=1, column=0, columnspan=2, sticky="e", pady=(self._scaled(6), self._scaled(0)))
 
         def save_and_close():
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
@@ -14144,7 +14144,7 @@ try {
             self._refresh_multi_text_visibility()
             win.destroy()
 
-        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(self._scaled(0), self._scaled(8)))
         ttk.Button(buttons, text="Salvar", command=save_and_close).pack(side=LEFT)
 
         def normalize_settings_surface(widget):
