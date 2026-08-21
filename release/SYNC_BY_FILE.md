@@ -146,8 +146,11 @@ Gera em `release/generated/<VERSAO>/`: `package/` (a onedir full),
 #    instaladores + full.zip na estrutura errada; o updater quebra.
 python scripts/sync_publish.py --package release/generated/<VERSAO> --version <VERSAO>
 
-# ✅ CORRETO — a pasta da build onedir (a onedir full solta)
-python scripts/sync_publish.py --package release/generated/<VERSAO>/package --version <VERSAO>
+# ✅ CORRETO — a pasta da build onedir (a onedir full solta) + o --github-tag:
+#   o manifest adiciona o github_url no sig.exe/SigUpdater.exe → o updater
+#   baixa esses do GitHub (previne o bloqueio de malware do Drive).
+python scripts/sync_publish.py --package release/generated/<VERSAO>/package \
+  --version <VERSAO> --github-tag <VERSAO>
 ```
 
 - O sync sobe ~1800 arquivos (pasta completa) e o **cliente baixa só o diff**
@@ -163,6 +166,11 @@ cd "release/generated/<VERSAO>"
 gh release create <VERSAO> ./<VERSAO>_full.zip ./setup_sig_<VERSAO>.exe ./online_setup_sig<VERSAO>.exe \
   --repo spigknot/SIG-Windows --title "SIG Windows <VERSAO>" --notes "<descrição>"
 
+# ✅ SEMPRE subir o sig.exe + SigUpdater.exe como ASSETS (estão na package/),
+#    porque o --github-tag do sync aponta o updater para esses URLs do GitHub:
+cd "release/generated/<VERSAO>/package"
+gh release upload <VERSAO> ./sig.exe ./SigUpdater.exe --repo spigknot/SIG-Windows --clobber
+
 # Se o create for interrompido no meio (upload lento), a release fica DRAFT.
 # Este gh NÃO tem `gh release publish` — publique com:
 gh release edit <VERSAO> --draft=false --repo spigknot/SIG-Windows
@@ -174,31 +182,22 @@ gh release delete <VERSAO_ANTERIOR> --repo spigknot/SIG-Windows --yes
 - **Caminhos do gh**: o shell do terminal é MSYS/zsh — `C:/Projetos/...` vira
   `no matches found`. Entre no diretório e use `./nome.ext`.
 
-### 4. PITFALL: Google marca o .exe como malware (o updater não baixa)
+### 4. PORQUÊ subimos o sig.exe + SigUpdater.exe como assets (e o --github-tag)
 
-O Google Drive **às vezes flagra o `SigUpdater.exe` (o updater compilado, ~11MB)
-como malware/spam** — `reason: cannotDownloadAbusiveFile`. Nesse caso o download
-público dá **404** e o autenticado dá **403** (diferente do "warning" do sig.exe,
-que ainda baixa com o `confirm`). **Sintoma**: o updater baixa os arquivos e falha
-exatamente no `sig.exe`/`SigUpdater.exe` com `HTTP Error 404`.
+O Google Drive **às vezes flagra os `.exe` PyInstaller como malware/spam**
+(`reason: cannotDownloadAbusiveFile`), de forma arbitrária e imprevisível — já
+aconteceu com o `SigUpdater.exe` (~11MB). Quando flagra, o download dá **404**
+(público) / **403** (autenticado) — o updater falha exatamente nesse arquivo.
 
-**Correção — o updater já suporta o `github_url` como fonte alternativa** (o
-GitHub não faz esse bloqueio):
+Por isso o fluxo normal **sempre** sobe `sig.exe` + `SigUpdater.exe` como assets
+do GitHub + passa o `--github-tag` ao sync → o manifest aponta esses dois para o
+GitHub (que não bloqueia), e o updater nunca depende do Drive para eles.
 
-```bash
-# 1) Subir o sig.exe + SigUpdater.exe como ASSETS individuais na release:
-cd "release/generated/<VERSAO>/package"
-gh release upload <VERSAO> ./sig.exe ./SigUpdater.exe --repo spigknot/SIG-Windows --clobber
-
-# 2) Re-rodar o sync COM o --github-tag → o manifest adiciona o github_url
-#    (sig.exe + SigUpdater.exe) → o updater baixa esses do GitHub:
-python scripts/sync_publish.py --package release/generated/<VERSAO>/package \
-  --version <VERSAO> --github-tag <VERSAO>
-```
-
-- O sig.exe pode ter o mesmo problema (o Google flagra os .exe PyInstaller de
-  forma arbitrária) — subir AMBOS como assets + o `--github-tag` cobre os dois.
-- Testar após o sync: o updater baixa o `SigUpdater.exe` do GitHub (200, ~11MB).
+- **Verificação** (opcional): se o updater falhar com 404 num `.exe`, baixar do
+  Drive `.../download?id=<drive_id>&export=download` — 200 = ok; 404 = bloqueado
+  (refazer os passos 2 e 3).
+- **Sintoma do bloqueio**: o updater baixa os arquivos e falha só no
+  `sig.exe`/`SigUpdater.exe` com `HTTP Error 404`.
 
 ### 5. Fechar
 
