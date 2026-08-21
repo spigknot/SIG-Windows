@@ -14162,12 +14162,11 @@ try {
                 normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
-        win.update_idletasks()
         _sw = self.root.winfo_screenwidth()
         _sh = self.root.winfo_screenheight()
-        _rw = max(frame.winfo_reqwidth(), 200)
-        _rh = max(frame.winfo_reqheight(), 150)
-        win.geometry(f"{min(_rw + self._scaled(46), _sw - 40)}x{min(_rh + self._scaled(46), _sh - 60)}")
+        # Janela de Configurações: 1093x782 no 1920x1080 (observado) × fator exato —
+        # mesma proporção da tela em qualquer resolução.
+        win.geometry(f"{min(self._scaled(1093), _sw - 40)}x{min(self._scaled(782), _sh - 60)}")
         win.wait_visibility()
         win.focus()
     def open_about(self):
