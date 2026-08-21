@@ -14463,16 +14463,42 @@ try {
             return
         self.settings = load_settings()
         self._refresh_live_grok_controls()
-        if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
+        multi_selected = (
+            self._selected_multi_transcription_model_names()
+            if self.multi_model_var.get()
+            else []
+        )
+        primary = self.settings.get("transcription_server")
+        secondary_name = next(
+            (name for name in multi_selected if name != primary), None
+        )
+        secondary_settings = (
+            settings_for_transcription_server(self.settings, secondary_name)
+            if secondary_name
+            else None
+        )
+        if (
+            is_grok_transcription(self.settings)
+            or (secondary_settings is not None and is_grok_transcription(secondary_settings))
+        ) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de iniciar.")
             return
-        if is_deepgram_transcription(self.settings) and not self.settings.get("deepgram_api_key"):
+        if (
+            is_deepgram_transcription(self.settings)
+            or (secondary_settings is not None and is_deepgram_transcription(secondary_settings))
+        ) and not self.settings.get("deepgram_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Deepgram nas configurações antes de iniciar.")
             return
-        if is_assemblyai_transcription(self.settings) and not self.settings.get("assemblyai_api_key"):
+        if (
+            is_assemblyai_transcription(self.settings)
+            or (secondary_settings is not None and is_assemblyai_transcription(secondary_settings))
+        ) and not self.settings.get("assemblyai_api_key"):
             messagebox.showerror("sig", "Insira a chave API da AssemblyAI nas configurações antes de iniciar.")
             return
-        if is_elevenlabs_transcription(self.settings) and not self.settings.get("elevenlabs_api_key"):
+        if (
+            is_elevenlabs_transcription(self.settings)
+            or (secondary_settings is not None and is_elevenlabs_transcription(secondary_settings))
+        ) and not self.settings.get("elevenlabs_api_key"):
             messagebox.showerror("sig", "Insira a chave API da ElevenLabs nas configurações antes de iniciar.")
             return
         self.live_stop_event.clear()
