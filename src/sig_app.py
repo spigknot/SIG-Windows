@@ -14167,7 +14167,7 @@ try {
         _sh = self.root.winfo_screenheight()
         _rw = max(frame.winfo_reqwidth(), 200)
         _rh = max(frame.winfo_reqheight(), 150)
-        win.geometry(f"{min(_rw + 46, _sw - 40)}x{min(_rh + 46, _sh - 60)}")
+        win.geometry(f"{min(_rw + self._scaled(46), _sw - 40)}x{min(_rh + self._scaled(46), _sh - 60)}")
         win.wait_visibility()
         win.focus()
     def open_about(self):
