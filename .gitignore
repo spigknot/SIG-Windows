@@ -7,6 +7,7 @@ dist/
 release/*
 !release/content_snapshot.json
 !release/INCREMENTAL_V2.md
+!release/SYNC_BY_FILE.md
 *.zip
 *.7z
 *.exe
