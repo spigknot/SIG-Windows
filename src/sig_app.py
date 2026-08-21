@@ -6865,13 +6865,13 @@ class SigApp:
         self.root = root
         self.root.title("sig")
         self._apply_window_icon()
-        # Escala proporcional da UI (referência 1920x1080; piso 0.70 — nunca
-        # comprime a ponto de ficar ilegível). Multiplica fontes (tk scaling),
-        # tamanhos e janela; NÃO move nada do lugar.
+        # Escala proporcional da UI (referência 1920x1080). Fator exato
+        # (largura e altura limitam), sem piso — o usuário quer a proporção real.
+        # Multiplica fontes (tk scaling), tamanhos e janela; NÃO move nada.
         try:
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
-            self.ui_scale = max(min(screen_w / 1920.0, screen_h / 1080.0), 0.70)
+            self.ui_scale = min(screen_w / 1920.0, screen_h / 1080.0)
             base_scaling = float(self.root.tk.call("tk", "scaling"))
             self.root.tk.call("tk", "scaling", base_scaling * self.ui_scale)
         except Exception:
@@ -14162,9 +14162,12 @@ try {
                 normalize_settings_surface(section)
         win.transient(self.root)
         win.grab_set()
+        win.update_idletasks()
         _sw = self.root.winfo_screenwidth()
         _sh = self.root.winfo_screenheight()
-        win.geometry(f"{min(self._scaled(940), _sw - 40)}x{min(self._scaled(1200), _sh - 60)}")
+        _rw = max(frame.winfo_reqwidth(), 200)
+        _rh = max(frame.winfo_reqheight(), 150)
+        win.geometry(f"{min(_rw + 46, _sw - 40)}x{min(_rh + 46, _sh - 60)}")
         win.wait_visibility()
         win.focus()
     def open_about(self):
