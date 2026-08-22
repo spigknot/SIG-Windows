@@ -9241,11 +9241,12 @@ try {
         self.zip_level_combo.pack(side=LEFT)
 
         # Botão "Modelos": multi-seleção de modelos de transcrição (menu).
-        self.files_models_button = ttk.Button(
+        self.files_models_button = ttk.Menubutton(
             options2,
             text="Modelos",
-            command=self._open_models_menu,
         )
+        self.files_models_menu = tk.Menu(self.files_models_button, tearoff=0, postcommand=self._populate_models_menu)
+        self.files_models_button.configure(menu=self.files_models_menu)
         self.files_models_button.pack(side=LEFT, padx=(16, 0))
 
         # VAD removido da tela principal (teste na aba própria)
@@ -9591,20 +9592,32 @@ try {
 
     def _position_live_audio_recovery_button(self):
         button = getattr(self, "live_recover_audio_button", None)
-        timer_label = getattr(self, "live_timer_label", None)
+        mic_stack = getattr(self, "live_mic_stack", None)
         live_top = getattr(self, "live_top", None)
-        if not button or not timer_label or not live_top:
+        if not button or not mic_stack or not live_top:
             return
         try:
             if not button.winfo_ismapped():
                 return
             live_top.update_idletasks()
-            timer_label.update_idletasks()
+            mic_stack.update_idletasks()
             button.update_idletasks()
             button_width = max(1, button.winfo_reqwidth())
-            desired_x = timer_label.winfo_x() + timer_label.winfo_width() + 6
-            max_x = max(0, live_top.winfo_width() - button_width - 4)
-            button.place(x=min(max(0, desired_x), max_x), y=0, anchor="nw")
+            button_height = max(1, button.winfo_reqheight())
+            # Centraliza o botão exatamente sobre o microfone vermelho
+            # (live_mic_stack 44x44), dentro das coordenadas do live_top.
+            stack_x = max(0, mic_stack.winfo_x())
+            stack_y = max(0, mic_stack.winfo_y())
+            mic_size = 44
+            center_x = stack_x + (mic_size - button_width) // 2
+            center_y = stack_y + (mic_size - button_height) // 2
+            max_x = max(0, live_top.winfo_width() - button_width)
+            max_y = max(0, live_top.winfo_height() - button_height)
+            button.place(
+                x=min(max(0, center_x), max_x),
+                y=min(max(0, center_y), max_y),
+                anchor="nw",
+            )
         except Exception:
             pass
 
@@ -12528,18 +12541,22 @@ try {
     def _multi_transcription_model_changed(self, name: str):
         self.settings["multi_transcription_models"] = self._selected_multi_transcription_model_names()
 
-    def _open_models_menu(self):
-        """Menu de multi-seleção de modelos de transcrição (botão 'Modelos')."""
+    def _populate_models_menu(self):
+        """Popula o menu do Menubutton 'Modelos' (postcommand) com a
+        multi-seleção de modelos de transcrição."""
+        menu = self.files_models_menu
+        menu.delete(0, "end")
         if self.running:
-            messagebox.showinfo("Modelos", "Aguarde o lote atual terminar antes de alterar esta opção.", parent=self.root)
+            menu.add_command(
+                label="Aguarde o lote atual terminar...",
+                state="disabled",
+            )
             return
         available = self._available_multi_transcription_models()
         if not available:
-            messagebox.showinfo(
-                "Modelos",
-                "Nenhum modelo de transcrição disponível: verifique as chaves de API nas "
-                "Configurações e se o servidor local está online.",
-                parent=self.root,
+            menu.add_command(
+                label="Nenhum modelo disponível (verifique chaves/servidor)",
+                state="disabled",
             )
             return
         selected = set(self._selected_multi_transcription_model_names())
@@ -12547,7 +12564,6 @@ try {
             default = str(self.settings.get("transcription_server") or "")
             if default in available.values():
                 selected.add(default)
-        menu = tk.Menu(self.root, tearoff=0)
         for label, name in available.items():
             variable = BooleanVar(value=name in selected)
             self.multi_transcription_model_vars[name] = variable
@@ -12556,13 +12572,6 @@ try {
                 variable=variable,
                 command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
             )
-        try:
-            menu.tk_popup(
-                self.files_models_button.winfo_rootx(),
-                self.files_models_button.winfo_rooty() + self.files_models_button.winfo_height(),
-            )
-        finally:
-            menu.grab_release()
 
     def _refresh_multi_text_layout(self):
         if not getattr(self, "live_history_primary_pane", None):
