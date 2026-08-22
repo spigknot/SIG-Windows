@@ -5700,14 +5700,31 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
     except json.JSONDecodeError:
         return ParsedTranscription(text.strip())
 
-    # Aviso/erro do provedor (ex.: modelo deprecated, erro, mensagem) — NÃO
-    # vazar os metadados como se fossem transcrição. Detectar ANTES do collect,
-    # porque o fallback genérico de collect juntaria os metadados do aviso.
-    # O Deepgram marca "deprecated" como VALOR de "transaction_key" (não como
-    # chave), então checamos também os valores de string.
+    # O Deepgram marca "transaction_key": "deprecated" em TODA resposta
+    # (inclusive nas normais, com transcript). Então a regra certa é:
+    # 1) se existe transcript real -> usa (o aviso no metadata é ruído);
+    # 2) sem transcript, se a resposta é aviso/erro -> vazio (não vazar metadados);
+    # 3) sem transcript e sem aviso -> texto cru (compatibilidade antiga).
+    def _find_transcript(value):
+        """Primeiro conteúdo não vazio sob chaves de transcrição conhecidas."""
+        if isinstance(value, dict):
+            for key in ("text", "transcription", "transcript", "result", "output"):
+                if key in value:
+                    item = value[key]
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+            for item in value.values():
+                found = _find_transcript(item)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = _find_transcript(item)
+                if found:
+                    return found
+        return None
+
     _WARNING_KEYS = ("deprecated", "error", "message", "detail", "warn", "warning", "status")
-    # Marcadores de VALOR apenas quando inequívocos (não aparecem em fala normal);
-    # "error"/"warning" em texto de transcrição legítimo não devem marcar.
     _WARNING_VALUE_MARKERS = ("deprecated", "unauthorized")
 
     def _is_warning(value):
@@ -5721,9 +5738,6 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
         if isinstance(value, list):
             return any(_is_warning(item) for item in value)
         return False
-
-    if _is_warning(payload):
-        return ParsedTranscription("")
 
     def collect(value):
         if value is None:
@@ -5758,11 +5772,14 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
         return []
 
     pieces = collect(payload)
-    if pieces:
+    if pieces and _find_transcript(payload):
         return ParsedTranscription(
             "\n".join(pieces).strip(),
             _timestamped_text_from_json(payload).strip(),
         )
+    # Sem transcript real: aviso/erro do provedor -> vazio (não vazar metadados).
+    if _is_warning(payload):
+        return ParsedTranscription("")
     return ParsedTranscription(text.strip(), _timestamped_text_from_json(payload).strip())
 
 
