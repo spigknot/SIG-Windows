@@ -16514,9 +16514,13 @@ try {
         temp_dir = app_base_dir() / "temp"
         raw_dir = temp_dir / "raw"
         log_dir = temp_dir / "logs"
+        audio_dir = temp_dir / "audios"
+        txt_dir = temp_dir / "txt"
         temp_dir.mkdir(parents=True, exist_ok=True)
         raw_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        txt_dir.mkdir(parents=True, exist_ok=True)
 
         # Arquivos menores entram primeiro para a fila começar a avançar rapidamente.
         paths = sorted(paths, key=lambda p: p.stat().st_size)
@@ -16537,13 +16541,13 @@ try {
                 original_name=path.name,
                 stem=stem,
                 mode=mode,
-                txt_path=temp_dir / f"{stem}.txt",
+                txt_path=txt_dir / f"{stem}.txt",
                 raw_path=raw_dir / f"{stem}.json",
                 log_path=log_dir / f"{stem}.ffmpeg.log",
                 model_name=transcription_model_names[0],
                 model_names=transcription_model_names[1:],
                 txt_paths=(
-                    [temp_dir / f"{stem}.modelo_{i}.txt" for i in range(2, len(transcription_model_names) + 1)]
+                    [txt_dir / f"{stem}.modelo_{i}.txt" for i in range(2, len(transcription_model_names) + 1)]
                     if multi_transcription
                     else []
                 ),
@@ -16556,15 +16560,15 @@ try {
             if use_vad or vad_only:
                 # Todo VAD recebe exatamente WAV PCM 16 kHz, mono e 16-bit.
                 job.mode = "ready"
-                job.converted_path = temp_dir / f"{stem}.vad_entrada.wav"
-                job.vad_output_path = temp_dir / f"{stem}.vad.wav"
+                job.converted_path = audio_dir / f"{stem}.vad_entrada.wav"
+                job.vad_output_path = audio_dir / f"{stem}.vad.wav"
             elif is_video_file(path):
                 job.mode = "ready"
-                job.converted_path = temp_dir / f"{stem}.wav"
+                job.converted_path = audio_dir / f"{stem}.wav"
             elif mode == "ready":
-                job.converted_path = temp_dir / f"{stem}.wav"
+                job.converted_path = audio_dir / f"{stem}.wav"
             elif mode == "compact":
-                job.converted_path = temp_dir / f"{stem}.ogg"
+                job.converted_path = audio_dir / f"{stem}.ogg"
             else:
                 job.upload_path = path
             jobs.append(job)
