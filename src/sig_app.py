@@ -13,6 +13,7 @@ import math
 import mimetypes
 import os
 import queue
+import socket
 import random
 import re
 import shutil
@@ -30,7 +31,7 @@ import uuid
 import webbrowser
 import wave
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 import tkinter as tk
 from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Button, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
@@ -121,7 +122,7 @@ DEFAULT_SETTINGS = {
     "transcribe_parallel": 16,
     "grok_chunk_ms": 100,
     "grok_rest_requests": False,
-    "transcription_server": "avare",
+    "transcription_server": "servidor",
     "multi_transcription_models": [],
     "text_model": "IA-Proxy",
     "text_reasoning": "low",
@@ -198,18 +199,13 @@ GROK_NON_REASONING_LEGACY_NAME = "grok-4.20-non-reasoning"
 DEEPSEEK_TEXT_NAME = "deepseek-v4-flash"
 IA_PROXY_NAME = "IA-Proxy"
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
-IA_PROXY_FALLBACK_URL = "http://avare:8500"
 SERVER_GEMMA_NAME = "servidor (gemma-4-26B-A4B-abliterated)"
 SERVER_GEMMA_MODEL = "gemma4"
 SERVER_GEMMA_URL = "http://servidor:8400/v1/chat/completions"
-SERVER_GEMMA_FALLBACK_URL = "http://avare:8400/v1/chat/completions"
 SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
 GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
 DEEPSEEK_API_NAMES = {DEEPSEEK_TEXT_NAME}
 DEFAULT_TRANSCRIPTION_SERVER_CONTENT = (
-    '*avare\t\t'
-    'http://avare:8100\t\t'
-    '"model": "granite-speech-4.1-2b-plus-ar"\n'
     'servidor\t\t'
     'http://servidor:8100\t\t'
     '"model": "granite-speech-4.1-2b-nar"\n'
@@ -220,7 +216,6 @@ TAGUAI_TRANSCRIPTION_SERVER_CONTENT = (
     '"model": "granite-speech-4.1-2b-nar"'
 )
 TRANSCRIPTION_SERVER_MIGRATION_MARKER = "#sig:taguai-speech-v1"
-AVARE_PLUS_AR_MIGRATION_MARKER = "#sig:avare-plus-ar-v1"
 TEXT_MODEL_CONFIGS = {}
 DEFAULT_TEXT_MODEL_SERVER_CONTENT = ""
 PARTS_EXTRACTION_LABELS = {
@@ -320,11 +315,7 @@ class AudioJob:
     upload_path: Path | None = None
     converted_path: Path | None = None
     txt_path: Path | None = None
-    txt_path_2: Path | None = None
-    txt_path_3: Path | None = None
     raw_path: Path | None = None
-    raw_path_2: Path | None = None
-    raw_path_3: Path | None = None
     log_path: Path | None = None
     vad_output_path: Path | None = None
     vad_input_bytes: int = 0
@@ -336,14 +327,14 @@ class AudioJob:
     conversion_elapsed: float = 0.0
     status: str = "Aguardando"
     transcription: str = ""
-    transcription_2: str = ""
-    transcription_3: str = ""
     error: str = ""
-    error_2: str = ""
-    error_3: str = ""
     model_name: str = "Modelo 1"
-    model_name_2: str = ""
-    model_name_3: str = ""
+    # Multi-modelo SEM limite: listas paralelas (índice 0 = modelo 2).
+    model_names: list[str] = field(default_factory=list)
+    transcripts: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    txt_paths: list[Path] = field(default_factory=list)
+    raw_paths: list[Path] = field(default_factory=list)
 
 
 def resource_path(relative: str) -> Path:
@@ -4666,23 +4657,6 @@ def normalize_transcription_servers_content(content: str) -> str:
             lines.append(TAGUAI_TRANSCRIPTION_SERVER_CONTENT)
         lines.append(TRANSCRIPTION_SERVER_MIGRATION_MARKER)
 
-    if AVARE_PLUS_AR_MIGRATION_MARKER not in content:
-        for index, raw_line in enumerate(lines):
-            server = parse_transcription_server_line(raw_line)
-            if not server or server["name"].casefold() not in {"avare-speech", "avare"}:
-                continue
-            lines[index] = re.sub(
-                r'("model"\s*:\s*)"(?:\\.|[^"\\])*"',
-                lambda match: match.group(1) + json.dumps(
-                    "granite-speech-4.1-2b-plus-ar",
-                    ensure_ascii=False,
-                ),
-                raw_line,
-                count=1,
-            )
-            break
-        lines.append(AVARE_PLUS_AR_MIGRATION_MARKER)
-
     if not any((server := parse_transcription_server_line(raw_line)) and server["selected"] for raw_line in lines):
         for index, raw_line in enumerate(lines):
             if parse_transcription_server_line(raw_line):
@@ -4696,6 +4670,15 @@ def write_transcription_servers_content(path: Path, content: str) -> None:
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_text(content, encoding="utf-8")
     temporary.replace(path)
+
+
+def hostname_online(hostname: str) -> bool:
+    """True se o hostname resolve na rede (ex.: o servidor local 'servidor')."""
+    try:
+        socket.gethostbyname(hostname)
+        return True
+    except OSError:
+        return False
 
 
 def read_transcription_servers() -> list[dict]:
@@ -4713,9 +4696,9 @@ def read_transcription_servers() -> list[dict]:
     if not servers:
         servers = [
             {
-                "name": "avare",
-                "url": "http://avare:8100/transcribe",
-                "parameters": {"model": "granite-speech-4.1-2b-plus-ar"},
+                "name": "servidor",
+                "url": "http://servidor:8100/transcribe",
+                "parameters": {"model": "granite-speech-4.1-2b-nar"},
                 "selected": True,
             }
         ]
@@ -4822,7 +4805,7 @@ def normalize_text_models_content(content: str) -> str:
         for raw_line in lines
         if not (
             (server := parse_transcription_server_line(raw_line))
-            and server["name"].casefold() in {"avare-grok", "taguai-grok", "ia-proxy"}
+            and server["name"].casefold() in {"taguai-grok", "ia-proxy"}
         )
     ]
     if not any((server := parse_transcription_server_line(raw_line)) and server["selected"] for raw_line in lines):
@@ -4863,7 +4846,6 @@ def read_text_models() -> list[dict]:
         {
             "name": IA_PROXY_NAME,
             "url": IA_PROXY_PRIMARY_URL,
-            "fallback_url": IA_PROXY_FALLBACK_URL,
             "parameters": {
                 "model": GROK_TEXT_NAME,
                 "temperature": 0.0,
@@ -4879,7 +4861,6 @@ def read_text_models() -> list[dict]:
         {
             "name": SERVER_GEMMA_NAME,
             "url": SERVER_GEMMA_URL,
-            "fallback_url": SERVER_GEMMA_FALLBACK_URL,
             "parameters": {
                 "model": SERVER_GEMMA_MODEL,
                 "chat_template_kwargs": {"enable_thinking": False},
@@ -5048,7 +5029,6 @@ def normalize_settings(data: dict) -> dict:
         data.get("transcription_server") or DEFAULT_SETTINGS["transcription_server"]
     )
     transcription_server = {
-        "Avare-speech": "avare",
         "Taguai-speech": "servidor",
         "Grok (API)": GROK_API_NAME,
     }.get(transcription_server, transcription_server)
@@ -5088,7 +5068,7 @@ def normalize_settings(data: dict) -> dict:
 
     text_model = str(data.get("text_model") or DEFAULT_SETTINGS["text_model"])
     legacy_text_model = text_model.casefold()
-    if legacy_text_model in {"avare-grok", "taguai-grok", "grok (api)"}:
+    if legacy_text_model in {"taguai-grok", "grok (api)"}:
         text_model = IA_PROXY_NAME if "api" not in legacy_text_model else GROK_TEXT_NAME
     elif legacy_text_model in {GROK_NON_REASONING_LEGACY_NAME, GROK_NON_REASONING_TEXT_NAME}:
         text_model = GROK_NON_REASONING_TEXT_NAME
@@ -6279,11 +6259,32 @@ def job_problem_reason(job: AudioJob, transcript: str) -> str:
     return ""
 
 
+def audio_job_attr(job: AudioJob, base: str, index: int):
+    """Lê um atributo por modelo: índice 1 = campo principal; 2+ = lista (índice 0 = modelo 2)."""
+    if index == 1:
+        return getattr(job, base)
+    values = getattr(job, f"{base}s")
+    list_index = index - 2
+    return values[list_index] if list_index < len(values) else None
+
+
+def audio_job_set(job: AudioJob, base: str, index: int, value):
+    """Grava um atributo por modelo, estendendo a lista quando necessário."""
+    if index == 1:
+        setattr(job, base, value)
+        return
+    values = getattr(job, f"{base}s")
+    list_index = index - 2
+    while len(values) <= list_index:
+        values.append("" if base in ("transcription", "error") else None)
+    values[list_index] = value
+
+
 def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
     if model_index == 1:
         return job_transcript_text(job)
-    transcript = getattr(job, f"transcription_{model_index}", "")
-    path = getattr(job, f"txt_path_{model_index}", None)
+    transcript = audio_job_attr(job, "transcription", model_index) or ""
+    path = audio_job_attr(job, "txt_path", model_index)
     if not transcript and path and path.exists():
         transcript = path.read_text(encoding="utf-8", errors="replace")
     return transcript or ""
@@ -6291,7 +6292,7 @@ def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
 
 def job_problem_reason_for_model(job: AudioJob, transcript: str, model_index: int) -> str:
     clean = transcript.strip()
-    error = getattr(job, "error" if model_index == 1 else f"error_{model_index}", "")
+    error = audio_job_attr(job, "error", model_index) or ""
     if error:
         return "Erro na transcrição/conversão"
     if not clean:
@@ -6383,11 +6384,11 @@ def write_html_report(jobs: list[AudioJob], html_path: Path, stats: list[tuple[s
     # compatível com lotes antigos e permite 2 ou 3 modelos novos.
     model_names: list[str] = []
     for job in jobs:
-        for index in range(1, 4):
-            name = str(getattr(job, "model_name" if index == 1 else f"model_name_{index}", "") or "").strip()
+        names = ([job.model_name] if job.model_name else []) + list(job.model_names)
+        for name in names:
+            name = str(name or "").strip()
             if name and name not in model_names:
                 model_names.append(name)
-    model_names = model_names[:3]
     multi_model = len(model_names) > 1
 
     for job in jobs:
@@ -7071,7 +7072,6 @@ class SigApp:
         self.live_assistant_part_var_2 = StringVar(value="Partes")
         self.transcription_model_display_var = StringVar()
         self.text_model_display_var = StringVar()
-        self.multi_model_var = BooleanVar(value=False)
         self.multi_transcription_model_vars: dict[str, BooleanVar] = {}
         self.multi_transcription_model_labels: dict[str, str] = {}
         self.multi_text_model_var = BooleanVar(value=False)
@@ -7509,6 +7509,27 @@ class SigApp:
                 self.activity_log.insert(END, line)
         self.activity_log.see(END)
         self.activity_log.configure(state="disabled")
+
+    def _update_activity_line(self, key: str, message: str, tag: str | None = None):
+        """Linha viva do activity log: atualiza a MESMA linha (por chave) sem criar novas."""
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        box.configure(state="normal")
+        if "vad_total" not in box.tag_names():
+            box.tag_configure("vad_total", foreground="#0a7a2f")
+        line_tag = f"phase:{key}"
+        line = f"{time.strftime('%H:%M:%S')}  {message}\n"
+        try:
+            box.delete(f"{line_tag}.first", f"{line_tag}.last")
+        except tk.TclError:
+            pass
+        if tag:
+            box.insert("end", line, (line_tag, tag))
+        else:
+            box.insert("end", line, line_tag)
+        box.see("end")
+        box.configure(state="disabled")
 
     def _render_sync_file_line(self, path: str, display: str, tag: str | None) -> None:
         """Atualiza a linha viva de um arquivo do download (padrão do VAD).
@@ -9168,29 +9189,17 @@ try {
         )
         self.zip_level_combo.pack(side=LEFT)
 
+        # Botão "Modelos": multi-seleção de modelos de transcrição (menu).
+        self.files_models_button = ttk.Button(
+            options2,
+            text="Modelos",
+            command=self._open_models_menu,
+        )
+        self.files_models_button.pack(side=LEFT, padx=(16, 0))
+
         # VAD removido da tela principal (teste na aba própria)
         self.zip_level_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_tree_modes())
         self._refresh_zip_controls()
-
-        self.files_multi_model_frame = ttk.Frame(self.files_controls_frame)
-        self.files_multi_model_check = ttk.Checkbutton(
-            self.files_multi_model_frame,
-            text="Multi model - transcrição",
-            variable=self.multi_model_var,
-            command=self._toggle_multi_model,
-        )
-        self.files_multi_model_check.pack(side=LEFT)
-        self.files_multi_model_help = ttk.Button(
-            self.files_multi_model_frame,
-            text="?",
-            width=2,
-            command=self._show_multi_model_help,
-        )
-        self.files_multi_model_help.pack(side=LEFT, padx=(4, 10))
-        self.files_multi_model_list = ttk.Frame(self.files_multi_model_frame)
-        self.files_multi_model_list.pack(side=LEFT, fill=X, expand=True)
-        self.files_multi_model_frame.pack(fill=X, pady=(0, 8))
-        self._refresh_file_multi_model_controls()
 
         list_frame = ttk.Frame(self.files_tab)
         list_frame.pack(fill=BOTH, expand=True)
@@ -9564,7 +9573,6 @@ try {
                 frame.pack_forget()
         if tab_name == "files":
             self.files_tab.pack(fill=BOTH, expand=True)
-            self._refresh_file_multi_model_controls()
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.files_tab_button.configure(background=active_bg, foreground=active_fg)
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -12415,15 +12423,6 @@ try {
         self.server_var.set("")
         self._refresh_assistant_model_label()
 
-    def _show_multi_model_help(self):
-        messagebox.showinfo(
-            "Multi model",
-            "O SIG envia o mesmo áudio simultaneamente para os modelos marcados nesta aba "
-            "e mostra uma coluna para cada resposta. Escolha dois ou três modelos. "
-            "O modelo ElevenLabs não está disponível nesta opção.",
-            parent=self.root,
-        )
-
     def _show_multi_text_help(self):
         messagebox.showinfo(
             "Multi model - texto",
@@ -12450,28 +12449,14 @@ try {
         self.multi_text_model_var.set(False)
         self._refresh_multi_text_layout()
 
-    def _toggle_multi_model(self):
-        if self.running:
-            self.multi_model_var.set(False)
-            messagebox.showinfo("Multi model", "Aguarde o lote atual terminar antes de alterar esta opção.", parent=self.root)
-            return
-        self._refresh_file_multi_model_controls()
-        if self.multi_model_var.get() and len(self._selected_multi_transcription_model_names()) < 2:
-            messagebox.showinfo(
-                "Multi model",
-                "Marque pelo menos dois modelos de transcrição na lista exibida.",
-                parent=self.root,
-            )
-
-    def _refresh_multi_model_layout(self):
-        self._refresh_file_multi_model_controls()
-
     def _available_multi_transcription_models(self) -> dict[str, str]:
         settings = load_settings()
         available = {}
         for server in read_transcription_servers():
             name = server["name"]
             if name == ELEVENLABS_API_NAME:
+                continue
+            if name in {"servidor", "taguai-speech"} and not hostname_online("servidor"):
                 continue
             if name == GROK_API_NAME and not plausible_xai_api_key(settings.get("grok_api_key", "")):
                 continue
@@ -12489,43 +12474,43 @@ try {
         ]
 
     def _multi_transcription_model_changed(self, name: str):
-        selected = self._selected_multi_transcription_model_names()
-        if len(selected) > 3:
-            self.multi_transcription_model_vars[name].set(False)
-            messagebox.showinfo("Multi model", "Escolha no máximo três modelos de transcrição.", parent=self.root)
         self.settings["multi_transcription_models"] = self._selected_multi_transcription_model_names()
 
-    def _refresh_file_multi_model_controls(self):
-        frame = getattr(self, "files_multi_model_frame", None)
-        model_list = getattr(self, "files_multi_model_list", None)
-        if frame is None or model_list is None:
+    def _open_models_menu(self):
+        """Menu de multi-seleção de modelos de transcrição (botão 'Modelos')."""
+        if self.running:
+            messagebox.showinfo("Modelos", "Aguarde o lote atual terminar antes de alterar esta opção.", parent=self.root)
             return
         available = self._available_multi_transcription_models()
-        previous = set(self._selected_multi_transcription_model_names())
-        if not previous:
-            previous = set(
-                name for name in load_settings().get("multi_transcription_models", [])
-                if name in available.values()
+        if not available:
+            messagebox.showinfo(
+                "Modelos",
+                "Nenhum modelo de transcrição disponível: verifique as chaves de API nas "
+                "Configurações e se o servidor local está online.",
+                parent=self.root,
             )
-        if not previous and self.settings.get("transcription_server") in available.values():
-            previous.add(self.settings["transcription_server"])
-        for child in model_list.winfo_children():
-            child.destroy()
-        self.multi_transcription_model_vars = {}
-        self.multi_transcription_model_labels = available
+            return
+        selected = set(self._selected_multi_transcription_model_names())
+        if not selected:
+            default = str(self.settings.get("transcription_server") or "")
+            if default in available.values():
+                selected.add(default)
+        menu = tk.Menu(self.root, tearoff=0)
         for label, name in available.items():
-            variable = BooleanVar(value=name in previous)
+            variable = BooleanVar(value=name in selected)
             self.multi_transcription_model_vars[name] = variable
-            ttk.Checkbutton(
-                model_list,
-                text=label,
+            menu.add_checkbutton(
+                label=label,
                 variable=variable,
-                command=lambda selected=name: self._multi_transcription_model_changed(selected),
-            ).pack(side=LEFT, padx=(0, 10))
-        if self.multi_model_var.get():
-            model_list.pack(side=LEFT, fill=X, expand=True)
-        else:
-            model_list.pack_forget()
+                command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
+            )
+        try:
+            menu.tk_popup(
+                self.files_models_button.winfo_rootx(),
+                self.files_models_button.winfo_rooty() + self.files_models_button.winfo_height(),
+            )
+        finally:
+            menu.grab_release()
 
     def _refresh_multi_text_layout(self):
         if not getattr(self, "live_history_primary_pane", None):
@@ -14132,7 +14117,6 @@ try {
             self._refresh_server_label()
             self._refresh_assistant_model_label()
             self._refresh_live_grok_controls()
-            self._refresh_file_multi_model_controls()
             win.destroy()
 
         ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
@@ -14472,11 +14456,7 @@ try {
             return
         self.settings = load_settings()
         self._refresh_live_grok_controls()
-        multi_selected = (
-            self._selected_multi_transcription_model_names()
-            if self.multi_model_var.get()
-            else []
-        )
+        multi_selected = self._selected_multi_transcription_model_names()
         primary = self.settings.get("transcription_server")
         secondary_name = next(
             (name for name in multi_selected if name != primary), None
@@ -16432,13 +16412,12 @@ try {
             return
         # Capture a seleção feita na aba antes de recarregar as preferências;
         # essa seleção é local ao lote e não deve desaparecer no reload.
-        multi_model_enabled = bool(self.multi_model_var.get())
-        multi_model_names = self._selected_multi_transcription_model_names() if multi_model_enabled else []
+        multi_model_names = self._selected_multi_transcription_model_names()
         self.settings = load_settings()
-        if multi_model_enabled and not 2 <= len(multi_model_names) <= 3:
+        if not multi_model_names:
             messagebox.showinfo(
-                "Multi model",
-                "Escolha de 2 a 3 modelos de transcrição na lista da aba Transcrição.",
+                "Modelos",
+                "Selecione pelo menos um modelo de transcrição no botão 'Modelos' da aba Transcrição.",
             )
             return
         multi_transcription = bool(multi_model_names)
@@ -16537,7 +16516,7 @@ try {
         primary_server = selected_transcription_server(settings)
         selected_model_names = list(settings.get("_multi_transcription_models") or [])
         if settings.get("_multi_transcription") and len(selected_model_names) >= 2:
-            transcription_model_names = selected_model_names[:3]
+            transcription_model_names = selected_model_names
         else:
             transcription_model_names = [primary_server["name"]]
         multi_transcription = len(transcription_model_names) >= 2
@@ -16550,15 +16529,20 @@ try {
                 stem=stem,
                 mode=mode,
                 txt_path=temp_dir / f"{stem}.txt",
-                txt_path_2=temp_dir / f"{stem}.modelo_2.txt" if multi_transcription else None,
-                txt_path_3=temp_dir / f"{stem}.modelo_3.txt" if len(transcription_model_names) >= 3 else None,
                 raw_path=raw_dir / f"{stem}.json",
-                raw_path_2=raw_dir / f"{stem}.modelo_2.json" if multi_transcription else None,
-                raw_path_3=raw_dir / f"{stem}.modelo_3.json" if len(transcription_model_names) >= 3 else None,
                 log_path=log_dir / f"{stem}.ffmpeg.log",
                 model_name=transcription_model_names[0],
-                model_name_2=transcription_model_names[1] if len(transcription_model_names) >= 2 else "",
-                model_name_3=transcription_model_names[2] if len(transcription_model_names) >= 3 else "",
+                model_names=transcription_model_names[1:],
+                txt_paths=(
+                    [temp_dir / f"{stem}.modelo_{i}.txt" for i in range(2, len(transcription_model_names) + 1)]
+                    if multi_transcription
+                    else []
+                ),
+                raw_paths=(
+                    [raw_dir / f"{stem}.modelo_{i}.json" for i in range(2, len(transcription_model_names) + 1)]
+                    if multi_transcription
+                    else []
+                ),
             )
             if use_vad or vad_only:
                 # Todo VAD recebe exatamente WAV PCM 16 kHz, mono e 16-bit.
@@ -16810,25 +16794,43 @@ try {
         if all(job.error for job in eligible):
             raise RuntimeError("o VAD falhou em todos os arquivos")
 
-    def _queue_phase_progress(self, label: str, done: int, total: int):
+    def _queue_phase_progress(self, label: str, done: int, total: int, phase_key: str | None = None, started: float | None = None):
         percent = int((done / max(total, 1) * 100) + 0.5)
         self._queue("progress", percent)
-        self._queue("status", f"{label}: {done}/{total} ({percent}%)")
+        now = time.perf_counter()
+        throttles = getattr(self, "_phase_throttle", None)
+        if throttles is None:
+            throttles = {}
+            self._phase_throttle = throttles
+        if done < total and phase_key and now - throttles.get(phase_key, 0.0) < 0.1:
+            return
+        if phase_key:
+            throttles[phase_key] = now
+        if done >= total and started is not None:
+            elapsed = time.perf_counter() - started
+            message = f"{label}: {done}/{total} ({format_duration(elapsed)})"
+            tag = "vad_total"
+        else:
+            message = f"{label}: {done}/{total} ({percent}%)"
+            tag = None
+        if phase_key:
+            self._queue("activity_line", phase_key, message, tag)
+        else:
+            self._queue("status", message)
 
-    def _queue_pipeline_progress(self, converted_done: int, total: int, transcribed_done: int):
+    def _queue_pipeline_progress(self, converted_done: int, total: int, transcribed_done: int, convert_started: float, transcribe_started: float):
         convert_percent = int((converted_done / max(total, 1) * 100) + 0.5)
         transcribe_percent = int((transcribed_done / max(total, 1) * 100) + 0.5)
         current_percent = convert_percent if converted_done < total else transcribe_percent
         self._queue("progress", current_percent)
-        self._queue(
-            "status",
-            " | ".join(
-                [
-                    f"Convertendo arquivos: {converted_done}/{total} ({convert_percent}%)",
-                    f"Transcrevendo arquivos: {transcribed_done}/{total} ({transcribe_percent}%)",
-                ]
-            ),
-        )
+        if converted_done >= total:
+            self._queue("activity_line", "convert", f"Convertendo arquivos: {converted_done}/{total} ({format_duration(time.perf_counter() - convert_started)})", "vad_total")
+        else:
+            self._queue("activity_line", "convert", f"Convertendo arquivos: {converted_done}/{total} ({convert_percent}%)", None)
+        if transcribed_done >= total:
+            self._queue("activity_line", "transcribe", f"Transcrevendo arquivos: {transcribed_done}/{total} ({format_duration(time.perf_counter() - transcribe_started)})", "vad_total")
+        else:
+            self._queue("activity_line", "transcribe", f"Transcrevendo arquivos: {transcribed_done}/{total} ({transcribe_percent}%)", None)
 
     def _batch_report_stats(
         self,
@@ -17083,7 +17085,8 @@ try {
     def _run_conversions(self, jobs: list[AudioJob], settings: dict, next_stage_vad: bool = False):
         total = len(jobs)
         done = 0
-        self._queue_phase_progress("Convertendo arquivos", done, total)
+        convert_started = time.perf_counter()
+        self._queue_phase_progress("Convertendo arquivos", done, total, "convert", convert_started)
         with concurrent.futures.ThreadPoolExecutor(max_workers=settings["convert_parallel"]) as executor:
             future_map = {executor.submit(self._convert_job, job): job for job in jobs}
             for future in concurrent.futures.as_completed(future_map):
@@ -17104,7 +17107,7 @@ try {
                     job.txt_path.write_text(job.error, encoding="utf-8")
                     self._queue("job", job.original_path, "Erro na conversão")
                 done += 1
-                self._queue_phase_progress("Convertendo arquivos", done, total)
+                self._queue_phase_progress("Convertendo arquivos", done, total, "convert", convert_started)
 
     def _run_pipelined_conversions_and_transcriptions(self, jobs: list[AudioJob], settings: dict):
         total = len(jobs)
@@ -17114,8 +17117,10 @@ try {
         converted_queue: queue.Queue = queue.Queue()
         sentinel = object()
         url = transcribe_url(settings)
+        convert_started = time.perf_counter()
+        transcribe_started = time.perf_counter()
 
-        self._queue_pipeline_progress(converted_done, total, transcribed_done)
+        self._queue_pipeline_progress(converted_done, total, transcribed_done, convert_started, transcribe_started)
 
         def update_progress(convert_delta: int = 0, transcribe_delta: int = 0):
             nonlocal converted_done, transcribed_done
@@ -17124,7 +17129,7 @@ try {
                 transcribed_done += transcribe_delta
                 current_converted = converted_done
                 current_transcribed = transcribed_done
-            self._queue_pipeline_progress(current_converted, total, current_transcribed)
+            self._queue_pipeline_progress(current_converted, total, current_transcribed, convert_started, transcribe_started)
 
         def convert_runner(job: AudioJob):
             if self.cancel_event.is_set():
@@ -17218,7 +17223,6 @@ try {
                     job.log_path.write_text(conversion_summary + "\n", encoding="utf-8")
                 except OSError:
                     pass
-            self._queue("status", f"{job.original_name}: {conversion_summary}")
             return
 
         ffmpeg = app_base_dir() / "ffmpeg.exe"
@@ -17315,7 +17319,8 @@ try {
             return
         url = transcribe_url(settings)
         done = 0
-        self._queue_phase_progress("Transcrevendo arquivos", done, total)
+        transcribe_started = time.perf_counter()
+        self._queue_phase_progress("Transcrevendo arquivos", done, total, "transcribe", transcribe_started)
 
         def run_group(group: list[AudioJob], parallelism: int):
             nonlocal done
@@ -17337,7 +17342,7 @@ try {
                         job.txt_path.write_text(job.error, encoding="utf-8")
                         self._queue("job", job.original_path, "Erro na transcrição")
                     done += 1
-                    self._queue_phase_progress("Transcrevendo arquivos", done, total)
+                    self._queue_phase_progress("Transcrevendo arquivos", done, total, "transcribe", transcribe_started)
 
         configured_parallelism = max(1, int(settings["transcribe_parallel"]))
         if not is_grok_transcription(settings):
@@ -17377,7 +17382,7 @@ try {
         total = len(candidates)
         if total == 0:
             return
-        model_names = list(settings.get("_multi_transcription_models") or [])[:3]
+        model_names = list(settings.get("_multi_transcription_models") or [])
         if len(model_names) < 2:
             raise RuntimeError("O multi-modelo precisa de pelo menos dois modelos selecionados.")
         model_settings = [
@@ -17391,30 +17396,42 @@ try {
         self.uploaders = uploaders
         done = [0] * len(model_settings)
         progress_lock = threading.Lock()
+        model_starts = [time.perf_counter()] * len(model_settings)
+        model_labels = [
+            str(ms.get("label") or ms["name"]) for ms in model_settings
+        ]
 
         def update_progress(index: int):
+            now = time.perf_counter()
             with progress_lock:
                 done[index - 1] += 1
                 snapshot = list(done)
             self._queue("progress", int((sum(snapshot) / (total * len(model_settings))) * 100 + 0.5))
-            self._queue(
-                "status",
-                "  |  ".join(
-                    f"Modelo {model_index}: {count}/{total}"
-                    for model_index, count in enumerate(snapshot, start=1)
-                ),
-            )
+            throttles = getattr(self, "_model_throttle", None)
+            if throttles is None:
+                throttles = {}
+                self._model_throttle = throttles
+            emit_lines = all(count >= total for count in snapshot) or now - throttles.get("all", 0.0) >= 0.1
+            if not emit_lines:
+                return
+            throttles["all"] = now
+            for model_index, count in enumerate(snapshot, start=1):
+                label = model_labels[model_index - 1]
+                if count >= total:
+                    self._queue(
+                        "activity_line",
+                        f"model:{model_index}",
+                        f"{label}: {count}/{total} ({format_duration(time.perf_counter() - model_starts[model_index - 1])})",
+                        "vad_total",
+                    )
+                else:
+                    self._queue("activity_line", f"model:{model_index}", f"{label}: {count}/{total}", None)
 
-        self._queue(
-            "status",
-            "  |  ".join(
-                f"Modelo {model_index}: 0/{total}"
-                for model_index in range(1, len(model_settings) + 1)
-            ),
-        )
+        for model_index, label in enumerate(model_labels, start=1):
+            self._queue("activity_line", f"model:{model_index}", f"{label}: 0/{total}", None)
 
         def job_attr(job: AudioJob, base: str, index: int):
-            return getattr(job, base if index == 1 else f"{base}_{index}")
+            return audio_job_attr(job, base, index)
 
         def model_runner(index: int):
             current_settings = model_settings[index - 1]
@@ -17447,7 +17464,7 @@ try {
                             raise
                         except Exception as exc:
                             detail = f"ERRO transcrição modelo {index}: {exc}"
-                            setattr(job, "error" if index == 1 else f"error_{index}", detail)
+                            audio_job_set(job, "error", index, detail)
                             txt_path = job_attr(job, "txt_path", index)
                             if txt_path:
                                 txt_path.write_text(detail, encoding="utf-8")
@@ -17479,7 +17496,7 @@ try {
 
         for job in candidates:
             errors = [
-                getattr(job, "error" if index == 1 else f"error_{index}")
+                audio_job_attr(job, "error", index)
                 for index in range(1, len(model_settings) + 1)
             ]
             if all(errors):
@@ -17509,8 +17526,8 @@ try {
         request_settings = request_settings or self.settings
         if not uploader:
             raise RuntimeError("uploader não inicializado")
-        raw_path = getattr(job, "raw_path" if model_index == 1 else f"raw_path_{model_index}")
-        txt_path = getattr(job, "txt_path" if model_index == 1 else f"txt_path_{model_index}")
+        raw_path = audio_job_attr(job, "raw_path", model_index)
+        txt_path = audio_job_attr(job, "txt_path", model_index)
         if raw_path is None or txt_path is None:
             raise RuntimeError(f"arquivos de saída do modelo {model_index} não definidos")
         # AssemblyAI: áudios com 2 minutos ou mais vão pelo fluxo assíncrono
@@ -17520,7 +17537,7 @@ try {
             and probe_duration_ms(job.upload_path) >= 120000
         ):
             result = self._assemblyai_async_transcribe(job, request_settings)
-            setattr(job, "transcription" if model_index == 1 else f"transcription_{model_index}", result)
+            audio_job_set(job, "transcription", model_index, result)
             txt_path.write_text(result, encoding="utf-8")
             return
         status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
@@ -17552,7 +17569,7 @@ try {
             raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
             raise RuntimeError(f"HTTP {status}\n{raw}")
         result = transcript or "(sem transcrição)"
-        setattr(job, "transcription" if model_index == 1 else f"transcription_{model_index}", result)
+        audio_job_set(job, "transcription", model_index, result)
         txt_path.write_text(result, encoding="utf-8")
 
     def _assemblyai_async_transcribe(self, job: AudioJob, request_settings: dict) -> str:
@@ -17671,6 +17688,9 @@ try {
                 elif kind == "activity":
                     tag = message[2] if len(message) > 2 else None
                     self._append_activity_log(message[1], tag)
+                elif kind == "activity_line":
+                    key, text, tag = message[1], message[2], message[3] if len(message) > 3 else None
+                    self._update_activity_line(key, text, tag)
                 elif kind == "progress":
                     value = max(0, min(100, int(message[1])))
                     self.progress_var.set(value)
