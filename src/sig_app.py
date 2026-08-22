@@ -9265,6 +9265,7 @@ try {
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.bind("<Double-1>", self._open_selected_original)
+        self.tree.bind("<Delete>", self._remove_selected_files)
         self.tree.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.pack(side=RIGHT, fill=Y)
 
@@ -12857,6 +12858,28 @@ try {
             self.status_var.set(f"Abrindo {path.name}")
         except Exception as exc:
             messagebox.showerror("sig", f"Não foi possível abrir o arquivo:\n{exc}")
+
+    def _remove_selected_files(self, _event=None):
+        """Remove da fila (antes de iniciar) os arquivos selecionados com Delete."""
+        if self.running:
+            return
+        selected = self.tree.selection()
+        if not selected:
+            return
+        selected_set = set(selected)
+        # Coleta os caminhos a remover e remove os itens da árvore
+        paths_to_remove = []
+        for path, tree_item in list(self.tree_items.items()):
+            if tree_item in selected_set:
+                paths_to_remove.append(path)
+                self.tree.delete(tree_item)
+                del self.tree_items[path]
+        if not paths_to_remove:
+            return
+        # Remove da lista ordenada mantendo a ordem de tamanho (já está ordenada)
+        removed_set = {p.resolve() for p in paths_to_remove}
+        self.selected_paths = [p for p in self.selected_paths if p.resolve() not in removed_set]
+        self.status_var.set(f"{len(paths_to_remove)} arquivo(s) removido(s). {len(self.selected_paths)} arquivo(s) na fila.")
 
     def clear_files(self):
         if self.running:
