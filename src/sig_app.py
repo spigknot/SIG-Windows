@@ -17397,9 +17397,7 @@ try {
         done = [0] * len(model_settings)
         progress_lock = threading.Lock()
         model_starts = [time.perf_counter()] * len(model_settings)
-        model_labels = [
-            str(ms.get("label") or ms["name"]) for ms in model_settings
-        ]
+        model_labels = list(model_names)
 
         def update_progress(index: int):
             now = time.perf_counter()
