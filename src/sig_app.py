@@ -16438,6 +16438,12 @@ try {
         # essa seleção é local ao lote e não deve desaparecer no reload.
         multi_model_names = self._selected_multi_transcription_model_names()
         self.settings = load_settings()
+        # Se o usuário nunca abriu o menu "Modelos" (vars vazias), ele escolheu o
+        # modelo nas Configurações — usa o modelo único de lá em vez de bloquear.
+        if not multi_model_names:
+            configured = str(self.settings.get("transcription_server") or "").strip()
+            if configured:
+                multi_model_names = [configured]
         if not multi_model_names:
             messagebox.showinfo(
                 "Modelos",
