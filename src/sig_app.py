@@ -8321,17 +8321,31 @@ try {
             font=tab_font,
             cursor="hand2",
         )
+        self.diarias_tab_button = tk.Label(
+            tab_bar,
+            text="Diárias",
+            width=tab_width,
+            height=1,
+            borderwidth=1,
+            relief="solid",
+            font=tab_font,
+            cursor="hand2",
+        )
         self.live_tab_button.pack(side=LEFT)
         self.files_tab_button.pack(side=LEFT, padx=(4, 0))
         self.qualification_tab_button.pack(side=LEFT, padx=(4, 0))
         self.imei_tab_button.pack(side=LEFT, padx=(4, 0))
         self.ffmpeg_tab_button.pack(side=LEFT, padx=(4, 0))
+        self.diarias_tab_button.pack(side=LEFT, padx=(4, 0))
         self.live_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("live"))
         self.files_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("files"))
         self.imei_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("imei"))
         self.ffmpeg_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("ffmpeg"))
         self.qualification_tab_button.bind(
             "<Button-1>", lambda _event: self.select_main_tab("qualification")
+        )
+        self.diarias_tab_button.bind(
+            "<Button-1>", lambda _event: self.select_main_tab("diarias")
         )
         workspace = ttk.Frame(outer)
         workspace.pack(fill=BOTH, expand=True)
@@ -8387,6 +8401,12 @@ try {
         self.imei_tab = ttk.Frame(self.tab_content, padding=14)
         self.ffmpeg_tab = ttk.Frame(self.tab_content, padding=14)
         self.qualification_tab = ttk.Frame(self.tab_content, padding=14)
+        self.diarias_tab = ttk.Frame(self.tab_content, padding=14)
+        ttk.Label(
+            self.diarias_tab,
+            text="Diárias — conteúdo em desenvolvimento.",
+            style="Muted.TLabel",
+        ).pack(anchor="w")
 
         # The live workflow intentionally keeps transcript, history and statement together,
         # matching the Android screen.  The old assistant frame remains internal only.
@@ -9633,6 +9653,7 @@ try {
             getattr(self, "imei_tab", None),
             getattr(self, "ffmpeg_tab", None),
             getattr(self, "qualification_tab", None),
+            getattr(self, "diarias_tab", None),
         ):
             if frame is not None:
                 frame.pack_forget()
@@ -9643,6 +9664,7 @@ try {
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "imei":
             self.imei_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -9650,6 +9672,7 @@ try {
             self.imei_tab_button.configure(background=active_bg, foreground=active_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "ffmpeg":
             self.ffmpeg_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -9657,6 +9680,7 @@ try {
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=active_bg, foreground=active_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "qualification":
             self.qualification_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -9664,6 +9688,15 @@ try {
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=active_bg, foreground=active_fg)
+            self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+        elif tab_name == "diarias":
+            self.diarias_tab.pack(fill=BOTH, expand=True)
+            self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.files_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.diarias_tab_button.configure(background=active_bg, foreground=active_fg)
         else:
             self.live_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=active_bg, foreground=active_fg)
@@ -9671,6 +9704,7 @@ try {
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.root.after_idle(self._position_live_parts_button)
 
     def _refresh_assistant_model_label(self):
