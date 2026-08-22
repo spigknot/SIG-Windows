@@ -7,6 +7,7 @@ Uso:
 Credenciais em release/r2_config.json (NUNCA commitar).
 """
 import argparse
+import hashlib
 import json
 import pathlib
 import sys
@@ -45,12 +46,40 @@ def main() -> None:
     bucket = cfg["bucket"]
     public_base = cfg["public_base"].rstrip("/")
 
-    # Upload S3 (idempotente — sobrescreve por path)
-    for index, (path, entry) in enumerate(files.items(), 1):
+
+    def _md5(path: pathlib.Path) -> str:
+        digest = hashlib.md5()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+
+    def _remote_etag(key: str) -> str:
+        try:
+            head = s3.head_object(Bucket=bucket, Key=key)
+            return str(head.get("ETag") or "").strip('"')
+        except s3.exceptions.ClientError:
+            return ""
+
+
+    # Diff por hash: uma única listagem (ETags) vs o MD5 local — sobe só o que mudou
+    remote_etags: dict[str, str] = {}
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket):
+        for obj in page.get("Contents", []):
+            remote_etags[str(obj["Key"])] = str(obj.get("ETag") or "").strip('"')
+    to_upload = {}
+    for path, entry in files.items():
+        if remote_etags.get(path) != _md5(package / path):
+            to_upload[path] = entry
+
+    print(f"subir: {len(to_upload)}")
+    for index, (path, entry) in enumerate(to_upload.items(), 1):
         with (package / path).open("rb") as handle:
             s3.put_object(Bucket=bucket, Key=path, Body=handle)
-        if index % 25 == 0 or index == len(files):
-            print(f"  upload {index}/{len(files)}")
+        if index % 25 == 0 or index == len(to_upload):
+            print(f"  upload {index}/{len(to_upload)}")
     print("upload concluído")
 
     # Manifesto (schema 2 — o formato validado pelo updater)
