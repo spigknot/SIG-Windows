@@ -5703,10 +5703,20 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
     # Aviso/erro do provedor (ex.: modelo deprecated, erro, mensagem) — NÃO
     # vazar os metadados como se fossem transcrição. Detectar ANTES do collect,
     # porque o fallback genérico de collect juntaria os metadados do aviso.
+    # O Deepgram marca "deprecated" como VALOR de "transaction_key" (não como
+    # chave), então checamos também os valores de string.
+    _WARNING_KEYS = ("deprecated", "error", "message", "detail", "warn", "warning", "status")
+    # Marcadores de VALOR apenas quando inequívocos (não aparecem em fala normal);
+    # "error"/"warning" em texto de transcrição legítimo não devem marcar.
+    _WARNING_VALUE_MARKERS = ("deprecated", "unauthorized")
+
     def _is_warning(value):
         if isinstance(value, dict):
-            if any(key in value for key in ("deprecated", "error", "message", "detail", "warn")):
-                return True
+            for key, item in value.items():
+                if key in _WARNING_KEYS:
+                    return True
+                if isinstance(item, str) and any(marker in item.casefold() for marker in _WARNING_VALUE_MARKERS):
+                    return True
             return any(_is_warning(item) for item in value.values())
         if isinstance(value, list):
             return any(_is_warning(item) for item in value)
