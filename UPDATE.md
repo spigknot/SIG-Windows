@@ -110,7 +110,10 @@ gh release create YYYYMMDD_NNN ./YYYYMMDD_NNN_full.zip ./setup_sig_YYYYMMDD_NNN.
 
 - **NÃO** subir `sig.exe`/`SigUpdater.exe` como assets avulsos — eles são servidos pelo R2 (o `github_url` do manifesto aponta para o R2.dev).
 - Se a release ficar em draft (upload interrompido): `gh release edit YYYYMMDD_NNN --draft=false`.
-- **Regra "só a versão atual"**: deletar a release anterior:
+- **Regra "só a versão atual"**: deletar a release anterior EXCETO a versão-ponte
+  `20260821_013` (MANTER no GitHub — os PCs antigos, ainda no Drive/sync antigo,
+  baixam o `sig.exe`/`SigUpdater.exe` da `013` de lá durante a migração). A `013`
+  pode ser deletada só quando não houver mais PCs na `012` ou anterior.
   ```bash
   gh release delete <VERSAO_ANTERIOR> --repo spigknot/SIG-Windows --yes
   ```
