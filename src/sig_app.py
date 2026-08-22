@@ -14285,198 +14285,156 @@ try {
         win.focus_force()
 
     def open_status(self):
-        """Abre uma tela com status de cada servidor Granite (HTTP GET em http://host:8100)."""
-        import json as _json
-        import http.client as _http
-        from urllib.parse import urlparse as _urlparse
+        """Abre a tela de status: 3 pingos por servidor (transcrição e texto).
 
+        Coluna 1 = modelos de transcrição; coluna 2 = modelos de texto.
+        Cada servidor recebe 3 pingos HTTP; a média é exibida em verde com
+        "(Xms)" se respondeu, ou em vermelho com "(offline)". Os que
+        responderam aparecem primeiro.
+        """
         win = Toplevel(self.root)
         win.title("Status dos servidores")
         win.resizable(False, False)
-        canvas = Canvas(win, width=1200, height=1200, highlightthickness=0, background="#000000")
+
+        try:
+            transcription_servers = read_transcription_servers()
+        except Exception:
+            transcription_servers = []
+        try:
+            text_models = read_text_models()
+        except Exception:
+            text_models = []
+
+        def entry_display(name: str, url: str, parameters: dict) -> tuple[str, str]:
+            model = str((parameters or {}).get("model", "") or "").strip()
+            if name.casefold() == "servidor" and model:
+                return f"{name} ({model})", url
+            return name, url
+
+        trans_entries = [
+            entry_display(s.get("name", "?"), s.get("url", ""), s.get("parameters") or {})
+            for s in transcription_servers
+        ]
+        text_entries = [
+            entry_display(m.get("name", "?"), m.get("url", ""), m.get("parameters") or {})
+            for m in text_models
+        ]
+
+        def measure(url: str) -> float | None:
+            """3 GETs no host; devolve a média em ms, ou None se offline."""
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return None
+            host = parsed.hostname or ""
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            conn_cls = (
+                http.client.HTTPSConnection
+                if parsed.scheme == "https"
+                else http.client.HTTPConnection
+            )
+            times = []
+            for _ in range(3):
+                start = time.perf_counter()
+                try:
+                    conn = conn_cls(host, port, timeout=2.0)
+                    try:
+                        conn.request("GET", "/", headers={"Connection": "close"})
+                        resp = conn.getresponse()
+                        resp.read()
+                        times.append((time.perf_counter() - start) * 1000.0)
+                    finally:
+                        conn.close()
+                except Exception:
+                    continue
+            if not times:
+                return None
+            return sum(times) / len(times)
+
+        results: dict[str, float | None] = {}
+        all_entries = trans_entries + text_entries
+        if all_entries:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(all_entries))
+            ) as executor:
+                future_map = {
+                    executor.submit(measure, url): name
+                    for name, url in all_entries
+                }
+                for future in concurrent.futures.as_completed(future_map, timeout=20):
+                    name = future_map[future]
+                    try:
+                        results[name] = future.result()
+                    except Exception:
+                        results[name] = None
+
+        def ordered(entries):
+            online = [e for e in entries if results.get(e[0]) is not None]
+            offline = [e for e in entries if results.get(e[0]) is None]
+            return online + offline
+
+        trans_ordered = ordered(trans_entries)
+        text_ordered = ordered(text_entries)
+
+        col_width = 620
+        width = max(col_width * 2, 400)
+        title_y = 26
+        header_y = 62
+        row_start = 92
+        row_h = 28
+        rows = max(len(trans_ordered), len(text_ordered), 1)
+        height = row_start + rows * row_h + 24
+
+        canvas = Canvas(win, width=width, height=height, highlightthickness=0, background="#000000")
         canvas.pack(fill=BOTH, expand=True)
 
-        # Título
         canvas.create_text(
-            600, 24,
+            width // 2,
+            title_y,
             text="Status dos servidores",
             fill="#d6a22b",
             font=("Segoe UI Semibold", 15),
         )
+        canvas.create_text(
+            20,
+            header_y,
+            text="Modelos de transcrição",
+            fill="#d6a22b",
+            font=("Segoe UI Semibold", 12),
+            anchor="w",
+        )
+        canvas.create_text(
+            col_width + 20,
+            header_y,
+            text="Modelos de texto",
+            fill="#d6a22b",
+            font=("Segoe UI Semibold", 12),
+            anchor="w",
+        )
 
-        # Busca servidores
-        try:
-            servers = read_transcription_servers()
-        except Exception:
-            servers = []
-        granite_servers = [s for s in servers if s.get("url", "").startswith("http") and "api.x.ai" not in s.get("url", "")]
-
-        if not granite_servers:
-            canvas.create_text(
-                600, 280,
-                text="Nenhum servidor Granite configurado.",
-                fill="#ffffff",
-                font=("Segoe UI", 12),
-            )
-            content_height = 340
-        else:
-            max_y = 58
-            for i, server in enumerate(granite_servers):
-                center_x = 300 + (i * 600)
-                y = 58
-                name = server.get("name", f"Servidor {i+1}")
-                url_full = server.get("url", "")
-
-                try:
-                    parsed = _urlparse(url_full)
-                    status_url = f"http://{parsed.hostname}:8100/health"
-                except Exception:
-                    status_url = url_full
-
-                # Nome do servidor
+        def draw_column(entries, x):
+            y = row_start
+            for name, _url in entries:
+                avg = results.get(name)
+                if avg is None:
+                    color = "#e74c3c"
+                    suffix = "(offline)"
+                else:
+                    color = "#2ecc71"
+                    suffix = f"({avg:.0f}ms)"
                 canvas.create_text(
-                    center_x, y,
-                    text=name,
-                    fill="#d6a22b",
-                    font=("Segoe UI Semibold", 11),
+                    x,
+                    y,
+                    text=f"{name} {suffix}",
+                    fill=color,
+                    font=("Segoe UI", 11),
+                    anchor="w",
                 )
-                y += 20
+                y += row_h
 
-                # URL
-                canvas.create_text(
-                    center_x, y,
-                    text=status_url,
-                    fill="#889493",
-                    font=("Consolas", 9),
-                )
-                y += 18
+        draw_column(trans_ordered, 20)
+        draw_column(text_ordered, col_width + 20)
 
-                # Requisição HTTP
-                try:
-                    conn = _http.HTTPConnection(parsed.hostname, 8100, timeout=5)
-                    conn.request("GET", "/health")
-                    resp = conn.getresponse()
-                    raw = resp.read().decode("utf-8", errors="replace")
-                    conn.close()
-
-                    try:
-                        data = _json.loads(raw)
-                    except _json.JSONDecodeError:
-                        data = raw
-
-                    if isinstance(data, dict):
-                        gpu_data = data.get("gpu") if isinstance(data.get("gpu"), dict) else data
-                        try:
-                            vram_used = float(gpu_data.get("memory_used_mb", 0) or 0)
-                            vram_total = float(gpu_data.get("memory_total_mb", 0) or 0)
-                        except (TypeError, ValueError):
-                            vram_used = vram_total = 0.0
-
-                        # Extrai stats se existir
-                        stats = data.pop("stats", None)
-
-                        # Campos normais (linha por linha)
-                        for key, value in data.items():
-                            canvas.create_text(
-                                center_x, y,
-                                text=f"{key}: {_json.dumps(value, ensure_ascii=False)}",
-                                fill="#2ecc71",
-                                font=("Consolas", 9),
-                            )
-                            y += 16
-
-                        # Stats destacados
-                        if isinstance(stats, dict) and stats:
-                            y += 4
-                            canvas.create_text(
-                                center_x, y,
-                                text="─ Estatísticas ─",
-                                fill="#d6a22b",
-                                font=("Segoe UI Semibold", 10),
-                            )
-                            y += 20
-                            for sk, sv in stats.items():
-                                canvas.create_text(
-                                    center_x, y,
-                                    text=f"  {sk}: {sv}",
-                                    fill="#ffffff",
-                                    font=("Consolas", 10),
-                                )
-                                y += 17
-
-                        if vram_total > 0:
-                            vram_percent = max(0.0, min(100.0, (vram_used / vram_total) * 100.0))
-                            bar_width = 420
-                            bar_height = 14
-                            bar_left = center_x - (bar_width / 2)
-                            bar_top = y + 12
-                            bar_color = (
-                                "#2ecc71" if vram_percent < 70
-                                else "#f1c40f" if vram_percent < 90
-                                else "#e74c3c"
-                            )
-                            canvas.create_text(
-                                center_x,
-                                bar_top,
-                                text=(
-                                    f"VRAM: {vram_used / 1024:.1f} GB / "
-                                    f"{vram_total / 1024:.1f} GB ({vram_percent:.1f}%)"
-                                ),
-                                fill="#ffffff",
-                                font=("Segoe UI", 10),
-                                anchor="s",
-                            )
-                            bar_top += 7
-                            canvas.create_rectangle(
-                                bar_left,
-                                bar_top,
-                                bar_left + bar_width,
-                                bar_top + bar_height,
-                                fill="#202827",
-                                outline="#52605e",
-                                width=1,
-                            )
-                            fill_width = bar_width * (vram_percent / 100.0)
-                            if fill_width > 0:
-                                canvas.create_rectangle(
-                                    bar_left,
-                                    bar_top,
-                                    bar_left + fill_width,
-                                    bar_top + bar_height,
-                                    fill=bar_color,
-                                    outline=bar_color,
-                                    width=0,
-                                )
-                            y = int(bar_top + bar_height + 14)
-                    else:
-                        for line in str(data).split("\n")[:15]:
-                            canvas.create_text(
-                                center_x, y,
-                                text=line[:80],
-                                fill="#2ecc71",
-                                font=("Consolas", 9),
-                            )
-                            y += 16
-                except Exception as exc:
-                    canvas.create_text(
-                        center_x, y,
-                        text=f"Erro: {exc}",
-                        fill="#e74c3c",
-                        font=("Consolas", 9),
-                    )
-                    y += 16
-
-                y += 12
-                max_y = max(max_y, y)
-
-            content_height = max_y + 24
-
-        height = min(max(content_height, 200), 1200)
-        canvas.configure(height=height)
-        status_width = 1200 if len(granite_servers) >= 2 else 600
-        canvas.configure(width=status_width)
-        win.geometry(f"{status_width}x{height}")
-
+        win.geometry(f"{width}x{height}")
         win.transient(self.root)
         win.wait_visibility()
         win.focus()
