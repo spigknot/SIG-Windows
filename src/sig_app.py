@@ -14321,29 +14321,22 @@ try {
         ]
 
         def measure(url: str) -> float | None:
-            """3 GETs no host; devolve a média em ms, ou None se offline."""
+            """3 handshakes TCP no host; devolve a média em ms, ou None se offline.
+
+            Mede só o connect() (nível 4) — valor mais próximo do ping ICMP,
+            sem o custo do processamento HTTP do servidor.
+            """
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https"):
                 return None
             host = parsed.hostname or ""
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            conn_cls = (
-                http.client.HTTPSConnection
-                if parsed.scheme == "https"
-                else http.client.HTTPConnection
-            )
             times = []
             for _ in range(3):
                 start = time.perf_counter()
                 try:
-                    conn = conn_cls(host, port, timeout=2.0)
-                    try:
-                        conn.request("GET", "/", headers={"Connection": "close"})
-                        resp = conn.getresponse()
-                        resp.read()
+                    with socket.create_connection((host, port), timeout=2.0):
                         times.append((time.perf_counter() - start) * 1000.0)
-                    finally:
-                        conn.close()
                 except Exception:
                     continue
             if not times:
@@ -14377,23 +14370,15 @@ try {
 
         col_width = 620
         width = max(col_width * 2, 400)
-        title_y = 26
-        header_y = 62
-        row_start = 92
+        header_y = 18
+        row_start = 48
         row_h = 28
         rows = max(len(trans_ordered), len(text_ordered), 1)
-        height = row_start + rows * row_h + 24
+        height = row_start + rows * row_h + 16
 
         canvas = Canvas(win, width=width, height=height, highlightthickness=0, background="#000000")
         canvas.pack(fill=BOTH, expand=True)
 
-        canvas.create_text(
-            width // 2,
-            title_y,
-            text="Status dos servidores",
-            fill="#d6a22b",
-            font=("Segoe UI Semibold", 15),
-        )
         canvas.create_text(
             20,
             header_y,
@@ -14418,6 +14403,9 @@ try {
                 if avg is None:
                     color = "#e74c3c"
                     suffix = "(offline)"
+                elif avg < 1.0:
+                    color = "#2ecc71"
+                    suffix = "(<1ms)"
                 else:
                     color = "#2ecc71"
                     suffix = f"({avg:.0f}ms)"
