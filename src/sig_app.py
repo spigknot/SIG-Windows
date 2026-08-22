@@ -5738,6 +5738,12 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
             "\n".join(pieces).strip(),
             _timestamped_text_from_json(payload).strip(),
         )
+    # Resposta sem transcrição. Se for um aviso/erro do provedor (ex.: modelo
+    # deprecated, erro, mensagem), NÃO vazar o JSON cru como se fosse o texto.
+    if isinstance(payload, dict) and any(
+        key in payload for key in ("deprecated", "error", "message", "detail", "warn")
+    ):
+        return ParsedTranscription("")
     return ParsedTranscription(text.strip(), _timestamped_text_from_json(payload).strip())
 
 
