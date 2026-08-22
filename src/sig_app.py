@@ -5700,6 +5700,21 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
     except json.JSONDecodeError:
         return ParsedTranscription(text.strip())
 
+    # Aviso/erro do provedor (ex.: modelo deprecated, erro, mensagem) — NÃO
+    # vazar os metadados como se fossem transcrição. Detectar ANTES do collect,
+    # porque o fallback genérico de collect juntaria os metadados do aviso.
+    def _is_warning(value):
+        if isinstance(value, dict):
+            if any(key in value for key in ("deprecated", "error", "message", "detail", "warn")):
+                return True
+            return any(_is_warning(item) for item in value.values())
+        if isinstance(value, list):
+            return any(_is_warning(item) for item in value)
+        return False
+
+    if _is_warning(payload):
+        return ParsedTranscription("")
+
     def collect(value):
         if value is None:
             return []
@@ -5738,12 +5753,6 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
             "\n".join(pieces).strip(),
             _timestamped_text_from_json(payload).strip(),
         )
-    # Resposta sem transcrição. Se for um aviso/erro do provedor (ex.: modelo
-    # deprecated, erro, mensagem), NÃO vazar o JSON cru como se fosse o texto.
-    if isinstance(payload, dict) and any(
-        key in payload for key in ("deprecated", "error", "message", "detail", "warn")
-    ):
-        return ParsedTranscription("")
     return ParsedTranscription(text.strip(), _timestamped_text_from_json(payload).strip())
 
 
