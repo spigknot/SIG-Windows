@@ -6259,11 +6259,20 @@ def job_problem_reason(job: AudioJob, transcript: str) -> str:
     return ""
 
 
+_JOB_LIST_PLURALS = {
+    "transcription": "transcripts",
+    "error": "errors",
+    "txt_path": "txt_paths",
+    "raw_path": "raw_paths",
+    "model_name": "model_names",
+}
+
+
 def audio_job_attr(job: AudioJob, base: str, index: int):
     """Lê um atributo por modelo: índice 1 = campo principal; 2+ = lista (índice 0 = modelo 2)."""
     if index == 1:
         return getattr(job, base)
-    values = getattr(job, f"{base}s")
+    values = getattr(job, _JOB_LIST_PLURALS.get(base, f"{base}s"))
     list_index = index - 2
     return values[list_index] if list_index < len(values) else None
 
@@ -6273,7 +6282,7 @@ def audio_job_set(job: AudioJob, base: str, index: int, value):
     if index == 1:
         setattr(job, base, value)
         return
-    values = getattr(job, f"{base}s")
+    values = getattr(job, _JOB_LIST_PLURALS.get(base, f"{base}s"))
     list_index = index - 2
     while len(values) <= list_index:
         values.append("" if base in ("transcription", "error") else None)
@@ -17419,14 +17428,15 @@ try {
                     self._queue(
                         "activity_line",
                         f"model:{model_index}",
-                        f"{label}: {count}/{total} ({format_duration(time.perf_counter() - model_starts[model_index - 1])})",
+                        f"{label} {count}/{total} ({format_duration(time.perf_counter() - model_starts[model_index - 1])})",
                         "vad_total",
                     )
                 else:
-                    self._queue("activity_line", f"model:{model_index}", f"{label}: {count}/{total}", None)
+                    percent = int(count / max(total, 1) * 100 + 0.5)
+                    self._queue("activity_line", f"model:{model_index}", f"{label} {count}/{total} ({percent}%)", None)
 
         for model_index, label in enumerate(model_labels, start=1):
-            self._queue("activity_line", f"model:{model_index}", f"{label}: 0/{total}", None)
+            self._queue("activity_line", f"model:{model_index}", f"{label} 0/{total} (0%)", None)
 
         def job_attr(job: AudioJob, base: str, index: int):
             return audio_job_attr(job, base, index)
