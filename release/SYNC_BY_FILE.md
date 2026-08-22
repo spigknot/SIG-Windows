@@ -115,6 +115,28 @@ ad-hoc `hermes-verify-sig-sync` (check/down/launch com assinatura real).
   diff, sync e rollbacks).
 - Suite completa do `release.py tests`.
 
+## MIGRAÇÃO PARA O CLOUDFLARE R2 (a pasta sync fora do Drive)
+
+**Estado (2026-08-22)**: bucket `sig` criado; upload S3 funcionando; download
+público via R2.dev funcionando. A migração substitui o Drive como fonte do
+sync por arquivo (elimina o falso positivo de malware do Google).
+
+- **Credenciais (SENSÍVEIS — NÃO commitar)**: `release/r2_config.json`
+  (ignorado pelo git; contém account_id, access_key_id, secret_access_key,
+  bucket, endpoint S3 e o public_base). Se faltar, gerar em
+  Cloudflare → R2 → Manage R2 API Tokens → Account API Token
+  (Object Read & Write, escopo: bucket `sig`).
+- **Endpoint S3** (upload): `https://<account-id>.r2.cloudflarestorage.com`
+- **Bucket**: `sig`
+- **Domínio público** (download do updater): `https://pub-<hash>.r2.dev`
+  — o R2.dev é POR BUCKET: o URL de um objeto é
+  `https://pub-<hash>.r2.dev/<path>` (SEM o nome do bucket no path).
+- **Exemplo testado**: upload de `build-info.json` + download
+  `...r2.dev/build-info.json` = 200 com o User-Agent do updater.
+- **Bloqueio 1010 do Cloudflare**: o acesso com UA de bot (urllib/Python)
+  recebe o 1010; com o UA do updater (`SigUpdater/2.0...`) funciona — o
+  updater já envia esse UA.
+
 ## Estado atual
 
 - Full `20260814_013` no GitHub; incremental ZIP e sync manifest 013 no

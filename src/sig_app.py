@@ -75,6 +75,7 @@ from stt_provider_rules import (
     supports_diarize,
 )
 from sync_common import (
+    R2_PUBLIC_HOST,
     SYNC_MANIFEST_FILE_ID,
     UPDATE_PUBLIC_KEY_E,
     UPDATE_PUBLIC_KEY_N,
@@ -1049,7 +1050,10 @@ def download_github_url(url: str, destination: Path, progress_callback=None) -> 
     """Baixa um arquivo de uma URL do GitHub releases, devolvendo o sha256."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
-    request = urllib.request.Request(url, headers={"User-Agent": "sig-updater/1.0"})
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)"},
+    )
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
         total = int(response.headers.get("Content-Length") or 0)
         downloaded = 0
@@ -7576,7 +7580,12 @@ class SigApp:
     def _update_check_worker(self, manual: bool = False) -> None:
         # Mecanismo principal: sincronização por arquivo (manifesto schema 2).
         try:
-            raw = download_google_drive_bytes(SYNC_MANIFEST_FILE_ID, 2 * 1024 * 1024)
+            request = urllib.request.Request(
+                f"https://{R2_PUBLIC_HOST}/sync_manifest.json",
+                headers={"User-Agent": "SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
             manifest = json.loads(raw.decode("utf-8"))
             sync_state = validate_sync_manifest(manifest)
             version = sync_state["version"]

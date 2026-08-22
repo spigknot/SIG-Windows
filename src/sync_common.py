@@ -17,6 +17,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 SYNC_MANIFEST_FILE_ID = "1FiuZNZ6Ylub7P10vecwV29UNntoOkySw"
+R2_PUBLIC_HOST = "pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev"
 SYNC_MANIFEST_SCHEMA = 2
 SYNC_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
 SYNC_MANIFEST_MAX_FILES = 20_000
@@ -182,10 +183,13 @@ def validate_sync_manifest(manifest: dict) -> dict:
             import urllib.parse
 
             parsed = urllib.parse.urlparse(github_url)
+            r2_host = R2_PUBLIC_HOST
+            allowed_github_path = "/spigknot/SIG-Windows/releases/download/"
             if (
                 parsed.scheme != "https"
-                or parsed.hostname != "github.com"
-                or not parsed.path.startswith("/spigknot/SIG-Windows/releases/download/")
+                or parsed.hostname not in ("github.com", r2_host)
+                or (parsed.hostname == "github.com" and not parsed.path.startswith(allowed_github_path))
+                or (parsed.hostname == r2_host and not parsed.path.startswith("/"))
             ):
                 raise SyncError(f"URL alternativa inválida no manifesto para: {path}")
         files[path] = {

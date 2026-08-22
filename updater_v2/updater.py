@@ -220,11 +220,17 @@ def fetch_incremental_manifest() -> dict:
 # ID do sync_manifest.json no Drive (arquivo público, atualizado a cada
 # publicação — o ID permanece estável como o do latest.json).
 SYNC_MANIFEST_FILE_ID = "1FiuZNZ6Ylub7P10vecwV29UNntoOkySw"
+R2_PUBLIC_HOST = "pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev"
+R2_MANIFEST_URL = f"https://{R2_PUBLIC_HOST}/sync_manifest.json"
 
 
 def fetch_sync_manifest() -> dict:
-    """Baixa e valida o manifesto de sincronização (schema 2) do Drive."""
-    with _open_google_drive_download(SYNC_MANIFEST_FILE_ID) as response:
+    """Baixa e valida o manifesto de sincronização (schema 2) do R2 (Cloudflare)."""
+    request = urllib.request.Request(
+        R2_MANIFEST_URL,
+        headers={"User-Agent": HTTP_USER_AGENT},
+    )
+    with _urlopen(request) as response:
         payload = response.read(SYNC_MANIFEST_MAX_BYTES + 1)
     if len(payload) > SYNC_MANIFEST_MAX_BYTES:
         raise UpdateError("o manifesto de sincronização excede o tamanho permitido")
@@ -446,10 +452,13 @@ def validate_sync_manifest(manifest: dict) -> dict:
             )
         if github_url:
             parsed = urllib.parse.urlparse(github_url)
+            r2_host = R2_PUBLIC_HOST
+            allowed_github_path = "/spigknot/SIG-Windows/releases/download/"
             if (
                 parsed.scheme != "https"
-                or parsed.hostname != "github.com"
-                or not parsed.path.startswith("/spigknot/SIG-Windows/releases/download/")
+                or parsed.hostname not in ("github.com", r2_host)
+                or (parsed.hostname == "github.com" and not parsed.path.startswith(allowed_github_path))
+                or (parsed.hostname == r2_host and not parsed.path.startswith("/"))
             ):
                 raise UpdateError(f"URL alternativa inválida no manifesto para: {path}")
         files[path] = {
