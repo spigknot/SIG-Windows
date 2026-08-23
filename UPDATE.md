@@ -19,6 +19,26 @@ bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → G
 - O R2.dev é POR BUCKET: o URL de um objeto é `https://pub-<hash>.r2.dev/<path>` (SEM o bucket no path).
 - O updater/app buscam o manifesto em `https://pub-<hash>.r2.dev/sync_manifest.json` (schema 2, assinado).
 
+## 0.1 Contexto essencial
+
+- **Repositório**: `D:\Projetos\SIG Windows` (Windows; o terminal é bash/MSYS — caminhos `C:/...` viram glob no `gh`, use `cd` no diretório e caminhos relativos `./arquivo`).
+- **Python do build**: `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe` (Python `3.11.0` — o `release.py` valida por VERSÃO, não por caminho).
+- **Versão nova**: a versão atual está em `APP_VERSION` em `src\sig_app.py`. A nova versão é a PRÓXIMA no formato `YYYYMMDD_NNN` (mesma data, número seguinte; ex.: se está `20260821_014`, gere `20260821_015`).
+- **Credenciais do R2** em `release\r2_config.json` e **chave privada do manifesto** em `release\update_private_key.pem` (ambos NUNCA commitar).
+
+## 0.2 Regras obrigatórias (não negociáveis)
+
+1. Nenhum processo `sig.exe` / `SigUpdater.exe` pode estar rodando durante o build (verifique e encerre antes — seção 1.2).
+2. O `--package` do `sync_r2.py` DEVE apontar para a pasta `package/` — nunca a raiz `release/generated/<v>` (corrompe o manifesto — seção 4).
+3. O sync é SOMENTE no Cloudflare R2. O Google Drive está APOSENTADO desde `20260821_013`.
+4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` + `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos (eles são servidos pelo R2).
+5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 5).
+6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 6).
+7. O harness deve terminar com `RELEASE_EXIT=0` e 12 PASS — QUALQUER `FAIL` impede a publicação. NÃO publicar release com FAIL.
+8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
+9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
+10. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
+
 ## 1. Pré-requisitos (antes de começar)
 
 1. **Ambiente de build aprovado**: Python `3.11.0` + PyInstaller `6.21.0` (o `release.py` valida e falha com diagnóstico se divergir).
@@ -135,6 +155,26 @@ git push origin main
 3. O `git status` limpo (sem logs, sem `r2_config.json`, sem chaves).
 4. Teste real: atualizar uma instalação antiga pelo app (deve baixar o diff do R2 e relançar na versão nova) — o log do updater deve ter `Atualização aplicada e validada`.
 
+## 8. Entrega (relatório final obrigatório)
+
+Ao concluir, reportar APENAS valores reais das saídas dos comandos:
+
+1. A versão publicada (`YYYYMMDD_NNN`).
+2. O resultado do harness (número de PASS — esperado 12, com `RELEASE_EXIT=0`).
+3. Quantos arquivos subiram no R2 (`subir: N` — deve ser um número pequeno, o diff).
+4. O link da release do GitHub.
+5. O hash do commit (`git rev-parse HEAD`).
+
+Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
+
+## 9. Manutenção do documento (obrigatório)
+
+Ao terminar, revise este `UPDATE.md`: se QUALQUER passo divergir do que foi
+documentado, ou se você encontrou um pitfall novo (erro, atalho, detalhe de
+ambiente), ATUALIZE este documento para refletir a realidade e inclua o
+pitfall na tabela de resolução — no mesmo commit da versão. Este documento é
+a fonte da verdade e deve evoluir com a prática.
+
 ---
 
 ## Pitfalls e resolução (já vividos — não repetir)
@@ -148,6 +188,7 @@ git push origin main
 | `[Erro: 13] Permission denied` no lock | updater sem admin / SIG aberto | fechar o SIG; executar o updater como Administrador |
 | `HTTP 1010` no R2.dev | User-Agent de bot (urllib) | o updater/app usam o UA `SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)` — nunca o UA do urllib |
 | sync_r2 subindo 1791 arquivos | versão antiga do script (sem o diff) | usar o diff por ETag/MD5 (list_objects) — `subir: N` pequeno |
+| `RequestTimeTooSkewed` no sync_r2 (`ListObjectsV2`) | relógio do Windows dessincronizado (serviço `w32time` parado; diferença >15 min vs servidor) | iniciar o serviço e sincronizar: `powershell -c "Start-Service w32time; w32tm /resync"` (com elevação); conferir com `date -u` vs `curl -sI https://api.cloudflare.com | grep -i ^date:` |
 | O `release_*.log`/`sync_*.log` entram no commit | `git add -A` pegou os logs | `rm -f release_*.log sync_*.log` ANTES do `git add` |
 
 ---
