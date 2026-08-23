@@ -34,7 +34,7 @@ bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → G
 4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` + `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos (eles são servidos pelo R2).
 5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 5).
 6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 6).
-7. O harness deve terminar com `RELEASE_EXIT=0` e 12 PASS — QUALQUER `FAIL` impede a publicação. NÃO publicar release com FAIL.
+7. O harness deve terminar com `RELEASE_EXIT=0` e 13 linhas PASS (4 de artefatos + 9 de cenários) — QUALQUER `FAIL` impede a publicação. NÃO publicar release com FAIL.
 8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
 9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
 10. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
@@ -69,8 +69,8 @@ cd "D:/Projetos/SIG Windows"
 ```
 
 - Gera: `release/generated/YYYYMMDD_NNN/` (package + `*_full.zip` + `setup_sig_*.exe` + `online_setup_sig*.exe`).
-- Roda o harness completo (8/8): build onedir, updater, diffs, sync, rollbacks.
-- **Critério de sucesso**: `RELEASE_EXIT=0` + as linhas `PASS` do harness (12 PASS). NÃO é sucesso se houver qualquer `FAIL`.
+- Roda o harness completo (9 cenários): build onedir, updater, diffs, sync, rollbacks.
+- **Critério de sucesso**: `RELEASE_EXIT=0` + as linhas `PASS` (13 linhas PASS: 4 de artefatos + 9 de cenários). NÃO é sucesso se houver qualquer `FAIL`.
 
 ### 3.1 SE o harness falhar com o SigUpdater
 
@@ -160,7 +160,7 @@ git push origin main
 Ao concluir, reportar APENAS valores reais das saídas dos comandos:
 
 1. A versão publicada (`YYYYMMDD_NNN`).
-2. O resultado do harness (número de PASS — esperado 12, com `RELEASE_EXIT=0`).
+2. O resultado do harness (linhas PASS — esperado 13, com `RELEASE_EXIT=0`).
 3. Quantos arquivos subiram no R2 (`subir: N` — deve ser um número pequeno, o diff).
 4. O link da release do GitHub.
 5. O hash do commit (`git rev-parse HEAD`).
