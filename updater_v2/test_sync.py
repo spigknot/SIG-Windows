@@ -1,7 +1,7 @@
 """Testes do manifesto de sincronização (schema 2) do updater.
 
-Cobre a FASE A1 do release/SYNC_BY_FILE.md: canonical, assinatura e
-validação estrutural. A assinatura é feita com a chave privada local quando
+Cobre o protocolo R2: canonical, assinatura e validação estrutural. A assinatura
+é feita com a chave privada local quando
 disponível (round-trip real com a chave pública embutida no updater).
 """
 
@@ -54,7 +54,8 @@ def _fake_files(overrides: dict | None = None) -> list[dict]:
                 "path": path,
                 "sha256": "a" * 64,
                 "size": 123,
-                "drive_id": "fake-id-" + path.replace("/", "-"),
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/" + path,
             }
         )
     for path, changes in (overrides or {}).items():
@@ -118,7 +119,13 @@ class SyncManifestTests(unittest.TestCase):
 
     def test_traversal_path_is_rejected(self):
         files = _fake_files() + [
-            {"path": "../fora.txt", "sha256": "a" * 64, "size": 1, "drive_id": "x"}
+            {
+                "path": "../fora.txt",
+                "sha256": "a" * 64,
+                "size": 1,
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/fora.txt",
+            }
         ]
         manifest = _make_manifest(files)
         if PRIVATE_KEY is not None:
@@ -128,7 +135,13 @@ class SyncManifestTests(unittest.TestCase):
 
     def test_unknown_top_level_is_rejected(self):
         files = _fake_files() + [
-            {"path": "outra_pasta/x.txt", "sha256": "a" * 64, "size": 1, "drive_id": "x"}
+            {
+                "path": "outra_pasta/x.txt",
+                "sha256": "a" * 64,
+                "size": 1,
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/outra_pasta/x.txt",
+            }
         ]
         manifest = _make_manifest(files)
         if PRIVATE_KEY is not None:
@@ -165,7 +178,7 @@ class SyncManifestTests(unittest.TestCase):
         manifest = _make_manifest(files)
         if PRIVATE_KEY is not None:
             manifest["signature"] = _sign(canonical_sync_manifest(manifest))
-        with self.assertRaisesRegex(UpdateError, "fonte de download"):
+        with self.assertRaisesRegex(UpdateError, "URL de download"):
             validate_sync_manifest(manifest)
 
     def test_github_url_without_drive_id_is_accepted(self):
@@ -184,7 +197,7 @@ class SyncManifestTests(unittest.TestCase):
         manifest = _make_manifest(files)
         if PRIVATE_KEY is not None:
             manifest["signature"] = _sign(canonical_sync_manifest(manifest))
-        with self.assertRaisesRegex(UpdateError, "URL alternativa"):
+        with self.assertRaisesRegex(UpdateError, "URL de download"):
             validate_sync_manifest(manifest)
 
     def test_canonical_is_stable_regardless_of_file_order(self):
@@ -321,10 +334,10 @@ class SyncTransactionTests(unittest.TestCase):
 class SyncDownloadTests(unittest.TestCase):
     """FASE A3: download por arquivo com retry e validação de hash."""
 
-    def _fake_open_drive(self, payload_factory):
+    def _fake_open_r2(self, payload_factory):
         import updater
 
-        original = updater._open_google_drive_download
+        original = updater._urlopen
 
         class _FakeResponse:
             def __init__(self, payload: bytes):
@@ -347,29 +360,30 @@ class SyncDownloadTests(unittest.TestCase):
         calls = {"count": 0}
         sequence = payload_factory() if callable(payload_factory) else payload_factory
 
-        def fake(drive_id):
+        def fake(_request, timeout=60):
             calls["count"] += 1
             payload = next(sequence)
             if isinstance(payload, Exception):
                 raise payload
             return _FakeResponse(payload)
 
-        updater._open_google_drive_download = fake
-        self.addCleanup(lambda: setattr(updater, "_open_google_drive_download", original))
+        updater._urlopen = fake
+        self.addCleanup(lambda: setattr(updater, "_urlopen", original))
         return calls
 
     def _entry(self, data: bytes) -> dict:
         import hashlib
 
         return {
-            "drive_id": "fake-id",
+            "drive_id": "",
+            "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/sig.exe",
             "sha256": hashlib.sha256(data).hexdigest(),
             "size": len(data),
         }
 
     def test_download_writes_validated_file(self):
         data = b"conteudo do arquivo"
-        calls = self._fake_open_drive(iter([data]))
+        calls = self._fake_open_r2(iter([data]))
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "sig.exe"
             download_sync_file(self._entry(data), destination)
@@ -379,7 +393,7 @@ class SyncDownloadTests(unittest.TestCase):
 
     def test_divergent_hash_is_rejected(self):
         data = b"conteudo bom"
-        calls = self._fake_open_drive(iter([b"conteudo adulterado"] * 3))
+        calls = self._fake_open_r2(iter([b"conteudo adulterado"] * 3))
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "sig.exe"
             with self.assertRaisesRegex(UpdateError, "após 3 tentativas"):
@@ -389,7 +403,7 @@ class SyncDownloadTests(unittest.TestCase):
 
     def test_transient_failure_recovers_on_retry(self):
         data = b"arquivo certo"
-        calls = self._fake_open_drive(iter([ConnectionError("rede caiu"), data]))
+        calls = self._fake_open_r2(iter([ConnectionError("rede caiu"), data]))
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "sig.exe"
             download_sync_file(self._entry(data), destination)
@@ -398,7 +412,7 @@ class SyncDownloadTests(unittest.TestCase):
 
     def test_oversized_payload_is_rejected(self):
         data = b"pequeno"
-        calls = self._fake_open_drive(iter([b"grande demais"] * 3))
+        calls = self._fake_open_r2(iter([b"grande demais"] * 3))
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "sig.exe"
             with self.assertRaises(UpdateError):
@@ -406,7 +420,7 @@ class SyncDownloadTests(unittest.TestCase):
 
     def test_progress_callback_reports_bytes(self):
         data = b"x" * 300_000
-        calls = self._fake_open_drive(iter([data]))
+        calls = self._fake_open_r2(iter([data]))
         seen = []
         with tempfile.TemporaryDirectory() as temporary:
             download_sync_file(

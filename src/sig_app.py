@@ -2,7 +2,6 @@ import base64
 import concurrent.futures
 import ctypes
 import hashlib
-import importlib
 from datetime import date, datetime
 from array import array
 from collections import deque
@@ -13,7 +12,6 @@ import math
 import mimetypes
 import os
 import queue
-import socket
 import random
 import re
 import shutil
@@ -34,7 +32,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 import tkinter as tk
-from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Button, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
+from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, urlencode, urlparse
 
@@ -77,9 +75,6 @@ from stt_provider_rules import (
 )
 from sync_common import (
     R2_PUBLIC_HOST,
-    SYNC_MANIFEST_FILE_ID,
-    UPDATE_PUBLIC_KEY_E,
-    UPDATE_PUBLIC_KEY_N,
     SyncError,
     classify_sync_files,
     validate_sync_manifest,
@@ -87,9 +82,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260823_001"
-UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
-UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
+APP_VERSION = "20260823_002"
 SUPPORTED_EXTENSIONS = {
     ".wav",
     ".mp3",
@@ -205,19 +198,6 @@ SERVER_GEMMA_URL = "http://servidor:8400/v1/chat/completions"
 SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
 GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
 DEEPSEEK_API_NAMES = {DEEPSEEK_TEXT_NAME}
-DEFAULT_TRANSCRIPTION_SERVER_CONTENT = (
-    'servidor\t\t'
-    'http://servidor:8100\t\t'
-    '"model": "granite-speech-4.1-2b-nar"\n'
-)
-TAGUAI_TRANSCRIPTION_SERVER_CONTENT = (
-    'servidor\t\t'
-    'http://servidor:8100\t\t'
-    '"model": "granite-speech-4.1-2b-nar"'
-)
-TRANSCRIPTION_SERVER_MIGRATION_MARKER = "#sig:taguai-speech-v1"
-TEXT_MODEL_CONFIGS = {}
-DEFAULT_TEXT_MODEL_SERVER_CONTENT = ""
 PARTS_EXTRACTION_LABELS = {
     "uppercase": "Palavras em maiúsculas",
     "name_database": "Base de nomes",
@@ -929,112 +909,6 @@ def project_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent.parent
     return Path(__file__).resolve().parents[1]
-
-
-def google_drive_download_url(file_id: str) -> str:
-    return f"{UPDATE_DOWNLOAD_URL}?{urlencode({'id': file_id, 'export': 'download', 'confirm': 't'})}"
-
-
-def canonical_update_manifest(manifest: dict) -> bytes:
-    signed_payload = {
-        "schema": int(manifest.get("schema") or 0),
-        "version": str(manifest.get("version") or ""),
-        "zip_file_id": str(manifest.get("zip_file_id") or ""),
-        "zip_name": str(manifest.get("zip_name") or ""),
-        "sha256": str(manifest.get("sha256") or "").lower(),
-        "size": int(manifest.get("size") or 0),
-        "created_at": str(manifest.get("created_at") or ""),
-    }
-    return json.dumps(
-        signed_payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def verify_update_manifest_signature(manifest: dict) -> bool:
-    try:
-        signature = base64.b64decode(str(manifest.get("signature") or ""), validate=True)
-        key_size = (UPDATE_PUBLIC_KEY_N.bit_length() + 7) // 8
-        if len(signature) != key_size:
-            return False
-        encoded = pow(int.from_bytes(signature, "big"), UPDATE_PUBLIC_KEY_E, UPDATE_PUBLIC_KEY_N)
-        encoded_bytes = encoded.to_bytes(key_size, "big")
-        digest_info = (
-            bytes.fromhex("3031300d060960864801650304020105000420")
-            + hashlib.sha256(canonical_update_manifest(manifest)).digest()
-        )
-        padding_size = key_size - len(digest_info) - 3
-        if padding_size < 8:
-            return False
-        expected = b"\x00\x01" + (b"\xff" * padding_size) + b"\x00" + digest_info
-        return encoded_bytes == expected
-    except (TypeError, ValueError):
-        return False
-
-
-def _open_google_drive_download(file_id: str):
-    request = urllib.request.Request(
-        google_drive_download_url(file_id),
-        headers={"User-Agent": "sig-updater/1.0"},
-    )
-    response = urllib.request.urlopen(request, timeout=60)
-    content_type = str(response.headers.get("Content-Type") or "").lower()
-    if "text/html" not in content_type:
-        return response
-
-    page = response.read(1024 * 1024).decode("utf-8", errors="replace")
-    response.close()
-    form_match = re.search(
-        r'<form[^>]+action="([^"]+)"[^>]*>',
-        page,
-        flags=re.IGNORECASE,
-    )
-    if not form_match:
-        raise RuntimeError("O Google Drive não forneceu o link de download do arquivo.")
-    action = html.unescape(form_match.group(1))
-    fields = {
-        html.unescape(name): html.unescape(value)
-        for name, value in re.findall(
-            r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"',
-            page,
-            flags=re.IGNORECASE,
-        )
-    }
-    separator = "&" if "?" in action else "?"
-    confirmation_url = f"{action}{separator}{urlencode(fields)}"
-    confirmation_request = urllib.request.Request(
-        confirmation_url,
-        headers={"User-Agent": "sig-updater/1.0"},
-    )
-    return urllib.request.urlopen(confirmation_request, timeout=60)
-
-
-def download_google_drive_bytes(file_id: str, maximum_size: int) -> bytes:
-    with _open_google_drive_download(file_id) as response:
-        payload = response.read(maximum_size + 1)
-    if len(payload) > maximum_size:
-        raise RuntimeError("O manifesto de atualização excedeu o tamanho permitido.")
-    return payload
-
-
-def download_google_drive_file(file_id: str, destination: Path, progress_callback=None) -> str:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256()
-    with _open_google_drive_download(file_id) as response, destination.open("wb") as output:
-        total = int(response.headers.get("Content-Length") or 0)
-        downloaded = 0
-        while True:
-            chunk = response.read(1024 * 256)
-            if not chunk:
-                break
-            output.write(chunk)
-            digest.update(chunk)
-            downloaded += len(chunk)
-            if progress_callback:
-                progress_callback(downloaded, total)
-    return digest.hexdigest()
 
 
 def download_github_url(url: str, destination: Path, progress_callback=None) -> str:
@@ -4608,70 +4482,6 @@ def settings_path() -> Path:
     return base / "settings.json"
 
 
-def transcription_servers_path() -> Path:
-    path = settings_path().parent / "Servidores" / "modelos_de_transcricao.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        current = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_TRANSCRIPTION_SERVER_CONTENT
-        normalized = normalize_transcription_servers_content(current)
-        if not path.exists() or normalized != current:
-            write_transcription_servers_content(path, normalized)
-    except Exception:
-        if not path.exists():
-            path.write_text(normalize_transcription_servers_content(DEFAULT_TRANSCRIPTION_SERVER_CONTENT), encoding="utf-8")
-    return path
-
-
-def parse_transcription_server_line(raw_line: str) -> dict | None:
-    trimmed = raw_line.strip()
-    if not trimmed or trimmed.startswith("#"):
-        return None
-    selected = trimmed.startswith("*")
-    line = trimmed.removeprefix("*").lstrip() if selected else trimmed
-    fields = [field.strip() for field in re.split(r"\t{2,}", line)]
-    if len(fields) < 3 or not fields[0] or not fields[1]:
-        return None
-    try:
-        parameters = json.loads("{" + ",".join(field for field in fields[2:] if field) + "}")
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parameters, dict) or "model" not in parameters:
-        return None
-    return {
-        "name": fields[0],
-        "url": fields[1],
-        "parameters": parameters,
-        "selected": selected,
-    }
-
-
-def normalize_transcription_servers_content(content: str) -> str:
-    lines = content.splitlines()
-    if TRANSCRIPTION_SERVER_MIGRATION_MARKER not in content:
-        has_taguai = any(
-            (server := parse_transcription_server_line(raw_line))
-            and server["name"].casefold() in {"taguai-speech", "servidor"}
-            for raw_line in lines
-        )
-        if not has_taguai:
-            lines.append(TAGUAI_TRANSCRIPTION_SERVER_CONTENT)
-        lines.append(TRANSCRIPTION_SERVER_MIGRATION_MARKER)
-
-    if not any((server := parse_transcription_server_line(raw_line)) and server["selected"] for raw_line in lines):
-        for index, raw_line in enumerate(lines):
-            if parse_transcription_server_line(raw_line):
-                leading_space = raw_line[: len(raw_line) - len(raw_line.lstrip())]
-                lines[index] = leading_space + "*" + raw_line.lstrip().removeprefix("*").lstrip()
-                break
-    return "\n".join(lines).strip() + "\n"
-
-
-def write_transcription_servers_content(path: Path, content: str) -> None:
-    temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(content, encoding="utf-8")
-    temporary.replace(path)
-
-
 def hostname_online(hostname: str) -> bool:
     """True se o hostname resolve na rede (ex.: o servidor local 'servidor')."""
     try:
@@ -4682,26 +4492,14 @@ def hostname_online(hostname: str) -> bool:
 
 
 def read_transcription_servers() -> list[dict]:
-    legacy_path = settings_path().parent / "Servidores" / "modelos_de_transcricao.txt"
-    try:
-        legacy_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    lines = DEFAULT_TRANSCRIPTION_SERVER_CONTENT.splitlines()
-    servers = []
-    for raw_line in lines:
-        server = parse_transcription_server_line(raw_line)
-        if server:
-            servers.append(server)
-    if not servers:
-        servers = [
-            {
-                "name": "servidor",
-                "url": "http://servidor:8100/transcribe",
-                "parameters": {"model": "granite-speech-4.1-2b-nar"},
-                "selected": True,
-            }
-        ]
+    servers = [
+        {
+            "name": "servidor",
+            "url": "http://servidor:8100",
+            "parameters": {"model": "granite-speech-4.1-2b-nar"},
+            "selected": True,
+        }
+    ]
     grok_selected = any(server["name"] == GROK_API_NAME for server in servers if server["selected"])
     deepgram_selected = any(server["name"] == DEEPGRAM_API_NAME for server in servers if server["selected"])
     assemblyai_selected = any(server["name"] == ASSEMBLYAI_API_NAME for server in servers if server["selected"])
@@ -4744,104 +4542,7 @@ def read_transcription_servers() -> list[dict]:
     ]
 
 
-def add_transcription_server(name: str, url: str, model: str) -> tuple[bool, str]:
-    clean_name, clean_url, clean_model = name.strip(), url.strip(), model.strip()
-    if not clean_name or not clean_url or not clean_model:
-        return False, "Preencha o nome, a URL e o modelo."
-    if any("\t" in value or "\n" in value or "\r" in value for value in (clean_name, clean_url, clean_model)):
-        return False, "Nome, URL e modelo não podem conter tabulações ou quebras de linha."
-    if not clean_url.startswith(("http://", "https://")):
-        return False, "A URL deve começar com http:// ou https://."
-    if any(server["name"].casefold() == clean_name.casefold() for server in read_transcription_servers()):
-        return False, "Já existe um servidor com esse nome."
-
-    path = transcription_servers_path()
-    line = f'{clean_name}\t\t{clean_url}\t\t"model": {json.dumps(clean_model, ensure_ascii=False)}'
-    content = path.read_text(encoding="utf-8").rstrip() + "\n" + line + "\n"
-    write_transcription_servers_content(path, normalize_transcription_servers_content(content))
-    return True, ""
-
-
-def remove_transcription_server(name: str) -> bool:
-    if name in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME):
-        return False
-    path = transcription_servers_path()
-    removed = False
-    remaining_lines = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        server = parse_transcription_server_line(raw_line)
-        if server and server["name"].casefold() == name.casefold():
-            removed = True
-            continue
-        remaining_lines.append(raw_line)
-    if removed:
-        write_transcription_servers_content(path, normalize_transcription_servers_content("\n".join(remaining_lines)))
-    return removed
-
-
-def text_models_path() -> Path:
-    path = settings_path().parent / "Servidores" / "modelos_de_texto.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        current = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_TEXT_MODEL_SERVER_CONTENT
-        normalized = normalize_text_models_content(current)
-        if not path.exists() or normalized != current:
-            write_transcription_servers_content(path, normalized)
-    except Exception:
-        if not path.exists():
-            path.write_text(normalize_text_models_content(DEFAULT_TEXT_MODEL_SERVER_CONTENT), encoding="utf-8")
-    return path
-
-
-def normalize_text_models_content(content: str) -> str:
-    legacy_grok_model = "grok-4." + "3"
-    lines = [
-        line.replace(f'"model": "{legacy_grok_model}"', '"model": "grok-4.6"')
-        .replace('"max_tokens": 5000', '"max_tokens": 10000')
-        for line in content.splitlines()
-    ]
-    lines = [
-        raw_line
-        for raw_line in lines
-        if not (
-            (server := parse_transcription_server_line(raw_line))
-            and server["name"].casefold() in {"taguai-grok", "ia-proxy"}
-        )
-    ]
-    if not any((server := parse_transcription_server_line(raw_line)) and server["selected"] for raw_line in lines):
-        for index, raw_line in enumerate(lines):
-            if parse_transcription_server_line(raw_line):
-                leading_space = raw_line[: len(raw_line) - len(raw_line.lstrip())]
-                lines[index] = leading_space + "*" + raw_line.lstrip().removeprefix("*").lstrip()
-                break
-    return "\n".join(lines).strip() + "\n"
-
-
 def read_text_models() -> list[dict]:
-    legacy_path = settings_path().parent / "Servidores" / "modelos_de_texto.txt"
-    try:
-        legacy_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    models = [
-        {
-            "name": name,
-            "url": config["url"],
-            "parameters": json.loads(json.dumps(config["parameters"], ensure_ascii=False)),
-            "selected": False,
-        }
-        for name, config in TEXT_MODEL_CONFIGS.items()
-    ]
-    regular_models = [
-        {
-            **model,
-            "selected": model["selected"],
-            "is_grok_api": False,
-            "is_deepseek_api": False,
-            "is_xai_proxy": False,
-        }
-        for model in models
-    ]
     integrated_models = [
         {
             "name": IA_PROXY_NAME,
@@ -4920,7 +4621,7 @@ def read_text_models() -> list[dict]:
             "is_xai_proxy": False,
         },
     ]
-    return integrated_models + regular_models
+    return integrated_models
 
 
 def selected_text_model_config(settings: dict, name_key: str = "text_model") -> dict:
@@ -4931,42 +4632,6 @@ def selected_text_model_config(settings: dict, name_key: str = "text_model") -> 
         or next((model for model in models if model["selected"]), None)
         or models[0]
     )
-
-
-def add_text_model(name: str, url: str, model: str) -> tuple[bool, str]:
-    clean_name, clean_url, clean_model = name.strip(), url.strip(), model.strip()
-    if not clean_name or not clean_url or not clean_model:
-        return False, "Preencha o nome, a URL e o modelo."
-    if any("\t" in value or "\n" in value or "\r" in value for value in (clean_name, clean_url, clean_model)):
-        return False, "Nome, URL e modelo não podem conter tabulações ou quebras de linha."
-    if not clean_url.startswith(("http://", "https://")):
-        return False, "A URL deve começar com http:// ou https://."
-    if any(item["name"].casefold() == clean_name.casefold() for item in read_text_models()):
-        return False, "Já existe um modelo de texto com esse nome."
-    path = text_models_path()
-    line = f'{clean_name}\t\t{clean_url}\t\t"model": {json.dumps(clean_model, ensure_ascii=False)}'
-    write_transcription_servers_content(
-        path,
-        normalize_text_models_content(path.read_text(encoding="utf-8").rstrip() + "\n" + line + "\n"),
-    )
-    return True, ""
-
-
-def remove_text_model(name: str) -> bool:
-    if name == IA_PROXY_NAME or name in GROK_TEXT_API_NAMES or name in DEEPSEEK_API_NAMES:
-        return False
-    path = text_models_path()
-    removed = False
-    remaining = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        item = parse_transcription_server_line(raw_line)
-        if item and item["name"].casefold() == name.casefold():
-            removed = True
-            continue
-        remaining.append(raw_line)
-    if removed:
-        write_transcription_servers_content(path, normalize_text_models_content("\n".join(remaining)))
-    return removed
 
 
 def selected_transcription_server(settings: dict) -> dict:
@@ -5162,16 +4827,6 @@ def normalize_settings(data: dict) -> dict:
     )
     # VAD removido
     return clean
-
-
-def settings_for_text_model(settings: dict, model_name: str, secondary: bool = False, task: str | None = None) -> dict:
-    selected = dict(settings)
-    if task:
-        model_key, reasoning_key, proxy_key = TEXT_TASK_KEYS[task]
-        selected[model_key] = model_name
-        return selected
-    selected["text_model"] = model_name
-    return selected
 
 
 def selected_parts_model(settings: dict) -> dict:
@@ -7090,7 +6745,6 @@ class SigApp:
         self.zip_help_after_id = None
         self.zip_help_window = None
         self.zip_help_position = (0, 0)
-        self.available_update: dict | None = None
         self.available_update_sync: dict | None = None
         self._sync_file_marks: dict[str, str] = {}
         self.update_check_thread: threading.Thread | None = None
@@ -7677,34 +7331,12 @@ class SigApp:
             return
         except (SyncError, ValueError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             if manual:
-                # Tenta o incremental ZIP (formato antigo) como contingência.
-                try:
-                    raw = download_google_drive_bytes(UPDATE_MANIFEST_FILE_ID, 1024 * 128)
-                    manifest = json.loads(raw.decode("utf-8"))
-                    if not verify_update_manifest_signature(manifest):
-                        raise RuntimeError("assinatura digital inválida")
-                    version = str(manifest.get("version") or "")
-                    zip_file_id = str(manifest.get("zip_file_id") or "")
-                    zip_name = str(manifest.get("zip_name") or "")
-                    digest = str(manifest.get("sha256") or "").lower()
-                    size = int(manifest.get("size") or 0)
-                    if not re.fullmatch(r"\d{8}_\d{3}", version):
-                        raise RuntimeError("versão inválida no manifesto")
-                    if not zip_file_id or zip_name != f"{version}.zip":
-                        raise RuntimeError("manifesto de atualização inconsistente")
-                    if not re.fullmatch(r"[0-9a-f]{64}", digest) or size <= 0:
-                        raise RuntimeError("hash ou tamanho inválido no manifesto")
-                    if version > APP_VERSION:
-                        self._queue("update_available", manifest)
-                    else:
-                        self._queue("update_not_found")
-                except Exception as fallback_error:
-                    self._queue("update_check_error", str(fallback_error))
-                return
-            self._queue("activity", f"Atualização: não foi possível consultar o Drive ({exc}).")
+                self._queue("update_check_error", f"não foi possível consultar o R2 ({exc})")
+            else:
+                self._queue("activity", f"Atualização: não foi possível consultar o R2 ({exc}).")
 
     def install_available_update(self) -> None:
-        if (not self.available_update and not self.available_update_sync) or self.update_installing:
+        if not self.available_update_sync or self.update_installing:
             return
         ffmpeg_running = bool(getattr(self, "ffmpeg_tools", None) and self.ffmpeg_tools.running)
         if self.running or self.live_state != "idle" or self.normal_recording or self.assistant_busy or ffmpeg_running:
@@ -7713,18 +7345,11 @@ class SigApp:
         self.update_installing = True
         self.update_button.configure(state="disabled")
         self.update_button_var.set("Baixando arquivos...")
-        if self.available_update_sync:
-            self.update_install_thread = threading.Thread(
-                target=self._sync_download_worker,
-                args=(self.available_update_sync.copy(),),
-                daemon=True,
-            )
-        else:
-            self.update_install_thread = threading.Thread(
-                target=self._update_download_worker,
-                args=(self.available_update.copy(),),
-                daemon=True,
-            )
+        self.update_install_thread = threading.Thread(
+            target=self._sync_download_worker,
+            args=(self.available_update_sync.copy(),),
+            daemon=True,
+        )
         self.update_install_thread.start()
 
     def _sync_download_worker(self, sync_state: dict) -> None:
@@ -7753,14 +7378,11 @@ class SigApp:
                             last_report["at"] = now
                             self._queue("update_sync_file_progress", path, downloaded, total)
 
-                    if entry.get("github_url"):
-                        digest = download_github_url(
-                            entry["github_url"], destination, progress_callback=on_progress
-                        )
-                    else:
-                        digest = download_google_drive_file(
-                            entry["drive_id"], destination, progress_callback=on_progress
-                        )
+                    if not entry.get("github_url"):
+                        raise RuntimeError(f"manifesto R2 sem URL de download para: {path}")
+                    digest = download_github_url(
+                        entry["github_url"], destination, progress_callback=on_progress
+                    )
                     if digest.lower() != entry["sha256"]:
                         raise RuntimeError(f"SHA-256 divergente ao baixar: {path}")
                     self._queue("update_sync_file_done", path)
@@ -7815,152 +7437,6 @@ class SigApp:
             self.root.after(250, self.root.destroy)
         except Exception as exc:
             self._queue("update_error", f"Não foi possível iniciar a sincronização: {exc}")
-
-    def _update_download_worker(self, manifest: dict) -> None:
-        version = str(manifest["version"])
-        update_root = Path(tempfile.gettempdir()) / "sig_updater" / version
-        zip_path = update_root / str(manifest["zip_name"])
-        partial_path = zip_path.with_suffix(".zip.part")
-        staging_dir = update_root / "staging"
-        try:
-            update_root.mkdir(parents=True, exist_ok=True)
-            if partial_path.exists():
-                partial_path.unlink()
-
-            last_percent = -1
-
-            def report_progress(downloaded: int, total: int):
-                nonlocal last_percent
-                if total > 0:
-                    percent = min(100, int(downloaded * 100 / total))
-                    if percent != last_percent:
-                        last_percent = percent
-                        self._queue("update_progress", f"Baixando atualização: {percent}%")
-                else:
-                    self._queue(
-                        "update_progress",
-                        f"Baixando atualização: {self._format_size(downloaded)}",
-                    )
-
-            digest = download_google_drive_file(
-                str(manifest["zip_file_id"]),
-                partial_path,
-                report_progress,
-            )
-            expected_size = int(manifest["size"])
-            actual_size = partial_path.stat().st_size
-            if actual_size != expected_size:
-                raise RuntimeError(
-                    f"tamanho recebido diferente do manifesto ({actual_size} de {expected_size} bytes)"
-                )
-            if digest.lower() != str(manifest["sha256"]).lower():
-                raise RuntimeError("o hash SHA-256 do pacote não confere")
-            partial_path.replace(zip_path)
-
-            self._queue("update_progress", "Validando atualização...")
-            if staging_dir.exists():
-                shutil.rmtree(staging_dir)
-            staging_dir.mkdir(parents=True, exist_ok=True)
-            self._validate_update_package_archive(zip_path, staging_dir)
-            self._queue("update_ready", zip_path, version)
-        except Exception as exc:
-            shutil.rmtree(update_root, ignore_errors=True)
-            self._queue("update_error", str(exc))
-
-    @staticmethod
-    def _validate_update_package_archive(zip_path: Path, staging_dir: Path) -> None:
-        """Valida e extrai o pacote de atualização baixado.
-
-        Formato diff (incremental v2, presença de ``removidos.txt``) exige
-        apenas ``sig.exe``/``build-info.json``/``removidos.txt`` — os demais
-        componentes ficam na instalação e são validados pelo updater (com
-        rollback). Formato antigo (v1) exige o conjunto completo.
-
-        Importante: esta função é a MESMA validação do updater do lado do
-        SIG. Mudanças no formato de pacote precisam atualizar os DOIS lugares
-        (veja release/INCREMENTAL_V2.md, seção "Peças afetadas").
-        """
-        total_uncompressed = 0
-        seen_members = set()
-        max_entries = 10_000
-        max_total_uncompressed = 4 * 1024 * 1024 * 1024
-        max_member_uncompressed = 1 * 1024 * 1024 * 1024
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            corrupt_member = archive.testzip()
-            if corrupt_member is not None:
-                raise RuntimeError(f"entrada corrompida no pacote: {corrupt_member}")
-            members = archive.infolist()
-            if len(members) > max_entries:
-                raise RuntimeError("o pacote excede o limite de entradas")
-            for member in members:
-                normalized_name = member.filename.replace("\\", "/").rstrip("/")
-                pure_path = PurePosixPath(normalized_name)
-                if (
-                    pure_path.is_absolute()
-                    or ".." in pure_path.parts
-                    or not pure_path.parts
-                    or member.flag_bits & 0x1
-                ):
-                    raise RuntimeError(f"entrada inválida no pacote: {member.filename}")
-                if any(
-                    "\x00" in part
-                    or ":" in part
-                    or part.endswith((" ", "."))
-                    or part.casefold() in {"g", "dist"}
-                    or part.casefold().startswith("_mei")
-                    for part in pure_path.parts
-                ):
-                    raise RuntimeError(f"nome incompatível no pacote: {member.filename}")
-                key = normalized_name.casefold()
-                if key in seen_members:
-                    raise RuntimeError(f"entrada duplicada no pacote: {member.filename}")
-                seen_members.add(key)
-                if (member.external_attr >> 16) & 0o170000 == 0o120000:
-                    raise RuntimeError(f"link simbólico não permitido: {member.filename}")
-                if member.file_size > max_member_uncompressed:
-                    raise RuntimeError(f"entrada individual grande demais: {member.filename}")
-                total_uncompressed += member.file_size
-                if total_uncompressed > max_total_uncompressed:
-                    raise RuntimeError("o pacote descompactado excede o limite permitido")
-            # Pacotes por diff (incremental v2) trazem apenas o que mudou;
-            # os componentes essenciais ficam na instalação e a validação
-            # final é feita pelo updater (com rollback).
-            if "removidos.txt" in seen_members:
-                required_members = {"sig.exe", "build-info.json", "removidos.txt"}
-            else:
-                required_members = {
-                    "sig.exe",
-                    "_internal/base_library.zip",
-                    "_internal/python311.dll",
-                    "_internal/vcruntime140.dll",
-                    "_internal/vcruntime140_1.dll",
-                    "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
-                    "SigUpdater.exe",
-                }
-            missing = sorted(
-                item for item in required_members
-                if item.casefold() not in seen_members
-            )
-            if missing:
-                raise RuntimeError("componentes obrigatórios ausentes: " + ", ".join(missing))
-            for member in members:
-                normalized_name = member.filename.replace("\\", "/").rstrip("/")
-                target = (staging_dir / Path(*PurePosixPath(normalized_name).parts)).resolve()
-                if not target.is_relative_to(staging_dir.resolve()):
-                    raise RuntimeError(f"destino inválido no pacote: {member.filename}")
-                if member.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member, "r") as source, target.open("wb") as destination:
-                    shutil.copyfileobj(source, destination, length=1024 * 256)
-        for required in required_members:
-            required_path = staging_dir / Path(*PurePosixPath(required).parts)
-            if not required_path.is_file():
-                raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
-            # removidos.txt vazio é válido (diff sem remoções).
-            if required != "removidos.txt" and required_path.stat().st_size <= 0:
-                raise RuntimeError(f"arquivo obrigatório ausente ou vazio: {required}")
 
     @staticmethod
     def _update_script_text() -> str:
@@ -13232,63 +12708,6 @@ try {
             transcription_server_var.set(selected_label)
             refreshing_transcription_servers = False
 
-        def add_server():
-            dialog = Toplevel(win)
-            dialog.title("Adicionar servidor de transcrição")
-            dialog.resizable(False, False)
-            dialog.transient(win)
-            dialog.grab_set()
-            dialog_frame = ttk.Frame(dialog, padding=16)
-            dialog_frame.pack(fill=BOTH, expand=True)
-            name_var = StringVar()
-            url_var = StringVar()
-            model_var = StringVar()
-            for row, (label, variable) in enumerate(
-                (("Nome do servidor", name_var), ("URL", url_var), ("Nome do modelo", model_var))
-            ):
-                ttk.Label(dialog_frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
-                entry = ttk.Entry(dialog_frame, textvariable=variable, width=46)
-                entry.grid(row=row, column=1, sticky="ew", pady=4)
-                if row == 0:
-                    entry.focus_set()
-
-            dialog_buttons = ttk.Frame(dialog_frame)
-            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
-
-            def confirm_add():
-                added, reason = add_transcription_server(name_var.get(), url_var.get(), model_var.get())
-                if not added:
-                    messagebox.showerror("sig", reason, parent=dialog)
-                    return
-                current_name = transcription_labels.get(transcription_server_var.get())
-                refresh_transcription_servers(current_name)
-                dialog.destroy()
-
-            ttk.Button(dialog_buttons, text="Cancelar", command=dialog.destroy).pack(side=LEFT, padx=(0, 8))
-            ttk.Button(dialog_buttons, text="Adicionar", command=confirm_add).pack(side=LEFT)
-            dialog.bind("<Return>", lambda _event: confirm_add())
-            dialog.bind("<Escape>", lambda _event: dialog.destroy())
-
-        def remove_server():
-            server_name = transcription_labels.get(transcription_server_var.get())
-            if not server_name:
-                messagebox.showinfo("sig", "Selecione um servidor para remover.", parent=win)
-                return
-            if server_name == GROK_API_NAME:
-                messagebox.showinfo("sig", "Grok STT é uma opção integrada e não pode ser removida.", parent=win)
-                return
-            if not messagebox.askyesno("sig", f"Remover o servidor {server_name}?", parent=win):
-                return
-            if not remove_transcription_server(server_name):
-                messagebox.showerror("sig", "Não consegui remover o servidor.", parent=win)
-                return
-            refresh_transcription_servers()
-            if self.settings.get("transcription_server") == server_name:
-                replacement = transcription_labels.get(transcription_server_var.get())
-                if replacement:
-                    self.settings = save_settings({**self.settings, "transcription_server": replacement})
-                    self._refresh_server_label()
-
         def primary_server_changed(*_args):
             refresh_transcription_servers(transcription_labels.get(transcription_server_var.get()))
             refresh_chunk_visibility()
@@ -13430,227 +12849,6 @@ try {
             current_reasoning_frame.grid(
                 row=current_reasoning_row, column=1, columnspan=3, sticky="w", pady=5
             )
-
-        def make_two_model_section(
-            section_frame,
-            *,
-            model_var,
-            model_2_var,
-            reasoning_var,
-            reasoning_2_var,
-            proxy_var,
-            proxy_2_var,
-            settings_model_key,
-            settings_model_2_key,
-            settings_reasoning_key,
-            settings_reasoning_2_key,
-            settings_proxy_key,
-            settings_proxy_2_key,
-            label_first,
-            label_second,
-        ):
-            model_labels = {}
-            model_2_labels = {"Nenhum": ""}
-            model_row = 0
-            ttk.Label(section_frame, text=label_first).grid(
-                row=model_row,
-                column=0,
-                sticky="w",
-                pady=5,
-                padx=(0, 12),
-            )
-            model_combo = ttk.Combobox(
-                section_frame,
-                textvariable=model_var,
-                state="readonly",
-                width=44,
-            )
-            model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
-            model_2_row = model_row + 3
-            ttk.Label(section_frame, text=label_second).grid(
-                row=model_2_row, column=0, sticky="w", pady=5, padx=(0, 12)
-            )
-            model_2_combo = ttk.Combobox(
-                section_frame, textvariable=model_2_var, state="readonly", width=44
-            )
-            model_2_combo.grid(row=model_2_row, column=1, sticky="ew", pady=5)
-
-            proxy_model_row = model_row + 1
-            proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
-            ttk.Label(
-                proxy_model_frame,
-                text="Modelo",
-                width=12,
-                anchor="w",
-                style="Settings.TLabel",
-            ).pack(
-                side=LEFT, padx=(0, 10)
-            )
-            proxy_model_display_var = StringVar(value=proxy_var.get())
-            proxy_model_button = ttk.Menubutton(
-                proxy_model_frame, textvariable=proxy_model_display_var, width=30
-            )
-            proxy_model_menu = tk.Menu(proxy_model_button, tearoff=False)
-            proxy_model_button.configure(menu=proxy_model_menu)
-            proxy_model_button.pack(side=LEFT)
-
-            reasoning_row = model_row + 2
-            reasoning_frame = ttk.Frame(section_frame, style="Settings.TFrame")
-            reasoning_label = ttk.Label(
-                reasoning_frame,
-                text="Raciocínio:",
-                width=12,
-                anchor="w",
-                style="Settings.TLabel",
-            )
-            reasoning_label.pack(side=LEFT, padx=(0, 10))
-            reasoning_display_var = StringVar(value=reasoning_var.get())
-            reasoning_button = ttk.Menubutton(
-                reasoning_frame, textvariable=reasoning_display_var, width=12
-            )
-            reasoning_menu = tk.Menu(reasoning_button, tearoff=False)
-            reasoning_button.configure(menu=reasoning_menu)
-            reasoning_button.pack(side=LEFT)
-
-            proxy_model_2_row = model_2_row + 1
-            proxy_model_2_frame = ttk.Frame(section_frame, style="Settings.TFrame")
-            ttk.Label(
-                proxy_model_2_frame,
-                text="Modelo",
-                width=12,
-                anchor="w",
-                style="Settings.TLabel",
-            ).pack(
-                side=LEFT, padx=(0, 10)
-            )
-            proxy_model_2_display_var = StringVar(value=proxy_2_var.get())
-            proxy_model_2_button = ttk.Menubutton(
-                proxy_model_2_frame, textvariable=proxy_model_2_display_var, width=30
-            )
-            proxy_model_2_menu = tk.Menu(proxy_model_2_button, tearoff=False)
-            proxy_model_2_button.configure(menu=proxy_model_2_menu)
-            proxy_model_2_button.pack(side=LEFT)
-
-            reasoning_2_row = model_2_row + 2
-            reasoning_2_frame = ttk.Frame(section_frame, style="Settings.TFrame")
-            reasoning_2_label = ttk.Label(
-                reasoning_2_frame,
-                text="Raciocínio:",
-                width=12,
-                anchor="w",
-                style="Settings.TLabel",
-            )
-            reasoning_2_label.pack(side=LEFT, padx=(0, 10))
-            reasoning_2_display_var = StringVar(value=reasoning_2_var.get())
-            reasoning_2_button = ttk.Menubutton(
-                reasoning_2_frame, textvariable=reasoning_2_display_var, width=12
-            )
-            reasoning_2_menu = tk.Menu(reasoning_2_button, tearoff=False)
-            reasoning_2_button.configure(menu=reasoning_2_menu)
-            reasoning_2_button.pack(side=LEFT)
-
-            def refresh(preferred_name: str | None = None):
-                available_models = [
-                    model
-                    for model in read_text_models()
-                    if (
-                        (
-                            model["name"] not in GROK_TEXT_API_NAMES
-                            or plausible_xai_api_key(grok_api_key_var.get())
-                        )
-                        and (
-                            model["name"] not in DEEPSEEK_API_NAMES
-                            or plausible_deepseek_api_key(deepseek_api_key_var.get())
-                        )
-                    )
-                ]
-                model_labels.clear()
-                model_labels.update(
-                    {
-                        (
-                            model["name"]
-                            if model["name"] == IA_PROXY_NAME or model["name"] in GROK_TEXT_API_NAMES or model["name"] in DEEPSEEK_API_NAMES
-                            else f"{model['name']} ({model['parameters'].get('model', 'modelo não informado')})"
-                        ): model["name"]
-                        for model in available_models
-                    }
-                )
-                model_combo.configure(values=list(model_labels))
-                target_name = preferred_name or str(self.settings.get(settings_model_key) or "")
-                if not target_name:
-                    target_name = selected_text_model_config(self.settings)["name"]
-                selected_label = next(
-                    (label for label, name in model_labels.items() if name == target_name),
-                    next(iter(model_labels), ""),
-                )
-                model_var.set(selected_label)
-                primary_name = model_labels.get(selected_label, "")
-                model_2_labels.clear()
-                model_2_labels["Nenhum"] = ""
-                model_2_labels.update(
-                    {
-                        label: name
-                        for label, name in model_labels.items()
-                        if name != primary_name or name == IA_PROXY_NAME
-                    }
-                )
-                model_2_combo.configure(values=list(model_2_labels))
-                wanted_secondary = (
-                    model_2_labels.get(model_2_var.get(), "")
-                    or str(self.settings.get(settings_model_2_key) or "")
-                )
-                secondary_label = next(
-                    (label for label, name in model_2_labels.items() if name == wanted_secondary),
-                    "Nenhum",
-                )
-                model_2_var.set(secondary_label)
-
-            def refresh_reasoning_controls(*_args):
-                refresh_model_reasoning_controls(
-                    model_labels.get(model_var.get(), ""),
-                    proxy_var,
-                    proxy_model_frame,
-                    proxy_model_menu,
-                    proxy_model_display_var,
-                    reasoning_var,
-                    reasoning_frame,
-                    reasoning_menu,
-                    reasoning_display_var,
-                    proxy_model_row,
-                    reasoning_row,
-                )
-
-            def refresh_reasoning_2_controls(*_args):
-                refresh_model_reasoning_controls(
-                    model_2_labels.get(model_2_var.get(), ""),
-                    proxy_2_var,
-                    proxy_model_2_frame,
-                    proxy_model_2_menu,
-                    proxy_model_2_display_var,
-                    reasoning_2_var,
-                    reasoning_2_frame,
-                    reasoning_2_menu,
-                    reasoning_2_display_var,
-                    proxy_model_2_row,
-                    reasoning_2_row,
-                )
-
-            refresh()
-            model_var.trace_add("write", refresh_reasoning_controls)
-            model_2_var.trace_add("write", refresh_reasoning_2_controls)
-            model_combo.bind(
-                "<<ComboboxSelected>>",
-                lambda _event: refresh(model_labels.get(model_var.get(), "")),
-            )
-            proxy_var.trace_add("write", refresh_reasoning_controls)
-            proxy_2_var.trace_add("write", refresh_reasoning_2_controls)
-            refresh_reasoning_controls()
-            refresh_reasoning_2_controls()
-            return {
-                "labels": model_labels,
-                "labels_2": model_2_labels,
-                "refresh": refresh,
-            }
 
         def make_single_text_section(
             section_frame,
@@ -18164,26 +17362,9 @@ try {
                     if generation == self.imei_generation and imei == self.imei_last_processed:
                         self.imei_model_var.set(detail)
                         self.imei_status_var.set("")
-                elif kind == "update_available":
-                    self.available_update = dict(message[1])
-                    self.update_button_var.set("Atualização disponível")
-                    self.update_button.configure(state="normal")
-                    if not self.update_button.winfo_ismapped():
-                        self.update_button.pack(side=RIGHT, anchor="n")
-                    self._finish_activity_step(
-                        "update:check",
-                        time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),
-                        suffix="- Encontrada!",
-                        tag="activity_step_warning",
-                    )
-                    self._append_activity_log(
-                        f"Nova versão disponível: {self.available_update['version']}.",
-                        "warning",
-                    )
                 elif kind == "update_available_sync":
                     state = dict(message[1])
                     self.available_update_sync = state
-                    self.available_update = None
                     self.update_button_var.set("Atualizar")
                     self.update_button.configure(state="normal")
                     if not self.update_button.winfo_ismapped():

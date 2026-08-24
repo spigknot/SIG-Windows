@@ -5,7 +5,7 @@ cópia embutida equivalente em ``updater_v2/updater.py`` (compilada no
 SigUpdater.exe). Os testes ``tests/test_sync_common.py`` garantem a PARIDADE
 entre as duas cópias (canonical e validação) — nunca alterar um sem o outro.
 
-Fonte do design: release/SYNC_BY_FILE.md.
+Fonte do design: UPDATE.md.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
-SYNC_MANIFEST_FILE_ID = "1FiuZNZ6Ylub7P10vecwV29UNntoOkySw"
 R2_PUBLIC_HOST = "pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev"
 SYNC_MANIFEST_SCHEMA = 2
 SYNC_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
@@ -173,29 +172,25 @@ def validate_sync_manifest(manifest: dict) -> dict:
         size = int(entry.get("size") or 0)
         if size < 0:
             raise SyncError(f"tamanho inválido no manifesto para: {path}")
-        drive_id = str(entry.get("drive_id") or "").strip()
         github_url = str(entry.get("github_url") or "").strip()
-        if not drive_id and not github_url:
-            raise SyncError(
-                f"sem fonte de download (drive_id ou github_url) no manifesto para: {path}"
-            )
-        if github_url:
-            import urllib.parse
+        if not github_url:
+            raise SyncError(f"manifesto R2 sem URL de download para: {path}")
+        import urllib.parse
 
-            parsed = urllib.parse.urlparse(github_url)
-            r2_host = R2_PUBLIC_HOST
-            allowed_github_path = "/spigknot/SIG-Windows/releases/download/"
-            if (
-                parsed.scheme != "https"
-                or parsed.hostname not in ("github.com", r2_host)
-                or (parsed.hostname == "github.com" and not parsed.path.startswith(allowed_github_path))
-                or (parsed.hostname == r2_host and not parsed.path.startswith("/"))
-            ):
-                raise SyncError(f"URL alternativa inválida no manifesto para: {path}")
+        parsed = urllib.parse.urlparse(github_url)
+        r2_host = R2_PUBLIC_HOST
+        allowed_github_path = "/spigknot/SIG-Windows/releases/download/"
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("github.com", r2_host)
+            or (parsed.hostname == "github.com" and not parsed.path.startswith(allowed_github_path))
+            or (parsed.hostname == r2_host and not parsed.path.startswith("/"))
+        ):
+            raise SyncError(f"URL de download inválida no manifesto para: {path}")
         files[path] = {
             "sha256": sha256,
             "size": size,
-            "drive_id": drive_id,
+            "drive_id": "",
             "github_url": github_url,
         }
     missing = sorted(relative for relative in SYNC_REQUIRED_FILES if relative not in files)

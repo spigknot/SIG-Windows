@@ -45,10 +45,6 @@ class AssemblyAiConfigTests(unittest.TestCase):
         self.assertFalse(sig_app.is_grok_transcription(settings))
         self.assertFalse(sig_app.is_deepgram_transcription(settings))
 
-    def test_remove_server_refuses_assemblyai(self):
-        self.assertFalse(sig_app.remove_transcription_server(sig_app.ASSEMBLYAI_API_NAME))
-
-
 class AssemblyAiUploaderTests(unittest.TestCase):
     def test_uploader_uses_multipart_audio_with_headers(self):
         cancel = threading.Event()

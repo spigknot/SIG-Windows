@@ -5,6 +5,7 @@ venv/
 build/
 dist/
 release/*
+!release/r2_config.example.json
 !release/content_snapshot.json
 !release/INCREMENTAL_V2.md
 !release/SYNC_BY_FILE.md

@@ -68,20 +68,22 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 
 ## Atualizacao incremental (sync por arquivo)
 
-A rota VIGENTE de atualizacao incremental e a sincronizacao por arquivo, publicada
-por `scripts\sync_publish.py` e consumida pelo `SigUpdater.exe`/SIG via
-`sync_manifest.json` (schema 2) assinado.
+- A rota vigente de atualização incremental é a sincronização por arquivo,
+  publicada exclusivamente no Cloudflare R2 por `scripts\sync_r2.py` e consumida
+  pelo `SigUpdater.exe`/SIG via `sync_manifest.json` (schema 2) assinado.
 
-- Publicar exclusivamente pela API do Google Drive. Nao copiar nem sincronizar o pacote pela unidade montada `X:`.
-- Pasta sync no Drive: `1-yrsmFu_lAe0dMPo4sK70QRYGqMFcHJK`
-- Manifesto: `sync_manifest.json` (schema 2), publicado SEMPRE pelo `scripts\sync_publish.py` (nunca editado a mao).
-- ID do manifesto: `1FiuZNZ6Ylub7P10vecwV29UNntoOkySw` (constante `SYNC_MANIFEST_FILE_ID` no updater e no `sync_common.py`).
-- Ciclo por release: `release.py release --version <v> --incremental` (gera package + `*_full.zip` + instalador) -> `sync_publish.py --package release\generated\<v>\package --version <v> --github-tag <v>` -> `gh release create` (full + exes + instalador).
-- O `--github-tag` adiciona `github_url` para `sig.exe`/`SigUpdater.exe` (defesa contra o falso positivo de malware do Drive nos binarios PyInstaller); os demais arquivos baixam pelo `drive_id`.
+- Nunca publicar, consultar ou sincronizar atualizações pelo Google Drive.
+- Manifesto: `sync_manifest.json` no R2, publicado sempre por `scripts\sync_r2.py`.
+- Ciclo por release: `release.py release --version <v> --incremental` (gera
+  package + `*_full.zip` + instaladores) -> `sync_r2.py --package
+  release\generated\<v>\package --version <v>` -> `gh release create` com o
+  pacote full e os instaladores.
+- Cada arquivo do manifesto tem `github_url` público no R2; `drive_id` deve
+  permanecer vazio por compatibilidade de assinatura e nunca é usado para baixar.
 - A versao precisa ser consistente entre `APP_VERSION`, o pacote e o manifesto sync. Nunca publicar quando esses valores forem diferentes.
 - Mesmo uma compilacao sem mudanca funcional precisa receber uma nova versao interna antes de ser publicada.
 - O pacote ZIP incremental (schema 1, `latest.json`) foi APOSENTADO em 2026-08-15: o `latest.json` esta congelado na ultima versao que o tinha e serve apenas para instalacoes antigas chegarem ao sync. Nao publicar ZIP incremental novo, nao atualizar `latest.json` e nao descrever esse fluxo como atual.
-- Nunca enviar `release\update_private_key.pem` ao GitHub ou ao Drive.
+- Nunca enviar `release\update_private_key.pem` ao GitHub ou ao R2.
 - Nao publicar o mesmo artefato duas vezes: o sync sobe somente o que mudou (reusando IDs comprovadamente iguais) e o manifesto e atualizado no mesmo ID estavel.
 - Depois do publish, conferir o manifesto sync pela API (`updater.fetch_sync_manifest()` deve apontar a versao nova).
 
@@ -99,7 +101,7 @@ por `scripts\sync_publish.py` e consumida pelo `SigUpdater.exe`/SIG via
 4. Conferir `python311.dll`, PortAudio e `sounddevice` no pacote.
 5. Conferir a estrutura interna do ZIP.
 6. Atualizar o manifesto e validar a assinatura.
-7. Verificar no Drive a versao, o tamanho e o SHA-256 publicados.
+7. Verificar no R2 a versão, o tamanho e o SHA-256 publicados.
 8. Conferir no log do updater a linha `Atualização aplicada e validada`; nao considerar concluido apenas porque apareceu `SIG atualizado iniciado; aguardando validação`.
 9. Abrir o SIG atualizado e conferir em Sobre que a versao exibida e a mesma do manifesto. Se a versao antiga continuar aparecendo, o `APP_VERSION` nao foi atualizado.
 10. Confirmar que o SIG atualizado nao volta a oferecer a mesma versao imediatamente.
@@ -109,8 +111,11 @@ por `scripts\sync_publish.py` e consumida pelo `SigUpdater.exe`/SIG via
 - O updater independente `SigUpdater.exe` deve permanecer ao lado do SIG numa instalacao completa.
 - Sem argumentos, `SigUpdater.exe` deve abrir sua interface grafica independente. Com `--zip`, `--target`, `--pid` e `--log`, deve preservar exatamente o contrato silencioso usado pelo SIG.
 - Antes de alterar a pasta em que esta instalado, o modo independente deve copiar e executar a si proprio em `%LOCALAPPDATA%\sig\updater`. Nunca tentar sobrescrever o executavel do updater que estiver em execucao.
-- O modo independente deve aceitar o incremental apenas pelo manifesto assinado do Drive e conferir tamanho e SHA-256. O pacote full deve vir da release mais recente do GitHub e possuir digest SHA-256 publicado pela API.
-- O modo independente deve ignorar uma incremental cuja versao seja igual ou anterior a instalada; nunca oferecer novamente a mesma versao como atualizacao.
+- O modo independente deve aceitar a sincronização apenas pelo manifesto assinado
+  do R2 e conferir tamanho e SHA-256. O pacote full deve vir da release mais
+  recente do GitHub e possuir digest SHA-256 publicado pela API.
+- O modo independente deve ignorar uma sincronização cuja versão seja igual ou
+  anterior à instalada; nunca oferecer novamente a mesma versão.
 - O pacote full pode instalar em pasta vazia e reparar uma instalacao incompleta. Pastas nao vazias que nao sejam reconhecidas como SIG devem ser recusadas para nao substituir arquivos alheios.
 - Tanto o modo chamado pelo SIG quanto o modo independente devem usar a mesma transacao, lock, validacao de startup e rollback. Nao criar um segundo caminho de copia simplificado.
 - O updater deve ser compilado como `--onefile --windowed`; o SIG continua obrigatoriamente `onedir`.
@@ -128,7 +133,10 @@ por `scripts\sync_publish.py` e consumida pelo `SigUpdater.exe`/SIG via
   `python scripts\release.py updater-test`
 - Para gerar uma release, usar somente:
   `python scripts\release.py release --version <APP_VERSION> --incremental`
-- O modo `--incremental` faz o clean build, valida o ambiente e o artefato do updater, roda o harness e gera o package, o `*_full.zip` (asset da release GitHub) e o instalador (`sig_setup_<v>.exe`). A publicacao incremental e o passo seguinte, pelo `scripts\sync_publish.py` (sync por arquivo — ver secao acima).
+- O modo `--incremental` faz o clean build, valida o ambiente e o artefato do
+  updater, roda o harness e gera o package, o `*_full.zip` (asset da release
+  GitHub) e os instaladores. A publicação do package no R2 é o passo seguinte,
+  pelo `scripts\sync_r2.py`.
 - Esse comando faz clean build isolado, verifica warnings criticos, inspeciona o executavel congelado, valida layout/dependencias, testa o updater real em pasta temporaria, cria o ZIP e assina o manifesto. Se uma etapa falhar, a release nao e aprovada.
 - `--allow-same` existe somente para smoke test local da versao atual e nunca deve ser usado para publicar.
 - O ZIP nunca deve ser criado manualmente a partir de `dist`. O `sig.exe` precisa vir do clean build desta execucao; os assets externos somente podem vir de um `--runtime-root` explicitamente escolhido e passam pelo gate de layout e pelo hash conhecido do `SigUpdater.exe`.

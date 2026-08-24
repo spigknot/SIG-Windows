@@ -582,7 +582,7 @@ def validate_manifest_shape(manifest: dict) -> None:
 def validate_current(
     repo_root: Path,
     package_root: Path,
-    manifest_path: Path,
+    manifest_path: Path | None,
     updater_metadata: Path,
     warn_path: Path | None = None,
     zip_path: Path | None = None,
@@ -592,11 +592,16 @@ def validate_current(
 ) -> list[str]:
     source_path = repo_root / "src/sig_app.py"
     app_version = read_app_version(source_path)
-    manifest = read_manifest(manifest_path)
-    validate_manifest_shape(manifest)
-    validate_manifest_signature(manifest, source_path)
     frozen_version = frozen_app_version(package_root / "sig.exe")
-    validate_version_consistency(app_version, manifest, zip_path, frozen_version)
+    if manifest_path is not None:
+        manifest = read_manifest(manifest_path)
+        validate_manifest_shape(manifest)
+        validate_manifest_signature(manifest, source_path)
+        validate_version_consistency(app_version, manifest, zip_path, frozen_version)
+    elif zip_path is not None and frozen_version != app_version:
+        raise ValidationError(
+            f"versão congelada divergente: APP_VERSION={app_version}, executável={frozen_version}"
+        )
     validate_package_layout(package_root, full=True)
     validate_frozen_dependencies(package_root)
     validate_updater_artifact(package_root, updater_metadata)

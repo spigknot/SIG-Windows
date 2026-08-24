@@ -5,7 +5,7 @@ Examples:
     python scripts/release.py validate --warn-path build/sig/warn-sig.txt
     python scripts/release.py tests
     python scripts/release.py updater-test
-    python scripts/release.py release --version 20260806_005 --zip-file-id DRIVE_ID
+    python scripts/release.py release --version 20260806_005 --incremental
 
 The release command never uses the repository's existing dist/sig.exe. It
 builds into a unique clean work directory and only uses the configured runtime
@@ -31,7 +31,6 @@ from pathlib import Path, PurePosixPath
 
 from release_validation import (
     ValidationError,
-    _manifest_payload,
     frozen_app_version,
     read_app_version,
     read_manifest,
@@ -282,9 +281,8 @@ def build_installer(root: Path, version: str) -> Path | None:
 def build_installer_online(root: Path, version: str) -> Path | None:
     """Gera o instalador online (PyInstaller onefile + UAC).
 
-    O instalador online baixa o pacote full da última release do GitHub
-    (fallback: pasta sync do Drive) e instala com atalhos — sem pacote
-    embutido.
+    O instalador online baixa o pacote full da última release do GitHub e
+    instala com atalhos, sem pacote embutido.
     """
     python = sys.executable
     output = root / "release" / "generated" / version / f"online_setup_sig{version}.exe"
@@ -381,22 +379,6 @@ def create_incremental_diff_tree(
     return included, len(removed)
 
 
-def sign_manifest(manifest: dict, key_path: Path, output_path: Path) -> None:
-    try:
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-    except ImportError as exc:
-        raise ValidationError("cryptography é necessária para assinar o manifesto") from exc
-    if not key_path.is_file():
-        raise ValidationError(f"chave privada do manifesto ausente: {key_path}")
-    private_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-    manifest = dict(manifest)
-    manifest["signature"] = __import__("base64").b64encode(
-        private_key.sign(_manifest_payload(manifest), padding.PKCS1v15(), hashes.SHA256())
-    ).decode("ascii")
-    output_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
 def verify_build_environment() -> None:
     """Gate do ambiente de build por VERSÕES (sem depender de caminho absoluto).
 
@@ -435,8 +417,8 @@ def build_release(args: argparse.Namespace) -> int:
             f"a versão do comando ({version}) diverge de APP_VERSION ({source_version}); "
             "altere somente APP_VERSION e execute novamente"
         )
-    current_manifest = read_manifest(root / "release/latest.json")
-    current_version = str(current_manifest.get("version") or "")
+    snapshots = read_content_snapshots(root)
+    current_version = max(snapshots, key=_version_parts) if snapshots else ""
     if version <= current_version and not args.allow_same:
         raise ValidationError(f"release {version} não é posterior à versão publicada {current_version}")
 
@@ -538,17 +520,16 @@ def build_release(args: argparse.Namespace) -> int:
             full_zip_path = output_root / f"{version}_full.zip"
             zip_directory(package_root, full_zip_path)
             validate_zip_layout(full_zip_path, full=True)
-            # A incremental (arquivo por arquivo) é publicada DEPOIS pelo
-            # scripts/sync_publish.py com o package gerado aqui. O ZIP
-            # incremental foi aposentado (2026-08-15): o snapshot continua
-            # sendo gravado como referência de conteúdo por versão.
+            # A sincronização por arquivo é publicada depois pelo
+            # scripts/sync_r2.py com o package gerado aqui. O ZIP incremental
+            # foi aposentado: o snapshot continua como referência de conteúdo.
             write_snapshot_entry(root, version, build_content_snapshot(package_root))
             print(
                 "AVISO: release/content_snapshot.json foi atualizado; "
                 "commite-o junto com a publicação."
             )
             print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
-            print("PASS: incremental será publicada por sync_publish.py (arquivo por arquivo).")
+            print("PASS: sincronização incremental será publicada por sync_r2.py (arquivo por arquivo).")
             build_installer(root, version)
             build_installer_online(root, version)
         else:
@@ -566,44 +547,8 @@ def build_release(args: argparse.Namespace) -> int:
             args.updater_timeout,
         ):
             print(f"PASS: {message}")
-        if not args.incremental and args.zip_file_id:
-            manifest = {
-                "schema": 1,
-                "version": version,
-                "zip_file_id": args.zip_file_id,
-                "zip_name": zip_path.name,
-                "sha256": sha256_file(zip_path),
-                "size": zip_path.stat().st_size,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            }
-            manifest_path = output_root / "latest.json"
-            sign_manifest(manifest, root / "release/update_private_key.pem", manifest_path)
-            final_manifest = read_manifest(manifest_path)
-            validate_manifest_shape(final_manifest)
-            validate_manifest_signature(final_manifest, root / "src/sig_app.py")
-            validate_version_consistency(version, final_manifest, zip_path, frozen_version)
-            print(f"PASS: release local aprovada: {zip_path}")
-            print(f"Manifesto assinado: {manifest_path}")
-        elif not args.incremental:
-            draft = output_root / "latest.draft.json"
-            draft.write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "version": version,
-                        "zip_file_id": "PENDING_DRIVE_UPLOAD",
-                        "zip_name": zip_path.name,
-                        "sha256": sha256_file(zip_path),
-                        "size": zip_path.stat().st_size,
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+        if not args.incremental:
             print(f"PASS: build limpo e pacote validado: {zip_path}")
-            print(f"Manifesto rascunho: {draft}")
-            print("A release ainda não é publicável: informe o ID do ZIP após o upload único ao Drive.")
         return 0
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
@@ -615,7 +560,7 @@ def validate_command(args: argparse.Namespace) -> int:
     messages = validate_current(
         root,
         (args.package_root or root / "dist").resolve(),
-        (args.manifest or root / "release/latest.json").resolve(),
+        args.manifest.resolve() if args.manifest else None,
         (args.updater_metadata or root / "scripts/updater_artifact.json").resolve(),
         args.warn_path.resolve() if args.warn_path else None,
         args.zip_path.resolve() if args.zip_path else None,
@@ -707,13 +652,12 @@ def parser() -> argparse.ArgumentParser:
 
     release = sub.add_parser("release", help="clean build, gates, ZIP e manifesto")
     release.add_argument("--version", help="deve ser igual a APP_VERSION")
-    release.add_argument("--zip-file-id", help="ID do ZIP depois do upload único ao Drive")
     release.add_argument(
         "--incremental",
         action="store_true",
         help=(
-            "gera o ZIP publicado no Drive sem ffmpeg.exe, ffplay.exe, "
-            "vad_worker.py e vad_deps; o full fica como *_full.zip para o GitHub"
+            "gera o package para publicação no R2 sem ZIP incremental; o full "
+            "fica como *_full.zip para o GitHub"
         ),
     )
     release.add_argument(

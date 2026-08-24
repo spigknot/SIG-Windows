@@ -13,7 +13,7 @@
 bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → GitHub (full + instaladores) → commit
 ```
 
-- **Sync por arquivo (atualização automática)**: Cloudflare R2 (`https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`).
+- **Sync por arquivo (atualização automática)**: Cloudflare R2, SEMPRE no bucket `sig` (`https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`).
 - **Download manual / reparo**: GitHub Releases (full.zip + instaladores).
 - **Drive do Google**: APOSENTADO desde a versão `20260821_013`. Não publicar mais lá.
 - O R2.dev é POR BUCKET: o URL de um objeto é `https://pub-<hash>.r2.dev/<path>` (SEM o bucket no path).
@@ -24,7 +24,7 @@ bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → G
 - **Repositório**: `D:\Projetos\SIG Windows` (Windows; o terminal é bash/MSYS — caminhos `C:/...` viram glob no `gh`, use `cd` no diretório e caminhos relativos `./arquivo`).
 - **Python do build**: `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe` (Python `3.11.0` — o `release.py` valida por VERSÃO, não por caminho).
 - **Versão nova**: a versão atual está em `APP_VERSION` em `src\sig_app.py`. A nova versão é a PRÓXIMA no formato `YYYYMMDD_NNN` (mesma data, número seguinte; ex.: se está `20260821_014`, gere `20260821_015`).
-- **Credenciais do R2** em `release\r2_config.json` e **chave privada do manifesto** em `release\update_private_key.pem` (ambos NUNCA commitar).
+- **Credenciais do R2** em `release\r2_config.json` e **chave privada do manifesto** em `release\update_private_key.pem` (ambos NUNCA commitar). O JSON local deve conter apenas as credenciais S3 da chave dedicada ao bucket `sig`; não reutilizar `bucket`/`public_base` de `sig-android` ou `tailmsg`.
 
 ## 0.2 Regras obrigatórias (não negociáveis)
 
@@ -47,8 +47,9 @@ bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → G
 2. **Fechar o SIG**: nenhum processo `sig.exe` / `SigUpdater.exe` pode estar rodando (o build sobrescreve os executáveis).
    - Checar: `powershell -NoProfile -Command "Get-Process | ? { $_.ProcessName -match '^sig$' }"` (deve estar vazio).
 3. **Credenciais do R2**: `release/r2_config.json` (NUNCA commitar; o `release/*` é ignorado pelo git).
+   - Usar somente `endpoint`, `access_key_id` e `secret_access_key` da chave dedicada ao bucket `sig`; o sync deve permanecer no bucket `sig` e na URL `pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`.
    - Se faltar: Cloudflare → R2 → Manage R2 API Tokens → Account API Token (Object Read & Write, escopo: bucket `sig`).
-4. **Chave privada do manifesto**: `release/update_private_key.pem` (usada pelo `sync_publish`/`sync_r2` para assinar o manifesto; NUNCA commitar).
+4. **Chave privada do manifesto**: `release/update_private_key.pem` (usada pelo `sync_r2.py` para assinar o manifesto; NUNCA commitar).
 
 ## 2. Bump da versão
 
@@ -187,8 +188,10 @@ a fonte da verdade e deve evoluir com a prática.
 | Google bloqueia `.exe` como malware | Drive flagra PyInstaller (aposentado — R2 não bloqueia) | se o R2 algum dia bloquear: assets avulsos no GitHub + `--github-tag` |
 | `[Erro: 13] Permission denied` no lock | updater sem admin / SIG aberto | fechar o SIG; executar o updater como Administrador |
 | `HTTP 1010` no R2.dev | User-Agent de bot (urllib) | o updater/app usam o UA `SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)` — nunca o UA do urllib |
+| Sync aparece em outro bucket | configuração de credenciais trouxe `bucket`/`public_base` de outro projeto | usar somente as credenciais S3 e manter o destino fixo `bucket = sig` e `https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev` |
 | sync_r2 subindo 1791 arquivos | versão antiga do script (sem o diff) | usar o diff por ETag/MD5 (list_objects) — `subir: N` pequeno |
 | `RequestTimeTooSkewed` no sync_r2 (`ListObjectsV2`) | relógio do Windows dessincronizado (serviço `w32time` parado; diferença >15 min vs servidor) | iniciar o serviço e sincronizar: `powershell -c "Start-Service w32time; w32tm /resync"` (com elevação); conferir com `date -u` vs `curl -sI https://api.cloudflare.com | grep -i ^date:` |
+| `SignatureDoesNotMatch` no `ListObjectsV2` | `release/r2_config.json` usa um par de credenciais S3 incompatível, antigo ou de outro token/bucket | gerar um novo token S3 para o bucket `sig`, substituir o par `access_key_id` + `secret_access_key` localmente e manter o endpoint S3 e `bucket: sig`; nunca usar o token da API ou a URL pública `.r2.dev` como credencial |
 | O `release_*.log`/`sync_*.log` entram no commit | `git add -A` pegou os logs | `rm -f release_*.log sync_*.log` ANTES do `git add` |
 
 ---

@@ -21,7 +21,6 @@ from updater import (  # noqa: E402
     validate_full_install_destination,
     validate_install_tree,
     validate_zip,
-    verify_update_manifest_signature,
 )
 
 class UpdaterV2ValidationTests(unittest.TestCase):
@@ -150,14 +149,6 @@ class UpdaterV2ValidationTests(unittest.TestCase):
                 archive.writestr(link, b"../../outside")
             with self.assertRaisesRegex(UpdateError, "link simbólico"):
                 validate_zip(zip_path)
-
-    def test_current_incremental_manifest_signature_is_valid(self):
-        manifest = __import__("json").loads(
-            (ROOT / "release" / "latest.json").read_text(encoding="utf-8")
-        )
-        self.assertTrue(verify_update_manifest_signature(manifest))
-        manifest["size"] = int(manifest["size"]) + 1
-        self.assertFalse(verify_update_manifest_signature(manifest))
 
     def test_full_release_prefers_largest_trusted_zip(self):
         release = {

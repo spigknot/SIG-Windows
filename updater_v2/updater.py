@@ -16,7 +16,6 @@ import concurrent.futures
 import datetime
 from contextlib import contextmanager
 import hashlib
-import html
 import json
 import os
 import queue
@@ -27,7 +26,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -36,11 +34,8 @@ from pathlib import Path, PurePosixPath
 
 
 VERSION_RE = re.compile(r"^\d{8}_\d{3}$")
-UPDATE_MANIFEST_FILE_ID = "1Gompo26SsyhSdliBGNaedLhEfidB244E"
-UPDATE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 UPDATE_PUBLIC_KEY_E = 65537
 UPDATE_PUBLIC_KEY_N = 4776833754672109710666015745718377295826954378034957006723781632230794955188598743370375368759247701138572196632244506341860738985196771222328276471293164426045586502411553661270415658303449836000240060850077943629529298365455842583839584430835872888082421190431050761740593243172708805858229100494995424042846759167936558524923889093025581721886390801543158714477942628958659907698645218405072643039190789807520623959789948760663039915934233343926084287154817842449929074144135976678727267978353880303189583548982201552861178437687569977746462198133228741460769839629249527122404198789341588724117695515639417887297249072695071299249800470626986276226209694407865386128033982643621030612265330884993509358887003353611841249193688390145075540912405754224137641702769971761374974256331506313629217304424829655209764530396523158905317988087656296751937468490602949770457129034644632659661248617309294539893653236376299080388523
-FULL_RELEASE_API_URL = "https://api.github.com/repos/spigknot/SIG-Windows/releases/latest"
 FULL_RELEASES_API_URL = "https://api.github.com/repos/spigknot/SIG-Windows/releases?per_page=20"
 HTTP_USER_AGENT = "SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)"
 MAX_MANIFEST_BYTES = 128 * 1024
@@ -123,103 +118,10 @@ def _verify_rsa_sha256_signature(signature_b64: str, canonical_bytes: bytes) -> 
         return False
 
 
-def canonical_update_manifest(manifest: dict) -> bytes:
-    signed_payload = {
-        "schema": int(manifest.get("schema") or 0),
-        "version": str(manifest.get("version") or ""),
-        "zip_file_id": str(manifest.get("zip_file_id") or ""),
-        "zip_name": str(manifest.get("zip_name") or ""),
-        "sha256": str(manifest.get("sha256") or "").lower(),
-        "size": int(manifest.get("size") or 0),
-        "created_at": str(manifest.get("created_at") or ""),
-    }
-    return json.dumps(
-        signed_payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def verify_update_manifest_signature(manifest: dict) -> bool:
-    return _verify_rsa_sha256_signature(
-        str(manifest.get("signature") or ""),
-        canonical_update_manifest(manifest),
-    )
-
-
-def _validate_incremental_manifest(manifest: dict) -> dict:
-    if not isinstance(manifest, dict) or not verify_update_manifest_signature(manifest):
-        raise UpdateError("o manifesto incremental não possui uma assinatura digital válida")
-    version = str(manifest.get("version") or "")
-    zip_name = str(manifest.get("zip_name") or "")
-    file_id = str(manifest.get("zip_file_id") or "")
-    digest = str(manifest.get("sha256") or "").lower()
-    size = int(manifest.get("size") or 0)
-    if not VERSION_RE.fullmatch(version):
-        raise UpdateError("o manifesto incremental contém uma versão inválida")
-    if not file_id or zip_name != f"{version}.zip":
-        raise UpdateError("o manifesto incremental é inconsistente")
-    if not re.fullmatch(r"[0-9a-f]{64}", digest) or not 0 < size <= MAX_UNCOMPRESSED_BYTES:
-        raise UpdateError("o manifesto incremental contém hash ou tamanho inválido")
-    return dict(manifest)
-
-
-def _google_drive_download_url(file_id: str) -> str:
-    query = urllib.parse.urlencode({"id": file_id, "export": "download", "confirm": "t"})
-    return f"{UPDATE_DOWNLOAD_URL}?{query}"
-
-
 def _urlopen(request: urllib.request.Request, timeout: int = 60):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
-def _open_google_drive_download(file_id: str):
-    request = urllib.request.Request(
-        _google_drive_download_url(file_id),
-        headers={"User-Agent": HTTP_USER_AGENT},
-    )
-    response = _urlopen(request)
-    content_type = str(response.headers.get("Content-Type") or "").lower()
-    if "text/html" not in content_type:
-        return response
-    page = response.read(1024 * 1024).decode("utf-8", errors="replace")
-    response.close()
-    form_match = re.search(r'<form[^>]+action="([^"]+)"[^>]*>', page, re.IGNORECASE)
-    if not form_match:
-        raise UpdateError("o Google Drive não forneceu o link de download")
-    action = html.unescape(form_match.group(1))
-    fields = {
-        html.unescape(name): html.unescape(value)
-        for name, value in re.findall(
-            r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"',
-            page,
-            flags=re.IGNORECASE,
-        )
-    }
-    separator = "&" if "?" in action else "?"
-    confirmation = urllib.request.Request(
-        f"{action}{separator}{urllib.parse.urlencode(fields)}",
-        headers={"User-Agent": HTTP_USER_AGENT},
-    )
-    return _urlopen(confirmation)
-
-
-def fetch_incremental_manifest() -> dict:
-    with _open_google_drive_download(UPDATE_MANIFEST_FILE_ID) as response:
-        payload = response.read(MAX_MANIFEST_BYTES + 1)
-    if len(payload) > MAX_MANIFEST_BYTES:
-        raise UpdateError("o manifesto incremental excede o tamanho permitido")
-    try:
-        manifest = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise UpdateError("o manifesto incremental não contém JSON válido") from exc
-    return _validate_incremental_manifest(manifest)
-
-
-# ID do sync_manifest.json no Drive (arquivo público, atualizado a cada
-# publicação — o ID permanece estável como o do latest.json).
-SYNC_MANIFEST_FILE_ID = "1FiuZNZ6Ylub7P10vecwV29UNntoOkySw"
 R2_PUBLIC_HOST = "pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev"
 R2_MANIFEST_URL = f"https://{R2_PUBLIC_HOST}/sync_manifest.json"
 
@@ -277,25 +179,6 @@ def select_full_release_asset(release: dict) -> dict:
         "sha256": digest,
         "size": int(asset["size"]),
     }
-
-
-def fetch_full_release() -> dict:
-    request = urllib.request.Request(
-        FULL_RELEASE_API_URL,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": HTTP_USER_AGENT,
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    with _urlopen(request) as response:
-        payload = response.read(1024 * 1024 + 1)
-    if len(payload) > 1024 * 1024:
-        raise UpdateError("a resposta da release completa excedeu o tamanho permitido")
-    try:
-        return select_full_release_asset(json.loads(payload.decode("utf-8")))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise UpdateError("o GitHub não retornou uma release válida") from exc
 
 
 def fetch_full_releases() -> list[dict]:
@@ -444,27 +327,23 @@ def validate_sync_manifest(manifest: dict) -> dict:
         size = int(entry.get("size") or 0)
         if size < 0:
             raise UpdateError(f"tamanho inválido no manifesto para: {path}")
-        drive_id = str(entry.get("drive_id") or "").strip()
         github_url = str(entry.get("github_url") or "").strip()
-        if not drive_id and not github_url:
-            raise UpdateError(
-                f"sem fonte de download (drive_id ou github_url) no manifesto para: {path}"
-            )
-        if github_url:
-            parsed = urllib.parse.urlparse(github_url)
-            r2_host = R2_PUBLIC_HOST
-            allowed_github_path = "/spigknot/SIG-Windows/releases/download/"
-            if (
-                parsed.scheme != "https"
-                or parsed.hostname not in ("github.com", r2_host)
-                or (parsed.hostname == "github.com" and not parsed.path.startswith(allowed_github_path))
-                or (parsed.hostname == r2_host and not parsed.path.startswith("/"))
-            ):
-                raise UpdateError(f"URL alternativa inválida no manifesto para: {path}")
+        if not github_url:
+            raise UpdateError(f"manifesto R2 sem URL de download para: {path}")
+        parsed = urllib.parse.urlparse(github_url)
+        r2_host = R2_PUBLIC_HOST
+        allowed_github_path = "/spigknot/SIG-Windows/releases/download/"
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("github.com", r2_host)
+            or (parsed.hostname == "github.com" and not parsed.path.startswith(allowed_github_path))
+            or (parsed.hostname == r2_host and not parsed.path.startswith("/"))
+        ):
+            raise UpdateError(f"URL de download inválida no manifesto para: {path}")
         files[path] = {
             "sha256": sha256,
             "size": size,
-            "drive_id": drive_id,
+            "drive_id": "",
             "github_url": github_url,
         }
     missing = sorted(
@@ -551,7 +430,7 @@ SYNC_DOWNLOAD_ATTEMPTS = 3
 
 
 def download_sync_file(entry: dict, destination: Path, progress_callback=None) -> None:
-    """Baixa UM arquivo do sync por ``drive_id``, com retry e validação.
+    """Baixa UM arquivo do manifesto R2, com retry e validação.
 
     O arquivo é gravado em ``.part`` e só promovido ao destino após tamanho e
     SHA-256 conferirem com o manifesto. Falhas transitórias são repetidas com
@@ -567,14 +446,13 @@ def download_sync_file(entry: dict, destination: Path, progress_callback=None) -
         digest = hashlib.sha256()
         downloaded = 0
         try:
-            if entry.get("github_url"):
-                request = urllib.request.Request(
-                    str(entry["github_url"]),
-                    headers={"User-Agent": HTTP_USER_AGENT},
-                )
-                response_context = _urlopen(request)
-            else:
-                response_context = _open_google_drive_download(str(entry["drive_id"]))
+            if not entry.get("github_url"):
+                raise UpdateError("entrada do manifesto R2 sem URL de download")
+            request = urllib.request.Request(
+                str(entry["github_url"]),
+                headers={"User-Agent": HTTP_USER_AGENT},
+            )
+            response_context = _urlopen(request)
             with response_context as response, partial.open("wb") as output:
                 while True:
                     chunk = response.read(1024 * 256)
@@ -616,14 +494,11 @@ def _download_to_file(
     digest = hashlib.sha256()
     downloaded = 0
     expected_size = int(descriptor["size"])
-    if descriptor.get("zip_file_id"):
-        response_context = _open_google_drive_download(str(descriptor["zip_file_id"]))
-    else:
-        request = urllib.request.Request(
-            str(descriptor["url"]),
-            headers={"User-Agent": HTTP_USER_AGENT},
-        )
-        response_context = _urlopen(request)
+    request = urllib.request.Request(
+        str(descriptor["url"]),
+        headers={"User-Agent": HTTP_USER_AGENT},
+    )
+    response_context = _urlopen(request)
     try:
         with response_context as response, partial.open("wb") as output:
             while True:
@@ -1613,7 +1488,6 @@ class StandaloneUpdaterUI:
         self.messagebox = messagebox
         self.target = Path(target).resolve()
         self.events: queue.Queue[tuple] = queue.Queue()
-        self.incremental: dict | None = None
         self.sync_state: dict | None = None
         self.full: dict | None = None
         self.full_releases: list[dict] = []
@@ -1761,7 +1635,7 @@ class StandaloneUpdaterUI:
         self.choose_zip_button.configure(state=normal)
         self.full_version_combo.configure(state="disabled" if busy else "readonly")
         self.incremental_button.configure(
-            state="normal" if not busy and (self.sync_state or self.incremental) else "disabled"
+            state="normal" if not busy and self.sync_state else "disabled"
         )
         full_available = bool(self.full or self.manual_zip)
         self.full_button.configure(state="normal" if not busy and full_available else "disabled")
@@ -1772,14 +1646,13 @@ class StandaloneUpdaterUI:
         if self.busy:
             return
         self.progress["value"] = 0
-        self._set_busy(True, "Consultando o Drive e o GitHub...")
+        self._set_busy(True, "Consultando o R2 e o GitHub...")
         self._write_log("Verificando pacotes disponíveis.")
         threading.Thread(target=self._check_worker, daemon=True).start()
 
     def _check_worker(self) -> None:
         errors = []
         notice = None
-        incremental = None
         sync_state = None
         full_releases: list[dict] = []
         installed = installed_version(self.target)
@@ -1802,23 +1675,12 @@ class StandaloneUpdaterUI:
                     "total": classification["total"],
                 }
         except Exception as exc:
-            errors.append(f"sincronização: {exc}")
-            try:
-                incremental = fetch_incremental_manifest()
-                incremental["kind"] = "incremental"
-                if installed and version_key(incremental["version"]) <= version_key(installed):
-                    notice = (
-                        f"Incremental {incremental['version']} ignorado: "
-                        f"a versão instalada ({installed}) já é igual ou mais nova."
-                    )
-                    incremental = None
-            except Exception as incremental_error:
-                errors.append(f"incremental: {incremental_error}")
+            errors.append(f"sincronização R2: {exc}")
         try:
             full_releases = fetch_full_releases()
         except Exception as exc:
             errors.append(f"completo: {exc}")
-        self.events.put(("checked", incremental, sync_state, full_releases, errors, notice))
+        self.events.put(("checked", sync_state, full_releases, errors, notice))
 
     def _on_full_version_selected(self, _event=None) -> None:
         selected = self.full_version_var.get()
@@ -1948,23 +1810,10 @@ class StandaloneUpdaterUI:
                 "sha256": "",
             }
         else:
-            descriptor = self.incremental if kind == "incremental" else self.full
+            descriptor = self.full
         if not descriptor:
             return
-        if kind == "incremental":
-            try:
-                validate_target_shell(self.target)
-            except UpdateError as exc:
-                self.messagebox.showerror(
-                    "Atualização incremental",
-                    f"A instalação não pode receber um incremental.\n\n{exc}\n\nUse o pacote completo.",
-                )
-                return
-            warning = (
-                f"O SIG será fechado e a versão {descriptor['version']} será aplicada.\n\n"
-                "Continuar?"
-            )
-        elif kind == "manual":
+        if kind == "manual":
             if not self._confirm_regression(descriptor):
                 return
             warning = (
@@ -2009,7 +1858,7 @@ class StandaloneUpdaterUI:
                 self.events.put(("status", f"Baixando {descriptor['zip_name']}..."))
                 _download_to_file(descriptor, zip_path, progress)
             self.events.put(("status", "Validando o pacote antes de alterar a instalação..."))
-            validate_zip(zip_path, full=(kind != "incremental"))
+            validate_zip(zip_path, full=True)
             log_path = _standalone_log_path(self.target)
             if getattr(sys, "frozen", False) and _same_path(sys.executable, self.target / "SigUpdater.exe"):
                 raise UpdateError("o atualizador não foi realocado para a pasta temporária")
@@ -2029,12 +1878,11 @@ class StandaloneUpdaterUI:
             self.events.put(("failed", str(exc)))
 
     def _install_update(self) -> None:
-        """O mecanismo principal é a sincronização por arquivo; o incremental
-        ZIP fica como contingência quando o manifesto sync não está publicado."""
+        """Instala somente a sincronização por arquivo publicada no R2."""
         if self.sync_state:
             self.install("sync")
         else:
-            self.install("incremental")
+            self._write_log("Nenhuma sincronização R2 disponível.")
 
     def _sync_install_worker(self, sync_state: dict) -> None:
         try:
@@ -2080,12 +1928,11 @@ class StandaloneUpdaterUI:
                 event = self.events.get_nowait()
                 kind = event[0]
                 if kind == "checked":
-                    self.incremental, self.sync_state, self.full_releases, errors, notice = (
+                    self.sync_state, self.full_releases, errors, notice = (
                         event[1],
                         event[2],
                         event[3],
                         event[4],
-                        event[5],
                     )
                     self.full = self.full_releases[0] if self.full_releases else None
                     details = []
@@ -2098,11 +1945,6 @@ class StandaloneUpdaterUI:
                         details.append(
                             f"Sincronização: {self.sync_state['version']} "
                             f"({download_count} arquivo(s), {self._format_size(download_size)})"
-                        )
-                    elif self.incremental:
-                        details.append(
-                            f"Incremental: {self.incremental['version']} "
-                            f"({self._format_size(int(self.incremental['size']))})"
                         )
                     if self.full_releases:
                         labels = [str(item["version"]) for item in self.full_releases]

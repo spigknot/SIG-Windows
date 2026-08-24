@@ -49,10 +49,6 @@ class ElevenLabsConfigTests(unittest.TestCase):
         url = sig_app.transcribe_url(settings)
         self.assertEqual(url, sig_app.ELEVENLABS_STT_URL)
 
-    def test_remove_server_refuses_elevenlabs(self):
-        self.assertFalse(sig_app.remove_transcription_server(sig_app.ELEVENLABS_API_NAME))
-
-
 class ElevenLabsUploaderTests(unittest.TestCase):
     def test_uploader_multipart_file_with_xi_api_key(self):
         cancel = threading.Event()

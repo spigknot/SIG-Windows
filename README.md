@@ -27,7 +27,7 @@ cópia de segurança para instalações e atualizações.
 As releases do GitHub sempre incluem um pacote **full** para instalação do zero:
 `sig.exe`, `SigUpdater.exe`, `ffmpeg.exe`, `ffplay.exe`, `_internal`, `vad_deps` e `vad_worker.py`.
 
-As atualizações automáticas do aplicativo usam a **sincronização por arquivo** publicada no Google Drive: o `sync_manifest.json` assinado (schema 2) lista cada arquivo com `sha256`, `size`, `drive_id` e `github_url`; o SIG e o `SigUpdater.exe` baixam somente o que mudou e convergem de qualquer versão. A publicação é feita exclusivamente por `scripts/sync_publish.py`. O pacote ZIP incremental (schema 1) foi aposentado e permanece apenas como compatibilidade para instalações antigas.
+As atualizações automáticas do aplicativo usam a **sincronização por arquivo** publicada no Cloudflare R2: o `sync_manifest.json` assinado (schema 2) lista cada arquivo com `sha256`, `size` e `github_url`; o SIG e o `SigUpdater.exe` baixam somente o que mudou e convergem de qualquer versão. A publicação é feita por `scripts/sync_r2.py`. O pacote ZIP incremental antigo foi aposentado.
 
 ## Compilacao
 
@@ -39,4 +39,4 @@ python scripts\release.py updater-v2-test --package-zip <pacote-full.zip> --upda
 python scripts\release.py release --version <APP_VERSION> --incremental
 ```
 
-O comando de release faz um build onedir limpo, recompila o updater a partir de `updater_v2/updater.py`, valida as dependências e gera o pacote incremental para o Drive, além de preservar o pacote full como `<versão>_full.zip` para a release do GitHub. Para uma instalação completa, não use apenas o `sig.exe`.
+O comando de release faz um build onedir limpo, recompila o updater a partir de `updater_v2/updater.py`, valida as dependências e gera o package para sincronização no R2, além de preservar o pacote full como `<versão>_full.zip` para a release do GitHub. Para uma instalação completa, não use apenas o `sig.exe`.

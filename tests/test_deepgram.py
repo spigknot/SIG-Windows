@@ -42,10 +42,6 @@ class DeepgramConfigTests(unittest.TestCase):
         self.assertTrue(sig_app.is_deepgram_transcription(settings))
         self.assertFalse(sig_app.is_grok_transcription(settings))
 
-    def test_remove_server_refuses_deepgram(self):
-        self.assertFalse(sig_app.remove_transcription_server(sig_app.DEEPGRAM_API_NAME))
-
-
 class DeepgramRestTests(unittest.TestCase):
     def test_query_string_base(self):
         query = sig_app.deepgram_query_string(_settings())

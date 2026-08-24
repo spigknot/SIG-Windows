@@ -7,16 +7,67 @@ Uso:
 Credenciais em release/r2_config.json (NUNCA commitar).
 """
 import argparse
+import base64
 import hashlib
 import json
 import pathlib
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-from sync_publish import snapshot, sign_manifest  # noqa: E402
 
 import boto3  # noqa: E402
+
+
+KEY_PATH = ROOT / "release" / "update_private_key.pem"
+
+
+def snapshot(package: pathlib.Path) -> dict[str, dict]:
+    files: dict[str, dict] = {}
+    for path in sorted(package.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(package).as_posix()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files[relative] = {"sha256": digest.hexdigest(), "size": path.stat().st_size}
+    return files
+
+
+def canonical_manifest(manifest: dict) -> bytes:
+    files = sorted(
+        (
+            {
+                "path": str(entry["path"]),
+                "sha256": str(entry["sha256"]).lower(),
+                "size": int(entry["size"]),
+                "drive_id": str(entry.get("drive_id") or ""),
+                "github_url": str(entry.get("github_url") or ""),
+            }
+            for entry in manifest.get("files", [])
+        ),
+        key=lambda item: item["path"],
+    )
+    payload = {
+        "schema": int(manifest.get("schema") or 0),
+        "version": str(manifest.get("version") or ""),
+        "created_at": str(manifest.get("created_at") or ""),
+        "files": files,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_manifest(manifest: dict) -> None:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    if not KEY_PATH.is_file():
+        raise SystemExit("chave privada de atualização não encontrada")
+    private_key = serialization.load_pem_private_key(KEY_PATH.read_bytes(), password=None)
+    signature = private_key.sign(canonical_manifest(manifest), padding.PKCS1v15(), hashes.SHA256())
+    manifest["signature"] = base64.b64encode(signature).decode("ascii")
 
 
 def main() -> None:
@@ -86,6 +137,7 @@ def main() -> None:
     manifest = {
         "schema": 2,
         "version": args.version,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "files": [
             {
                 "path": path,

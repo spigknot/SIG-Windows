@@ -28,7 +28,8 @@ def _fake_manifest_files() -> list[dict]:
                 "path": path,
                 "sha256": "a" * 64,
                 "size": 123,
-                "drive_id": "id-" + path.replace("/", "-"),
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/" + path,
             }
         )
     return entries
@@ -72,7 +73,13 @@ class ParityTests(unittest.TestCase):
     def test_validation_agrees_with_updater_on_bad_path(self):
         manifest = _manifest()
         manifest["files"] = manifest["files"] + [
-            {"path": "malicioso/x.txt", "sha256": "a" * 64, "size": 1, "drive_id": "x"}
+            {
+                "path": "malicioso/x.txt",
+                "sha256": "a" * 64,
+                "size": 1,
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/malicioso/x.txt",
+            }
         ]
         with self.assertRaises(sync_common.SyncError):
             sync_common.validate_sync_manifest(manifest)

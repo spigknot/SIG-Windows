@@ -39,7 +39,7 @@ It relocates a copy of itself to `%LOCALAPPDATA%\sig\updater` before touching
 the installation, so it can safely replace the installed updater too. In this
 mode it can:
 
-- download the signed incremental declared by the Drive manifest;
+- download the signed file synchronization declared by the Cloudflare R2 manifest;
 - install or repair from the latest full GitHub release;
 - install the full package into an empty folder;
 - close the SIG, apply the same transactional swap, validate startup and roll
