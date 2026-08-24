@@ -128,9 +128,10 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 
 - Nenhuma versao pode ser considerada concluida ou publicavel sem passar pelo comando oficial em `scripts\release.py`.
 - A sequencia minima obrigatoria, executada no mesmo Python que contem PyInstaller, e:
-  `python scripts\release.py tests`
-  `python scripts\release.py validate --warn-path build\sig\warn-sig.txt`
-  `python scripts\release.py updater-test`
+  `python scripts\release.py preflight --quiet`
+- O `preflight` executa, em ordem e com parada no primeiro erro, a suíte unitária,
+  a validação do estado atual, `updater-v2-test` e `ui-smoke` (smoke test da interface).
+  `--quiet` reduz somente as linhas PASS; falhas continuam visíveis.
 - Para gerar uma release, usar somente:
   `python scripts\release.py release --version <APP_VERSION> --incremental`
 - O modo `--incremental` faz o clean build, valida o ambiente e o artefato do
@@ -140,7 +141,8 @@ Nao colocar esses binarios grandes no historico normal do Git. Publicar o pacote
 - Esse comando faz clean build isolado, verifica warnings criticos, inspeciona o executavel congelado, valida layout/dependencias, testa o updater real em pasta temporaria, cria o ZIP e assina o manifesto. Se uma etapa falhar, a release nao e aprovada.
 - `--allow-same` existe somente para smoke test local da versao atual e nunca deve ser usado para publicar.
 - O ZIP nunca deve ser criado manualmente a partir de `dist`. O `sig.exe` precisa vir do clean build desta execucao; os assets externos somente podem vir de um `--runtime-root` explicitamente escolhido e passam pelo gate de layout e pelo hash conhecido do `SigUpdater.exe`.
-- O codigo-fonte de producao do `SigUpdater.exe` esta versionado em `updater_v2\updater.py`. Toda release deve recompila-lo em uma pasta limpa, validar seu hash em `scripts\updater_artifact.json` e executar `python scripts\release.py updater-v2-test`.
+- O codigo-fonte de producao do `SigUpdater.exe` esta versionado em `updater_v2\updater.py`. Toda release deve recompila-lo em uma pasta limpa, validar seu hash em `scripts\updater_artifact.json` e executar o gate `updater-v2-test`, incluido no `preflight` e no harness do build limpo.
+- O comando `updater-test` e legado e nao e um gate de release. Ele permanece apenas para diagnostico de compatibilidade quando for solicitado explicitamente.
 - O updater e transacional: valida CRC, caminhos, duplicatas, tamanhos e arquivos essenciais antes da troca; usa diario, lock exclusivo, troca atomica por componentes, rollback e validacao de inicializacao.
 - O SIG usa o `SigUpdater.exe` extraido do pacote quando ele existe. Isso permite migrar instalacoes antigas para o updater endurecido sem depender do helper possivelmente antigo que ja esta instalado.
 - O helper legado esta preservado em `updater_v2\legacy\SigUpdater-legacy-20260806_004.exe` apenas para diagnostico historico; nao e fonte de novas releases.

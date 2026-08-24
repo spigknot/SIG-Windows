@@ -4,7 +4,8 @@ Examples:
 
     python scripts/release.py validate --warn-path build/sig/warn-sig.txt
     python scripts/release.py tests
-    python scripts/release.py updater-test
+    python scripts/release.py preflight --quiet
+    python scripts/release.py ui-smoke --quiet
     python scripts/release.py release --version 20260806_005 --incremental
 
 The release command never uses the repository's existing dist/sig.exe. It
@@ -60,6 +61,13 @@ def load_updater_harness(root: Path):
     if root_text not in sys.path:
         sys.path.insert(0, root_text)
     return importlib.import_module("updater_v2.harness").run
+
+
+def load_ui_smoke(root: Path):
+    scripts_dir = str((root / "scripts").resolve())
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    return importlib.import_module("ui_smoke").run
 
 
 def latest_generated_full_package(root: Path) -> Path:
@@ -423,6 +431,7 @@ def build_release(args: argparse.Namespace) -> int:
         raise ValidationError(f"release {version} não é posterior à versão publicada {current_version}")
 
     check_build_environment()
+    run_preflight(root, quiet=True)
     runtime_root = (args.runtime_root or root / "dist").resolve()
     runtime_manifest = root / "scripts/runtime_artifact.json"
     validate_runtime_assets(runtime_root, runtime_manifest)
@@ -568,12 +577,13 @@ def validate_command(args: argparse.Namespace) -> int:
         (args.runtime_root or root / "dist").resolve(),
         (args.runtime_manifest or root / "scripts/runtime_artifact.json").resolve(),
     )
-    for message in messages:
-        print(f"PASS: {message}")
+    if not getattr(args, "quiet", False):
+        for message in messages:
+            print(f"PASS: {message}")
     return 0
 
 
-def tests_command() -> int:
+def tests_command(*, quiet: bool = False) -> int:
     root = repo_root()
     suite = unittest.TestSuite()
     suite.addTests(
@@ -586,7 +596,7 @@ def tests_command() -> int:
             str(root / "updater_v2"), pattern="test_*.py", top_level_dir=str(root)
         )
     )
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=0 if quiet else 2).run(suite)
     return 0 if result.wasSuccessful() else 1
 
 
@@ -599,8 +609,11 @@ def updater_test_command(args: argparse.Namespace) -> int:
         else latest_generated_full_package(root).resolve()
     )
     updater = (args.updater or root / "updater_v2/bin/SigUpdater.exe").resolve()
-    for message in run(updater, package_zip, args.timeout):
-        print(f"PASS: {message}")
+    if not getattr(args, "quiet", False):
+        for message in run(updater, package_zip, args.timeout):
+            print(f"PASS: {message}")
+    else:
+        list(run(updater, package_zip, args.timeout))
     return 0
 
 
@@ -619,8 +632,58 @@ def updater_v2_test_command(args: argparse.Namespace) -> int:
         if args.package_zip
         else latest_generated_full_package(root).resolve()
     )
-    for message in run(updater, package_zip, args.timeout):
-        print(f"PASS: {message}")
+    if not getattr(args, "quiet", False):
+        for message in run(updater, package_zip, args.timeout):
+            print(f"PASS: {message}")
+    else:
+        list(run(updater, package_zip, args.timeout))
+    return 0
+
+
+def ui_smoke_command(args: argparse.Namespace) -> int:
+    root = repo_root()
+    run = load_ui_smoke(root)
+    return run(quiet=bool(getattr(args, "quiet", False)))
+
+
+def _current_validation_args(root: Path, *, quiet: bool) -> argparse.Namespace:
+    return argparse.Namespace(
+        package_root=None,
+        manifest=None,
+        updater_metadata=None,
+        warn_path=root / "build" / "sig" / "warn-sig.txt",
+        zip_path=None,
+        require_build_info=False,
+        runtime_root=None,
+        runtime_manifest=None,
+        quiet=quiet,
+    )
+
+
+def run_preflight(root: Path, *, quiet: bool = False) -> None:
+    """Run every operator-facing gate before a clean release build."""
+    if tests_command(quiet=quiet) != 0:
+        raise ValidationError("preflight: a suíte de testes falhou")
+    if validate_command(_current_validation_args(root, quiet=quiet)) != 0:
+        raise ValidationError("preflight: a validação do estado atual falhou")
+    updater_args = argparse.Namespace(
+        package_zip=None,
+        updater=None,
+        timeout=180,
+        quiet=quiet,
+    )
+    if updater_v2_test_command(updater_args) != 0:
+        raise ValidationError("preflight: o harness do updater v2 falhou")
+    ui_args = argparse.Namespace(quiet=quiet)
+    if ui_smoke_command(ui_args) != 0:
+        raise ValidationError("preflight: o smoke test da interface falhou")
+
+
+def preflight_command(args: argparse.Namespace) -> int:
+    root = repo_root()
+    run_preflight(root, quiet=bool(getattr(args, "quiet", False)))
+    if not getattr(args, "quiet", False):
+        print("PASS: preflight completo")
     return 0
 
 
@@ -637,18 +700,28 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--require-build-info", action="store_true")
     validate.add_argument("--runtime-root", type=Path)
     validate.add_argument("--runtime-manifest", type=Path)
+    validate.add_argument("--quiet", action="store_true")
 
-    sub.add_parser("tests", help="executar as regressões unitárias")
+    tests = sub.add_parser("tests", help="executar as regressões unitárias")
+    tests.add_argument("--quiet", action="store_true")
 
     updater = sub.add_parser("updater-test", help="executar o updater real em diretório temporário")
     updater.add_argument("--package-zip", type=Path)
     updater.add_argument("--updater", type=Path)
     updater.add_argument("--timeout", type=int, default=120)
+    updater.add_argument("--quiet", action="store_true")
 
     updater_v2 = sub.add_parser("updater-v2-test", help="testar o novo updater em cenários de falha")
     updater_v2.add_argument("--package-zip", type=Path)
     updater_v2.add_argument("--updater", type=Path)
     updater_v2.add_argument("--timeout", type=int, default=180)
+    updater_v2.add_argument("--quiet", action="store_true")
+
+    preflight = sub.add_parser("preflight", help="executar todos os gates antes do build")
+    preflight.add_argument("--quiet", action="store_true")
+
+    ui_smoke = sub.add_parser("ui-smoke", help="verificar a construção da interface Tk")
+    ui_smoke.add_argument("--quiet", action="store_true")
 
     release = sub.add_parser("release", help="clean build, gates, ZIP e manifesto")
     release.add_argument("--version", help="deve ser igual a APP_VERSION")
@@ -677,11 +750,15 @@ def main() -> int:
         if args.command == "validate":
             return validate_command(args)
         if args.command == "tests":
-            return tests_command()
+            return tests_command(quiet=args.quiet)
         if args.command == "updater-test":
             return updater_test_command(args)
         if args.command == "updater-v2-test":
             return updater_v2_test_command(args)
+        if args.command == "preflight":
+            return preflight_command(args)
+        if args.command == "ui-smoke":
+            return ui_smoke_command(args)
         if args.command == "release":
             return build_release(args)
         raise AssertionError(args.command)

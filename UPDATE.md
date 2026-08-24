@@ -10,7 +10,7 @@
 ## 0. Visão geral do fluxo
 
 ```
-bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → GitHub (full + instaladores) → commit
+bump da versão → preflight → release.py (build + harness 13/13) → sync no R2 (diff) → GitHub (full + instaladores) → commit
 ```
 
 - **Sync por arquivo (atualização automática)**: Cloudflare R2, SEMPRE no bucket `sig` (`https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`).
@@ -34,7 +34,7 @@ bump da versão → release.py (build + harness 8/8) → sync no R2 (diff) → G
 4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` + `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos (eles são servidos pelo R2).
 5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 5).
 6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 6).
-7. O harness deve terminar com `RELEASE_EXIT=0` e 13 linhas PASS (4 de artefatos + 9 de cenários) — QUALQUER `FAIL` impede a publicação. NÃO publicar release com FAIL.
+7. O preflight e o harness devem terminar com código zero; o release deve produzir 13 linhas PASS (4 de artefatos + 9 de cenários) — QUALQUER `FAIL` impede a publicação. NÃO publicar release com FAIL.
 8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
 9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
 10. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
@@ -66,12 +66,14 @@ APP_VERSION = "YYYYMMDD_NNN"   # ex.: 20260821_014
 
 ```bash
 cd "D:/Projetos/SIG Windows"
+"C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/release.py preflight --quiet
 "C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/release.py release --version YYYYMMDD_NNN --incremental
 ```
 
 - Gera: `release/generated/YYYYMMDD_NNN/` (package + `*_full.zip` + `setup_sig_*.exe` + `online_setup_sig*.exe`).
-- Roda o harness completo (9 cenários): build onedir, updater, diffs, sync, rollbacks.
-- **Critério de sucesso**: `RELEASE_EXIT=0` + as linhas `PASS` (13 linhas PASS: 4 de artefatos + 9 de cenários). NÃO é sucesso se houver qualquer `FAIL`.
+- O `preflight` roda os testes unitários, a validação do estado atual, o `updater-v2-test` e `ui-smoke`, em ordem fail-fast.
+- O comando `release` repete o preflight automaticamente antes do build limpo e depois roda o harness completo (9 cenários): build onedir, updater, diffs, sync e rollbacks.
+- **Critério de sucesso**: preflight sem erro, código zero no release e 13 linhas PASS no release (4 de artefatos + 9 de cenários). NÃO é sucesso se houver qualquer `FAIL`.
 
 ### 3.1 SE o harness falhar com o SigUpdater
 
@@ -161,7 +163,7 @@ git push origin main
 Ao concluir, reportar APENAS valores reais das saídas dos comandos:
 
 1. A versão publicada (`YYYYMMDD_NNN`).
-2. O resultado do harness (linhas PASS — esperado 13, com `RELEASE_EXIT=0`).
+2. O resultado do preflight e do harness (release com 13 linhas PASS e código zero).
 3. Quantos arquivos subiram no R2 (`subir: N` — deve ser um número pequeno, o diff).
 4. O link da release do GitHub.
 5. O hash do commit (`git rev-parse HEAD`).
@@ -193,6 +195,8 @@ a fonte da verdade e deve evoluir com a prática.
 | `RequestTimeTooSkewed` no sync_r2 (`ListObjectsV2`) | relógio do Windows dessincronizado (serviço `w32time` parado; diferença >15 min vs servidor) | iniciar o serviço e sincronizar: `powershell -c "Start-Service w32time; w32tm /resync"` (com elevação); conferir com `date -u` vs `curl -sI https://api.cloudflare.com | grep -i ^date:` |
 | `SignatureDoesNotMatch` no `ListObjectsV2` | `release/r2_config.json` usa um par de credenciais S3 incompatível, antigo ou de outro token/bucket | gerar um novo token S3 para o bucket `sig`, substituir o par `access_key_id` + `secret_access_key` localmente e manter o endpoint S3 e `bucket: sig`; nunca usar o token da API ou a URL pública `.r2.dev` como credencial |
 | O `release_*.log`/`sync_*.log` entram no commit | `git add -A` pegou os logs | `rm -f release_*.log sync_*.log` ANTES do `git add` |
+| Documentos indicam gates diferentes para o updater | O contrato antigo usava `updater-test`, enquanto o updater atual tem metadados v2 | usar `python scripts/release.py preflight --quiet`; o gate oficial é `updater-v2-test` |
+| Release criado sem suíte ou smoke test | O build antigo validava o pacote e o updater, mas não encadeava todos os gates de operador | deixar o `preflight` fail-fast rodar antes do build; publicar somente após o smoke test da UI |
 
 ---
 
