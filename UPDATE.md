@@ -23,7 +23,7 @@ bump da versão → preflight → release.py (build + harness 13/13) → sync no
 
 - **Repositório**: `D:\Projetos\SIG Windows` (Windows; o terminal é bash/MSYS — caminhos `C:/...` viram glob no `gh`, use `cd` no diretório e caminhos relativos `./arquivo`).
 - **Python do build**: `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe` (Python `3.11.0` — o `release.py` valida por VERSÃO, não por caminho).
-- **Versão nova**: a versão atual está em `APP_VERSION` em `src\sig_app.py`. A nova versão é a PRÓXIMA no formato `YYYYMMDD_NNN` (mesma data, número seguinte; ex.: se está `20260821_014`, gere `20260821_015`).
+- **Versão nova**: a versão atual está em `APP_VERSION` em `src\sig_app.py`. Use a data real do dia no formato `YYYYMMDD_NNN`. Se a data for a mesma da versão atual, incremente apenas `NNN`; se o dia mudar, reinicie obrigatoriamente em `001` (ex.: `20260823_003` → `20260824_001`; no mesmo dia, `20260824_001` → `20260824_002`). Nunca continue a numeração do dia anterior.
 - **Credenciais do R2** em `release\r2_config.json` e **chave privada do manifesto** em `release\update_private_key.pem` (ambos NUNCA commitar). O JSON local deve conter apenas as credenciais S3 da chave dedicada ao bucket `sig`; não reutilizar `bucket`/`public_base` de `sig-android` ou `tailmsg`.
 
 ## 0.2 Regras obrigatórias (não negociáveis)
@@ -197,6 +197,7 @@ a fonte da verdade e deve evoluir com a prática.
 | O `release_*.log`/`sync_*.log` entram no commit | `git add -A` pegou os logs | `rm -f release_*.log sync_*.log` ANTES do `git add` |
 | Documentos indicam gates diferentes para o updater | O contrato antigo usava `updater-test`, enquanto o updater atual tem metadados v2 | usar `python scripts/release.py preflight --quiet`; o gate oficial é `updater-v2-test` |
 | Release criado sem suíte ou smoke test | O build antigo validava o pacote e o updater, mas não encadeava todos os gates de operador | deixar o `preflight` fail-fast rodar antes do build; publicar somente após o smoke test da UI |
+| Versão publicada com a data do dia anterior | A sequência foi incrementada sem comparar `YYYYMMDD` com a data atual | usar a data real do dia e reiniciar `NNN` em `001` sempre que o dia mudar |
 
 ---
 
