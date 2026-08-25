@@ -21,7 +21,9 @@ from sig_app import (  # noqa: E402
     DEEPSEEK_TEXT_NAME,
     GROK_TEXT_NAME,
     IA_PROXY_NAME,
+    SERVER_GEMMA_MODEL,
     TextModelClient,
+    assistant_request_model_label,
     selected_text_model,
 )
 
@@ -57,6 +59,54 @@ class _FakeConnection:
 
 
 class AssistantPromptTests(unittest.TestCase):
+    def test_request_log_label_for_direct_models(self):
+        self.assertEqual(
+            assistant_request_model_label(
+                {"request_model": GROK_TEXT_NAME, "provider": "xai"}
+            ),
+            "Grok-4.6",
+        )
+        self.assertEqual(
+            assistant_request_model_label(
+                {"request_model": "grok-4.20-0309-non-reasoning", "provider": "xai"}
+            ),
+            "Grok-4.20",
+        )
+        self.assertEqual(
+            assistant_request_model_label(
+                {"request_model": DEEPSEEK_TEXT_NAME, "provider": "deepseek"}
+            ),
+            DEEPSEEK_TEXT_NAME,
+        )
+        self.assertEqual(
+            assistant_request_model_label(
+                {"request_model": SERVER_GEMMA_MODEL, "provider": "servidor"}
+            ),
+            "servidor",
+        )
+
+    def test_request_log_label_for_ia_proxy_includes_final_model(self):
+        self.assertEqual(
+            assistant_request_model_label(
+                {
+                    "request_model": GROK_TEXT_NAME,
+                    "provider": "xai",
+                    "is_xai_proxy": True,
+                }
+            ),
+            "IA-Proxy/Grok-4.6",
+        )
+        self.assertEqual(
+            assistant_request_model_label(
+                {
+                    "request_model": DEEPSEEK_TEXT_NAME,
+                    "provider": "deepseek",
+                    "is_xai_proxy": True,
+                }
+            ),
+            "IA-Proxy/deepseek-v4-flash",
+        )
+
     def test_history_user_prompt_inserts_the_transcription(self):
         prompt = history_user_prompt("  Entrevista transcrita.  ")
 
@@ -196,7 +246,7 @@ class AssistantPromptTests(unittest.TestCase):
     def test_statement_user_prompt_inserts_history_marker(self):
         prompt = statement_user_prompt("JOÃO", "HISTÓRICO DA PARTE")
 
-        self.assertIn("oitiva de JOÃO", prompt)
+        self.assertIn("oitiva da pessoa", prompt)
         self.assertIn("HISTÓRICO DA PARTE", prompt)
         self.assertNotIn("{{{conteudo_caixa_historico}}}", prompt)
 

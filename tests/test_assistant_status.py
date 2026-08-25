@@ -12,26 +12,18 @@ from sig_app import history_completion_status  # noqa: E402
 
 
 class AssistantStatusTests(unittest.TestCase):
-    def test_history_does_not_wait_for_parts_that_already_finished(self):
-        message = history_completion_status("done", "done", 2)
-        self.assertIn("Histórico e extração de partes concluídos", message)
-        self.assertNotIn("Finalizando", message)
-        self.assertNotIn("Aguardando", message)
+    def test_history_completion_ignores_legacy_parts_state(self):
+        message = history_completion_status("done", "running", 2)
+        self.assertEqual(message, "Histórico concluído.")
 
-    def test_parts_can_truthfully_wait_for_history(self):
-        message = history_completion_status("running", "done", 1)
-        self.assertIn("Extração de partes concluída", message)
-        self.assertIn("Aguardando o histórico", message)
+    def test_history_running_has_no_parts_message(self):
+        self.assertEqual(history_completion_status("running", "done", 1), "Redigindo histórico...")
 
-    def test_history_waits_only_while_parts_are_running(self):
-        message = history_completion_status("done", "running", 0)
-        self.assertIn("Finalizando a identificação das partes", message)
+    def test_history_error_is_reported_without_parts(self):
+        self.assertEqual(history_completion_status("error", "running", 0), "Histórico com erro.")
 
-    def test_no_names_uses_the_final_empty_message(self):
-        self.assertEqual(
-            history_completion_status("done", "done", 0),
-            "Histórico concluído; nenhuma parte foi identificada.",
-        )
+    def test_idle_has_no_completion_message(self):
+        self.assertEqual(history_completion_status("idle", "done", 0), "")
 
 
 if __name__ == "__main__":

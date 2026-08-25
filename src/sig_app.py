@@ -41,11 +41,8 @@ import pypdfium2 as pdfium
 
 from assistant_prompts import (
     DEFAULT_HISTORY_SYSTEM_PROMPT,
-    DEFAULT_PARTS_PROMPT,
     DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
     history_user_prompt,
-    parts_user_prompt_from_history,
-    parts_user_prompt_from_transcription,
     qualification_user_prompt,
     statement_prompt,
     statement_user_prompt,
@@ -82,7 +79,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260824_001"
+APP_VERSION = "20260824_002"
 SUPPORTED_EXTENSIONS = {
     ".wav",
     ".mp3",
@@ -5542,6 +5539,31 @@ def selected_text_model_for(settings: dict, task: str, *, secondary: bool = Fals
     )
 
 
+def assistant_request_model_label(model_config: dict) -> str:
+    """Retorna o destino curto mostrado nas linhas de requisição de IA."""
+    request_model = str(
+        model_config.get("request_model")
+        or (model_config.get("parameters") or {}).get("model")
+        or model_config.get("name")
+        or "modelo"
+    ).strip()
+    provider = str(model_config.get("provider") or "").casefold()
+
+    if provider == "servidor" or request_model in SERVER_GEMMA_NAMES | {SERVER_GEMMA_MODEL}:
+        destination = "servidor"
+    else:
+        destination = {
+            GROK_TEXT_NAME: "Grok-4.6",
+            GROK_NON_REASONING_TEXT_NAME: "Grok-4.20",
+            GROK_NON_REASONING_LEGACY_NAME: "Grok-4.20",
+            DEEPSEEK_TEXT_NAME: DEEPSEEK_TEXT_NAME,
+        }.get(request_model, request_model)
+
+    if model_config.get("is_xai_proxy"):
+        return f"IA-Proxy/{destination}"
+    return destination
+
+
 def extract_text_model_output(raw: bytes) -> str:
     body = raw.decode("utf-8-sig", errors="replace")
     try:
@@ -5753,25 +5775,19 @@ def qualification_display_label(field_id: str) -> str:
 
 def history_completion_status(
     history_state: str,
-    names_state: str,
-    names_count: int,
+    names_state: str = "idle",
+    names_count: int = 0,
 ) -> str:
-    if history_state == "done" and names_state == "done":
-        if names_count:
-            return (
-                "Histórico e extração de partes concluídos: "
-                f"{names_count} parte(s) identificada(s)."
-            )
-        return "Histórico concluído; nenhuma parte foi identificada."
-    if history_state == "done" and names_state == "running":
-        return "Histórico concluído. Finalizando a identificação das partes..."
-    if history_state == "running" and names_state == "done":
-        if names_count:
-            return (
-                f"Extração de partes concluída: {names_count} parte(s) identificada(s). "
-                "Aguardando o histórico..."
-            )
-        return "Extração de partes concluída. Aguardando o histórico..."
+    # A extração de partes está temporariamente fora do fluxo. Os argumentos
+    # antigos permanecem opcionais para não quebrar consumidores legados, mas
+    # nunca mais influenciam o estado exibido após uma requisição de histórico.
+    del names_state, names_count
+    if history_state == "done":
+        return "Histórico concluído."
+    if history_state == "running":
+        return "Redigindo histórico..."
+    if history_state == "error":
+        return "Histórico com erro."
     return ""
 
 
@@ -6697,6 +6713,8 @@ class SigApp:
         self.normal_record_language = "pt"
         self.normal_record_diarize = False
         self.normal_record_paused = False
+        self.microphone_available = False
+        self.microphone_check_after_id = None
         self.live_waveform_lock = threading.Lock()
         # Keep roughly one envelope sample per visible pixel for a denser waveform.
         self.live_waveform_levels = deque([0.0] * 168, maxlen=168)
@@ -6859,6 +6877,7 @@ class SigApp:
         self._refresh_server_label()
         self.root.after(100, self._poll_ui_queue)
         self.root.after(100, self._refresh_assistant_progress_clock)
+        self.root.after(0, self._refresh_microphone_availability)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -6872,11 +6891,21 @@ class SigApp:
         style.configure("TFrame", background="#f4f7f6")
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
         style.configure("TLabel", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
-        # Keep labels inside the settings sections on the same surface as the
-        # label frame instead of inheriting the theme's light label background.
-        style.configure("Settings.TFrame", background=settings_surface)
+        # Keep the settings pages on the normal light surface. Each individual
+        # settings section owns its gray interior through the LabelFrame and
+        # its inner-frame style, instead of creating one continuous gray panel.
+        settings_page_surface = "#f4f7f6"
+        style.configure("Settings.TFrame", background=settings_page_surface)
+        style.configure("Settings.Inner.TFrame", background=settings_surface)
         style.configure("Settings.TLabelframe", background=settings_surface)
         style.configure("Settings.TLabelframe.Label", background=settings_surface)
+        style.configure("Disabled.Settings.TFrame", background=settings_surface)
+        style.configure("Disabled.Settings.TLabelframe", background=settings_surface)
+        style.configure(
+            "Disabled.Settings.TLabelframe.Label",
+            background=settings_surface,
+            foreground="#8a918e",
+        )
         style.configure(
             "Settings.TLabel",
             background=settings_surface,
@@ -6887,6 +6916,18 @@ class SigApp:
             "Settings.TCheckbutton",
             background=settings_surface,
             foreground="#1d2b2a",
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "Disabled.Settings.TLabel",
+            background=settings_surface,
+            foreground="#8a918e",
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "Disabled.Settings.TCheckbutton",
+            background=settings_surface,
+            foreground="#8a918e",
             font=("Segoe UI", 10),
         )
         style.configure("Muted.TLabel", background="#f4f7f6", foreground="#667371", font=("Segoe UI", 9))
@@ -8486,7 +8527,8 @@ try {
         )
         self.assistant_parts_menu = tk.Menu(self.assistant_parts_button, tearoff=False)
         self.assistant_parts_button.configure(menu=self.assistant_parts_menu)
-        self.assistant_parts_button.pack(side=LEFT, padx=(0, 8))
+        # A seleção de partes está temporariamente fora da interface.
+        self.assistant_parts_button.pack_forget()
         self.assistant_statement_button = ttk.Button(
             assistant_actions,
             text="Oitiva",
@@ -9009,7 +9051,11 @@ try {
             return
         self.settings = load_settings()
         generation, settings = self._begin_assistant_request("qualification", "qualification")
-        self._begin_activity_step("assistant:qualification", "Qualificação requisitada")
+        model_config = selected_text_model_for(settings, "qualification")
+        self._begin_activity_step(
+            "assistant:qualification",
+            f"Qualificação requisitada - {assistant_request_model_label(model_config)}",
+        )
         self.qualification_status_var.set("Organizando qualificação...")
         self._set_activity_status("Qualificação requisitada", log=False)
         self.qualification_result_fields = {}
@@ -9485,31 +9531,14 @@ try {
         self.assistant_status_var.set("Caixa de texto limpa.")
 
     def _set_live_assistant_names(self, names: list[str]):
-        self.live_assistant_names = distinct_names([name.strip().upper() for name in names if name.strip()])
+        self.live_assistant_names = []
         menus = (
             (self.live_parts_menu, self.live_assistant_part_var),
             (self.live_parts_menu_2, self.live_assistant_part_var_2),
         )
         for menu, variable in menus:
             menu.delete(0, END)
-        if not self.live_assistant_names:
-            for menu, variable in menus:
-                variable.set("Partes")
-                menu.add_command(label="Nenhuma parte identificada", state="disabled")
-                menu.add_separator()
-                menu.add_command(label="Detectar", command=self.detect_live_parts_from_history)
-            return
-        for menu, variable in menus:
-            variable.set(self.live_assistant_names[0])
-            for name in self.live_assistant_names:
-                menu.add_command(
-                    label=name,
-                    command=lambda selected=name, target=variable: (
-                        target.set(selected), self.status_var.set(f"Parte selecionada: {selected}.")
-                    ),
-                )
-            menu.add_separator()
-            menu.add_command(label="Detectar", command=self.detect_live_parts_from_history)
+            variable.set("")
 
     def _position_live_parts_buttons(self):
         pairs = (
@@ -9552,18 +9581,11 @@ try {
             actions.update_idletasks()
             transcript_actions = history_button.master
             transcript_actions.update_idletasks()
-            part_label = part_var.get().strip() or "Partes"
-            # Menubutton reserves part of its character width for the arrow;
-            # long labels need one extra character beyond the normal margin.
-            desired_part_width = max(
-                6, len(part_label) + (2 if len(part_label) > 6 else 0)
-            )
-            if int(parts_button.cget("width")) != desired_part_width:
-                parts_button.configure(width=desired_part_width)
-                actions.update_idletasks()
+            # O seletor de partes está fora da interface; mantenha o widget
+            # não mapeado para compatibilidade com estados antigos.
+            parts_button.place_forget()
             recover_button.place(x=0, y=0)
-            parts_button.place(x=recover_button.winfo_reqwidth() + 4, y=0)
-            left_edge = parts_button.winfo_x() + parts_button.winfo_width()
+            left_edge = recover_button.winfo_x() + recover_button.winfo_width()
             right_edge = clear_button.winfo_x()
             statement_half = statement_button.winfo_reqwidth() / 2
             midpoint = (left_edge + right_edge) / 2
@@ -10059,63 +10081,14 @@ try {
         self.status_var.set(f"Parte selecionada: {name}.")
 
     def detect_live_parts_from_history(self):
-        material = self._live_editor_value("history")
-        if not material or self.assistant_busy or self.live_state != "idle":
-            return
-        self._begin_activity_step("assistant:names", "Partes requisitadas")
-        self._set_activity_status("Partes requisitadas", log=False)
-        generation, settings = self._begin_assistant_request("history", "live")
-        self._set_live_assistant_names([])
-        self.live_assistant_status_var.set("Identificando partes no histórico atual...")
-        def worker():
-            started = time.monotonic()
-            try:
-                if settings["parts_extraction"] == "name_database":
-                    names = extract_names_from_database(material, load_name_database())
-                elif settings["parts_extraction"] == "uppercase":
-                    names = extract_uppercase_names(material)
-                else:
-                    names = parse_assistant_names(
-                        self.assistant_client.post(
-                            selected_parts_model(settings),
-                            DEFAULT_PARTS_PROMPT,
-                            parts_user_prompt_from_history(material),
-                        )
-                    )
-                self._queue(
-                    "assistant_names_result",
-                    generation,
-                    "live",
-                    names,
-                    time.monotonic() - started,
-                )
-            except Exception as exc:
-                self._queue(
-                    "assistant_task_error",
-                    generation,
-                    "live",
-                    "names",
-                    str(exc),
-                    time.monotonic() - started,
-                )
-            finally:
-                self._queue("assistant_finished", generation)
-        self.assistant_thread = threading.Thread(target=worker, daemon=True)
-        self.assistant_thread.start()
+        # A extração de partes está desativada temporariamente. O método é
+        # mantido apenas para que referências antigas não gerem exceção.
+        return
 
     def _set_assistant_names(self, names: list[str]):
-        self.assistant_names = distinct_names([name.strip().upper() for name in names if name.strip()])
+        self.assistant_names = []
         self.assistant_parts_menu.delete(0, END)
-        if not self.assistant_names:
-            self.assistant_part_var.set("Partes")
-            self.assistant_parts_menu.add_command(label="Nenhuma parte identificada", state="disabled")
-            return
-        self.assistant_part_var.set(self.assistant_names[0])
-        for name in self.assistant_names:
-            self.assistant_parts_menu.add_command(
-                label=name,
-                command=lambda selected=name: self.assistant_part_var.set(selected),
-            )
+        self.assistant_part_var.set("")
 
     def _render_assistant_progress(self):
         progress_var = (
@@ -10145,26 +10118,11 @@ try {
                     rendered.append(f"100% Redigindo {task_label} - {model_label}{suffix}")
                 else:
                     rendered.append(f"0% Redigindo {task_label} - {model_label}{suffix}")
-            if self.assistant_phase == "history":
-                names_state = self.assistant_task_states["names"]
-                names_elapsed = self.assistant_task_elapsed.get("names")
-                if names_elapsed is None:
-                    started = self.assistant_task_started_at.get("names")
-                    names_elapsed = max(0.0, time.monotonic() - started) if started is not None else None
-                names_suffix = f" ({names_elapsed:.1f}s)" if names_elapsed is not None else ""
-                rendered.append(
-                    f"100% Extraindo partes{names_suffix}"
-                    if names_state == "done"
-                    else f"ERRO Extraindo partes{names_suffix}"
-                    if names_state == "error"
-                    else f"0% Extraindo partes{names_suffix}"
-                )
             progress_var.set("\n".join(rendered))
             return
         task_labels = {
             "qualification_document": "Qualificando e gerando documento",
             "history": "Redigindo histórico",
-            "names": "Extraindo partes",
             "statement": "Redigindo oitiva",
             "document": "Gerando documento",
             "document_copy": "Copiando documento",
@@ -10176,7 +10134,6 @@ try {
             "history",
             "statement",
             "document",
-            "names",
             "document_copy",
             "document_save_docx",
             "document_save_pdf",
@@ -10271,12 +10228,7 @@ try {
         return self.live_assistant_status_var if target == "live" else self.assistant_status_var
 
     def _refresh_history_completion_status(self, target: str) -> None:
-        names = self.live_assistant_names if target == "live" else self.assistant_names
-        message = history_completion_status(
-            self.assistant_task_states["history"],
-            self.assistant_task_states["names"],
-            len(names),
-        )
+        message = history_completion_status(self.assistant_task_states["history"])
         if not message:
             return
         self._assistant_target_status(target).set(message)
@@ -10342,23 +10294,33 @@ try {
             return
         generation, settings = self._begin_assistant_request("history", target)
         self._set_assistant_target_names(target, [])
-        self.assistant_task_states.update(history="running", names="running", statement="idle")
+        self.assistant_task_states.update(history="running", names="idle", statement="idle")
         self.assistant_task_elapsed.update(history=None, names=None, statement=None)
         request_started = time.monotonic()
         self.assistant_task_started_at.update(
             history=request_started,
-            names=request_started,
+            names=None,
             statement=None,
         )
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_multi_started_at[("history", 1)] = request_started
             self.assistant_multi_started_at[("history", 2)] = request_started
-            self._begin_activity_step("assistant:history:1", "Histórico 1 requisitado")
-            self._begin_activity_step("assistant:history:2", "Histórico 2 requisitado")
+            history_models = [
+                selected_text_model_for(settings, "history"),
+                selected_text_model_for(settings, "history", secondary=True),
+            ]
+            for index, model_config in enumerate(history_models, start=1):
+                self._begin_activity_step(
+                    f"assistant:history:{index}",
+                    f"Histórico {index} requisitado - {assistant_request_model_label(model_config)}",
+                )
         else:
-            self._begin_activity_step("assistant:history", "Histórico requisitado")
-        self._begin_activity_step("assistant:names", "Partes requisitadas")
-        self._set_activity_status("Histórico e Partes requisitados", log=False)
+            history_model = selected_text_model_for(settings, "history")
+            self._begin_activity_step(
+                "assistant:history",
+                f"Histórico requisitado - {assistant_request_model_label(history_model)}",
+            )
+        self._set_activity_status("Histórico requisitado", log=False)
         self._render_assistant_progress()
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_thread = threading.Thread(
@@ -10380,74 +10342,22 @@ try {
         if not client:
             return
         model_config = selected_text_model_for(settings, "history")
-        parts_model_config = selected_parts_model(settings)
-        extraction_method = settings["parts_extraction"]
         history_request = history_user_prompt(material)
         try:
-            if extraction_method == "ai":
-                started = {"history": time.monotonic(), "names": time.monotonic()}
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                    futures = {
-                        executor.submit(
-                            client.post,
-                            model_config,
-                            DEFAULT_HISTORY_SYSTEM_PROMPT,
-                            history_request,
-                        ): "history",
-                        executor.submit(
-                            client.post,
-                            parts_model_config,
-                            DEFAULT_PARTS_PROMPT,
-                            parts_user_prompt_from_transcription(material),
-                        ): "names",
-                    }
-                    for future in concurrent.futures.as_completed(futures):
-                        task = futures[future]
-                        try:
-                            result = future.result()
-                            elapsed = time.monotonic() - started[task]
-                            if task == "history":
-                                self._queue("assistant_text_result", generation, target, task, result, elapsed)
-                            else:
-                                names = parse_assistant_names(result)
-                                if not names:
-                                    raise RuntimeError("O servidor não devolveu nomes reconhecíveis.")
-                                self._queue("assistant_names_result", generation, target, names, elapsed)
-                        except Cancelled:
-                            pass
-                        except Exception as exc:
-                            elapsed = time.monotonic() - started[task]
-                            self._queue("assistant_task_error", generation, target, task, str(exc), elapsed)
-            else:
-                history_started = time.monotonic()
-                try:
-                    history = client.post(
-                        model_config,
-                        DEFAULT_HISTORY_SYSTEM_PROMPT,
-                        history_request,
-                    )
-                    history_elapsed = time.monotonic() - history_started
-                    self._queue("assistant_text_result", generation, target, "history", history, history_elapsed)
-                except Cancelled:
-                    return
-                except Exception as exc:
-                    elapsed = time.monotonic() - history_started
-                    self._queue("assistant_task_error", generation, target, "history", str(exc), elapsed)
-                    self._queue("assistant_task_error", generation, target, "names", str(exc), 0.0)
-                    return
-
-                names_started = time.monotonic()
-                if extraction_method == "name_database":
-                    names = extract_names_from_database(history, load_name_database())
-                else:
-                    names = extract_uppercase_names(history)
-                self._queue(
-                    "assistant_names_result",
-                    generation,
-                    target,
-                    names,
-                    time.monotonic() - names_started,
+            history_started = time.monotonic()
+            try:
+                history = client.post(
+                    model_config,
+                    DEFAULT_HISTORY_SYSTEM_PROMPT,
+                    history_request,
                 )
+                history_elapsed = time.monotonic() - history_started
+                self._queue("assistant_text_result", generation, target, "history", history, history_elapsed)
+            except Cancelled:
+                return
+            except Exception as exc:
+                elapsed = time.monotonic() - history_started
+                self._queue("assistant_task_error", generation, target, "history", str(exc), elapsed)
         finally:
             self._queue("assistant_finished", generation)
 
@@ -10459,8 +10369,6 @@ try {
             selected_text_model_for(settings, "history"),
             selected_text_model_for(settings, "history", secondary=True),
         ]
-        extraction_method = settings["parts_extraction"]
-        primary_history = ""
         history_request = history_user_prompt(material)
         try:
             started = time.monotonic()
@@ -10478,8 +10386,6 @@ try {
                     index = future_map[future]
                     try:
                         result = future.result()
-                        if index == 1:
-                            primary_history = result
                         self._queue(
                             "assistant_multi_text_result",
                             generation,
@@ -10497,27 +10403,6 @@ try {
                             str(exc),
                             time.monotonic() - started,
                         )
-            if primary_history:
-                names_started = time.monotonic()
-                if extraction_method == "ai":
-                    names = parse_assistant_names(
-                        client.post(
-                            selected_parts_model(settings),
-                            DEFAULT_PARTS_PROMPT,
-                            parts_user_prompt_from_transcription(material),
-                        )
-                    )
-                elif extraction_method == "name_database":
-                    names = extract_names_from_database(primary_history, load_name_database())
-                else:
-                    names = extract_uppercase_names(primary_history)
-                self._queue(
-                    "assistant_names_result",
-                    generation,
-                    "live",
-                    names,
-                    time.monotonic() - names_started,
-                )
         finally:
             self._queue("assistant_finished", generation)
 
@@ -10568,10 +10453,21 @@ try {
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
             self.assistant_multi_started_at[("statement", 1)] = request_started
             self.assistant_multi_started_at[("statement", 2)] = request_started
-            self._begin_activity_step("assistant:statement:1", "Oitiva 1 requisitada")
-            self._begin_activity_step("assistant:statement:2", "Oitiva 2 requisitada")
+            statement_models = [
+                selected_text_model_for(settings, "statement"),
+                selected_text_model_for(settings, "statement", secondary=True),
+            ]
+            for index, model_config in enumerate(statement_models, start=1):
+                self._begin_activity_step(
+                    f"assistant:statement:{index}",
+                    f"Oitiva {index} requisitada - {assistant_request_model_label(model_config)}",
+                )
         else:
-            self._begin_activity_step("assistant:statement", "Oitiva requisitada")
+            statement_model = selected_text_model_for(settings, "statement")
+            self._begin_activity_step(
+                "assistant:statement",
+                f"Oitiva requisitada - {assistant_request_model_label(statement_model)}",
+            )
         self._set_activity_status("Oitiva requisitada", log=False)
         self._render_assistant_progress()
         if target == "live" and self.multi_text_model_var.get() and self.multi_text_secondary:
@@ -10800,6 +10696,38 @@ try {
             # showing the button cannot move the microphone row or timer.
             button.place(x=0, y=0, anchor="nw")
             self._position_live_audio_recovery_button()
+
+    @staticmethod
+    def _sounddevice_has_input_device(sounddevice_module) -> bool:
+        """Consulta novamente o inventário do PortAudio e procura entradas de áudio."""
+        try:
+            devices = sounddevice_module.query_devices()
+            if isinstance(devices, dict):
+                devices = [devices]
+            return any(
+                int((device.get("max_input_channels", 0) or 0)) > 0
+                for device in devices
+                if hasattr(device, "get")
+            )
+        except Exception:
+            return False
+
+    def _microphone_is_available(self) -> bool:
+        try:
+            import sounddevice as sd
+        except Exception:
+            return False
+        return self._sounddevice_has_input_device(sd)
+
+    def _refresh_microphone_availability(self):
+        """Atualiza a disponibilidade sem exigir que o microfone existisse ao abrir o app."""
+        self.microphone_available = self._microphone_is_available()
+        try:
+            self.microphone_check_after_id = self.root.after(
+                1000, self._refresh_microphone_availability
+            )
+        except Exception:
+            self.microphone_check_after_id = None
 
     def _clear_live_integral_audio(self):
         self.live_audio_recovery_available = False
@@ -11556,7 +11484,11 @@ try {
             self.assistant_task_elapsed["qualification_document"] = None
             self.assistant_task_started_at["qualification_document"] = time.monotonic()
             self._render_assistant_progress()
-        self._begin_activity_step("assistant:qualification", "Qualificação requisitada")
+        model_config = selected_text_model_for(settings, "qualification")
+        self._begin_activity_step(
+            "assistant:qualification",
+            f"Qualificação requisitada - {assistant_request_model_label(model_config)}",
+        )
         self.live_assistant_status_var.set("Organizando qualificação...")
         self._set_activity_status("Qualificação requisitada", log=False)
         self.assistant_thread = threading.Thread(
@@ -11846,6 +11778,25 @@ try {
         if self.running or self.live_state != "idle" or self.normal_recording or self.assistant_busy:
             messagebox.showinfo("sig", "Conclua a tarefa em andamento antes de gravar.")
             return
+        try:
+            import sounddevice as sd
+        except Exception as exc:
+            messagebox.showerror(
+                "sig",
+                "Não consegui carregar a captura de microfone.\n"
+                "Reinstale o app com a dependência sounddevice embutida.\n\n"
+                f"Detalhe: {exc}",
+            )
+            return
+        if not self._sounddevice_has_input_device(sd):
+            self.microphone_available = False
+            messagebox.showerror(
+                "sig",
+                "Nenhum microfone de entrada foi encontrado.\n"
+                "Conecte um microfone e tente novamente.",
+            )
+            return
+        self.microphone_available = True
         self.settings = load_settings()
         if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de gravar.")
@@ -12462,6 +12413,60 @@ try {
         frame.pack(fill=BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        import tkinter as tk
+
+        settings_tab_bar = tk.Frame(frame, background="#f4f7f6")
+        settings_tab_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        settings_tab_content = ttk.Frame(frame, style="Settings.TFrame")
+        settings_tab_content.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        settings_tab_content.columnconfigure(0, weight=1)
+        settings_tab_content.rowconfigure(0, weight=1)
+
+        settings_tab_names = ("Modelos", "Policial", "Chaves API", "Avançado")
+        settings_tab_buttons = {}
+        settings_tab_pages = {}
+        settings_active_bg = "#ffffff"
+        settings_inactive_bg = "#d6d2c7"
+        settings_active_fg = "#10201f"
+        settings_inactive_fg = "#111111"
+        settings_tab_font = ("Segoe UI Semibold", 10)
+        settings_tab_width = len("Chaves API") + 1
+
+        for index, name in enumerate(settings_tab_names):
+            settings_tab_pages[name] = ttk.Frame(settings_tab_content, style="Settings.TFrame")
+            button = tk.Label(
+                settings_tab_bar,
+                text=name,
+                width=settings_tab_width,
+                height=1,
+                borderwidth=1,
+                relief="solid",
+                font=settings_tab_font,
+                cursor="hand2",
+            )
+            settings_tab_buttons[name] = button
+            button.pack(side=LEFT, padx=(0 if index == 0 else 4, 0))
+
+        def select_settings_tab(name: str):
+            for page in settings_tab_pages.values():
+                page.pack_forget()
+            settings_tab_pages[name].pack(fill=BOTH, expand=True)
+            for tab_name, button in settings_tab_buttons.items():
+                button.configure(
+                    background=settings_active_bg if tab_name == name else settings_inactive_bg,
+                    foreground=settings_active_fg if tab_name == name else settings_inactive_fg,
+                )
+
+        for name, button in settings_tab_buttons.items():
+            button.bind("<Button-1>", lambda _event, selected=name: select_settings_tab(selected))
+
+        models_tab = settings_tab_pages["Modelos"]
+        police_tab = settings_tab_pages["Policial"]
+        api_tab = settings_tab_pages["Chaves API"]
+        advanced_tab = settings_tab_pages["Avançado"]
+        select_settings_tab("Modelos")
 
         conv_var = IntVar(value=self.settings["convert_parallel"])
         req_var = IntVar(value=self.settings["transcribe_parallel"])
@@ -12492,7 +12497,6 @@ try {
         grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
         deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
         deepgram_api_key_var = StringVar(value=self.settings.get("deepgram_api_key", ""))
-        deepgram_keyterms_var = StringVar(value=self.settings.get("deepgram_keyterms", ""))
         assemblyai_api_key_var = StringVar(value=self.settings.get("assemblyai_api_key", ""))
         elevenlabs_api_key_var = StringVar(value=self.settings.get("elevenlabs_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
@@ -12504,48 +12508,119 @@ try {
         grok_chunk_ms_var = StringVar(value=str(self.settings.get("grok_chunk_ms", 100)))
         grok_rest_var = BooleanVar(value=bool(self.settings.get("grok_rest_requests", False)))
 
-        import tkinter as tk
-        # Duas colunas: a primeira com os dados gerais, a segunda com os
-        # modelos de texto por tarefa.
-        columns = []
-        for col_index, titles in enumerate(
-            (
-                ("Policial", "Chaves API", "Transcrição", "Paralelismo"),
-                ("Histórico", "Oitiva", "Extração de partes", "Qualificação"),
+        # A aba Modelos usa uma única coluna para evitar largura horizontal
+        # desperdiçada e manter a leitura das seções em sequência.
+        models_column = ttk.Frame(models_tab, style="Settings.TFrame")
+        models_column.pack(fill=BOTH, expand=True, anchor="n")
+        model_titles = (
+            "Transcrição",
+            "Histórico",
+            "Oitiva",
+            "Qualificação",
+            "Extração de partes",
+        )
+        model_sections = []
+        for title in model_titles:
+            section = ttk.LabelFrame(
+                models_column,
+                text=title,
+                padding=(12, 8),
+                style="Settings.TLabelframe",
             )
-        ):
-            column = ttk.Frame(frame)
-            column.grid(
-                row=0,
-                column=col_index,
-                sticky="n",
-                padx=(0, 9) if col_index == 0 else (9, 0),
-            )
-            column_sections = []
-            for title in titles:
-                section = ttk.LabelFrame(
-                    column,
-                    text=title,
-                    padding=(12, 8),
-                    style="Settings.TLabelframe",
-                )
-                section.grid(row=len(column_sections), column=0, sticky="ew", pady=(0, 8))
-                section.columnconfigure(0, minsize=170)
-                section.columnconfigure(1, weight=1)
-                column_sections.append(section)
-            columns.append(column_sections)
+            section.pack(fill=X, anchor="n", pady=(0, 8))
+            section.columnconfigure(0, minsize=170)
+            section.columnconfigure(1, weight=1)
+            model_sections.append(section)
+        parallel_frame = ttk.LabelFrame(
+            advanced_tab,
+            text="Paralelismo",
+            padding=(12, 8),
+            style="Settings.TLabelframe",
+        )
+        parallel_frame.pack(fill=X, anchor="n")
+        parallel_frame.columnconfigure(0, minsize=170)
+        parallel_frame.columnconfigure(1, weight=1)
+        columns = [model_sections, [parallel_frame]]
         (
-            police_frame,
-            api_frame,
             transcription_frame,
-            parallel_frame,
-        ) = columns[0]
-        (
             history_frame,
             statement_frame,
-            extraction_frame,
             qualification_frame,
-        ) = columns[1]
+            extraction_frame,
+        ) = model_sections
+
+        police_frame = ttk.LabelFrame(
+            police_tab,
+            text="Policial",
+            padding=(12, 8),
+            style="Settings.TLabelframe",
+        )
+        police_frame.pack(fill=X, anchor="n")
+        police_frame.columnconfigure(0, minsize=170)
+        police_frame.columnconfigure(1, weight=1)
+
+        def make_api_section(parent, title: str):
+            section = ttk.LabelFrame(
+                parent,
+                text=title,
+                padding=(12, 8),
+                style="Settings.TLabelframe",
+            )
+            section.pack(fill=X, anchor="n", pady=(0, 8))
+            section.columnconfigure(0, minsize=190)
+            section.columnconfigure(1, weight=1)
+            return section
+
+        api_transcription_frame = make_api_section(api_tab, "Transcrição")
+        api_text_frame = make_api_section(api_tab, "Texto")
+        api_imei_frame = make_api_section(api_tab, "IMEI CHECK")
+
+        def add_api_field(section, row: int, label: str, variable: StringVar, help_text: str = ""):
+            ttk.Label(section, text=label).grid(
+                row=row, column=0, sticky="w", pady=5, padx=(0, 12)
+            )
+            entry = ttk.Entry(section, textvariable=variable, show="*", width=44)
+            entry.grid(row=row, column=1, sticky="ew", pady=5)
+            if help_text:
+                create_tooltip(entry, help_text)
+            return entry
+
+        add_api_field(
+            api_transcription_frame,
+            0,
+            "Chave API da ElevenLabs",
+            elevenlabs_api_key_var,
+            "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
+        )
+        add_api_field(
+            api_transcription_frame,
+            1,
+            "Chave API do Deepgram",
+            deepgram_api_key_var,
+            "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
+        )
+        add_api_field(
+            api_transcription_frame,
+            2,
+            "Chave API da AssemblyAI",
+            assemblyai_api_key_var,
+            "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
+        )
+        add_api_field(
+            api_text_frame,
+            0,
+            "Chave API da xAI",
+            grok_api_key_var,
+            "Obrigatória para selecionar modelos da xAI em transcrição ou texto.",
+        )
+        add_api_field(
+            api_text_frame,
+            1,
+            "Chave API do Deepseek",
+            deepseek_api_key_var,
+            "Obrigatória para selecionar modelos DeepSeek V4.",
+        )
+        add_api_field(api_imei_frame, 0, "Chave API do IMEI Check", imei_api_key_var)
 
         cpu_count = max(1, os.cpu_count() or 1)
 
@@ -12577,85 +12652,6 @@ try {
             conv_var.set(cpu_count)
         parallel_selector(0, "Conversões paralelas", conv_var, cpu_count * 4, values=cpu_options)
         parallel_selector(1, "Requisições paralelas", req_var, 16)
-
-        grok_key_row = 0
-        ttk.Label(api_frame, text="Chave API da xAI").grid(
-            row=grok_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        grok_key_entry = ttk.Entry(api_frame, textvariable=grok_api_key_var, show="*", width=44)
-        grok_key_entry.grid(row=grok_key_row, column=1, sticky="ew", pady=5)
-        create_tooltip(grok_key_entry, "Obrigatória para selecionar modelos da xAI em transcrição ou texto.")
-
-        deepseek_key_row = grok_key_row + 1
-        ttk.Label(api_frame, text="Chave API do Deepseek").grid(
-            row=deepseek_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        deepseek_key_entry = ttk.Entry(api_frame, textvariable=deepseek_api_key_var, show="*", width=44)
-        deepseek_key_entry.grid(row=deepseek_key_row, column=1, sticky="ew", pady=5)
-        create_tooltip(
-            deepseek_key_entry,
-            "Obrigatória para selecionar DeepSeek V4 Flash ou DeepSeek V4 Pro.",
-        )
-
-        imei_key_row = deepseek_key_row + 1
-        ttk.Label(api_frame, text="Chave API do IMEI Check").grid(
-            row=imei_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        imei_key_entry = ttk.Entry(api_frame, textvariable=imei_api_key_var, show="*", width=44)
-        imei_key_entry.grid(row=imei_key_row, column=1, sticky="ew", pady=5)
-
-        deepgram_key_row = imei_key_row + 1
-        ttk.Label(api_frame, text="Chave API do Deepgram").grid(
-            row=deepgram_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        deepgram_key_entry = ttk.Entry(
-            api_frame, textvariable=deepgram_api_key_var, show="*", width=44
-        )
-        deepgram_key_entry.grid(row=deepgram_key_row, column=1, sticky="ew", pady=5)
-        create_tooltip(
-            deepgram_key_entry,
-            "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
-        )
-
-        deepgram_keyterms_row = deepgram_key_row + 1
-        ttk.Label(api_frame, text="Palavras-chave do Deepgram").grid(
-            row=deepgram_keyterms_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        deepgram_keyterms_entry = ttk.Entry(
-            api_frame, textvariable=deepgram_keyterms_var, width=44
-        )
-        deepgram_keyterms_entry.grid(row=deepgram_keyterms_row, column=1, sticky="ew", pady=5)
-        create_tooltip(
-            deepgram_keyterms_entry,
-            "Termos que o Nova 3 deve priorizar na transcrição, separados por vírgula "
-            "(ex.: Taguaí, Fartura, ruas e nomes locais). Limite: 500 tokens no total.",
-        )
-
-        assemblyai_key_row = deepgram_keyterms_row + 1
-        ttk.Label(api_frame, text="Chave API da AssemblyAI").grid(
-            row=assemblyai_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        assemblyai_key_entry = ttk.Entry(
-            api_frame, textvariable=assemblyai_api_key_var, show="*", width=44
-        )
-        assemblyai_key_entry.grid(row=assemblyai_key_row, column=1, sticky="ew", pady=5)
-        create_tooltip(
-            assemblyai_key_entry,
-            "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
-        )
-
-        elevenlabs_key_row = assemblyai_key_row + 1
-        ttk.Label(api_frame, text="Chave API da ElevenLabs").grid(
-            row=elevenlabs_key_row, column=0, sticky="w", pady=5, padx=(0, 12)
-        )
-        elevenlabs_key_entry = ttk.Entry(
-            api_frame, textvariable=elevenlabs_api_key_var, show="*", width=44
-        )
-        elevenlabs_key_entry.grid(row=elevenlabs_key_row, column=1, sticky="ew", pady=5)
-        create_tooltip(
-            elevenlabs_key_entry,
-            "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
-        )
 
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
@@ -12713,7 +12709,7 @@ try {
             refresh_chunk_visibility()
 
         chunk_size_row = transcription_server_row + 1
-        chunk_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
+        chunk_controls = ttk.Frame(transcription_frame, style="Settings.Inner.TFrame")
         chunk_label = ttk.Label(
             chunk_controls,
             text="Chunk size:",
@@ -12744,7 +12740,7 @@ try {
         chunk_help.pack(side=LEFT, padx=(5, 0))
         chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=5)
 
-        rest_controls = ttk.Frame(transcription_frame, style="Settings.TFrame")
+        rest_controls = ttk.Frame(transcription_frame, style="Settings.Inner.TFrame")
 
         def confirm_grok_rest():
             if not grok_rest_var.get():
@@ -12869,7 +12865,7 @@ try {
             )
             model_combo.grid(row=0, column=1, sticky="ew", pady=5)
 
-            proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            proxy_model_frame = ttk.Frame(section_frame, style="Settings.Inner.TFrame")
             ttk.Label(
                 proxy_model_frame,
                 text="Modelo",
@@ -12883,7 +12879,7 @@ try {
             proxy_button.configure(menu=proxy_menu)
             proxy_button.pack(side=LEFT)
 
-            reasoning_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            reasoning_frame = ttk.Frame(section_frame, style="Settings.Inner.TFrame")
             ttk.Label(
                 reasoning_frame,
                 text="Raciocínio:",
@@ -13006,7 +13002,7 @@ try {
             model_combo.grid(row=model_row, column=1, sticky="ew", pady=5)
 
             proxy_model_row = model_row + 1
-            proxy_model_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            proxy_model_frame = ttk.Frame(section_frame, style="Settings.Inner.TFrame")
             ttk.Label(
                 proxy_model_frame,
                 text="Modelo",
@@ -13025,7 +13021,7 @@ try {
             proxy_model_button.pack(side=LEFT)
 
             reasoning_row = model_row + 2
-            reasoning_frame = ttk.Frame(section_frame, style="Settings.TFrame")
+            reasoning_frame = ttk.Frame(section_frame, style="Settings.Inner.TFrame")
             ttk.Label(
                 reasoning_frame,
                 text="Raciocínio:",
@@ -13258,27 +13254,8 @@ try {
             dialog.bind("<Return>", lambda _event: confirm_edit())
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
 
-        def grok_api_key_changed(*_args):
-            primary_name = transcription_labels.get(transcription_server_var.get(), "")
-            refresh_transcription_servers(primary_name)
-            history_ui["refresh"](history_ui["labels"].get(history_model_var.get(), ""))
-            statement_ui["refresh"](statement_ui["labels"].get(statement_model_var.get(), ""))
-            extraction_ui["refresh"]()
-            qualification_ui["refresh"]()
-            refresh_chunk_visibility()
-
-        grok_api_key_var.trace_add("write", grok_api_key_changed)
-
-        def deepseek_api_key_changed(*_args):
-            history_ui["refresh"](history_ui["labels"].get(history_model_var.get(), ""))
-            statement_ui["refresh"](statement_ui["labels"].get(statement_model_var.get(), ""))
-            extraction_ui["refresh"]()
-            qualification_ui["refresh"]()
-
-        deepseek_api_key_var.trace_add("write", deepseek_api_key_changed)
-
         buttons = ttk.Frame(frame)
-        buttons.grid(row=1, column=0, columnspan=2, sticky="e", pady=(6, 0))
+        buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(6, 0))
 
         def save_and_close():
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
@@ -13287,7 +13264,9 @@ try {
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
             deepgram_api_key = deepgram_api_key_var.get().strip()
-            deepgram_keyterms = deepgram_keyterms_var.get().strip()
+            # O campo de palavras-chave foi removido da UI, mas o valor antigo
+            # continua preservado para não alterar o comportamento do Deepgram.
+            deepgram_keyterms = str(self.settings.get("deepgram_keyterms") or "").strip()
             assemblyai_api_key = assemblyai_api_key_var.get().strip()
             elevenlabs_api_key = elevenlabs_api_key_var.get().strip()
             imei_api_key = imei_api_key_var.get().strip()
@@ -13444,12 +13423,45 @@ try {
                 elif isinstance(child, ttk.Checkbutton):
                     child.configure(style="Settings.TCheckbutton")
                 elif isinstance(child, ttk.Frame):
-                    child.configure(style="Settings.TFrame")
+                    child.configure(style="Settings.Inner.TFrame")
                 normalize_settings_surface(child)
 
-        for column_sections in columns:
-            for section in column_sections:
-                normalize_settings_surface(section)
+        all_settings_sections = [
+            section
+            for column_sections in columns
+            for section in column_sections
+        ] + [
+            police_frame,
+            api_transcription_frame,
+            api_text_frame,
+            api_imei_frame,
+        ]
+        for section in all_settings_sections:
+            normalize_settings_surface(section)
+
+        def disable_settings_section(section):
+            section.configure(style="Disabled.Settings.TLabelframe")
+
+            def disable_children(widget):
+                for child in widget.winfo_children():
+                    if isinstance(child, ttk.LabelFrame):
+                        child.configure(style="Disabled.Settings.TLabelframe")
+                    elif isinstance(child, ttk.Label):
+                        child.configure(style="Disabled.Settings.TLabel")
+                    elif isinstance(child, ttk.Checkbutton):
+                        child.configure(state="disabled", style="Disabled.Settings.TCheckbutton")
+                    elif isinstance(child, (ttk.Entry, ttk.Combobox, ttk.Menubutton, ttk.Button)):
+                        child.configure(state="disabled")
+                    elif isinstance(child, ttk.Frame):
+                        child.configure(style="Disabled.Settings.TFrame")
+                    disable_children(child)
+
+            disable_children(section)
+
+        # A extração de partes está temporariamente fora do fluxo; a seção
+        # permanece visível apenas para deixar claro que a opção está
+        # indisponível, sem permitir alteração acidental.
+        disable_settings_section(extraction_frame)
         win.transient(self.root)
         win.grab_set()
         win.wait_visibility()
@@ -13715,6 +13727,15 @@ try {
                 f"Detalhe: {exc}",
             )
             return
+        if not self._sounddevice_has_input_device(sounddevice):
+            self.microphone_available = False
+            messagebox.showerror(
+                "sig",
+                "Nenhum microfone de entrada foi encontrado.\n"
+                "Conecte um microfone e tente novamente.",
+            )
+            return
+        self.microphone_available = True
         self.settings = load_settings()
         self._refresh_live_grok_controls()
         multi_selected = self._selected_multi_transcription_model_names()

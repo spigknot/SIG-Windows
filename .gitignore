@@ -20,6 +20,7 @@ release/*
 settings.json
 .idea/
 .vscode/
+.codex/
 
 # lock de update do dist
 .dist.sig-update.lock
