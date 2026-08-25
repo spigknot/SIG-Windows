@@ -22,6 +22,16 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_FILES = REQUIRED_UPDATE_FILES + REQUIRED_RUNTIME_FILES
 
 
+def _log_tail(path: Path, *, max_lines: int = 20, max_chars: int = 4000) -> str:
+    """Return bounded diagnostics while keeping the complete log on disk."""
+    if not path.is_file():
+        return "log ausente"
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    return tail[-max_chars:] if len(tail) > max_chars else tail
+
+
 def _hash(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -274,7 +284,9 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
                 success_holder.wait(timeout=5)
             _stop_sig_processes(success_target)
         if code != 0:
-            raise AssertionError(f"sucesso retornou {code}: {success_log.read_text(errors='replace')}")
+            raise AssertionError(
+                f"sucesso retornou {code}; log={success_log}\n{_log_tail(success_log)}"
+            )
         if (success_target / "_internal/release-test-marker.txt").read_text().strip() != marker:
             raise AssertionError("o pacote novo não foi instalado no cenário de sucesso")
         if "Atualização aplicada e validada." not in success_log.read_text(encoding="utf-8"):
@@ -334,7 +346,9 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
                 diff_holder.wait(timeout=5)
             _stop_sig_processes(diff_target)
         if code != 0:
-            raise AssertionError(f"diff retornou {code}: {diff_log.read_text(errors='replace')}")
+            raise AssertionError(
+                f"diff retornou {code}; log={diff_log}\n{_log_tail(diff_log)}"
+            )
         if (diff_target / "_internal/diff-test-novo.txt").read_text() != "novo-conteudo":
             raise AssertionError("o diff não instalou o arquivo novo")
         if (diff_target / removed_name).exists():
@@ -418,7 +432,7 @@ def run(updater: Path, package_zip: Path, timeout: int = 180) -> list[str]:
         _stop_sig_processes(sync_target)
         if sync_code != 0:
             raise AssertionError(
-                f"sync retornou {sync_code}: {sync_log.read_text(errors='replace')}"
+                f"sync retornou {sync_code}; log={sync_log}\n{_log_tail(sync_log)}"
             )
         if (sync_target / "prompts" / "historico_system.txt").read_bytes() != original_historico:
             raise AssertionError("sync não restaurou o arquivo canônico")

@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "name": "sig-windows-agent-context",
+  "static": [
+    {
+      "id": "root-invariants",
+      "path": "AGENTS.md",
+      "version": 1
+    },
+    {
+      "id": "task-routing",
+      "path": "docs/agents/README.md",
+      "version": 1
+    }
+  ],
+  "conditional": [
+    {
+      "id": "release-runbook",
+      "path": "UPDATE.md",
+      "when": "build, release, synchronization, installer or updater"
+    },
+    {
+      "id": "legacy-release-history",
+      "path": "docs/maintenance/release-history.md",
+      "when": "diagnosis of an installation from the migration period"
+    },
+    {
+      "id": "release-handoff-pointer",
+      "path": "prompt_update.txt",
+      "when": "release handoff"
+    }
+  ],
+  "policy": {
+    "staticPrefix": "load static segments only for every task",
+    "conditionalSuffix": "load only the segments selected by task routing",
+    "metadataOnly": "record segment id, version, bytes and sha256; never content"
+  },
+  "staticMaxBytes": 16000
+}

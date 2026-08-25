@@ -35,9 +35,14 @@ Com Python 3.11 e as dependencias `Pillow`, `sounddevice`, `websocket-client`, `
 
 ```powershell
 python scripts\release.py preflight --quiet
-python scripts\release.py release --version <APP_VERSION> --incremental
+python scripts\release.py release --version <APP_VERSION> --incremental --quiet
 ```
 
+O gate rápido de sintaxe pode ser executado isoladamente com
+`python scripts\release.py syntax --quiet`.
+
 O preflight executa os testes unitários, a validação do estado atual, o gate `updater-v2-test` e o smoke test da interface. O comando de release repete esses gates antes de fazer o build onedir limpo, recompila o updater a partir de `updater_v2/updater.py`, valida as dependências e gera o package para sincronização no R2, além de preservar o pacote full como `<versão>_full.zip` para a release do GitHub. Para uma instalação completa, não use apenas o `sig.exe`.
+
+O contrato de saída concisa e os caminhos para diagnóstico estão em `docs/agents/validation-output.md`.
 
 O smoke test da interface pode ser executado isoladamente com `python scripts\release.py ui-smoke --quiet`. Ele verifica a criação da janela, a troca das abas principais e a abertura de Configurações sem acessar servidores ou dados do usuário.

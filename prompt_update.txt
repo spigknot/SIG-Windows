@@ -1,67 +1,14 @@
-Você é o agente responsável por gerar e publicar uma nova versão do aplicativo
-SIG Windows (app desktop Windows, Python/Tkinter/PyInstaller), seguindo
-EXATAMENTE o procedimento documentado no projeto.
+# Ponteiro de handoff do SIG Windows
 
-**FONTE DA VERDADE — LEIA PRIMEIRO**:
-`D:\Projetos\SIG Windows\UPDATE.md`
-Esse arquivo contém o procedimento completo (bump, compilação, testes, upload,
-verificação e todos os pitfalls já vividos). Siga-o na ordem, literalmente,
-sem pular etapas e sem inventar atalhos.
+Este arquivo nao duplica instrucoes operacionais.
 
-**Contexto essencial**:
-- Repositório: `D:\Projetos\SIG Windows` (Windows; o terminal é bash/MSYS).
-- Python 3.11.0: `C:\Users\Gustavo\AppData\Local\Programs\Python\Python311\python.exe`
-- A versão atual está em `APP_VERSION` em `src\sig_app.py`. A nova versão é a
-  PRÓXIMA no formato `YYYYMMDD_NNN` (mesma data, número seguinte; ex.: se está
-  `20260821_014`, gere `20260821_015`).
-- Fluxo resumido (detalhes no UPDATE.md):
-  1. Bump do APP_VERSION
-  2. `release.py release --version <NOVA> --incremental` (build + harness 8/8)
-  3. `sync_r2.py --package release/generated/<NOVA>/package --version <NOVA>`
-     (publica o diff no CLOUDFLARE R2 — NUNCA no Google Drive)
-  4. `gh release create <NOVA>` no repo `spigknot/SIG-Windows` (full.zip + os 2
-     instaladores) e deletar a release anterior
-  5. Commit + push (sem os logs)
-- Credenciais do R2 em `release\r2_config.json` (NUNCA commitar); chave do
-  manifesto em `release\update_private_key.pem` (NUNCA commitar).
+- Regras universais: leia `AGENTS.md`.
+- Roteamento: leia `docs/agents/README.md`.
+- Build, release, sincronizacao, instalador ou updater: leia `UPDATE.md` antes
+  de executar qualquer comando.
+- Diagnostico de migracao antiga: leia
+  `docs/maintenance/release-history.md` somente se necessario.
 
-**REGRAS OBRIGATÓRIAS**:
-1. Nenhum processo `sig.exe`/`SigUpdater.exe` pode estar rodando durante o build
-   (verifique e encerre antes).
-2. O `--package` do `sync_r2.py` DEVE apontar para a pasta `package/` — nunca a
-   raiz `release/generated/<v>` (isso corrompe o manifesto).
-3. O sync é SOMENTE no Cloudflare R2. O Google Drive está APOSENTADO.
-4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` +
-   `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos
-   (eles são servidos pelo R2).
-5. Deletar a release anterior (regra "só a versão atual").
-6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves
-   privadas, `settings.json`. Remova os logs antes do `git add`.
-7. Se o harness falhar com "SigUpdater.exe não corresponde ao artefato
-   conhecido como bom": siga a seção 3.1 do UPDATE.md (recompilar o updater
-   com PyInstaller determinístico, atualizar os DOIS metadatas —
-   `scripts/updater_artifact.json` e `updater_v2/artifact.json` — e re-rodar
-   o release).
-8. Após o sync, VERIFIQUE o manifesto no R2 com o comando da seção 4 do
-   UPDATE.md (deve mostrar a versão nova).
-9. O harness deve terminar com `RELEASE_EXIT=0` e 12 PASS — QUALQUER FAIL
-   impede a publicação. NÃO publique um release com FAIL.
-10. Não invente resultados nem números: tudo que reportar deve vir da saída
-    real dos comandos.
-
-**ENTREGA** (relatório final):
-- A versão publicada
-- O resultado do harness (número de PASS)
-- Quantos arquivos subiram no R2 (deve ser um número pequeno — o diff)
-- O link da release do GitHub
-- O hash do commit
-- Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato
-  (mensagem + o comando que falhou), sem tentar contornar por conta própria
-  fora do UPDATE.md.
-
-**MANUTENÇÃO DO DOCUMENTO (obrigatório)**:
-Ao terminar, revise o `UPDATE.md`: se QUALQUER passo divergir do que foi
-documentado, ou se você encontrou um pitfall novo (erro, atalho, detalhe de
-ambiente), ATUALIZE o `UPDATE.md` para refletir a realidade e inclua o pitfall
-na tabela de resolução — no mesmo commit da versão. O documento é a fonte da
-verdade e deve evoluir com a prática.
+Use os numeros, caminhos, comandos, criterios e resultados reais encontrados nas
+fontes canonicas. Nao copie versoes, contagens de PASS, credenciais ou estado
+operacional para este ponteiro.

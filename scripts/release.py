@@ -16,6 +16,7 @@ bundle for static assets whose source is currently outside Git.
 from __future__ import annotations
 
 import argparse
+import io
 import importlib
 import json
 import os
@@ -27,6 +28,7 @@ import tempfile
 import time
 import unittest
 import uuid
+import warnings
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -256,7 +258,7 @@ def find_iscc() -> Path | None:
     return None
 
 
-def build_installer(root: Path, version: str) -> Path | None:
+def build_installer(root: Path, version: str, *, quiet: bool = False) -> Path | None:
     """Gera o instalador (Inno Setup) a partir do package validado.
 
     O setup.exe é um canal ADICIONAL (instalação assistida com atalhos) e só
@@ -282,11 +284,12 @@ def build_installer(root: Path, version: str) -> Path | None:
         print(result.stdout[-800:])
         print(result.stderr[-800:])
         return None
-    print(f"PASS: instalador gerado para GitHub: {setup_exe}")
+    if not quiet:
+        print(f"PASS: instalador gerado para GitHub: {setup_exe}")
     return setup_exe
 
 
-def build_installer_online(root: Path, version: str) -> Path | None:
+def build_installer_online(root: Path, version: str, *, quiet: bool = False) -> Path | None:
     """Gera o instalador online (PyInstaller onefile + UAC).
 
     O instalador online baixa o pacote full da última release do GitHub e
@@ -317,7 +320,8 @@ def build_installer_online(root: Path, version: str) -> Path | None:
         print(result.stdout[-1000:])
         print(result.stderr[-1000:])
         return None
-    print(f"PASS: instalador online gerado para GitHub: {output}")
+    if not quiet:
+        print(f"PASS: instalador online gerado para GitHub: {output}")
     return output
 
 
@@ -416,6 +420,7 @@ def verify_build_environment() -> None:
 
 
 def build_release(args: argparse.Namespace) -> int:
+    quiet = bool(getattr(args, "quiet", False))
     verify_build_environment()
     root = repo_root()
     source_version = read_app_version(root / "src/sig_app.py")
@@ -533,14 +538,15 @@ def build_release(args: argparse.Namespace) -> int:
             # scripts/sync_r2.py com o package gerado aqui. O ZIP incremental
             # foi aposentado: o snapshot continua como referência de conteúdo.
             write_snapshot_entry(root, version, build_content_snapshot(package_root))
-            print(
-                "AVISO: release/content_snapshot.json foi atualizado; "
-                "commite-o junto com a publicação."
-            )
-            print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
-            print("PASS: sincronização incremental será publicada por sync_r2.py (arquivo por arquivo).")
-            build_installer(root, version)
-            build_installer_online(root, version)
+            if not quiet:
+                print(
+                    "AVISO: release/content_snapshot.json foi atualizado; "
+                    "commite-o junto com a publicação."
+                )
+                print(f"PASS: pacote full local preservado para GitHub: {full_zip_path}")
+                print("PASS: sincronização incremental será publicada por sync_r2.py (arquivo por arquivo).")
+            build_installer(root, version, quiet=quiet)
+            build_installer_online(root, version, quiet=quiet)
         else:
             zip_path = output_root / f"{version}.zip"
             zip_directory(package_root, zip_path)
@@ -550,14 +556,25 @@ def build_release(args: argparse.Namespace) -> int:
         # user's installation.
         run_updater_test = load_updater_harness(root)
 
-        for message in run_updater_test(
-            package_root / "SigUpdater.exe",
-            full_zip_path if args.incremental else zip_path,
-            args.updater_timeout,
-        ):
-            print(f"PASS: {message}")
-        if not args.incremental:
+        try:
+            harness_messages = list(run_updater_test(
+                package_root / "SigUpdater.exe",
+                full_zip_path if args.incremental else zip_path,
+                args.updater_timeout,
+            ))
+        except AssertionError as exc:
+            raise ValidationError(str(exc)) from None
+        if not quiet:
+            for message in harness_messages:
+                print(f"PASS: {message}")
+        if not args.incremental and not quiet:
             print(f"PASS: build limpo e pacote validado: {zip_path}")
+        if quiet:
+            package_kind = "full+package" if args.incremental else "full"
+            print(
+                f"PASS: release {version} kind={package_kind} "
+                f"harness={len(harness_messages)}"
+            )
         return 0
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
@@ -583,7 +600,15 @@ def validate_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def tests_command(*, quiet: bool = False) -> int:
+def _bounded_tail(text: str, *, max_lines: int = 20, max_chars: int = 4000) -> str:
+    lines = text.splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
+def tests_command(*, quiet: bool = False, emit_summary: bool = False) -> int:
     root = repo_root()
     suite = unittest.TestSuite()
     suite.addTests(
@@ -596,7 +621,24 @@ def tests_command(*, quiet: bool = False) -> int:
             str(root / "updater_v2"), pattern="test_*.py", top_level_dir=str(root)
         )
     )
-    result = unittest.TextTestRunner(verbosity=0 if quiet else 2).run(suite)
+    stream = io.StringIO() if quiet else None
+    runner = unittest.TextTestRunner(
+        stream=stream,
+        verbosity=0 if quiet else 2,
+    )
+    if quiet:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = runner.run(suite)
+    else:
+        result = runner.run(suite)
+    if quiet and not result.wasSuccessful():
+        output = _bounded_tail(stream.getvalue() if stream else "")
+        print("FAIL: tests")
+        if output:
+            print(output)
+    elif quiet and emit_summary:
+        print("PASS: tests")
     return 0 if result.wasSuccessful() else 1
 
 
@@ -609,11 +651,15 @@ def updater_test_command(args: argparse.Namespace) -> int:
         else latest_generated_full_package(root).resolve()
     )
     updater = (args.updater or root / "updater_v2/bin/SigUpdater.exe").resolve()
+    try:
+        messages = list(run(updater, package_zip, args.timeout))
+    except AssertionError as exc:
+        raise ValidationError(str(exc)) from None
     if not getattr(args, "quiet", False):
-        for message in run(updater, package_zip, args.timeout):
+        for message in messages:
             print(f"PASS: {message}")
-    else:
-        list(run(updater, package_zip, args.timeout))
+    elif getattr(args, "emit_summary", False):
+        print(f"PASS: updater-test scenarios={len(messages)}")
     return 0
 
 
@@ -632,11 +678,15 @@ def updater_v2_test_command(args: argparse.Namespace) -> int:
         if args.package_zip
         else latest_generated_full_package(root).resolve()
     )
+    try:
+        messages = list(run(updater, package_zip, args.timeout))
+    except AssertionError as exc:
+        raise ValidationError(str(exc)) from None
     if not getattr(args, "quiet", False):
-        for message in run(updater, package_zip, args.timeout):
+        for message in messages:
             print(f"PASS: {message}")
-    else:
-        list(run(updater, package_zip, args.timeout))
+    elif getattr(args, "emit_summary", False):
+        print(f"PASS: updater-v2-test scenarios={len(messages)}")
     return 0
 
 
@@ -644,6 +694,54 @@ def ui_smoke_command(args: argparse.Namespace) -> int:
     root = repo_root()
     run = load_ui_smoke(root)
     return run(quiet=bool(getattr(args, "quiet", False)))
+
+
+def syntax_command(root: Path, *, quiet: bool = False) -> int:
+    """Run the fast standard-library syntax gate before expensive checks."""
+    paths = [root / "scripts", root / "src", root / "updater_v2", root / "tests"]
+    command = [sys.executable, "-m", "compileall"]
+    if quiet:
+        command.append("-q")
+    command.extend(str(path) for path in paths)
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        print("FAIL: syntax")
+        output = _bounded_tail((completed.stdout or "") + (completed.stderr or ""))
+        if output:
+            print(output)
+        return completed.returncode
+    if not quiet:
+        print("PASS: syntax")
+    return 0
+
+
+def prompt_context_command(root: Path, *, quiet: bool = False) -> int:
+    """Validate the always-loaded agent context before the other release gates."""
+    command = [sys.executable, str(root / "scripts" / "check_prompt_context.py")]
+    if quiet:
+        command.append("--quiet")
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    output = (completed.stdout or "") + (completed.stderr or "")
+    if completed.returncode != 0 or not quiet:
+        if output:
+            print(output, end="")
+    return completed.returncode
 
 
 def _current_validation_args(root: Path, *, quiet: bool) -> argparse.Namespace:
@@ -662,6 +760,10 @@ def _current_validation_args(root: Path, *, quiet: bool) -> argparse.Namespace:
 
 def run_preflight(root: Path, *, quiet: bool = False) -> None:
     """Run every operator-facing gate before a clean release build."""
+    if syntax_command(root, quiet=quiet) != 0:
+        raise ValidationError("preflight: o gate de sintaxe falhou")
+    if prompt_context_command(root, quiet=quiet) != 0:
+        raise ValidationError("preflight: o contrato de contexto do agente falhou")
     if tests_command(quiet=quiet) != 0:
         raise ValidationError("preflight: a suíte de testes falhou")
     if validate_command(_current_validation_args(root, quiet=quiet)) != 0:
@@ -684,6 +786,8 @@ def preflight_command(args: argparse.Namespace) -> int:
     run_preflight(root, quiet=bool(getattr(args, "quiet", False)))
     if not getattr(args, "quiet", False):
         print("PASS: preflight completo")
+    else:
+        print("PASS: preflight")
     return 0
 
 
@@ -723,6 +827,9 @@ def parser() -> argparse.ArgumentParser:
     ui_smoke = sub.add_parser("ui-smoke", help="verificar a construção da interface Tk")
     ui_smoke.add_argument("--quiet", action="store_true")
 
+    syntax = sub.add_parser("syntax", help="verificar sintaxe Python sem dependências extras")
+    syntax.add_argument("--quiet", action="store_true")
+
     release = sub.add_parser("release", help="clean build, gates, ZIP e manifesto")
     release.add_argument("--version", help="deve ser igual a APP_VERSION")
     release.add_argument(
@@ -741,6 +848,7 @@ def parser() -> argparse.ArgumentParser:
     release.add_argument("--runtime-root", type=Path)
     release.add_argument("--output-root", type=Path)
     release.add_argument("--updater-timeout", type=int, default=180)
+    release.add_argument("--quiet", action="store_true")
     return result
 
 
@@ -748,21 +856,34 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "validate":
-            return validate_command(args)
+            result = validate_command(args)
+            if result == 0 and args.quiet:
+                print("PASS: validate")
+            return result
         if args.command == "tests":
-            return tests_command(quiet=args.quiet)
+            return tests_command(quiet=args.quiet, emit_summary=True)
         if args.command == "updater-test":
+            args.emit_summary = True
             return updater_test_command(args)
         if args.command == "updater-v2-test":
+            args.emit_summary = True
             return updater_v2_test_command(args)
         if args.command == "preflight":
             return preflight_command(args)
         if args.command == "ui-smoke":
-            return ui_smoke_command(args)
+            result = ui_smoke_command(args)
+            if result == 0 and args.quiet:
+                print("PASS: ui-smoke")
+            return result
+        if args.command == "syntax":
+            result = syntax_command(repo_root(), quiet=args.quiet)
+            if result == 0 and args.quiet:
+                print("PASS: syntax")
+            return result
         if args.command == "release":
             return build_release(args)
         raise AssertionError(args.command)
-    except (ValidationError, FileNotFoundError, json.JSONDecodeError) as exc:
+    except (ValidationError, FileNotFoundError, json.JSONDecodeError, AssertionError) as exc:
         print(f"FAIL: {exc}")
         return 1
 

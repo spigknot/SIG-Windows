@@ -79,7 +79,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260824_002"
+APP_VERSION = "20260825_001"
 SUPPORTED_EXTENSIONS = {
     ".wav",
     ".mp3",

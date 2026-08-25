@@ -1,7 +1,8 @@
 param(
     [string]$Python = "C:\Users\Gustavo\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe",
     [string]$Output = "",
-    [long]$SourceDateEpoch = 946684800
+    [long]$SourceDateEpoch = 946684800,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,24 +20,37 @@ if (Test-Path -LiteralPath $work) {
     Remove-Item -LiteralPath $work -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
+$logPath = Join-Path $work "pyinstaller.log"
 
 $previousSourceDateEpoch = [Environment]::GetEnvironmentVariable("SOURCE_DATE_EPOCH", "Process")
 $previousPythonHashSeed = [Environment]::GetEnvironmentVariable("PYTHONHASHSEED", "Process")
 $env:SOURCE_DATE_EPOCH = [string]$SourceDateEpoch
 $env:PYTHONHASHSEED = "0"
 try {
-    & $Python -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --onefile `
-        --windowed `
-        --noupx `
-        --name SigUpdater `
-        --distpath $Output `
-        --workpath $work `
-        --specpath $work `
+    $pyinstallerArgs = @(
+        "-m", "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onefile",
+        "--windowed",
+        "--noupx",
+        "--name", "SigUpdater",
+        "--distpath", $Output,
+        "--workpath", $work,
+        "--specpath", $work,
         (Join-Path $PSScriptRoot "updater.py")
+    )
+    if ($Quiet) {
+        $pyinstallerArgs = @("-m", "PyInstaller", "--log-level", "WARN") + $pyinstallerArgs[2..($pyinstallerArgs.Length - 1)]
+        & $Python @pyinstallerArgs *> $logPath
+    }
+    else {
+        & $Python @pyinstallerArgs
+    }
     if ($LASTEXITCODE -ne 0) {
+        if ($Quiet) {
+            throw "PyInstaller falhou com código $LASTEXITCODE; consulte $logPath"
+        }
         throw "PyInstaller falhou com código $LASTEXITCODE"
     }
 
@@ -44,8 +58,15 @@ try {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "PyInstaller não produziu $artifact"
     }
-    Write-Host "PASS: $artifact"
-    Get-FileHash -LiteralPath $artifact -Algorithm SHA256
+    if ($Quiet) {
+        $size = (Get-Item -LiteralPath $artifact).Length
+        $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+        Write-Host "PASS: SigUpdater.exe size=$size sha256=$hash"
+    }
+    else {
+        Write-Host "PASS: $artifact"
+        Get-FileHash -LiteralPath $artifact -Algorithm SHA256
+    }
 }
 finally {
     if ($null -eq $previousSourceDateEpoch) {

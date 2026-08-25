@@ -10,7 +10,7 @@
 ## 0. Visão geral do fluxo
 
 ```
-bump da versão → preflight → release.py (build + harness 13/13) → sync no R2 (diff) → GitHub (full + instaladores) → commit
+bump da versão → preflight → release.py (build + harness completo) → sync no R2 (diff) → GitHub (full + instaladores) → commit
 ```
 
 - **Sync por arquivo (atualização automática)**: Cloudflare R2, SEMPRE no bucket `sig` (`https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`).
@@ -34,7 +34,7 @@ bump da versão → preflight → release.py (build + harness 13/13) → sync no
 4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` + `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos (eles são servidos pelo R2).
 5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 5).
 6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 6).
-7. O preflight e o harness devem terminar com código zero; o release deve produzir 13 linhas PASS (4 de artefatos + 9 de cenários) — QUALQUER `FAIL` impede a publicação. NÃO publicar release com FAIL.
+7. O preflight e o harness devem terminar com código zero — QUALQUER `FAIL` impede a publicação. Em modo `--quiet`, cada comando produz um resumo curto; sem `--quiet`, o release mantém as linhas PASS detalhadas e os 9 cenários do harness. Consulte `docs/agents/validation-output.md` para o contrato de saída.
 8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
 9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
 10. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
@@ -50,6 +50,11 @@ bump da versão → preflight → release.py (build + harness 13/13) → sync no
    - Usar somente `endpoint`, `access_key_id` e `secret_access_key` da chave dedicada ao bucket `sig`; o sync deve permanecer no bucket `sig` e na URL `pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`.
    - Se faltar: Cloudflare → R2 → Manage R2 API Tokens → Account API Token (Object Read & Write, escopo: bucket `sig`).
 4. **Chave privada do manifesto**: `release/update_private_key.pem` (usada pelo `sync_r2.py` para assinar o manifesto; NUNCA commitar).
+5. **Gate rápido e contrato de contexto**: antes do preflight, executar
+   `python scripts\release.py syntax --quiet` e
+   `python scripts\check_prompt_context.py --quiet`. A verificacao confirma que
+   a sintaxe Python está válida e que o prefixo estatico continua separado dos
+   documentos condicionais sem divulgar conteudo de prompts, credenciais ou estado privado.
 
 ## 2. Bump da versão
 
@@ -67,13 +72,13 @@ APP_VERSION = "YYYYMMDD_NNN"   # ex.: 20260821_014
 ```bash
 cd "D:/Projetos/SIG Windows"
 "C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/release.py preflight --quiet
-"C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/release.py release --version YYYYMMDD_NNN --incremental
+"C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/release.py release --version YYYYMMDD_NNN --incremental --quiet
 ```
 
 - Gera: `release/generated/YYYYMMDD_NNN/` (package + `*_full.zip` + `setup_sig_*.exe` + `online_setup_sig*.exe`).
 - O `preflight` roda os testes unitários, a validação do estado atual, o `updater-v2-test` e `ui-smoke`, em ordem fail-fast.
 - O comando `release` repete o preflight automaticamente antes do build limpo e depois roda o harness completo (9 cenários): build onedir, updater, diffs, sync e rollbacks.
-- **Critério de sucesso**: preflight sem erro, código zero no release e 13 linhas PASS no release (4 de artefatos + 9 de cenários). NÃO é sucesso se houver qualquer `FAIL`.
+- **Critério de sucesso**: preflight sem erro, código zero no release, pacote/manifesto válidos e harness completo. Em modo quiet, o resumo deve conter `PASS`; NÃO é sucesso se houver qualquer `FAIL`.
 
 ### 3.1 SE o harness falhar com o SigUpdater
 
@@ -105,12 +110,12 @@ rm -rf release/generated/YYYYMMDD_NNN release_*.log
 
 ```bash
 "C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/sync_r2.py \
-  --package release/generated/YYYYMMDD_NNN/package --version YYYYMMDD_NNN
+  --package release/generated/YYYYMMDD_NNN/package --version YYYYMMDD_NNN --quiet
 ```
 
 - **O `--package` DEVE apontar para a pasta `package/`** (a onedir full solta) — NUNCA a raiz `release/generated/<v>` (isso quebrou o manifesto com `package/_internal` aninhado).
 - O script: calcula o MD5 local, lista os ETags do R2 (1 chamada), sobe SÓ os que mudaram e publica o `sync_manifest.json` assinado.
-- Saída esperada: `subir: N` (N pequeno — só o diff) + `sync_manifest.json publicado no R2`.
+- Saída quiet esperada: uma linha `PASS: sync-r2` com versão, quantidade enviada, quantidade inalterada e manifesto. Sem `--quiet`, a saída mostra `subir: N` (N pequeno — só o diff) e o progresso.
 - **Verificação pós-sync** (obrigatória):
 
 ```bash
@@ -163,7 +168,7 @@ git push origin main
 Ao concluir, reportar APENAS valores reais das saídas dos comandos:
 
 1. A versão publicada (`YYYYMMDD_NNN`).
-2. O resultado do preflight e do harness (release com 13 linhas PASS e código zero).
+2. O resultado do preflight e do harness (resumo `PASS` e código zero; a contagem real de cenários vem da saída do comando).
 3. Quantos arquivos subiram no R2 (`subir: N` — deve ser um número pequeno, o diff).
 4. O link da release do GitHub.
 5. O hash do commit (`git rev-parse HEAD`).
@@ -198,12 +203,14 @@ a fonte da verdade e deve evoluir com a prática.
 | Documentos indicam gates diferentes para o updater | O contrato antigo usava `updater-test`, enquanto o updater atual tem metadados v2 | usar `python scripts/release.py preflight --quiet`; o gate oficial é `updater-v2-test` |
 | Release criado sem suíte ou smoke test | O build antigo validava o pacote e o updater, mas não encadeava todos os gates de operador | deixar o `preflight` fail-fast rodar antes do build; publicar somente após o smoke test da UI |
 | Versão publicada com a data do dia anterior | A sequência foi incrementada sem comparar `YYYYMMDD` com a data atual | usar a data real do dia e reiniciar `NNN` em `001` sempre que o dia mudar |
+| Saída quiet diferente entre gates | cada script tratava `--quiet` de forma isolada e o preflight deixava escapar linhas internas | seguir `docs/agents/validation-output.md`; sucesso em uma linha, falha com caminho do log e código não zero |
+| Wrapper reporta sucesso após falha do release | pipeline Bash para `tail` sem `pipefail` | usar `set -euo pipefail` ou propagar o exit code do `release.py` |
 
 ---
 
-## Contexto da transição (histórico)
+## Contexto historico opcional
 
-- `20260821_012`: sync pelo Drive + `--github-tag` (assets dos executáveis no GitHub por causa do malware do Google).
-- `20260821_013` (PONTE): updater/app passam a buscar o manifesto no R2; publicada ainda pelo Drive para as instalações antigas migrarem.
-- `20260821_014` em diante: **publicação exclusiva pelo R2**; o Drive fica congelado na `013` (portão de entrada para versões antigas) e o GitHub só tem full + instaladores.
-- Um PC antigo faz 2 atualizações em sequência na migração: `013` (ponte, via Drive) → `014+` (via R2).
+O historico da migracao de distribuicao foi separado em
+`docs/maintenance/release-history.md`. Leia-o somente para diagnosticar uma
+instalacao antiga; ele nao faz parte do procedimento atual nem deve ser
+carregado como contexto universal.

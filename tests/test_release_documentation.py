@@ -33,6 +33,11 @@ class ReleaseDocumentationTests(unittest.TestCase):
         self.assertEqual(ui.command, "ui-smoke")
         self.assertTrue(ui.quiet)
 
+    def test_preflight_validates_the_prompt_context_contract(self):
+        from release import prompt_context_command
+
+        self.assertEqual(prompt_context_command(ROOT, quiet=True), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

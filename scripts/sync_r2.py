@@ -74,6 +74,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--package", required=True, help="pasta onedir full (ex.: .../package)")
     ap.add_argument("--version", required=True, help="versão do manifesto (ex.: 20260821_013)")
+    ap.add_argument("--quiet", action="store_true", help="mostrar somente o resumo do sync")
     args = ap.parse_args()
 
     cfg_path = ROOT / "release" / "r2_config.json"
@@ -85,7 +86,8 @@ def main() -> None:
         raise SystemExit(f"pasta do pacote não encontrada: {package}")
 
     files = snapshot(package)
-    print(f"pacote: {len(files)} arquivos")
+    if not args.quiet:
+        print(f"pacote: {len(files)} arquivos")
 
     s3 = boto3.client(
         "s3",
@@ -125,13 +127,16 @@ def main() -> None:
         if remote_etags.get(path) != _md5(package / path):
             to_upload[path] = entry
 
-    print(f"subir: {len(to_upload)}")
+    upload_count = len(to_upload)
+    if not args.quiet:
+        print(f"subir: {upload_count}")
     for index, (path, entry) in enumerate(to_upload.items(), 1):
         with (package / path).open("rb") as handle:
             s3.put_object(Bucket=bucket, Key=path, Body=handle)
-        if index % 25 == 0 or index == len(to_upload):
+        if not args.quiet and (index % 25 == 0 or index == len(to_upload)):
             print(f"  upload {index}/{len(to_upload)}")
-    print("upload concluído")
+    if not args.quiet:
+        print("upload concluído")
 
     # Manifesto (schema 2 — o formato validado pelo updater)
     manifest = {
@@ -152,7 +157,13 @@ def main() -> None:
     sign_manifest(manifest)
     body = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     s3.put_object(Bucket=bucket, Key="sync_manifest.json", Body=body, ContentType="application/json")
-    print("sync_manifest.json publicado no R2")
+    if args.quiet:
+        print(
+            f"PASS: sync-r2 version={args.version} uploaded={upload_count} "
+            f"unchanged={len(files) - upload_count} manifest=sync_manifest.json"
+        )
+    else:
+        print("sync_manifest.json publicado no R2")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ Por que este script existe (em vez de rodar PyInstaller direto):
 """
 
 import shutil
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -24,13 +25,38 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 
-def run(*args: str) -> None:
-    print("+", " ".join(args))
-    subprocess.run(list(args), cwd=ROOT, check=True)
+def run(*args: str, quiet: bool = False) -> int:
+    command = list(args)
+    if quiet:
+        log_path = ROOT / "build" / "build_dev.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as log:
+            result = subprocess.run(
+                command,
+                cwd=ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                text=True,
+            )
+        if result.returncode != 0:
+            print(f"ERRO: build falhou ({result.returncode}); consulte {log_path}")
+        return result.returncode
+    print("+", " ".join(command))
+    subprocess.run(command, cwd=ROOT, check=True)
+    return 0
 
 
-def main() -> int:
-    run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "sig.spec")
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build de desenvolvimento do SIG Windows")
+    parser.add_argument("--quiet", action="store_true", help="mostrar somente o resumo; manter log em build/build_dev.log")
+    args = parser.parse_args(argv)
+    pyinstaller_args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean"]
+    if args.quiet:
+        pyinstaller_args.extend(["--log-level", "WARN"])
+    pyinstaller_args.append("sig.spec")
+    if run(*pyinstaller_args, quiet=args.quiet) != 0:
+        return 1
 
     nested = DIST / "sig"
     if not nested.is_dir():
@@ -72,9 +98,13 @@ def main() -> int:
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             shutil.copytree(source_dir, target_dir)
-            print(f"+ sincronizado {relative}/ da raiz para dist/")
+            if not args.quiet:
+                print(f"+ sincronizado {relative}/ da raiz para dist/")
 
-    print(f"OK: {exe} pronto (layout flat), assets de runtime preservados em {DIST}")
+    if args.quiet:
+        print(f"PASS: build_dev sig.exe size={exe.stat().st_size}")
+    else:
+        print(f"OK: {exe} pronto (layout flat), assets de runtime preservados em {DIST}")
     return 0
 
 
