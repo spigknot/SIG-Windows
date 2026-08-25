@@ -1,0 +1,71 @@
+SERVIDORES E ENDPOINTS DO SIG WINDOWS
+
+Fonte: src/sig_app.py
+
+TRANSCRICAO
+==========
+
+Nome exibido: servidor (granite-speech-4.1-2b-nar)
+Endpoint REST: http://servidor:8100
+Porta: 8100
+
+Nome exibido: Grok STT
+Endpoint REST: https://api.x.ai/v1/stt
+Endpoint WebSocket: wss://api.x.ai/v1/stt
+Porta: 443
+
+Nome exibido: Deepgram Nova 3
+Endpoint REST: https://api.deepgram.com/v1/listen
+Endpoint WebSocket: wss://api.deepgram.com/v1/listen
+Porta: 443
+
+Nome exibido: AssemblyAI Universal-3.5 Pro
+Endpoint REST: https://sync.assemblyai.com/transcribe
+Endpoint WebSocket: wss://streaming.assemblyai.com/v3/ws
+Porta: 443
+
+Nome exibido: ElevenLabs Scribe v2 Realtime
+Endpoint REST: https://api.elevenlabs.io/v1/speech-to-text
+Endpoint WebSocket: wss://api.elevenlabs.io/v1/speech-to-text/realtime
+Porta: 443
+
+
+TEXTO / IA
+==========
+
+Nome exibido: IA-Proxy
+Endpoint: http://servidor:8500
+Porta: 8500
+Modelos encaminhados atualmente:
+- grok-4.6
+- grok-4.20-0309-non-reasoning
+- deepseek-v4-flash
+
+Nome exibido: servidor (gemma-4-26B-A4B-abliterated)
+Endpoint: http://servidor:8400/v1/chat/completions
+Porta: 8400
+Modelo interno: gemma4
+
+Nome exibido: grok-4.6
+Endpoint: https://api.x.ai/v1/responses
+Porta: 443
+
+Nome exibido: grok-4.20-0309-non-reasoning
+Endpoint: https://api.x.ai/v1/responses
+Porta: 443
+
+Nome exibido: deepseek-v4-flash
+Endpoint: https://api.deepseek.com/chat/completions
+Porta: 443
+
+
+OBSERVACOES
+==========
+
+- Os modelos diretos da xAI e da DeepSeek aparecem conforme a chave API
+  correspondente esteja preenchida e seja considerada plausivel pelo app.
+- O IA-Proxy nao usa chave API no cliente e fixa o reasoning minimo conforme
+  o modelo encaminhado.
+- O codigo ativo atualmente nao define avare:8500 como fallback do IA-Proxy.
+- O nome grok-4.20-non-reasoning aparece apenas como alias legado de
+  compatibilidade; a opcao atual e grok-4.20-0309-non-reasoning.

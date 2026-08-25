@@ -15,6 +15,7 @@ import queue
 import random
 import re
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
@@ -79,7 +80,15 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260825_001"
+APP_VERSION = "20260825_002"
+
+
+def format_process_command(command: list[object]) -> str:
+    """Renderiza a linha de comando exatamente como os argumentos do processo."""
+    parts = [str(part) for part in command]
+    return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
+
+
 SUPPORTED_EXTENSIONS = {
     ".wav",
     ".mp3",
@@ -1387,6 +1396,7 @@ class FfmpegTaskTracker:
     def __init__(self, app: "SigApp", tasks: list[str]):
         self.app = app
         self.tasks: dict[str, dict[str, object]] = {task: {"progress": 0, "state": "pending", "detail": ""} for task in tasks}
+        self.commands: list[str] = []
         self.live_status = ""
         self.success_message = ""
         self.error_message = ""
@@ -1437,6 +1447,12 @@ class FfmpegTaskTracker:
             self.error_message = text
         self._render_later()
 
+    def command(self, rendered_command: str):
+        """Mantem cada comando FFmpeg executado visivel durante os updates."""
+        with self._lock:
+            self.commands.append(rendered_command)
+        self._render_later()
+
     def _render_later(self):
         with self._lock:
             if self._scheduled:
@@ -1448,6 +1464,7 @@ class FfmpegTaskTracker:
         with self._lock:
             self._scheduled = False
             tasks = [(name, dict(data)) for name, data in self.tasks.items()]
+            commands = list(self.commands)
             live, success, error = self.live_status, self.success_message, self.error_message
         box = self.app.activity_log
         if not box.winfo_exists():
@@ -1458,6 +1475,7 @@ class FfmpegTaskTracker:
         box.tag_configure("active", foreground="#1d2b2a")
         box.tag_configure("pending", foreground="#667371")
         box.tag_configure("error", foreground="#b3261e")
+        box.tag_configure("command", foreground="#536471")
         for name, item in tasks:
             state, progress, detail = item["state"], int(item["progress"]), str(item["detail"])
             if state == "completed":
@@ -1470,6 +1488,10 @@ class FfmpegTaskTracker:
             else:
                 line, tag = f"{name}\n", "pending"
             box.insert(END, line, tag)
+        if commands:
+            box.insert(END, "\nComandos FFmpeg:\n", "command")
+            for rendered_command in commands:
+                box.insert(END, f"$ {rendered_command}\n", "command")
         if live:
             box.insert(END, f"{live}\n", "active")
         if error:
@@ -2510,6 +2532,7 @@ class FfmpegToolsPanel:
             str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-ss", self._fmt_seconds(offset),
             "-i", str(context["source"]), "-t", self._fmt_seconds(play_duration), "-an", "-vf", ",".join(filters), "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
         ]
+        self._record_ffmpeg_command(video_command, force=True)
         self.frame_preview_process = subprocess.Popen(
             video_command,
             stdout=subprocess.PIPE,
@@ -2780,6 +2803,7 @@ class FfmpegToolsPanel:
             command += ["-vf", filters]
         command.append(str(image_path))
         try:
+            self._record_ffmpeg_command(command, force=True)
             result = subprocess.run(command, capture_output=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if result.returncode != 0 or not image_path.exists():
                 raise RuntimeError("FFmpeg não gerou a prévia")
@@ -3005,6 +3029,18 @@ class FfmpegToolsPanel:
     def _append_log(self, message: str) -> None:
         # Diagnóstico completo continua salvo nos arquivos de erro; a UI usa apenas etapas.
         return
+
+    def _record_ffmpeg_command(self, command: list[object], *, force: bool = False) -> None:
+        """Registra a linha real antes de iniciar um processo FFmpeg."""
+        rendered_command = format_process_command(command)
+        if self.running and self.task_tracker:
+            self.task_tracker.command(rendered_command)
+        elif force:
+            self.app._append_activity_log(
+                f"FFmpeg: {rendered_command}",
+                "ffmpeg_command",
+                raw=True,
+            )
 
     def _set_status(self, message: str, progress: int | None = None) -> None:
         def apply():
@@ -3269,6 +3305,7 @@ class FfmpegToolsPanel:
         # Every process has its own FFmpeg progress stream. There is no shared
         # callback pool, history buffer, or artificial ten-process ceiling.
         progress_command = [command[0], "-stats_period", "0.1", "-progress", "pipe:1", "-nostats", *command[1:]]
+        self._record_ffmpeg_command(progress_command)
         process = subprocess.Popen(
             progress_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1, creationflags=flags,
@@ -3514,8 +3551,10 @@ class FfmpegToolsPanel:
         self._execute_video("Cortando vídeo com precisão", build)
 
     def _is_h264_video(self, source: Path) -> bool:
+        command = [str(self._ffmpeg()), "-hide_banner", "-i", str(source)]
+        self._record_ffmpeg_command(command)
         result = subprocess.run(
-            [str(self._ffmpeg()), "-hide_banner", "-i", str(source)],
+            command,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -3529,6 +3568,7 @@ class FfmpegToolsPanel:
             str(self._ffmpeg()), "-hide_banner", "-skip_frame", "nokey", "-i", str(source),
             "-vf", "showinfo", "-an", "-f", "null", "-",
         ]
+        self._record_ffmpeg_command(command)
         result = subprocess.run(
             command,
             capture_output=True,
@@ -3749,6 +3789,7 @@ class FfmpegToolsPanel:
 
     def _probe_media(self, source: Path) -> MediaProfile:
         command = [str(self._ffmpeg()), "-hide_banner", "-i", str(source)]
+        self._record_ffmpeg_command(command)
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         text = result.stderr + result.stdout
         duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
@@ -7238,8 +7279,9 @@ class SigApp:
 
         return message.rstrip(".")
 
-    def _append_activity_log(self, message: str, tag: str | None = None):
-        message = self._compact_activity_message(message)
+    def _append_activity_log(self, message: str, tag: str | None = None, *, raw: bool = False):
+        if not raw:
+            message = self._compact_activity_message(message)
         if not message or not getattr(self, "activity_log", None):
             return
         self.activity_log.configure(state="normal")
@@ -7247,6 +7289,8 @@ class SigApp:
             self.activity_log.tag_configure("vad_total", foreground="#0a7a2f")
         if "warning" not in self.activity_log.tag_names():
             self.activity_log.tag_configure("warning", foreground="#a65300")
+        if "ffmpeg_command" not in self.activity_log.tag_names():
+            self.activity_log.tag_configure("ffmpeg_command", foreground="#536471")
         for part in message.splitlines():
             line = f"{time.strftime('%H:%M:%S')}  {part}\n"
             if tag:
@@ -16560,6 +16604,7 @@ try {
             ]
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         with job.log_path.open("wb") as log:
+            self._queue("ffmpeg_command", format_process_command(command))
             process = subprocess.Popen(
                 command,
                 stdout=log,
@@ -16979,6 +17024,12 @@ try {
                 elif kind == "activity":
                     tag = message[2] if len(message) > 2 else None
                     self._append_activity_log(message[1], tag)
+                elif kind == "ffmpeg_command":
+                    self._append_activity_log(
+                        f"FFmpeg: {message[1]}",
+                        "ffmpeg_command",
+                        raw=True,
+                    )
                 elif kind == "activity_line":
                     key, text, tag = message[1], message[2], message[3] if len(message) > 3 else None
                     self._update_activity_line(key, text, tag)

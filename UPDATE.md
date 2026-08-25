@@ -130,13 +130,29 @@ Deve imprimir a versão nova. Se falhar, o manifesto não foi publicado corretam
 
 ## 5. GitHub Releases (full + instaladores — SEM os executáveis avulsos)
 
+Arquivos grandes NÃO devem ser passados junto do `gh release create`: se a
+janela do terminal for encerrada durante o upload, o GitHub pode deixar uma
+release parcial ou um endpoint de upload inválido. Primeiro crie somente os
+metadados da release; depois envie cada asset em um comando separado e aguarde
+o exit code zero de cada comando.
+
 ```bash
 cd "D:/Projetos/SIG Windows/release/generated/YYYYMMDD_NNN"
-gh release create YYYYMMDD_NNN ./YYYYMMDD_NNN_full.zip ./setup_sig_YYYYMMDD_NNN.exe ./online_setup_sigYYYYMMDD_NNN.exe \
+gh release create YYYYMMDD_NNN \
   --repo spigknot/SIG-Windows --title "SIG Windows YYYYMMDD_NNN" --notes "<descrição>"
+gh release upload YYYYMMDD_NNN ./YYYYMMDD_NNN_full.zip \
+  --repo spigknot/SIG-Windows
+gh release upload YYYYMMDD_NNN ./setup_sig_YYYYMMDD_NNN.exe \
+  --repo spigknot/SIG-Windows
+gh release upload YYYYMMDD_NNN ./online_setup_sigYYYYMMDD_NNN.exe \
+  --repo spigknot/SIG-Windows
+gh release view YYYYMMDD_NNN --repo spigknot/SIG-Windows --json tagName,url,assets
 ```
 
 - **NÃO** subir `sig.exe`/`SigUpdater.exe` como assets avulsos — eles são servidos pelo R2 (o `github_url` do manifesto aponta para o R2.dev).
+- A verificação final deve mostrar exatamente os três assets permitidos: o
+  `full.zip` e os dois instaladores. Se um upload falhar, pare, preserve o
+  diagnóstico e não exclua a release anterior até corrigir a release atual.
 - Se a release ficar em draft (upload interrompido): `gh release edit YYYYMMDD_NNN --draft=false`.
 - **Regra "só a versão atual"**: deletar a release anterior EXCETO a versão-ponte
   `20260821_013` (MANTER no GitHub — os PCs antigos, ainda no Drive/sync antigo,
@@ -199,6 +215,7 @@ a fonte da verdade e deve evoluir com a prática.
 | sync_r2 subindo 1791 arquivos | versão antiga do script (sem o diff) | usar o diff por ETag/MD5 (list_objects) — `subir: N` pequeno |
 | `RequestTimeTooSkewed` no sync_r2 (`ListObjectsV2`) | relógio do Windows dessincronizado (serviço `w32time` parado; diferença >15 min vs servidor) | iniciar o serviço e sincronizar: `powershell -c "Start-Service w32time; w32tm /resync"` (com elevação); conferir com `date -u` vs `curl -sI https://api.cloudflare.com | grep -i ^date:` |
 | `SignatureDoesNotMatch` no `ListObjectsV2` | `release/r2_config.json` usa um par de credenciais S3 incompatível, antigo ou de outro token/bucket | gerar um novo token S3 para o bucket `sig`, substituir o par `access_key_id` + `secret_access_key` localmente e manter o endpoint S3 e `bucket: sig`; nunca usar o token da API ou a URL pública `.r2.dev` como credencial |
+| `gh release create` interrompido durante upload grande; release parcial, URL `untagged-*` ou `HTTP 404` em `uploads.github.com` | assets grandes foram enviados junto da criação e o processo terminou antes de concluir todos os uploads | confirmar a situação com `gh release list/view`; se a release estiver parcial, excluí-la com sua tag órfã, recriar sem assets e enviar o full e os dois instaladores separadamente, aguardando cada comando |
 | O `release_*.log`/`sync_*.log` entram no commit | `git add -A` pegou os logs | `rm -f release_*.log sync_*.log` ANTES do `git add` |
 | Documentos indicam gates diferentes para o updater | O contrato antigo usava `updater-test`, enquanto o updater atual tem metadados v2 | usar `python scripts/release.py preflight --quiet`; o gate oficial é `updater-v2-test` |
 | Release criado sem suíte ou smoke test | O build antigo validava o pacote e o updater, mas não encadeava todos os gates de operador | deixar o `preflight` fail-fast rodar antes do build; publicar somente após o smoke test da UI |
