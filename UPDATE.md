@@ -84,7 +84,7 @@ cd "D:/Projetos/SIG Windows"
 
 Erro típico: `FAIL: SigUpdater.exe não corresponde ao artefato conhecido como bom`.
 
-Causa: o `release.py` recompila o `SigUpdater.exe` (PyInstaller determinístico) e o hash novo diverge dos metadatas quando o `updater.py` muda.
+Causa: o `release.py` recompila o `SigUpdater.exe` e o hash novo diverge dos metadados. Isso pode ocorrer quando o `updater.py` muda ou quando o PyInstaller/Windows resolve novas DLLs de API Set, mesmo sem alteração no código do updater.
 
 Resolução (sempre que o `updater.py` for alterado):
 
@@ -98,7 +98,8 @@ SOURCE_DATE_EPOCH=946684800 PYTHONHASHSEED=0 "C:/Users/Gustavo/AppData/Local/Pro
 # 2. Copiar para o bin de referência
 cp /d/d/tmp/updater-rebuild/SigUpdater.exe updater_v2/bin/SigUpdater.exe
 
-# 3. Atualizar os DOIS metadatas com o size + sha256 novos
+# 3. Após revisar e aprovar a nova composição de dependências, atualizar os DOIS metadados com o size + sha256 novos
+#    O source_sha256 permanece igual quando updater_v2/updater.py não mudou.
 #    (scripts/updater_artifact.json e updater_v2/artifact.json)
 "C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" -c "import hashlib; print(len(open('updater_v2/bin/SigUpdater.exe','rb').read()), hashlib.sha256(open('updater_v2/bin/SigUpdater.exe','rb').read()).hexdigest())"
 
@@ -207,7 +208,7 @@ a fonte da verdade e deve evoluir com a prática.
 |---|---|---|
 | `componente desconhecido no manifesto: <v>_full.zip` | o `--package` apontou para a raiz (subiu o full.zip no manifesto) | usar `--package .../package`; re-publicar o sync |
 | `no matches found for C:/...` no `gh` | shell MSYS trata `C:/` como glob | `cd` no diretório e usar `./arquivo` |
-| `SigUpdater.exe não corresponde ao artefato bom` | `updater.py` mudou e o hash do fresh divergiu | seção 3.1 (recompilar + atualizar os 2 metadatas) |
+| `SigUpdater.exe não corresponde ao artefato bom` | `updater.py` mudou ou PyInstaller/Windows incluiu novas DLLs de API Set e o hash do fresh divergiu | revisar a composição, seguir a seção 3.1 e atualizar os 2 metadados; manter a validação exata por hash |
 | Google bloqueia `.exe` como malware | Drive flagra PyInstaller (aposentado — R2 não bloqueia) | se o R2 algum dia bloquear: assets avulsos no GitHub + `--github-tag` |
 | `[Erro: 13] Permission denied` no lock | updater sem admin / SIG aberto | fechar o SIG; executar o updater como Administrador |
 | `HTTP 1010` no R2.dev | User-Agent de bot (urllib) | o updater/app usam o UA `SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)` — nunca o UA do urllib |

@@ -80,7 +80,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260825_002"
+APP_VERSION = "20260826_001"
 
 
 def format_process_command(command: list[object]) -> str:
@@ -161,6 +161,14 @@ DEFAULT_SETTINGS = {
     "police_station": "",
     "police_delegate": "",
     "police_city": "",
+}
+API_KEY_IMPORT_FIELDS = {
+    "assemblyai": "assemblyai_api_key",
+    "elevenlabs": "elevenlabs_api_key",
+    "deepgram": "deepgram_api_key",
+    "deepseek": "deepseek_api_key",
+    "xai": "grok_api_key",
+    "imei check": "imei_api_key",
 }
 GROK_API_NAME = "Grok STT"
 GROK_STT_URL = "https://api.x.ai/v1/stt"
@@ -4686,6 +4694,29 @@ def transcription_server_label(server: dict) -> str:
     if server["name"] == GROK_API_NAME:
         return GROK_API_NAME
     return f"{server['name']} ({server['parameters'].get('model', 'modelo não informado')})"
+
+
+def parse_api_keys_text(text: str) -> dict[str, str]:
+    """Extrai chaves de linhas no formato ``serviço chave``.
+
+    O nome do serviço pode conter espaços; a última palavra da linha é sempre
+    tratada como a chave. Linhas vazias, incompletas ou de serviços não
+    reconhecidos são ignoradas. Quando um serviço aparece mais de uma vez, a
+    última chave informada prevalece.
+    """
+    imported: dict[str, str] = {}
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        service_name_and_key = line.rsplit(None, 1)
+        if len(service_name_and_key) != 2:
+            continue
+        service_name, api_key = service_name_and_key
+        field_name = API_KEY_IMPORT_FIELDS.get(" ".join(service_name.casefold().split()))
+        if field_name and api_key:
+            imported[field_name] = api_key
+    return imported
 
 
 def load_settings() -> dict:
@@ -12615,6 +12646,8 @@ try {
             section.columnconfigure(1, weight=1)
             return section
 
+        api_import_frame = ttk.Frame(api_tab, style="Settings.Inner.TFrame")
+        api_import_frame.pack(fill=X, anchor="n", pady=(0, 8))
         api_transcription_frame = make_api_section(api_tab, "Transcrição")
         api_text_frame = make_api_section(api_tab, "Texto")
         api_imei_frame = make_api_section(api_tab, "IMEI CHECK")
@@ -12665,6 +12698,76 @@ try {
             "Obrigatória para selecionar modelos DeepSeek V4.",
         )
         add_api_field(api_imei_frame, 0, "Chave API do IMEI Check", imei_api_key_var)
+
+        api_key_variables = {
+            "grok_api_key": grok_api_key_var,
+            "deepseek_api_key": deepseek_api_key_var,
+            "deepgram_api_key": deepgram_api_key_var,
+            "assemblyai_api_key": assemblyai_api_key_var,
+            "elevenlabs_api_key": elevenlabs_api_key_var,
+            "imei_api_key": imei_api_key_var,
+        }
+        api_key_import_labels = {
+            "grok_api_key": "xAI",
+            "deepseek_api_key": "Deepseek",
+            "deepgram_api_key": "Deepgram",
+            "assemblyai_api_key": "AssemblyAI",
+            "elevenlabs_api_key": "ElevenLabs",
+            "imei_api_key": "Imei Check",
+        }
+
+        def import_api_keys():
+            selected_path = filedialog.askopenfilename(
+                parent=win,
+                title="Importar chaves API",
+                filetypes=(
+                    ("Arquivos de texto", "*.txt"),
+                    ("Todos os arquivos", "*.*"),
+                ),
+            )
+            if not selected_path:
+                return
+            try:
+                try:
+                    content = Path(selected_path).read_text(encoding="utf-8-sig")
+                except UnicodeDecodeError:
+                    content = Path(selected_path).read_text(encoding="cp1252")
+            except OSError as exc:
+                messagebox.showerror(
+                    "sig",
+                    f"Não foi possível ler o arquivo selecionado:\n{exc}",
+                    parent=win,
+                )
+                return
+
+            imported = parse_api_keys_text(content)
+            if not imported:
+                messagebox.showwarning(
+                    "Importar chaves API",
+                    "Nenhuma chave API reconhecida foi encontrada no arquivo.",
+                    parent=win,
+                )
+                return
+
+            for field_name, api_key in imported.items():
+                api_key_variables[field_name].set(api_key)
+            imported_labels = [
+                api_key_import_labels[field_name]
+                for field_name in imported
+            ]
+            messagebox.showinfo(
+                "Importar chaves API",
+                "Chaves importadas: "
+                + ", ".join(imported_labels)
+                + ".\n\nClique em Salvar para manter as alterações.",
+                parent=win,
+            )
+
+        ttk.Button(
+            api_import_frame,
+            text="IMPORTAR",
+            command=import_api_keys,
+        ).pack(side=RIGHT)
 
         cpu_count = max(1, os.cpu_count() or 1)
 
