@@ -561,7 +561,12 @@ def _crop_preview_page_to_content(
     horizontal_padding: int = 4,
     vertical_padding: int = 14,
 ) -> Image.Image:
-    """Crop printable whitespace while retaining a small reading margin."""
+    """Remove apenas o espaço em branco VERTICAL, mantendo a página inteira.
+
+    A largura completa da página é preservada (nada de crop horizontal): a
+    prévia precisa mostrar o documento COM as bordas — margens esquerda E
+    direita. O crop vertical elimina o vazio acima/abaixo do conteúdo.
+    """
     white = Image.new("RGB", page.size, (255, 255, 255))
     difference = ImageChops.difference(page, white).convert("L")
     # Ignore PDF rasterization noise in the white page background, but retain
@@ -571,12 +576,16 @@ def _crop_preview_page_to_content(
     mask.close()
     difference.close()
     white.close()
-    cropped = page if not bounds else page.crop(bounds)
+    if not bounds:
+        cropped = page
+    else:
+        # Mantém a largura TOTAL da página (x=0 até page.width); usa o bbox
+        # apenas para cortar o vazio vertical.
+        _left, top, _right, bottom = bounds
+        cropped = page.crop((0, top, page.width, bottom))
     if cropped is not page:
         page.close()
-    # Keep roughly one blank text line above and below each page.  The
-    # horizontal padding stays intentionally small because the old preview
-    # left too much empty space beside the document.
+    # Keep roughly one blank text line above and below each page.
     padded = ImageOps.expand(
         cropped,
         border=(max(0, horizontal_padding), max(0, vertical_padding)),
@@ -904,16 +913,23 @@ def generate_docx_from_template(
 
 
 def ensure_document_templates() -> dict[str, Path]:
+    """Resolve os modelos Word na pasta externa ``modelos/`` (ao lado do app).
+
+    Os modelos NÃO vão mais empacotados dentro do executável: a instalação e
+    os updates full/diff entregam a pasta ``modelos/`` ao lado do ``sig.exe``.
+    Se faltarem, a instalação/atualização está incompleta.
+    """
     external_dir = app_base_dir() / "modelos"
     external_dir.mkdir(parents=True, exist_ok=True)
     resolved: dict[str, Path] = {}
     for template_kind, filename in DOCUMENT_TEMPLATE_NAMES.items():
         external_path = external_dir / filename
-        bundled_path = resource_path(f"modelos/{filename}")
-        if not external_path.exists() and bundled_path.exists():
-            shutil.copy2(bundled_path, external_path)
         if not external_path.exists():
-            raise FileNotFoundError(f"Modelo não encontrado: {external_path}")
+            raise FileNotFoundError(
+                f"Modelo não encontrado: {external_path}\n"
+                "Os modelos são entregues pela instalação/atualização do SIG. "
+                "Execute uma atualização ou use 'Reparar instalação'."
+            )
         resolved[template_kind] = external_path
     return resolved
 
@@ -996,6 +1012,8 @@ class MediaProfile:
     audio_channels: int
     audio_layout: str
     has_video: bool = True
+    rotation: int = 0
+    audio_codec: str = ""
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -2007,16 +2025,16 @@ class FfmpegToolsPanel:
         join_checks.pack(anchor="w")
         self.join_reencode_check = ttk.Checkbutton(
             join_checks,
-            text="Reencodar",
+            text="Reencode Completo",
             variable=self.join_reencode_var,
-            command=self._update_join_controls,
+            command=self._on_toggle_join_reencode,
         )
         self.join_reencode_check.pack(side=LEFT)
         self.join_smart_check = ttk.Checkbutton(
             join_checks,
             text="SmartJoin",
             variable=self.join_smart_var,
-            command=self._update_join_controls,
+            command=self._on_toggle_join_smart,
         )
         self.join_smart_check.pack(side=LEFT, padx=(18, 0))
         options = ttk.Frame(self.join_tab)
@@ -2080,16 +2098,16 @@ class FfmpegToolsPanel:
         checks.pack(anchor="w", pady=(8, 0))
         self.insert_reencode_check = ttk.Checkbutton(
             checks,
-            text="Reencodar",
+            text="Reencode Completo",
             variable=self.insert_reencode_var,
-            command=self._update_insert_controls,
+            command=self._on_toggle_insert_reencode,
         )
         self.insert_reencode_check.pack(side=LEFT)
         self.insert_smart_check = ttk.Checkbutton(
             checks,
             text="Smart Insert",
             variable=self.insert_smart_var,
-            command=self._enable_insert_smart,
+            command=self._on_toggle_insert_smart,
         )
         self.insert_smart_check.pack(side=LEFT, padx=(18, 0))
         ttk.Label(
@@ -2197,35 +2215,76 @@ class FfmpegToolsPanel:
         # QSV ou AMF. Não estimamos esse número sem uma fonte do driver.
         self.rotate_device_limit_var.set("")
 
+    def _on_toggle_join_reencode(self) -> None:
+        if self.join_reencode_var.get():
+            self.join_smart_var.set(False)
+        self._update_join_controls()
+
+    def _on_toggle_join_smart(self) -> None:
+        if self.join_smart_var.get():
+            self.join_reencode_var.set(False)
+        self._update_join_controls()
+
     def _update_join_controls(self) -> None:
         reencode = self.join_reencode_var.get()
-        self.join_smart_check.configure(state="normal" if reencode else "disabled")
-        self.join_transition_combo.configure(state="readonly" if reencode else "disabled")
-        self.join_seconds_entry.configure(state="normal" if reencode else "disabled")
-        if not reencode:
-            self.join_smart_var.set(False)
-            return
-        if self.join_smart_var.get():
+        smart = self.join_smart_var.get()
+        has_mode = reencode or smart
+
+        self.join_reencode_check.configure(state="normal" if not self.running else "disabled")
+        self.join_smart_check.configure(state="normal" if not self.running else "disabled")
+        self.join_transition_combo.configure(state="readonly" if (has_mode and not self.running) else "disabled")
+        self.join_seconds_entry.configure(state="normal" if (has_mode and not self.running) else "disabled")
+
+        if smart:
+            # "Fade in/out" disponível apenas para SmartJoin
+            self.join_transition_combo.configure(values=self.TRANSITIONS)
+            if self.join_transition_var.get() not in self.TRANSITIONS:
+                self.join_transition_var.set("Fade in/out")
+        elif reencode:
+            # "Fade in/out" NÃO disponível para Reencode Completo
             choices = tuple(item for item in self.TRANSITIONS if item != "Fade in/out")
             self.join_transition_combo.configure(values=choices)
-            if self.join_transition_var.get() == "Fade in/out":
+            if self.join_transition_var.get() == "Fade in/out" or self.join_transition_var.get() not in choices:
                 self.join_transition_var.set("fade")
-        else:
-            self.join_transition_combo.configure(values=self.TRANSITIONS)
+
+    def _on_toggle_insert_reencode(self) -> None:
+        if self.insert_reencode_var.get():
+            self.insert_smart_var.set(False)
+        self._update_insert_controls()
+
+    def _on_toggle_insert_smart(self) -> None:
+        if self.insert_smart_var.get():
+            self.insert_reencode_var.set(False)
+        self._update_insert_controls()
 
     def _update_insert_controls(self) -> None:
-        enabled = bool(self.insert_reencode_var.get()) and not self.running and self.insert_secondary_input is not None
-        self.insert_smart_check.configure(state="normal" if self.insert_reencode_var.get() and not self.running else "disabled")
+        reencode = self.insert_reencode_var.get()
+        smart = self.insert_smart_var.get()
+        has_mode = reencode or smart
+        enabled = has_mode and not self.running and self.insert_secondary_input is not None
+
+        self.insert_reencode_check.configure(state="normal" if not self.running else "disabled")
+        self.insert_smart_check.configure(state="normal" if not self.running else "disabled")
         self.insert_transition_combo.configure(state="readonly" if enabled else "disabled")
         self.insert_seconds_entry.configure(state="normal" if enabled else "disabled")
-        if not self.insert_reencode_var.get():
-            self.insert_smart_var.set(False)
+
+        if smart:
+            # Fade in/out disponível apenas para Smart Insert
+            choices = ("No transition", "Fade in/out")
+            self.insert_transition_combo.configure(values=choices)
+            if self.insert_transition_var.get() not in choices:
+                self.insert_transition_var.set("Fade in/out")
+        elif reencode:
+            # Reencode Completo: curvas de transição, sem "Fade in/out"
+            transitions = tuple(label for label, _value in self.AUDIO_TRANSITIONS if label != "Fade in/out")
+            self.insert_transition_combo.configure(values=transitions)
+            if self.insert_transition_var.get() == "Fade in/out" or self.insert_transition_var.get() not in transitions:
+                self.insert_transition_var.set("Linear slope (tri)")
+        else:
             self.insert_transition_var.set("No transition")
 
     def _enable_insert_smart(self) -> None:
-        if self.insert_smart_var.get():
-            self.insert_reencode_var.set(True)
-        self._update_insert_controls()
+        self._on_toggle_insert_smart()
 
     def _show_insert_options(self, visible: bool) -> None:
         if visible:
@@ -2852,6 +2911,8 @@ class FfmpegToolsPanel:
                 self.extract_timeline.set_media(0)
                 self.extract_preview.delete("all")
                 self.extract_preview.create_text(400, 90, text="O recorte com marcadores fica disponível ao selecionar um único arquivo.", fill="#d7e2df", font=("Segoe UI", 10))
+                self.extract_start_var.set("")
+                self.extract_end_var.set("")
 
     def select_rotate_input(self) -> None:
         selected = filedialog.askopenfilename(title="Selecionar vídeo", filetypes=[("Vídeos", "*.mp4 *.mov *.mkv *.avi *.webm"), ("Todos os arquivos", "*.*")])
@@ -3456,7 +3517,7 @@ class FfmpegToolsPanel:
         if is_video:
             self._cut_video_hybrid(source, output, start, end, media)
         else:
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-ss", self._fmt_seconds(start), "-t", self._fmt_seconds(duration), "-map", "0:a:0?", "-vn", *self._audio_codec_args(extension, media.audio_bitrate), str(output)]
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration), "-map", "0:a:0?", "-vn", *self._audio_codec_args(extension, media.audio_bitrate), str(output)]
             self._execute(command, "Cortando áudio", 1, 1)
 
     def _cut_video_hybrid(self, source: Path, output: Path, start: float, end: float, media: MediaProfile) -> None:
@@ -3533,7 +3594,7 @@ class FfmpegToolsPanel:
             input_args, filter_args = self._filter_for_profile("null", profile)
             return [
                 str(self._ffmpeg()), "-hide_banner", "-y", *input_args,
-                "-i", str(source), "-ss", self._fmt_seconds(start),
+                "-ss", self._fmt_seconds(start), "-i", str(source),
                 "-t", self._fmt_seconds(end - start),
                 "-map", "0:v:0?", "-map", "0:a:0?", *filter_args,
                 *self._video_args(profile, media.video_bitrate), "-c:a", "aac", "-b:a", media.audio_bitrate,
@@ -3548,7 +3609,7 @@ class FfmpegToolsPanel:
             input_args, filter_args = self._filter_for_profile("null", profile)
             return [
                 str(self._ffmpeg()), "-hide_banner", "-y", *input_args,
-                "-i", str(source), "-ss", self._fmt_seconds(start),
+                "-ss", self._fmt_seconds(start), "-i", str(source),
                 "-t", self._fmt_seconds(end - start),
                 "-map", "0:v:0?", "-map", "0:a:0?", *filter_args,
                 *self._video_args(profile, media.video_bitrate), "-c:a", "aac", "-b:a", media.audio_bitrate,
@@ -3639,7 +3700,8 @@ class FfmpegToolsPanel:
         seek_args = ["-ss", self._fmt_seconds(start)] if has_trim else []
         duration_args = ["-t", self._fmt_seconds(trim_duration)] if has_trim else []
         if self.rotate_metadata_var.get():
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={degrees % 360}", str(output)]
+            target_rotation = (media.rotation + degrees) % 360
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={target_rotation}", str(output)]
             self._execute(command, "Cortando e atualizando rotação" if has_trim else "Atualizando metadados de rotação", 1, 1, trim_duration)
             return
         filters: list[str] = []
@@ -3681,7 +3743,8 @@ class FfmpegToolsPanel:
                     self._append_log(f"Giro paralelo não concluiu ({exc}); repetindo em um único processo.")
         def build(profile):
             input_args, filter_args = self._filter_for_profile(filter_text, profile)
-            return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, *seek_args, "-i", str(source), *duration_args, "-map", "0:v:0", "-map", "0:a?", *filter_args, *self._video_args(profile, media.video_bitrate), "-c:a", "copy", "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart", str(output)]
+            audio_args = ["-c:a", "copy"] if media.audio_codec in {"aac", "mp3", "ac3", "eac3", ""} else ["-c:a", "aac", "-b:a", media.audio_bitrate, "-ar", str(media.audio_rate), "-ac", str(media.audio_channels)]
+            return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, *seek_args, "-i", str(source), *duration_args, "-map", "0:v:0", "-map", "0:a?", *filter_args, *self._video_args(profile, media.video_bitrate), *audio_args, "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart", str(output)]
         self._execute_video("Girando e cortando vídeo" if has_trim else "Girando vídeo", build, duration_seconds=trim_duration)
 
     def _rotate_video_parallel(
@@ -3804,16 +3867,35 @@ class FfmpegToolsPanel:
         duration = 0.0
         if duration_match:
             duration = int(duration_match.group(1)) * 3600 + int(duration_match.group(2)) * 60 + float(duration_match.group(3))
-        video_line = next((line for line in text.splitlines() if "Video:" in line), "")
+        video_line = next((line for line in text.splitlines() if "Video:" in line and "attached pic" not in line), "")
         audio_line = next((line for line in text.splitlines() if "Audio:" in line), "")
         video_match = re.search(r"(\d{2,5})x(\d{2,5}).*?(\d+(?:\.\d+)?) fps", video_line)
-        width = int(video_match.group(1)) if video_match else 1280
-        height = int(video_match.group(2)) if video_match else 720
-        fps = video_match.group(3) if video_match else "30"
+        if video_match:
+            width = int(video_match.group(1))
+            height = int(video_match.group(2))
+            fps = video_match.group(3)
+        else:
+            dim_match = re.search(r"(\d{2,5})x(\d{2,5})", video_line)
+            width = int(dim_match.group(1)) if dim_match else 1280
+            height = int(dim_match.group(2)) if dim_match else 720
+            fps_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)", video_line)
+            fps = fps_match.group(1) if fps_match else "30"
+
         video_rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", video_line)
         audio_rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", audio_line)
-        video_bitrate = f"{float(video_rates[-1]):g}k" if video_rates and float(video_rates[-1]) > 0 else "1M"
         audio_bitrate = f"{float(audio_rates[-1]):g}k" if audio_rates and float(audio_rates[-1]) > 0 else "128k"
+        if video_rates and float(video_rates[-1]) > 0:
+            video_bitrate = f"{float(video_rates[-1]):g}k"
+        else:
+            container_rate = re.search(r"bitrate:\s*(\d+(?:\.\d+)?)\s*kb/s", text)
+            if container_rate and float(container_rate.group(1)) > 0:
+                total_kbps = float(container_rate.group(1))
+                audio_kbps = float(audio_rates[-1]) if (audio_rates and float(audio_rates[-1]) > 0) else 128.0
+                est_video_kbps = max(100.0, total_kbps - audio_kbps if bool(audio_line) else total_kbps)
+                video_bitrate = f"{round(est_video_kbps)}k"
+            else:
+                video_bitrate = "1M"
+
         rate_match = re.search(r"(\d+)\s*Hz", audio_line)
         audio_rate = int(rate_match.group(1)) if rate_match else 48000
         if re.search(r"\bmono\b", audio_line):
@@ -3824,10 +3906,19 @@ class FfmpegToolsPanel:
             channels_match = re.search(r"(\d+)\s*channels", audio_line)
             audio_channels = int(channels_match.group(1)) if channels_match else 2
             audio_layout = {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}.get(audio_channels, "stereo")
+
+        rotate_match = re.search(r"rotate\s*:\s*(-?\d+)", text, re.IGNORECASE)
+        if not rotate_match:
+            rotate_match = re.search(r"rotation of\s*(-?\d+)", text, re.IGNORECASE)
+        rotation = int(rotate_match.group(1)) % 360 if rotate_match else 0
+
+        audio_codec_match = re.search(r"Audio:\s*([a-zA-Z0-9_]+)", audio_line)
+        audio_codec = audio_codec_match.group(1).lower() if audio_codec_match else ""
+
         return MediaProfile(
             duration, bool(audio_line), width - width % 2, height - height % 2, fps,
             video_bitrate, audio_bitrate, audio_rate, audio_channels, audio_layout,
-            bool(video_line),
+            bool(video_line), rotation, audio_codec,
         )
 
     def _join_audio_worker(self, clips: list[MediaProfile]) -> None:
@@ -3865,11 +3956,15 @@ class FfmpegToolsPanel:
             command += ["-i", str(path)]
         if transition_seconds > 0:
             filters: list[str] = []
-            previous = "0:a"
+            first = clips[0]
+            target_rate = first.audio_rate
+            for idx in range(len(self.join_inputs)):
+                filters.append(f"[{idx}:a]aresample={target_rate},aformat=sample_rates={target_rate}:channel_layouts={first.audio_layout}[a{idx}_norm]")
+            previous = "a0_norm"
             for index in range(1, len(self.join_inputs)):
                 output_label = f"a{index}out"
                 filters.append(
-                    f"[{previous}][{index}:a]acrossfade=d={self._fmt_seconds(transition_seconds)}"
+                    f"[{previous}][a{index}_norm]acrossfade=d={self._fmt_seconds(transition_seconds)}"
                     f":c1=tri:c2=tri[{output_label}]"
                 )
                 previous = output_label
@@ -3901,7 +3996,14 @@ class FfmpegToolsPanel:
         if any(not item.has_video for item in clips):
             raise RuntimeError("Junte somente áudios ou somente vídeos na mesma tarefa")
         output = self._safe_output(self.output_dir, "videos_juntos", ".mp4")
-        if not self.join_reencode_var.get():
+        if not self.join_reencode_var.get() and not self.join_smart_var.get():
+            first = clips[0]
+            for idx, clip in enumerate(clips[1:], start=2):
+                if clip.width != first.width or clip.height != first.height:
+                    raise RuntimeError(
+                        f"As mídias possuem resoluções distintas ({first.width}x{first.height} vs {clip.width}x{clip.height}). "
+                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
+                    )
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
             lines = []
             for path in self.join_inputs:
@@ -4286,6 +4388,10 @@ class FfmpegToolsPanel:
     def _xfade_join_filter(self, clips: list[tuple], profile: dict, seconds: float, transition: str) -> str:
         parts = [self._video_normalize_filter(index, profile) for index in range(len(clips))]
         parts.extend(self._audio_normalize_filter(index, clip, profile) for index, clip in enumerate(clips))
+        if seconds <= 0.001:
+            inputs = "".join(f"[v{index}][a{index}]" for index in range(len(clips)))
+            parts.append(f"{inputs}concat=n={len(clips)}:v=1:a=1[vout][aout]")
+            return ";".join(parts)
         last_video, last_audio = "v0", "a0"
         accumulated = clips[0][0]
         transition_name = "fade" if transition == "Fade in/out" else transition
@@ -4320,13 +4426,12 @@ class FfmpegToolsPanel:
         if transition_seconds < 0:
             raise RuntimeError("Tempo de transição não pode ser negativo")
 
-        full_reencode = self.insert_reencode_var.get() and (
-            not self.insert_smart_var.get() or transition_code != "none"
-        )
-        extension = ".m4a" if full_reencode else (main.suffix.lower() if main.suffix.lower() in AUDIO_EXTENSIONS else ".m4a")
+        full_reencode = self.insert_reencode_var.get()
+        use_smart = self.insert_smart_var.get()
+        extension = main.suffix.lower() if main.suffix.lower() in AUDIO_EXTENSIONS else ".m4a"
         output = self._safe_output(self.output_dir, f"{main.stem}_com_audio", extension)
         total_duration = main_profile.duration + inserted_profile.duration
-        mode = "Reencodificação com transição" if full_reencode else ("Smart Insert" if self.insert_smart_var.get() else "Sem reencodar")
+        mode = "Reencode Completo" if full_reencode else ("Smart Insert" if use_smart else "Sem reencodar")
         self._set_status(f"Inserindo áudio ({mode})", 0)
         self._append_log(
             f"Inserção: ponto {self._clock(insertion)}, áudio principal {main_profile.audio_rate} Hz/"
@@ -4337,14 +4442,20 @@ class FfmpegToolsPanel:
             command = self._insert_full_reencode_arguments(
                 main, inserted, output, main_profile, insertion, transition_seconds, transition_code
             )
-            self._execute(command, "Inserindo áudio com reencodificação", 1, 1, total_duration)
+            self._execute(command, "Inserindo áudio (Reencode Completo)", 1, 1, total_duration)
             return
-        if self.insert_smart_var.get():
-            self._insert_smart_worker(main, inserted, output, main_profile, insertion, total_duration)
+        if use_smart:
+            use_fade = self.insert_transition_var.get() == "Fade in/out" and transition_seconds > 0
+            self._insert_smart_worker(main, inserted, output, main_profile, insertion, total_duration, use_fade, transition_seconds)
             return
         self._insert_copy_worker(main, inserted, output, insertion, total_duration)
 
     def _insert_copy_worker(self, main: Path, inserted: Path, output: Path, insertion: float, total_duration: float) -> None:
+        if main.suffix.lower() != inserted.suffix.lower():
+            raise RuntimeError(
+                f"Os formatos dos arquivos são diferentes ({main.suffix} vs {inserted.suffix}). "
+                "Para juntar formatos distintos, marque 'Smart Insert' ou 'Reencode Completo'."
+            )
         work_dir = self.output_dir / f"insert_copy_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
         extension = output.suffix or ".m4a"
@@ -4353,7 +4464,7 @@ class FfmpegToolsPanel:
             if insertion > 0.001:
                 left = work_dir / f"000{extension}"
                 self._execute(
-                    [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", "0", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
                     "Preparando trecho inicial",
                     1,
                     4,
@@ -4362,7 +4473,7 @@ class FfmpegToolsPanel:
                 pieces.append(left)
             middle = work_dir / f"{len(pieces):03d}{extension}"
             self._execute(
-                [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(middle)],
+                [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", "0", "-i", str(inserted), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(middle)],
                 "Preparando áudio inserido",
                 2 if insertion > 0.001 else 1,
                 4,
@@ -4386,7 +4497,17 @@ class FfmpegToolsPanel:
                 path.unlink(missing_ok=True)
             work_dir.rmdir()
 
-    def _insert_smart_worker(self, main: Path, inserted: Path, output: Path, profile: MediaProfile, insertion: float, total_duration: float) -> None:
+    def _insert_smart_worker(
+        self,
+        main: Path,
+        inserted: Path,
+        output: Path,
+        profile: MediaProfile,
+        insertion: float,
+        total_duration: float,
+        use_fade: bool = False,
+        fade_seconds: float = 0.5,
+    ) -> None:
         work_dir = self.output_dir / f"smart_insert_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
         extension = output.suffix or ".m4a"
@@ -4397,7 +4518,7 @@ class FfmpegToolsPanel:
                 step += 1
                 left = work_dir / f"{len(pieces):03d}{extension}"
                 self._execute(
-                    [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", "0", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
                     "Smart Insert: trecho inicial",
                     step,
                     4,
@@ -4406,16 +4527,35 @@ class FfmpegToolsPanel:
                 pieces.append(left)
             step += 1
             middle = work_dir / f"{len(pieces):03d}{extension}"
+            inserted_dur = self._get_duration_only(inserted)
+            eff_fade = min(fade_seconds, inserted_dur / 2) if use_fade else 0.0
+
+            fade_filters: list[str] = []
+            if eff_fade > 0:
+                fade_filters.append(f"afade=t=in:st=0:d={self._fmt_seconds(eff_fade)}")
+                fade_out_st = max(0.0, inserted_dur - eff_fade)
+                fade_filters.append(f"afade=t=out:st={self._fmt_seconds(fade_out_st)}:d={self._fmt_seconds(eff_fade)}")
+
+            middle_cmd = [
+                str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0",
+                "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
+            ]
+            if fade_filters:
+                middle_cmd += ["-af", ",".join(fade_filters)]
+
+            if extension.lower() == ".wav":
+                pcm_codec = profile.audio_codec if profile.audio_codec.startswith("pcm_") else "pcm_s16le"
+                middle_cmd += ["-c:a", pcm_codec, "-f", "wav"]
+            else:
+                middle_cmd += self._audio_codec_args(extension, profile.audio_bitrate)
+            middle_cmd.append(str(middle))
+
             self._execute(
-                [
-                    str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0",
-                    "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
-                    *self._audio_codec_args(extension, profile.audio_bitrate), str(middle),
-                ],
+                middle_cmd,
                 "Smart Insert: compatibilizando áudio inserido",
                 step,
                 4,
-                self._get_duration_only(inserted),
+                inserted_dur,
             )
             pieces.append(middle)
             main_duration = self._get_duration_only(main)
@@ -4445,8 +4585,12 @@ class FfmpegToolsPanel:
             encoding="utf-8",
         )
         try:
+            concat_cmd = [str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy"]
+            if output.suffix.lower() == ".m4a":
+                concat_cmd += ["-movflags", "+faststart"]
+            concat_cmd += ["-avoid_negative_ts", "make_zero", str(output)]
             self._execute(
-                [str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-avoid_negative_ts", "make_zero", str(output)],
+                concat_cmd,
                 label,
                 progress,
                 total,
@@ -4505,11 +4649,13 @@ class FfmpegToolsPanel:
             filters.append(f"[{previous}]anull[aout]")
         else:
             filters.append("".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
+        ext = output.suffix.lower().lstrip(".")
+        codec_args = self._audio_codec_args(ext, profile.audio_bitrate)
         return [
             str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-i", str(inserted),
             "-filter_complex", ";".join(filters), "-map", "[aout]", "-vn",
             "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
-            *self._audio_codec_args("m4a", profile.audio_bitrate), "-map_metadata", "-1", str(output),
+            *codec_args, "-map_metadata", "-1", str(output),
         ]
 
     def _clean_worker(self) -> None:
@@ -4719,6 +4865,40 @@ def parse_api_keys_text(text: str) -> dict[str, str]:
     return imported
 
 
+def fallback_text_model_for_missing_api_key(
+    model_name: str,
+    grok_api_key: str,
+    deepseek_api_key: str,
+) -> str:
+    """Retorna o Gemma quando um modelo de texto direto perdeu sua chave."""
+    candidate = str(model_name or "").strip()
+    if candidate in GROK_TEXT_API_NAMES and not str(grok_api_key or "").strip():
+        return SERVER_GEMMA_NAME
+    if candidate in DEEPSEEK_API_NAMES and not str(deepseek_api_key or "").strip():
+        return SERVER_GEMMA_NAME
+    return candidate
+
+
+def fallback_transcription_server_for_missing_api_key(
+    server_name: str,
+    grok_api_key: str,
+    deepgram_api_key: str,
+    assemblyai_api_key: str,
+    elevenlabs_api_key: str,
+) -> str:
+    """Retorna o Granite NAR quando um servidor STT perdeu sua chave."""
+    candidate = str(server_name or "").strip()
+    api_keys = {
+        GROK_API_NAME: grok_api_key,
+        DEEPGRAM_API_NAME: deepgram_api_key,
+        ASSEMBLYAI_API_NAME: assemblyai_api_key,
+        ELEVENLABS_API_NAME: elevenlabs_api_key,
+    }
+    if candidate in api_keys and not str(api_keys[candidate] or "").strip():
+        return DEFAULT_SETTINGS["transcription_server"]
+    return candidate
+
+
 def load_settings() -> dict:
     data = DEFAULT_SETTINGS.copy()
     path = settings_path()
@@ -4758,6 +4938,11 @@ def normalize_settings(data: dict) -> dict:
         if isinstance(rest_value, bool)
         else str(rest_value).strip().casefold() in {"1", "true", "yes", "on"}
     )
+    grok_api_key = str(data.get("grok_api_key") or "").strip()
+    deepgram_api_key = str(data.get("deepgram_api_key") or "").strip()
+    assemblyai_api_key = str(data.get("assemblyai_api_key") or "").strip()
+    elevenlabs_api_key = str(data.get("elevenlabs_api_key") or "").strip()
+    deepseek_api_key = str(data.get("deepseek_api_key") or "").strip()
     server_names = {server["name"] for server in read_transcription_servers()}
     transcription_server = str(
         data.get("transcription_server") or DEFAULT_SETTINGS["transcription_server"]
@@ -4766,6 +4951,13 @@ def normalize_settings(data: dict) -> dict:
         "Taguai-speech": "servidor",
         "Grok (API)": GROK_API_NAME,
     }.get(transcription_server, transcription_server)
+    transcription_server = fallback_transcription_server_for_missing_api_key(
+        transcription_server,
+        grok_api_key,
+        deepgram_api_key,
+        assemblyai_api_key,
+        elevenlabs_api_key,
+    )
     clean["transcription_server"] = (
         transcription_server
         if transcription_server in server_names
@@ -4774,12 +4966,18 @@ def normalize_settings(data: dict) -> dict:
     multi_models = data.get("multi_transcription_models")
     if not isinstance(multi_models, (list, tuple)):
         multi_models = []
-    clean["multi_transcription_models"] = list(dict.fromkeys(
-        str(name).strip()
-        for name in multi_models
-        if str(name).strip() in server_names
-        and str(name).strip() != ELEVENLABS_API_NAME
-    ))[:3]
+    normalized_multi_models = []
+    for name in multi_models:
+        candidate = fallback_transcription_server_for_missing_api_key(
+            str(name).strip(),
+            grok_api_key,
+            deepgram_api_key,
+            assemblyai_api_key,
+            elevenlabs_api_key,
+        )
+        if candidate in server_names and candidate != ELEVENLABS_API_NAME:
+            normalized_multi_models.append(candidate)
+    clean["multi_transcription_models"] = list(dict.fromkeys(normalized_multi_models))[:3]
     text_model_names = {model["name"] for model in read_text_models()}
 
     def proxy_model(value, provider):
@@ -4832,6 +5030,7 @@ def normalize_settings(data: dict) -> dict:
         parts_model
         if parts_model in {
             IA_PROXY_NAME,
+            SERVER_GEMMA_NAME,
             GROK_NON_REASONING_TEXT_NAME,
             GROK_TEXT_NAME,
             DEEPSEEK_TEXT_NAME,
@@ -4849,16 +5048,16 @@ def normalize_settings(data: dict) -> dict:
         if clean["parts_proxy_model"] == DEEPSEEK_TEXT_NAME
         else "grok"
     )
-    clean["grok_api_key"] = str(data.get("grok_api_key") or "").strip()
-    clean["deepgram_api_key"] = str(data.get("deepgram_api_key") or "").strip()
+    clean["grok_api_key"] = grok_api_key
+    clean["deepgram_api_key"] = deepgram_api_key
     clean["deepgram_keyterms"] = ", ".join(
         term.strip()
         for term in str(data.get("deepgram_keyterms") or "").replace("\n", ",").split(",")
         if term.strip()
     )
-    clean["assemblyai_api_key"] = str(data.get("assemblyai_api_key") or "").strip()
-    clean["elevenlabs_api_key"] = str(data.get("elevenlabs_api_key") or "").strip()
-    clean["deepseek_api_key"] = str(data.get("deepseek_api_key") or "").strip()
+    clean["assemblyai_api_key"] = assemblyai_api_key
+    clean["elevenlabs_api_key"] = elevenlabs_api_key
+    clean["deepseek_api_key"] = deepseek_api_key
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
     clean["police_role"] = str(data.get("police_role") or "").strip()
@@ -4866,13 +5065,13 @@ def normalize_settings(data: dict) -> dict:
     clean["police_delegate"] = str(data.get("police_delegate") or "").strip()
     clean["police_city"] = str(data.get("police_city") or "").strip()
     if clean["text_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
-        clean["text_model"] = IA_PROXY_NAME
+        clean["text_model"] = SERVER_GEMMA_NAME
     if clean["text_model"] in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
-        clean["text_model"] = IA_PROXY_NAME
+        clean["text_model"] = SERVER_GEMMA_NAME
     if clean["parts_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
-        clean["parts_model"] = IA_PROXY_NAME
+        clean["parts_model"] = SERVER_GEMMA_NAME
     if clean["parts_model"] == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
-        clean["parts_model"] = IA_PROXY_NAME
+        clean["parts_model"] = SERVER_GEMMA_NAME
     # Modelos por tarefa (histórico, oitiva e qualificação) e raciocínio das
     # partes: preservados com fallback para as chaves gerais de texto.
     task_preserved: dict[str, object] = {}
@@ -4880,6 +5079,10 @@ def normalize_settings(data: dict) -> dict:
         model_key, reasoning_key, proxy_key = keys
         raw_model = str(data.get(model_key) or "")
         model_value = raw_model if raw_model in text_model_names else clean["text_model"]
+        if model_value in GROK_TEXT_API_NAMES and not plausible_xai_api_key(grok_api_key):
+            model_value = SERVER_GEMMA_NAME
+        elif model_value in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(deepseek_api_key):
+            model_value = SERVER_GEMMA_NAME
         task_preserved[model_key] = model_value
         task_preserved[proxy_key] = proxy_model(data.get(proxy_key), "grok")
         effective_model = task_preserved[proxy_key] if model_value == IA_PROXY_NAME else model_value
@@ -6853,6 +7056,8 @@ class SigApp:
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
+        self.live_ws_finalize_pending = False
+        self.live_ws_finalize_started: float | None = None
         self.update_button_var = StringVar(value="Atualização disponível")
         self.server_var = StringVar()
         self.progress_var = IntVar(value=0)
@@ -7310,24 +7515,92 @@ class SigApp:
 
         return message.rstrip(".")
 
+    def _log_message_tag(self, message: str) -> str | None:
+        """Cor automática da linha do log pelo conteúdo (FFmpeg dourado, erro
+        vermelho, aviso amarelo, sucesso verde)."""
+        lower = str(message or "").strip().lower()
+        if not lower:
+            return None
+        if lower.startswith("ffmpeg:"):
+            return "ffmpeg_command"
+        error_patterns = (
+            r"\berro\b",
+            r"\bfalha\b",
+            r"não consegui",
+            r"não foi possível",
+            r"não foi possivel",
+            r"\brecusad",
+            r"inválid",
+            r"\binvalid",
+            r"^http [45]\d{2}",
+            r"falhou",
+            r"fechou a conexão",
+            r"retornou código",
+            r"resposta vazia",
+            r"gravação vazia",
+            r"sem conteúdo",
+            r"nenhum microfone",
+            r"não há microfone",
+        )
+        if any(re.search(pattern, lower) for pattern in error_patterns):
+            return "activity_step_error"
+        warning_patterns = (
+            r"reconectando",
+            r"desconectado",
+            r"não enviou uma confirmação",
+            r"não havia conexão ativa",
+            r"sem áudio foi gravado",
+            r"não concluiu dentro do tempo",
+            r"mantive o texto parcial",
+            r"não foi possível confirmar",
+            r"\baguarde\b",
+            r"cancelad",
+            r"^parâmetros",
+        )
+        if any(re.search(pattern, lower) for pattern in warning_patterns):
+            return "warning"
+        success_patterns = (
+            r"concluíd",
+            r"finalizad",
+            r"requisitad",
+            r"gerad",
+            r"\bpront",
+            r"salvamento",
+            r"baixad",
+            r"atualizad",
+            r"^reconectou",
+            r"^gravando",
+            r"^gravando pelo",
+            r"^conectando",
+            r"^conectado",
+            r"^enviando",
+            r"^ouvindo",
+            r"pausada",
+            r"^transcrição concluída",
+        )
+        if any(re.search(pattern, lower) for pattern in success_patterns):
+            return "activity_step_done"
+        return None
+
     def _append_activity_log(self, message: str, tag: str | None = None, *, raw: bool = False):
         if not raw:
             message = self._compact_activity_message(message)
         if not message or not getattr(self, "activity_log", None):
             return
         self.activity_log.configure(state="normal")
+        if "activity_step_done" not in self.activity_log.tag_names():
+            self.activity_log.tag_configure("activity_step_done", foreground="#16833a")
+        if "activity_step_error" not in self.activity_log.tag_names():
+            self.activity_log.tag_configure("activity_step_error", foreground="#b3261e")
         if "vad_total" not in self.activity_log.tag_names():
             self.activity_log.tag_configure("vad_total", foreground="#0a7a2f")
         if "warning" not in self.activity_log.tag_names():
             self.activity_log.tag_configure("warning", foreground="#a65300")
         if "ffmpeg_command" not in self.activity_log.tag_names():
-            self.activity_log.tag_configure("ffmpeg_command", foreground="#536471")
+            self.activity_log.tag_configure("ffmpeg_command", foreground="#c99a2e")
         for part in message.splitlines():
             line = f"{time.strftime('%H:%M:%S')}  {part}\n"
-            if tag:
-                self.activity_log.insert(END, line, tag)
-            else:
-                self.activity_log.insert(END, line)
+            self.activity_log.insert(END, line, tag or self._log_message_tag(part))
         self.activity_log.see(END)
         self.activity_log.configure(state="disabled")
 
@@ -7380,6 +7653,24 @@ class SigApp:
             self._sync_file_marks.pop(path, None)
         box.see("end")
         box.configure(state="disabled")
+
+    def _activity_log_click(self, event):
+        """Clique em linha vermelha/amarela do log copia o texto da mensagem."""
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        try:
+            index = box.index(f"@{event.x},{event.y}")
+            tags = set(box.tag_names(index))
+            if tags & {"activity_step_error", "activity_step_warning", "warning"}:
+                start = box.index(f"{index} linestart")
+                end = box.index(f"{index} lineend")
+                text = box.get(start, end).strip()
+                if text:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(text)
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _format_size(total_bytes: int) -> str:
@@ -7986,6 +8277,7 @@ try {
         self.activity_log.grid(row=0, column=0, sticky="nsew")
         activity_scroll.grid(row=0, column=1, sticky="ns")
         activity_hscroll.grid(row=1, column=0, sticky="ew")
+        self.activity_log.bind("<Button-1>", self._activity_log_click)
 
         self.live_tab = ttk.Frame(self.tab_content, padding=(14, 2, 14, 14))
         self.files_tab = ttk.Frame(self.tab_content, padding=14)
@@ -8517,8 +8809,8 @@ try {
 
         self.live_document_actions_frame = ttk.Frame(
             self.live_document_preview_panel,
-            width=222,
-            height=66,
+            width=74,
+            height=222,
         )
         self.live_document_actions_frame.pack_propagate(False)
         self.live_document_copy_progress = ttk.Progressbar(
@@ -8533,7 +8825,7 @@ try {
                 width=66,
                 height=66,
             )
-            holder.pack(side=LEFT, padx=(8, 0))
+            holder.pack(side=TOP, pady=(0, 8))
             holder.pack_propagate(False)
             button = ttk.Button(
                 holder,
@@ -9703,6 +9995,41 @@ try {
             button.place(x=right_x, y=center_y, anchor="w")
             right_x -= 4
 
+    def _document_preview_max_width(self) -> int:
+        """Largura máxima da caixa da prévia.
+
+        O stage não pode passar da borda direita do painel e precisa deixar
+        vão suficiente à direita para a coluna de ações ficar no meio do
+        espaço entre a preview e o log (74px + 8 de respiro a cada lado).
+        """
+        panel = getattr(self, "live_document_preview_panel", None)
+        log = getattr(self, "activity_box", None)
+        if panel is None or log is None or not panel.winfo_exists() or not log.winfo_exists():
+            return 1120
+        try:
+            panel_width = max(1, panel.winfo_width())
+            gap_to_log = log.winfo_rootx() - panel.winfo_rootx()
+            return max(220, min(panel_width - 8, gap_to_log - 74 - 16))
+        except Exception:
+            return 1120
+
+    def _document_preview_stage_width(self, available_width: int) -> int:
+        """Largura da caixa da prévia — SEMPRE a página A4 no tamanho de 100%.
+
+        A caixa representa a largura FÍSICA do papel (A4: 21 cm) no zoom de
+        100%, calculada do DPI real do painel. Assim ela é IDÊNTICA antes de
+        gerar o documento, depois de gerar e em QUALQUER zoom — o zoom só
+        encolhe o conteúdo renderizado dentro da mesma caixa. Nunca usar a
+        largura da imagem re-renderizada (depende do zoom e do estado de
+        carregamento, causando o 'pulo' da caixa).
+        """
+        # Largura física do A4 (21 cm) em pixels a 100% no DPI real do painel.
+        dpi = _window_physical_dpi(self.root)
+        page_width_100 = round(21 / 2.54 * dpi)
+        # Imagem inteira + insets laterais (4) + scrollbar (14) + respiro (4).
+        needed = page_width_100 + 22
+        return max(220, min(available_width, needed))
+
     def _fit_live_document_preview(self, _event=None):
         """Use the lower workspace for a wide, vertically scrollable A4 preview."""
         row = getattr(self, "live_qualification_row", None)
@@ -9740,10 +10067,9 @@ try {
             180,
             min(520, available_height - action_height - 4 - extra_height),
         )
-        # Keep the document preview comfortably sized without letting the
-        # player occupy all of the lower workspace.  The surrounding panel
-        # remains in place so the other occurrence controls do not shift.
-        stage_width = max(220, min(1120, round(available_width * 0.77 * 0.92)))
+        # A caixa representa SEMPRE a página a 100% (o zoom só encolhe o
+        # conteúdo), limitada pelo vão até o log — que guarda a coluna de ações.
+        stage_width = self._document_preview_stage_width(self._document_preview_max_width())
         stage.configure(
             width=stage_width,
             height=stage_height + extra_height,
@@ -9853,8 +10179,10 @@ try {
         stage_height = max(1, qualification_editor.winfo_height())
         # Do not read stage.winfo_width() here: while the panel is being moved
         # Tk can report its transient pre-layout width as 1 px. Recompute the
-        # approved 23% reduction from the panel's real available width.
-        stage_width = max(220, min(1120, round(panel_width * 0.77 * 0.92)))
+        # width from the panel's real available width — the box represents
+        # always the page at 100% (zoom only shrinks the content) and is
+        # limited by the gap to the log, which hosts the actions column.
+        stage_width = self._document_preview_stage_width(self._document_preview_max_width())
         stage.place(
             x=0,
             y=stage_y,
@@ -9874,18 +10202,31 @@ try {
             height=zoom_height,
         )
 
-        # Keep the document actions in the free strip between the player and
-        # the log. Explicit placement prevents the player from squeezing them
-        # to a few pixels when the window is not maximized.
+        # A coluna de ações fica no MEIO do espaço entre a borda direita da
+        # caixa de preview (stage) e a borda esquerda da caixa de log, com a
+        # borda inferior do botão Salvar na linha da borda inferior do log.
         actions = getattr(self, "live_document_actions_frame", None)
         if actions and actions.winfo_ismapped():
             actions.update_idletasks()
-            actions_width = max(148, actions.winfo_reqwidth())
-            actions_height = max(66, actions.winfo_reqheight())
-            action_x = stage_width + 8
-            if action_x + actions_width > panel_width:
-                action_x = max(0, panel_width - actions_width)
-            action_y = stage_y + max(0, (stage_height - actions_height) // 2)
+            actions_width = max(74, actions.winfo_reqwidth())
+            actions_height = max(214, actions.winfo_reqheight())
+            log = getattr(self, "activity_box", None)
+            if log is not None and log.winfo_exists():
+                stage_right_root = stage.winfo_rootx() + stage.winfo_width()
+                log_left_root = log.winfo_rootx()
+                mid_x_root = (stage_right_root + log_left_root) / 2
+                action_x_root = round(mid_x_root - actions_width / 2)
+                lo = stage_right_root + 8
+                hi = log_left_root - actions_width - 8
+                if hi < lo:
+                    hi = lo
+                action_x_root = max(lo, min(action_x_root, hi))
+                action_x = action_x_root - panel.winfo_rootx()
+                log_bottom_root = log.winfo_rooty() + log.winfo_height()
+                action_y = log_bottom_root - panel.winfo_rooty() - actions_height
+            else:
+                action_x = stage_width + 8
+                action_y = stage_y + max(0, (stage_height - actions_height) // 2)
             actions.place(
                 x=action_x,
                 y=action_y,
@@ -9969,12 +10310,12 @@ try {
             scrollbar_width = max(12, scrollbar.winfo_reqwidth())
         available_width = max(40, viewport_width - scrollbar_width)
         photo = self.document_preview_photo
-        # A caixa da prévia abraça o documento: largura = imagem + 2px de cada
-        # lado (mesma margem discreta usada na vertical pelo crop).
-        if photo:
-            target_width = min(available_width, photo.width() + 4)
-        else:
-            target_width = available_width
+        # A caixa (canvas) tem LARGURA FIXA — a página a 100% — e o zoom
+        # apenas encolhe a imagem desenhada DENTRO dela (comportamento de
+        # visualizador: a janela não muda, o conteúdo escala). Antes o canvas
+        # abraçava a imagem (photo.width()+4) e a caixa inteira encolhia no
+        # zoom 25/50%.
+        target_width = available_width
         canvas_x = max(0, (available_width - target_width) // 2)
         canvas.place(
             x=canvas_x,
@@ -10145,6 +10486,9 @@ try {
         )
         self.document_preview_page_var.set(f"Página 1/{pages}")
         self._position_embedded_document_preview()
+        # A imagem renderizada define a largura necessária da caixa: re-posiciona
+        # o stage para abraçar a página inteira (margens e bordas) no zoom atual.
+        self.root.after_idle(self._position_live_document_preview)
         canvas.xview_moveto(0)
         canvas.yview_moveto(0)
 
@@ -10753,8 +11097,8 @@ try {
             return
         canvas.create_oval(4, 4, 40, 40, fill="#13201e", outline="#2c403d", width=2)
         if state in ("listening", "paused"):
-            canvas.create_line(15, 15, 29, 29, fill="#ff4b4b", width=5, capstyle="round")
-            canvas.create_line(29, 15, 15, 29, fill="#ff4b4b", width=5, capstyle="round")
+            canvas.create_line(15, 21, 20, 27, fill="#3ddc66", width=5, capstyle="round")
+            canvas.create_line(20, 27, 30, 15, fill="#3ddc66", width=5, capstyle="round")
         else:
             canvas.create_oval(17, 10, 27, 26, fill="#ff4b4b", outline="#ffd0d0", width=2)
             canvas.create_line(22, 26, 22, 33, fill="#ff4b4b", width=3, capstyle="round")
@@ -10834,8 +11178,8 @@ try {
         canvas.delete("all")
         if self.normal_recording:
             canvas.create_oval(4, 4, 40, 40, fill="#3d1515", outline="#5a2424", width=2)
-            canvas.create_line(15, 15, 29, 29, fill="#ff4b4b", width=5, capstyle="round")
-            canvas.create_line(29, 15, 15, 29, fill="#ff4b4b", width=5, capstyle="round")
+            canvas.create_line(15, 21, 20, 27, fill="#3ddc66", width=5, capstyle="round")
+            canvas.create_line(20, 27, 30, 15, fill="#3ddc66", width=5, capstyle="round")
             return
         canvas.create_oval(4, 4, 40, 40, fill="#ffffff", outline="#768282", width=2)
         canvas.create_oval(17, 10, 27, 26, fill="#536565", outline="")
@@ -11233,8 +11577,8 @@ try {
                 self.live_document_actions_frame.place(
                     x=0,
                     y=0,
-                    width=222,
-                    height=66,
+                    width=74,
+                    height=222,
                 )
             self.root.after_idle(self._position_live_document_preview)
             self._begin_activity_step("preview", "Preview requisitado")
@@ -11870,6 +12214,7 @@ try {
                 "Nenhum microfone de entrada foi encontrado.\n"
                 "Conecte um microfone e tente novamente.",
             )
+            self.status_var.set("Nenhum microfone de entrada foi encontrado. Conecte um microfone e tente novamente.")
             return
         self.microphone_available = True
         self.settings = load_settings()
@@ -11897,7 +12242,7 @@ try {
         self.normal_record_pcm_path = temp / f"gravacao_{int(time.time() * 1000)}.pcm"
         self._draw_normal_live_mic_button()
         self._draw_live_pause_button()
-        self.status_var.set("Gravando. Clique novamente no microfone branco para enviar.")
+        self.status_var.set("Gravando. Clique no botão verde para encerrar gravação")
         self.normal_record_thread = threading.Thread(target=self._normal_live_record_worker, daemon=True)
         self.normal_record_thread.start()
 
@@ -11951,8 +12296,11 @@ try {
                 wav_path.with_suffix(".raw"),
             )
             if status != 200: raise RuntimeError(f"HTTP {status}")
-            self._queue("live_payload", parsed.text, parsed.timestamped_text, grok)
-            self._queue("status", "Transcrição concluída.")
+            if not parsed.text.strip():
+                self._queue("status", "Transcrição ao vivo finalizada sem conteúdo")
+            else:
+                self._queue("live_payload", parsed.text, parsed.timestamped_text, grok)
+                self._queue("status", "Transcrição concluída.")
         except Exception as exc:
             self._queue("status", f"Erro na gravação: {exc}")
         finally:
@@ -12647,7 +12995,7 @@ try {
             return section
 
         api_import_frame = ttk.Frame(api_tab, style="Settings.Inner.TFrame")
-        api_import_frame.pack(fill=X, anchor="n", pady=(0, 8))
+        api_import_frame.pack(anchor="e", pady=(0, 8))
         api_transcription_frame = make_api_section(api_tab, "Transcrição")
         api_text_frame = make_api_section(api_tab, "Texto")
         api_imei_frame = make_api_section(api_tab, "IMEI CHECK")
@@ -13065,9 +13413,22 @@ try {
                     for model in available_models
                 })
                 model_combo.configure(values=list(model_labels_holder))
-                target = preferred_name or str(self.settings.get(settings_model_key) or "")
+                target = (
+                    preferred_name
+                    or model_labels_holder.get(model_var.get(), "")
+                    or str(self.settings.get(settings_model_key) or "")
+                )
+                target = fallback_text_model_for_missing_api_key(
+                    target,
+                    grok_api_key_var.get(),
+                    deepseek_api_key_var.get(),
+                )
                 if target not in model_labels_holder.values():
-                    target = self.settings.get("text_model") or IA_PROXY_NAME
+                    target = (
+                        SERVER_GEMMA_NAME
+                        if SERVER_GEMMA_NAME in model_labels_holder.values()
+                        else IA_PROXY_NAME
+                    )
                 label = next(
                     (item for item, name in model_labels_holder.items() if name == target),
                     next(iter(model_labels_holder), ""),
@@ -13188,10 +13549,27 @@ try {
                 model_labels_holder.clear()
                 model_labels_holder.update(history_ui["labels"])
                 model_combo.configure(values=list(model_labels_holder))
-                current = model_var.get() or str(self.settings.get(settings_model_key) or IA_PROXY_NAME)
-                target = current if current in model_labels_holder else IA_PROXY_NAME
-                if model_var.get() != target:
-                    model_var.set(target)
+                current = (
+                    model_labels_holder.get(model_var.get(), "")
+                    or str(self.settings.get(settings_model_key) or IA_PROXY_NAME)
+                )
+                target = fallback_text_model_for_missing_api_key(
+                    current,
+                    grok_api_key_var.get(),
+                    deepseek_api_key_var.get(),
+                )
+                if target not in model_labels_holder.values():
+                    target = (
+                        SERVER_GEMMA_NAME
+                        if SERVER_GEMMA_NAME in model_labels_holder.values()
+                        else IA_PROXY_NAME
+                    )
+                target_label = next(
+                    (label for label, name in model_labels_holder.items() if name == target),
+                    next(iter(model_labels_holder), ""),
+                )
+                if model_var.get() != target_label:
+                    model_var.set(target_label)
                 configure_menu(
                     proxy_model_menu,
                     proxy_var,
@@ -13290,6 +13668,22 @@ try {
             settings_proxy_key="qualification_proxy_model",
             model_labels_holder=qualification_model_labels,
         )
+
+        def refresh_api_key_dependent_selectors(*_args):
+            refresh_transcription_servers()
+            history_ui["refresh"]()
+            statement_ui["refresh"]()
+            refresh_extraction_visibility()
+            qualification_ui["refresh"]()
+
+        for api_key_variable in (
+            grok_api_key_var,
+            deepseek_api_key_var,
+            deepgram_api_key_var,
+            assemblyai_api_key_var,
+            elevenlabs_api_key_var,
+        ):
+            api_key_variable.trace_add("write", refresh_api_key_dependent_selectors)
 
         ttk.Label(police_frame, text="Nome").grid(
             row=0, column=0, sticky="w", pady=5, padx=(0, 12)
@@ -13416,6 +13810,23 @@ try {
             deepgram_keyterms = str(self.settings.get("deepgram_keyterms") or "").strip()
             assemblyai_api_key = assemblyai_api_key_var.get().strip()
             elevenlabs_api_key = elevenlabs_api_key_var.get().strip()
+            selected_transcription = fallback_transcription_server_for_missing_api_key(
+                selected_transcription,
+                api_key,
+                deepgram_api_key,
+                assemblyai_api_key,
+                elevenlabs_api_key,
+            )
+            selected_history = fallback_text_model_for_missing_api_key(
+                selected_history,
+                api_key,
+                deepseek_api_key,
+            )
+            selected_statement = fallback_text_model_for_missing_api_key(
+                selected_statement,
+                api_key,
+                deepseek_api_key,
+            )
             imei_api_key = imei_api_key_var.get().strip()
             police_name = police_name_var.get().strip()
             police_role = police_role_var.get().strip()
@@ -13478,6 +13889,11 @@ try {
             selected_parts_model_name = parts_model_labels.get(
                 parts_model_var.get(), IA_PROXY_NAME
             )
+            selected_parts_model_name = fallback_text_model_for_missing_api_key(
+                selected_parts_model_name,
+                api_key,
+                deepseek_api_key,
+            )
             selected_parts_proxy_model = parts_proxy_model_var.get()
             if (
                 extraction_key == "ai"
@@ -13499,6 +13915,11 @@ try {
                 return
             selected_qualification_model = qualification_model_labels.get(
                 qualification_model_var.get(), IA_PROXY_NAME
+            )
+            selected_qualification_model = fallback_text_model_for_missing_api_key(
+                selected_qualification_model,
+                api_key,
+                deepseek_api_key,
             )
             if (
                 selected_qualification_model in GROK_TEXT_API_NAMES
@@ -13881,6 +14302,7 @@ try {
                 "Nenhum microfone de entrada foi encontrado.\n"
                 "Conecte um microfone e tente novamente.",
             )
+            self.status_var.set("Nenhum microfone de entrada foi encontrado. Conecte um microfone e tente novamente.")
             return
         self.microphone_available = True
         self.settings = load_settings()
@@ -13921,6 +14343,8 @@ try {
             return
         self.live_stop_event.clear()
         self.live_abort_event.clear()
+        self.live_ws_finalize_pending = False
+        self.live_ws_finalize_started = None
         self.live_uses_grok_websocket = is_grok_transcription(self.settings) and not self.settings.get(
             "grok_rest_requests", False
         )
@@ -14023,6 +14447,8 @@ try {
             and not self.live_uses_elevenlabs_websocket
         ):
             self.status_var.set("Ouvindo e transcrevendo ao vivo...")
+        elif streaming_websocket:
+            self.status_var.set("Gravando. Clique no botão verde para encerrar o websocket")
         if self.live_uses_elevenlabs_websocket:
             target = self._elevenlabs_live_capture_loop
         elif self.live_uses_assemblyai_websocket:
@@ -14077,10 +14503,13 @@ try {
         self._set_live_state("finalizing")
         if self.live_uses_elevenlabs_websocket:
             self.elevenlabs_ws_intentional_close = True
-            self.status_var.set("Recebendo a transcrição final do Scribe...")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.elevenlabs_ws_app
             if not app:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
                 self._finish_live_output()
                 return
@@ -14096,15 +14525,19 @@ try {
                 }))
                 threading.Thread(target=self._wait_for_elevenlabs_final_event, daemon=True).start()
             except Exception:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
                 self._finish_live_output()
             return
         if self.live_uses_assemblyai_websocket:
             self.assemblyai_ws_intentional_close = True
-            self.status_var.set("Recebendo a transcrição final da AssemblyAI...")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.assemblyai_ws_app
             if not app:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
                 self._finish_live_output()
                 return
@@ -14112,15 +14545,19 @@ try {
                 app.send(json.dumps({"type": "Terminate"}))
                 threading.Thread(target=self._wait_for_assemblyai_final_event, daemon=True).start()
             except Exception:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
                 self._finish_live_output()
             return
         if self.live_uses_deepgram_websocket:
             self.deepgram_ws_intentional_close = True
-            self.status_var.set("Recebendo a transcrição final do Deepgram...")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.deepgram_ws_app
             if not app:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
                 self._finish_live_output()
                 return
@@ -14128,15 +14565,19 @@ try {
                 app.send(json.dumps({"type": "CloseStream"}))
                 threading.Thread(target=self._wait_for_deepgram_final_event, daemon=True).start()
             except Exception:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
                 self._finish_live_output()
             return
         if self.live_uses_grok_websocket:
             self.grok_ws_intentional_close = True
-            self.status_var.set("Recebendo a transcrição final do Grok...")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.grok_ws_app
             if not app:
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
                 self._finish_live_output()
                 return
@@ -14148,10 +14589,13 @@ try {
             except Exception:
                 # The user deliberately stopped the stream. Keep the partial text and finish
                 # cleanly instead of routing this through the cancellation/error path.
+                self._finish_ws_finalize_step()
                 self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
                 self._finish_live_output()
             return
-        self.status_var.set("Enviando áudio integral para a transcrição definitiva...")
+        self._begin_activity_step("live:ws_finalize", "Encerrando. Consolidando transcrição")
+        self.live_ws_finalize_started = time.monotonic()
+        self.live_ws_finalize_pending = True
         self.live_stop_event.set()
         with self.live_lock:
             self.live_draft_generation += 1
@@ -14179,6 +14623,7 @@ try {
                 "status",
                 "O Scribe não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
             )
+            self._finish_ws_finalize_step()
             self._finish_live_output()
 
     def _wait_for_assemblyai_final_event(self):
@@ -14196,6 +14641,7 @@ try {
                 "status",
                 "A AssemblyAI não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
             )
+            self._finish_ws_finalize_step()
             self._finish_live_output()
 
     def _wait_for_deepgram_final_event(self):
@@ -14213,6 +14659,7 @@ try {
                 "status",
                 "O Deepgram não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
             )
+            self._finish_ws_finalize_step()
             self._finish_live_output()
 
     def _wait_for_grok_final_event(self):
@@ -14230,6 +14677,7 @@ try {
                 "status",
                 "O Grok não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
             )
+            self._finish_ws_finalize_step()
             self._finish_live_output()
 
     def cancel_live_mic(self):
@@ -14240,6 +14688,8 @@ try {
         self.live_recovery_cancel_event.set()
         self.live_audio_recovery_available = False
         self.live_output_finished = True
+        self.live_ws_finalize_pending = False
+        self._finish_ws_finalize_step()
         self._set_live_audio_recovery_visible(False)
         self.grok_ws_intentional_close = True
         self.deepgram_ws_intentional_close = True
@@ -14668,7 +15118,7 @@ try {
             self._queue("live_display", text)
             if timestamped:
                 self._queue("live_payload", text, timestamped, True)
-            self._queue("status", "Transcrição definitiva concluída.")
+            self._finish_ws_finalize_step()
             self._finish_live_output()
 
         def on_error(_app, _error):
@@ -14921,7 +15371,7 @@ try {
                     if not text:
                         self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
                     self._queue("live_display", text)
-                    self._queue("status", "Transcrição definitiva concluída.")
+                    self._finish_ws_finalize_step()
                     self._finish_live_output()
                 return
             if event_type == "Error":
@@ -14955,7 +15405,7 @@ try {
                 if not text:
                     self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
                 self._queue("live_display", text)
-                self._queue("status", "Transcrição definitiva concluída.")
+                self._finish_ws_finalize_step()
                 self._finish_live_output()
                 return
             if (
@@ -15210,7 +15660,7 @@ try {
                 self._queue("live_display", text)
                 if timestamped:
                     self._queue("live_payload", text, timestamped, True)
-                self._queue("status", "Transcrição definitiva concluída.")
+                self._finish_ws_finalize_step()
                 self._finish_live_output()
                 return
             if (
@@ -15419,7 +15869,7 @@ try {
                 self._queue("live_display", text)
                 if timestamped:
                     self._queue("live_payload", text, timestamped, True)
-                self._queue("status", "Transcrição definitiva concluída.")
+                self._finish_ws_finalize_step()
                 self._finish_live_output()
             elif event_type == "error":
                 self.grok_ws_lost_event.set()
@@ -15713,48 +16163,24 @@ try {
                 return
             if not pcm_path or not pcm_path.exists() or pcm_path.stat().st_size < 1024:
                 self._queue("status", "Nenhum áudio foi gravado.")
+                self._finish_ws_finalize_step()
                 self._finish_live_output()
                 return
-            temp_dir = app_base_dir() / "temp"
-            temp_live = temp_dir / "live"
-            raw_dir = temp_live / "raw"
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            wav_path = temp_live / f"live_definitive_{int(time.time() * 1000)}.wav"
-            raw_path = raw_dir / f"{wav_path.stem}.json"
-            try:
-                write_wav_from_pcm_file(wav_path, pcm_path)
-                definitive_settings = load_settings()
-                self.live_uploader = create_transcription_uploader(self.live_abort_event, definitive_settings)
-                status, parsed = self.live_uploader.post_file_parsed(
-                    transcribe_url(definitive_settings),
-                    wav_path,
-                    "audio/wav",
-                    raw_path,
-                )
-                if status != 200:
-                    raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
-                    raise RuntimeError(f"HTTP {status}\n{raw}")
-                definitive = parsed.text.strip()
-                if not definitive:
-                    raise RuntimeError("A transcrição definitiva voltou vazia.")
-                with self.live_lock:
-                    self.live_committed_text = definitive
-                    self.live_draft_text = ""
-                    display = self._current_live_text_locked()
-                self._queue(
-                    "live_payload",
-                    display,
-                    parsed.timestamped_text,
-                    is_grok_transcription(definitive_settings),
-                )
-                self._queue("status", "Transcrição definitiva concluída.")
-            except Exception as exc:
-                self._queue("status", f"Não consegui gerar a transcrição definitiva. Mantive o texto parcial. Detalhe: {exc}")
-            finally:
-                try:
-                    wav_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            # A transcrição definitiva por REST (reupload do áudio integral) foi
+            # removida do provedor primário: o texto final é o já acumulado das
+            # janelas ao vivo. O modelo secundário (Granite) mantém a própria
+            # requisição final em _transcribe_secondary_definitive.
+            with self.live_lock:
+                text = self.live_committed_text.strip() or self._current_live_text_locked().strip()
+                self.live_committed_text = text
+                self.live_draft_text = ""
+            timestamped = (self.live_timestamped_transcript_text or "").strip()
+            if not text:
+                self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
+            self._queue("live_display", text)
+            if timestamped:
+                self._queue("live_payload", text, timestamped, True)
+            self._finish_ws_finalize_step()
             self._finish_live_output()
         finally:
             try:
@@ -15763,6 +16189,11 @@ try {
             except Exception:
                 pass
             self.live_full_pcm_path = None
+
+    def _finish_ws_finalize_step(self) -> None:
+        """Encerra a etapa 'Websocket encerrado. Recebendo transcrição' na UI thread."""
+        started = self.live_ws_finalize_started
+        self._queue("activity_step_finish", "live:ws_finalize", time.monotonic() - started if started else 0.0)
 
     def _finish_live_output(self):
         if self.live_output_finished:
@@ -15788,7 +16219,11 @@ try {
         )
         self.live_output_finished = True
         self._queue("live_state", "idle")
-        self._queue("status", "Transcrição ao vivo finalizada.")
+        if not self.live_ws_finalize_pending:
+            # Encerramento fora do fluxo do botão Parar (ex.: transcript.done
+            # espontâneo do servidor): registra o tempo do ciclo ao vivo.
+            elapsed = max(0.0, time.time() - getattr(self, "live_started_at", time.time()))
+            self._queue("status", f"Transcrição ao vivo finalizada ({elapsed:.1f}s)")
 
     def _wait_for_live_capture(self):
         live_thread = self.live_thread
@@ -15802,9 +16237,7 @@ try {
         self.live_secondary_done_event.wait(45)
         self.live_finish_waiting = False
         self._finish_live_output()
-        if self.live_secondary_done_event.is_set():
-            self._queue("status", "Transcrição ao vivo finalizada nos dois modelos.")
-        else:
+        if not self.live_secondary_done_event.is_set():
             self._queue("status", "O modelo 2 não concluiu dentro do tempo esperado; o texto recebido foi mantido.")
 
     def save_html_report(self):
@@ -17136,6 +17569,11 @@ try {
                 elif kind == "activity_line":
                     key, text, tag = message[1], message[2], message[3] if len(message) > 3 else None
                     self._update_activity_line(key, text, tag)
+                elif kind == "activity_step_finish":
+                    key, elapsed = message[1], float(message[2])
+                    self._finish_activity_step(key, elapsed)
+                    if key == "live:ws_finalize":
+                        self.live_ws_finalize_pending = False
                 elif kind == "progress":
                     value = max(0, min(100, int(message[1])))
                     self.progress_var.set(value)

@@ -64,11 +64,11 @@ class MultiTranscriptionTests(unittest.TestCase):
         self.assertNotIn("text_model_2", settings)
         self.assertNotIn("history_model_2", settings)
         self.assertNotIn("statement_model_2", settings)
-        # Nomes inexistentes (ex.: servidor removido) e o Scribe realtime
-        # (somente ao vivo) são descartados da multi-seleção.
+        # O Grok sem chave é substituído pelo servidor; o Scribe realtime
+        # (somente ao vivo) continua fora da multi-seleção.
         self.assertEqual(
             settings["multi_transcription_models"],
-            ["servidor", GROK_API_NAME],
+            ["servidor"],
         )
 
 

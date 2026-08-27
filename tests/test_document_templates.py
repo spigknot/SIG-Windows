@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from sig_app import (  # noqa: E402
     DOCUMENT_TEMPLATE_NAMES,
+    SigApp,
     _crop_preview_page_to_content,
     build_cf_html,
     generate_docx_from_template,
@@ -38,8 +39,60 @@ REPLACEMENTS = {
 }
 
 
+class DocumentPreviewStageWidthTests(unittest.TestCase):
+    """A caixa da prévia representa SEMPRE a página A4 no tamanho de 100%.
+
+    Regressão vacinada: a caixa NÃO pode depender da imagem renderizada nem
+    do zoom — ela é calculada da largura FÍSICA do papel (21 cm) no DPI real.
+    Isso garante: (a) o zoom só encolhe o conteúdo, nunca a caixa; (b) a caixa
+    já nasce no tamanho final antes de qualquer documento ser gerado; (c) a
+    margem direita nunca é cortada (a caixa representa a página inteira).
+    """
+
+    def _stage_width(self, available_width, *, dpi=96, photo=False, zoom="100%"):
+        app = object.__new__(SigApp)
+        app.root = None  # _window_physical_dpi é substituído pelo mock
+        if photo:
+            app.document_preview_photo = object()  # só precisa existir
+        app.document_preview_zoom_var = type(
+            "FakeVar", (), {"get": lambda self: zoom}
+        )()
+        from unittest import mock
+
+        with mock.patch("sig_app._window_physical_dpi", return_value=dpi):
+            return SigApp._document_preview_stage_width(app, available_width)
+
+    def test_box_is_a4_page_at_100_percent(self):
+        # A4 (21cm) a 100% em 96 DPI = 794px + respiros = 816.
+        self.assertEqual(self._stage_width(1000), 816)
+
+    def test_box_scales_with_physical_dpi(self):
+        # No painel de ~102 PPI (tela do usuário): 843 + 22 = 865.
+        self.assertEqual(self._stage_width(1000, dpi=102), 865)
+
+    def test_box_ignores_photo_and_zoom(self):
+        # O tamanho é o MESMO com ou sem imagem renderizada e em qualquer
+        # zoom (25/50/100%) — o zoom nunca encolhe a caixa.
+        without = self._stage_width(1000, photo=False, zoom="100%")
+        with_photo_100 = self._stage_width(1000, photo=True, zoom="100%")
+        with_photo_25 = self._stage_width(1000, photo=True, zoom="25%")
+        with_photo_50 = self._stage_width(1000, photo=True, zoom="50%")
+        self.assertEqual(without, with_photo_100)
+        self.assertEqual(with_photo_100, with_photo_25)
+        self.assertEqual(with_photo_25, with_photo_50)
+
+    def test_box_respects_maximum_width(self):
+        # Em janela estreita a caixa cede até o limite máximo disponível
+        # (calculado pelo chamador a partir do vão até o log).
+        self.assertEqual(self._stage_width(700, dpi=102), 700)
+        self.assertEqual(self._stage_width(600, dpi=102), 600)
+
+    def test_box_has_a_floor(self):
+        self.assertEqual(self._stage_width(200, dpi=102), 220)
+
+
 class DocumentTemplateTests(unittest.TestCase):
-    def test_preview_keeps_small_vertical_margins_without_side_waste(self):
+    def test_crop_keeps_full_page_width_and_trims_vertical_blank(self):
         from PIL import Image, ImageDraw
 
         page = Image.new("RGB", (100, 100), "white")
@@ -52,12 +105,17 @@ class DocumentTemplateTests(unittest.TestCase):
             vertical_padding=12,
         )
         try:
-            self.assertEqual(preview.size, (84, 84))
-            self.assertEqual(preview.getpixel((42, 0)), (255, 255, 255))
-            self.assertEqual(preview.getpixel((42, 11)), (255, 255, 255))
-            self.assertEqual(preview.getpixel((42, 12)), (0, 0, 0))
-            self.assertEqual(preview.getpixel((42, 71)), (0, 0, 0))
-            self.assertEqual(preview.getpixel((42, 83)), (255, 255, 255))
+            # A largura TOTAL da página é preservada (104 = 100 + 2 + 2):
+            # as margens esquerda e direita do documento ficam visíveis.
+            # Só o vazio vertical é cortado (60 de conteúdo + 12 + 12).
+            self.assertEqual(preview.size, (104, 84))
+            self.assertEqual(preview.getpixel((52, 11)), (255, 255, 255))
+            self.assertEqual(preview.getpixel((52, 12)), (0, 0, 0))
+            self.assertEqual(preview.getpixel((52, 71)), (0, 0, 0))
+            self.assertEqual(preview.getpixel((52, 72)), (255, 255, 255))
+            # Margens laterais presentes na imagem final (nada é cortado).
+            self.assertEqual(preview.getpixel((0, 52)), (255, 255, 255))
+            self.assertEqual(preview.getpixel((103, 52)), (255, 255, 255))
         finally:
             preview.close()
 
@@ -111,7 +169,7 @@ class DocumentTemplateTests(unittest.TestCase):
                     document_xml = archive.read("word/document.xml").decode("utf-8")
                 self.assertNotIn("{{", document_xml)
                 self.assertNotIn("ns0:", document_xml)
-                self.assertIn("w:sz w:val=\"20\"", document_xml)
+                self.assertIn('w:sz w:val="20"', document_xml)
 
     def test_bold_statement_marker_remains_bold(self):
         with tempfile.TemporaryDirectory() as temporary:

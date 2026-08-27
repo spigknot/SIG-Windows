@@ -18,9 +18,9 @@ Os prompts podem ser ajustados diretamente nos arquivos de `prompts/`. Em uma in
 empacotada, a pasta fica ao lado de `sig.exe`; a cópia em `_internal/prompts` é mantida como
 fallback para instalações que não tenham a pasta externa.
 
-Os modelos `modelo_declaracoes.docx` e `modelo_depoimento.docx` seguem a mesma regra:
-a pasta externa `modelos/` tem prioridade, enquanto `_internal/modelos` preserva uma
-cópia de segurança para instalações e atualizações.
+Os modelos `modelo_declaracoes.docx` e `modelo_depoimento.docx` NÃO são empacotados
+no executável: a instalação e as atualizações (full/diff) entregam a pasta `modelos/`
+ao lado de `sig.exe`.
 
 ## Pacotes
 

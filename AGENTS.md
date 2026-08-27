@@ -8,8 +8,9 @@ ser carregados somente pelo roteamento em `docs/agents/README.md`.
 - Prompts editaveis pertencem a `prompts/`; `src/assistant_prompts.py` apenas os
   carrega e monta as partes variaveis. Nao duplicar o texto dos prompts em
   codigo-fonte.
-- Modelos Word editaveis pertencem a `modelos/`. A copia externa ao lado do
-  aplicativo tem prioridade sobre a copia empacotada.
+- Modelos Word editaveis pertencem a `modelos/`; nao sao empacotados no
+  executavel — instalacao e updates (full/diff) entregam a pasta `modelos/`
+  ao lado do aplicativo.
 - O codigo-fonte e o contrato de comportamento sao a fonte de verdade. Nao
   editar `dist/`, artefatos gerados ou pacotes publicados como se fossem fonte.
 

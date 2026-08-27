@@ -28,7 +28,6 @@ a = Analysis(
         ('assets/icon.png', 'assets'),
         ('assets/default_nomes.txt', 'assets'),
         ('prompts/*.txt', 'prompts'),
-        ('modelos/*.docx', 'modelos'),
     ] + sounddevice_datas + pdfium_datas,
     hiddenimports=[
         '_cffi_backend',
