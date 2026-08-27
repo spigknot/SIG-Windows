@@ -1,0 +1,54 @@
+RELATÓRIO DE BUGS — FERRAMENTAS FFMPEG
+
+Commit auditado: 2cba133
+Status: todos os findings abaixo continuam presentes no código atual.
+
+1. [ALTA] SmartJoin de áudio ignora a transição
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 3932 e 3944
+Explicação: usa -c copy mesmo quando o usuário seleciona tempo de transição.
+
+2. [ALTA] Join de áudio oferece transições de vídeo e sempre usa tri
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 2043 e 3968
+Explicação: opções como dissolve e wipeleft não são convertidas; o comando usa sempre c1=tri:c2=tri.
+
+3. [ALTA] Join de vídeo em modo cópia valida somente a resolução
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 3999 e 4015
+Explicação: não verifica codec, FPS, pixel format, timebase ou compatibilidade dos streams.
+
+4. [ALTA] Insert em modo cópia aceita áudios incompatíveis
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 4454 e 4467
+Explicação: compara apenas a extensão dos arquivos.
+
+5. [ALTA] SmartJoin com clipes sem áudio gera áudio incompleto
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linha: 4210
+Explicação: não cria silêncio para o corpo de clipes sem áudio.
+
+6. [ALTA] Transições muito longas descartam conteúdo
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 4113 e 4166
+Explicação: trechos com duração igual ou inferior a 0,12 s são omitidos.
+
+7. [MÉDIA] Combinações inválidas de áudio continuam disponíveis
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 1923 e 3488
+Explicação: OGG e Opus permitem frequências e bitrates que fazem o FFmpeg falhar.
+
+8. [MÉDIA] Fallback de hardware continua fixado em libx264
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 3275 e 3447
+Explicação: pode ignorar o fallback detectado como mpeg4.
+
+9. [MÉDIA] Encoder e qualidade ficam disponíveis quando não têm efeito
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linha: 2145
+Explicação: a interface permite escolher encoder em operações de áudio, cópia direta e metadata-only, mas a opção não é usada.
+
+10. [BAIXA] WMA pode ser produzido com codec AAC
+Arquivo: D:\Projetos\SIG Windows\src\sig_app.py
+Linhas: 3494 e 4431
+Explicação: o arquivo pode manter extensão .wma embora o codec usado seja AAC.

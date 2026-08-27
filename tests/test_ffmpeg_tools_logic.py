@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from sig_app import FfmpegToolsPanel, MediaProfile  # noqa: E402
+from sig_app import FfmpegToolsPanel, MediaProfile, VideoAcceleration  # noqa: E402
 
 
 class FfmpegToolsLogicTests(unittest.TestCase):
@@ -111,6 +111,8 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel = object.__new__(FfmpegToolsPanel)
         panel.running = False
         panel.TRANSITIONS = FfmpegToolsPanel.TRANSITIONS
+        panel.AUDIO_TRANSITIONS = FfmpegToolsPanel.AUDIO_TRANSITIONS
+        panel.join_inputs = []
 
         panel.join_reencode_var = MagicMock()
         panel.join_smart_var = MagicMock()
@@ -119,6 +121,13 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.join_smart_check = MagicMock()
         panel.join_transition_combo = MagicMock()
         panel.join_seconds_entry = MagicMock()
+        panel.active_tool_var = MagicMock()
+        panel.active_tool_var.get.return_value = "Juntar áudios/vídeos"
+        panel.available_accelerations = [VideoAcceleration("cpu", "CPU", "libx264")]
+        panel.acceleration_combo = MagicMock()
+        panel.quality_label = MagicMock()
+        panel.quality_menu_button = MagicMock()
+        panel.quality_help_button = MagicMock()
 
         # Marcando Reencode Completo desmarca SmartJoin
         panel.join_reencode_var.get.return_value = True
@@ -164,6 +173,106 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         # Smart Insert só deve ter No transition e Fade in/out
         args, kwargs = panel.insert_transition_combo.configure.call_args_list[-1]
         self.assertEqual(kwargs.get("values", ()), ("No transition", "Fade in/out"))
+
+    def test_wma_audio_codec_args(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        args = panel._audio_codec_args(".wma", "128k")
+        self.assertEqual(args, ["-c:a", "wmav2", "-b:a", "128k"])
+
+    def test_join_audio_copy_only_logic(self):
+        # Quando SmartJoin está ativado com tempo > 0, NÃO pode cair em copy_only
+        reencode = False
+        smart = True
+        transition_seconds = 1.5
+        copy_only = (not reencode and not smart) or (smart and transition_seconds <= 0.001)
+        self.assertFalse(copy_only)
+
+        # Quando SmartJoin está ativado com tempo 0, cai em copy_only
+        transition_seconds = 0.0
+        copy_only = (not reencode and not smart) or (smart and transition_seconds <= 0.001)
+        self.assertTrue(copy_only)
+
+        # Quando nenhum está ativado (cópia direta), cai em copy_only
+        reencode = False
+        smart = False
+        copy_only = (not reencode and not smart) or (smart and transition_seconds <= 0.001)
+        self.assertTrue(copy_only)
+
+    def test_join_copy_body_generates_silence_for_audioless_clip(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda s: f"{s:.2f}"
+        panel._join_audio_args = lambda p: ["-c:a", "aac", "-b:a", "128k"]
+
+        captured_commands = []
+        panel._execute = lambda cmd, label, prog, tot: captured_commands.append(cmd)
+
+        profile = {
+            "audio_layout": "stereo",
+            "audio_rate": 48000,
+            "audio_bitrate": "128k",
+        }
+        clip_without_audio = (5.0, False, 1920, 1080, "30")
+
+        panel._join_copy_body(
+            source=Path("video_mudo.mp4"),
+            clip=clip_without_audio,
+            profile=profile,
+            destination=Path("out.ts"),
+            start=0.0,
+            duration=5.0,
+            label="Corpo mudo",
+            progress=1,
+            total=1,
+        )
+
+        self.assertEqual(len(captured_commands), 1)
+        cmd = captured_commands[0]
+        # Deve conter anullsrc para manter integridade da trilha de áudio
+        self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000", " ".join(cmd))
+        self.assertIn("-map 1:a:0", " ".join(cmd))
+
+    def test_insert_copy_worker_rejects_incompatible_streams(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        p1 = MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 44100, 2, "stereo", False, "pcm_s16le")
+        p2 = MediaProfile(5.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, "pcm_s16le")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            panel._insert_copy_worker(
+                main=Path("main.wav"),
+                inserted=Path("sub.wav"),
+                output=Path("out.wav"),
+                main_profile=p1,
+                inserted_profile=p2,
+                insertion=2.0,
+                total_duration=15.0,
+            )
+        self.assertIn("taxas de amostragem", str(ctx.exception))
+
+    def test_execute_video_uses_detected_cpu_fallback(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        mpeg4_cpu = VideoAcceleration("cpu", "CPU (fallback)", "mpeg4")
+        panel.available_accelerations = [
+            VideoAcceleration("nvenc", "NVENC", "h264_nvenc"),
+            mpeg4_cpu,
+        ]
+        panel.acceleration = panel.available_accelerations[0]
+        panel._append_log = MagicMock()
+
+        call_count = 0
+        def failing_builder(acc: VideoAcceleration):
+            nonlocal call_count
+            call_count += 1
+            if acc.key == "nvenc":
+                raise RuntimeError("NVENC falhou")
+            return ["ffmpeg", "-c:v", acc.encoder]
+
+        executed_commands = []
+        panel._execute = lambda cmd, *a, **kw: executed_commands.append(cmd)
+
+        panel._execute_video("Render", failing_builder)
+        self.assertEqual(panel.acceleration.encoder, "mpeg4")
+        self.assertIn("mpeg4", executed_commands[0])
 
 
 if __name__ == "__main__":

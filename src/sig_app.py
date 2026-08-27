@@ -1931,6 +1931,11 @@ class FfmpegToolsPanel:
             combo = ttk.Combobox(settings, textvariable=variable, values=choices, state="readonly", width=8)
             combo.grid(row=0, column=column * 2 + 1)
             self.extract_custom_widgets.append(combo)
+        self.extract_extension_combo = self.extract_custom_widgets[0]
+        self.extract_rate_combo = self.extract_custom_widgets[1]
+        self.extract_channels_combo = self.extract_custom_widgets[2]
+        self.extract_bitrate_combo = self.extract_custom_widgets[3]
+        self.extract_extension_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_extract_format_changed())
         trim = ttk.Frame(self.extract_tab)
         trim.pack(anchor="w", pady=(12, 0))
         ttk.Label(trim, text="Recorte opcional - início (s):").grid(row=0, column=0, sticky="w")
@@ -2142,7 +2147,19 @@ class FfmpegToolsPanel:
         self._refresh_encoder_control_state()
 
     def _refresh_encoder_control_state(self) -> None:
-        uses_video_encoder = self.active_tool_var.get() in {"Cortar", "Girar vídeo", "Juntar áudios/vídeos"}
+        tool = self.active_tool_var.get()
+        uses_video_encoder = False
+        if tool == "Cortar":
+            uses_video_encoder = self.cut_input is None or self.cut_input.suffix.lower() in VIDEO_EXTENSIONS
+        elif tool == "Girar vídeo":
+            uses_video_encoder = not self.rotate_metadata_var.get()
+        elif tool == "Juntar áudios/vídeos":
+            is_audio_only = bool(getattr(self, "join_inputs", [])) and all(
+                path.suffix.lower() in AUDIO_EXTENSIONS for path in self.join_inputs
+            )
+            has_reencode = self.join_reencode_var.get() or self.join_smart_var.get()
+            uses_video_encoder = not is_audio_only and has_reencode
+
         has_encoder = bool(self.available_accelerations)
         if not uses_video_encoder or not has_encoder:
             self.acceleration_combo.configure(state="disabled")
@@ -2188,6 +2205,23 @@ class FfmpegToolsPanel:
         finally:
             self.extract_preset_sync = False
         self._refresh_extract_preset_controls()
+        self._on_extract_format_changed()
+
+    def _on_extract_format_changed(self) -> None:
+        fmt = self.extract_extension_var.get().lower()
+        if hasattr(self, "extract_rate_combo"):
+            if fmt == "opus":
+                allowed_rates = ("8000", "12000", "16000", "24000", "48000")
+                self.extract_rate_combo.configure(values=allowed_rates)
+                if self.extract_rate_var.get() not in allowed_rates:
+                    self.extract_rate_var.set("48000")
+            else:
+                standard_rates = ("8000", "16000", "22050", "44100", "48000")
+                self.extract_rate_combo.configure(values=standard_rates)
+
+        is_lossless = fmt in {"wav", "flac"}
+        if hasattr(self, "extract_bitrate_combo"):
+            self.extract_bitrate_combo.configure(state="disabled" if is_lossless else "readonly")
 
     def _refresh_extract_preset_controls(self) -> None:
         locked = self.extract_transcription_preset_var.get() or self.extract_compact_preset_var.get()
@@ -2209,6 +2243,7 @@ class FfmpegToolsPanel:
             self.rotate_device_limit_label.pack_forget()
         self._refresh_rotate_device_limit()
         self._refresh_rotate_thumbnail()
+        self._refresh_encoder_control_state()
 
     def _refresh_rotate_device_limit(self) -> None:
         # FFmpeg não expõe uma API confiável de sessões simultâneas para NVENC,
@@ -2219,11 +2254,13 @@ class FfmpegToolsPanel:
         if self.join_reencode_var.get():
             self.join_smart_var.set(False)
         self._update_join_controls()
+        self._refresh_encoder_control_state()
 
     def _on_toggle_join_smart(self) -> None:
         if self.join_smart_var.get():
             self.join_reencode_var.set(False)
         self._update_join_controls()
+        self._refresh_encoder_control_state()
 
     def _update_join_controls(self) -> None:
         reencode = self.join_reencode_var.get()
@@ -2235,17 +2272,34 @@ class FfmpegToolsPanel:
         self.join_transition_combo.configure(state="readonly" if (has_mode and not self.running) else "disabled")
         self.join_seconds_entry.configure(state="normal" if (has_mode and not self.running) else "disabled")
 
-        if smart:
-            # "Fade in/out" disponível apenas para SmartJoin
-            self.join_transition_combo.configure(values=self.TRANSITIONS)
-            if self.join_transition_var.get() not in self.TRANSITIONS:
-                self.join_transition_var.set("Fade in/out")
-        elif reencode:
-            # "Fade in/out" NÃO disponível para Reencode Completo
-            choices = tuple(item for item in self.TRANSITIONS if item != "Fade in/out")
-            self.join_transition_combo.configure(values=choices)
-            if self.join_transition_var.get() == "Fade in/out" or self.join_transition_var.get() not in choices:
-                self.join_transition_var.set("fade")
+        is_audio_only = bool(getattr(self, "join_inputs", [])) and all(
+            path.suffix.lower() in AUDIO_EXTENSIONS for path in self.join_inputs
+        )
+
+        if is_audio_only:
+            if smart:
+                choices = ("Fade in/out",)
+                self.join_transition_combo.configure(values=choices)
+                if self.join_transition_var.get() not in choices:
+                    self.join_transition_var.set("Fade in/out")
+            elif reencode:
+                choices = tuple(
+                    label for label, _value in self.AUDIO_TRANSITIONS
+                    if label != "Fade in/out" and label != "No transition"
+                )
+                self.join_transition_combo.configure(values=choices)
+                if self.join_transition_var.get() not in choices:
+                    self.join_transition_var.set("Linear slope (tri)")
+        else:
+            if smart:
+                self.join_transition_combo.configure(values=self.TRANSITIONS)
+                if self.join_transition_var.get() not in self.TRANSITIONS:
+                    self.join_transition_var.set("Fade in/out")
+            elif reencode:
+                choices = tuple(item for item in self.TRANSITIONS if item != "Fade in/out")
+                self.join_transition_combo.configure(values=choices)
+                if self.join_transition_var.get() == "Fade in/out" or self.join_transition_var.get() not in choices:
+                    self.join_transition_var.set("fade")
 
     def _on_toggle_insert_reencode(self) -> None:
         if self.insert_reencode_var.get():
@@ -2895,6 +2949,7 @@ class FfmpegToolsPanel:
             self._activate_preview(self.cut_input, self.cut_preview, self.cut_timeline, self.cut_current_var, self.cut_play_button, "cut")
             self.cut_start_var.set("0")
             self.cut_end_var.set(self._fmt_seconds(self.cut_timeline.duration))
+            self._refresh_encoder_control_state()
 
     def select_extract_inputs(self) -> None:
         selected = filedialog.askopenfilenames(title="Selecionar mídias", filetypes=self._filetypes())
@@ -3069,6 +3124,8 @@ class FfmpegToolsPanel:
             self.join_list.insert(END, f"{index}. {path.name}")
         if selected_index is not None and self.join_inputs:
             self.join_list.selection_set(selected_index)
+        self._update_join_controls()
+        self._refresh_encoder_control_state()
 
     def choose_output_dir(self) -> None:
         chosen = filedialog.askdirectory(title="Selecionar pasta de saída do FFmpeg", initialdir=str(self.output_dir))
@@ -3438,16 +3495,16 @@ class FfmpegToolsPanel:
         self._set_status(f"{label} concluído ({progress}/{total})", int(progress * 100 / max(total, 1)))
 
     def _execute_video(self, label: str, builder, progress: int = 1, total: int = 1, duration_seconds: float = 0.0, progress_callback=None) -> None:
-        profile = self.acceleration or VideoAcceleration("cpu", "CPU (fallback)", "libx264")
+        cpu_fallback = next((acc for acc in getattr(self, "available_accelerations", []) if acc.key == "cpu"), VideoAcceleration("cpu", "CPU (fallback)", "libx264"))
+        profile = self.acceleration or cpu_fallback
         try:
             self._execute(builder(profile), label, progress, total, duration_seconds, progress_callback)
         except RuntimeError:
             if profile.key == "cpu":
                 raise
-            fallback = VideoAcceleration("cpu", "CPU (fallback)", "libx264")
-            self._append_log(f"{profile.label} não concluiu a tarefa; repetindo com CPU.")
-            self.acceleration = fallback
-            self._execute(builder(fallback), f"{label} (CPU)", progress, total, duration_seconds, progress_callback)
+            self._append_log(f"{profile.label} não concluiu a tarefa; repetindo com CPU ({cpu_fallback.encoder}).")
+            self.acceleration = cpu_fallback
+            self._execute(builder(cpu_fallback), f"{label} (CPU)", progress, total, duration_seconds, progress_callback)
 
     @staticmethod
     def _seconds(value: str, label: str, allow_empty: bool = False) -> float | None:
@@ -3491,6 +3548,8 @@ class FfmpegToolsPanel:
             return ["-c:a", "libopus", "-application", "voip", "-b:a", bitrate, "-vbr", "off"]
         if ext == "flac":
             return ["-c:a", "flac"]
+        if ext == "wma":
+            return ["-c:a", "wmav2", "-b:a", bitrate]
         return ["-c:a", "aac", "-b:a", bitrate]
 
     @staticmethod
@@ -3664,6 +3723,8 @@ class FfmpegToolsPanel:
         rate = self.extract_rate_var.get()
         channels = self.extract_channels_var.get()
         bitrate = self.extract_bitrate_var.get()
+        if extension == "opus" and rate not in {"8000", "12000", "16000", "24000", "48000"}:
+            rate = "48000"
         total = len(self.extract_inputs)
         for index, source in enumerate(self.extract_inputs, start=1):
             if not source.exists():
@@ -3929,9 +3990,17 @@ class FfmpegToolsPanel:
         if transition_seconds < 0:
             raise RuntimeError("Tempo de transição não pode ser negativo")
 
-        copy_only = not self.join_reencode_var.get() or (self.join_smart_var.get() and transition_seconds == 0)
+        copy_only = (not self.join_reencode_var.get() and not self.join_smart_var.get()) or (self.join_smart_var.get() and transition_seconds <= 0.001)
         if copy_only:
             extension = self.join_inputs[0].suffix.lower() or ".m4a"
+            first = clips[0]
+            for idx, clip in enumerate(clips[1:], start=2):
+                if clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels or clip.audio_codec != first.audio_codec:
+                    raise RuntimeError(
+                        f"Os áudios possuem taxas, canais ou codecs distintos ({first.audio_rate}Hz/{first.audio_channels}ch/{first.audio_codec} "
+                        f"vs {clip.audio_rate}Hz/{clip.audio_channels}ch/{clip.audio_codec}). "
+                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
+                    )
             output = self._safe_output(self.output_dir, "audios_juntos", extension)
             list_file = self.output_dir / f"join_audio_{uuid.uuid4().hex}.txt"
             list_file.write_text(
@@ -3949,7 +4018,13 @@ class FfmpegToolsPanel:
                 list_file.unlink(missing_ok=True)
 
         shortest = min(item.duration for item in clips)
-        transition_seconds = min(transition_seconds, max(0.0, shortest - 0.05))
+        max_transition = min(clips[i].duration / 2.05 for i in range(1, len(clips) - 1)) if len(clips) > 2 else shortest / 1.05
+        if transition_seconds > max_transition:
+            transition_seconds = max(0.01, max_transition)
+            self._append_log(f"Tempo de transição de áudio ajustado para {transition_seconds:.2f}s para caber nos clipes sem perda.")
+
+        transition_choice = self.join_transition_var.get()
+        transition_code = dict(self.AUDIO_TRANSITIONS).get(transition_choice, "tri")
         output = self._safe_output(self.output_dir, "audios_juntos", ".m4a")
         command = [str(self._ffmpeg()), "-hide_banner", "-y"]
         for path in self.join_inputs:
@@ -3960,16 +4035,36 @@ class FfmpegToolsPanel:
             target_rate = first.audio_rate
             for idx in range(len(self.join_inputs)):
                 filters.append(f"[{idx}:a]aresample={target_rate},aformat=sample_rates={target_rate}:channel_layouts={first.audio_layout}[a{idx}_norm]")
-            previous = "a0_norm"
-            for index in range(1, len(self.join_inputs)):
-                output_label = f"a{index}out"
-                filters.append(
-                    f"[{previous}][a{index}_norm]acrossfade=d={self._fmt_seconds(transition_seconds)}"
-                    f":c1=tri:c2=tri[{output_label}]"
-                )
-                previous = output_label
-            filter_text = ";".join(filters)
-            command += ["-filter_complex", filter_text, "-map", f"[{previous}]"]
+
+            if transition_choice == "Fade in/out" or transition_code == "fade":
+                faded_labels: list[str] = []
+                for idx, clip in enumerate(clips):
+                    fade_dur = min(transition_seconds, clip.duration / 2)
+                    fade_filters: list[str] = []
+                    if idx > 0:
+                        fade_filters.append(f"afade=t=in:st=0:d={self._fmt_seconds(fade_dur)}")
+                    if idx < len(clips) - 1:
+                        fade_out_st = max(0.0, clip.duration - fade_dur)
+                        fade_filters.append(f"afade=t=out:st={self._fmt_seconds(fade_out_st)}:d={self._fmt_seconds(fade_dur)}")
+                    lbl = f"af{idx}"
+                    fade_str = ("," + ",".join(fade_filters)) if fade_filters else ""
+                    filters.append(f"[a{idx}_norm]{fade_str.lstrip(',')}[{lbl}]" if fade_filters else f"[a{idx}_norm]anull[{lbl}]")
+                    faded_labels.append(lbl)
+                concat_inputs = "".join(f"[{lbl}]" for lbl in faded_labels)
+                filters.append(f"{concat_inputs}concat=n={len(clips)}:v=0:a=1[aout]")
+                command += ["-filter_complex", ";".join(filters), "-map", "[aout]"]
+            else:
+                previous = "a0_norm"
+                curve = transition_code if transition_code not in {"none", "fade"} else "tri"
+                for index in range(1, len(self.join_inputs)):
+                    output_label = f"a{index}out"
+                    filters.append(
+                        f"[{previous}][a{index}_norm]acrossfade=d={self._fmt_seconds(transition_seconds)}"
+                        f":c1={curve}:c2={curve}[{output_label}]"
+                    )
+                    previous = output_label
+                filter_text = ";".join(filters)
+                command += ["-filter_complex", filter_text, "-map", f"[{previous}]"]
         else:
             inputs = "".join(f"[{index}:a]" for index in range(len(self.join_inputs)))
             command += [
@@ -3981,7 +4076,7 @@ class FfmpegToolsPanel:
             "-c:a", "aac", "-b:a", first.audio_bitrate, "-ar", str(first.audio_rate),
             "-ac", str(first.audio_channels), "-movflags", "+faststart", str(output),
         ]
-        total_duration = sum(item.duration for item in clips) - transition_seconds * (len(clips) - 1)
+        total_duration = sum(item.duration for item in clips) - (transition_seconds * (len(clips) - 1) if transition_choice != "Fade in/out" else 0.0)
         self._execute(command, "Aplicando transições e juntando áudios", 1, 1, max(0.1, total_duration))
 
     def _join_worker(self) -> None:
@@ -4002,6 +4097,21 @@ class FfmpegToolsPanel:
                 if clip.width != first.width or clip.height != first.height:
                     raise RuntimeError(
                         f"As mídias possuem resoluções distintas ({first.width}x{first.height} vs {clip.width}x{clip.height}). "
+                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
+                    )
+                if clip.fps != first.fps:
+                    raise RuntimeError(
+                        f"As mídias possuem taxas de quadros distintas ({first.fps} fps vs {clip.fps} fps). "
+                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
+                    )
+                if clip.has_audio != first.has_audio:
+                    raise RuntimeError(
+                        "Algumas mídias possuem áudio e outras não. "
+                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
+                    )
+                if clip.has_audio and (clip.audio_codec != first.audio_codec or clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels):
+                    raise RuntimeError(
+                        f"As trilhas de áudio possuem formatos divergentes ({first.audio_codec}/{first.audio_rate}Hz vs {clip.audio_codec}/{clip.audio_rate}Hz). "
                         "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
                     )
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
@@ -4043,7 +4153,15 @@ class FfmpegToolsPanel:
         if any(duration <= 0 for duration, *_rest in clips):
             raise RuntimeError("Não consegui identificar a duração de um dos vídeos")
         shortest = min(duration for duration, *_rest in clips)
-        transition_seconds = min(transition_seconds, max(0.0, shortest - 0.1))
+        if len(clips) > 2 and strategy == "Smart Join":
+            max_safe_transition = min((clips[i].duration - 0.12) / 2.0 for i in range(1, len(clips) - 1))
+            max_safe_transition = min(max_safe_transition, clips[0].duration - 0.1, clips[-1].duration - 0.1)
+        else:
+            max_safe_transition = shortest / 2.0 if strategy == "Smart Join" else shortest - 0.1
+        max_safe_transition = max(0.0, max_safe_transition)
+        if transition_seconds > max_safe_transition:
+            transition_seconds = max_safe_transition
+            self._append_log(f"Tempo de transição ajustado para {transition_seconds:.2f}s para evitar perda de quadros nos clipes.")
         base = clips[0]
         profile = {
             "width": max(2, base.width), "height": max(2, base.height), "fps": base.fps,
@@ -4110,7 +4228,7 @@ class FfmpegToolsPanel:
                 body_start = 0.0 if index == 0 else transition_seconds
                 body_end = duration if index == len(inputs) - 1 else duration - transition_seconds
                 body_duration = body_end - body_start
-                if body_duration > 0.12:
+                if body_duration > 0.05:
                     step += 1
                     body = work_dir / f"corpo_{index:03d}.ts"
                     self._join_copy_body(source, clips[index], profile, body, body_start, body_duration, f"Copiando corpo {index + 1}/{len(inputs)}", step, total_steps)
@@ -4163,7 +4281,7 @@ class FfmpegToolsPanel:
                 body_start = 0.0 if index == 0 else transition_seconds
                 body_end = duration if index == len(inputs) - 1 else duration - transition_seconds
                 body_duration = body_end - body_start
-                if body_duration > 0.12:
+                if body_duration > 0.05:
                     step += 1
                     body = work_dir / f"corpo_{index:03d}.ts"
                     self._join_copy_body(source, clips[index], profile, body, body_start, body_duration, f"Copiando corpo {index + 1}/{len(inputs)}", step, total_steps)
@@ -4206,14 +4324,22 @@ class FfmpegToolsPanel:
         command = [str(self._ffmpeg()), "-hide_banner", "-y", "-fflags", "+genpts"]
         if start > 0.001:
             command += ["-ss", self._fmt_seconds(start)]
-        command += ["-i", str(source), "-t", self._fmt_seconds(duration), "-map", "0:v:0"]
+        command += ["-i", str(source)]
         if clip[1]:
-            command += ["-map", "0:a:0?"]
-        command += [
-            "-c:v", "copy", "-bsf:v", "h264_mp4toannexb", *self._join_audio_args(profile),
-            "-avoid_negative_ts", "make_zero",
-            "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", str(destination),
-        ]
+            command += [
+                "-t", self._fmt_seconds(duration), "-map", "0:v:0", "-map", "0:a:0?",
+                "-c:v", "copy", "-bsf:v", "h264_mp4toannexb", *self._join_audio_args(profile),
+                "-avoid_negative_ts", "make_zero",
+                "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", str(destination),
+            ]
+        else:
+            command += [
+                "-f", "lavfi", "-i", f"anullsrc=channel_layout={profile['audio_layout']}:sample_rate={profile['audio_rate']}",
+                "-t", self._fmt_seconds(duration), "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-bsf:v", "h264_mp4toannexb", *self._join_audio_args(profile),
+                "-avoid_negative_ts", "make_zero",
+                "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", str(destination),
+            ]
         self._execute(command, label, progress, total)
 
     def _join_transition_piece(
@@ -4448,13 +4574,24 @@ class FfmpegToolsPanel:
             use_fade = self.insert_transition_var.get() == "Fade in/out" and transition_seconds > 0
             self._insert_smart_worker(main, inserted, output, main_profile, insertion, total_duration, use_fade, transition_seconds)
             return
-        self._insert_copy_worker(main, inserted, output, insertion, total_duration)
+        self._insert_copy_worker(main, inserted, output, main_profile, inserted_profile, insertion, total_duration)
 
-    def _insert_copy_worker(self, main: Path, inserted: Path, output: Path, insertion: float, total_duration: float) -> None:
+    def _insert_copy_worker(self, main: Path, inserted: Path, output: Path, main_profile: MediaProfile, inserted_profile: MediaProfile, insertion: float, total_duration: float) -> None:
         if main.suffix.lower() != inserted.suffix.lower():
             raise RuntimeError(
                 f"Os formatos dos arquivos são diferentes ({main.suffix} vs {inserted.suffix}). "
                 "Para juntar formatos distintos, marque 'Smart Insert' ou 'Reencode Completo'."
+            )
+        if (
+            main_profile.audio_rate != inserted_profile.audio_rate
+            or main_profile.audio_channels != inserted_profile.audio_channels
+            or main_profile.audio_codec != inserted_profile.audio_codec
+        ):
+            raise RuntimeError(
+                f"Os áudios possuem taxas de amostragem, canais ou codecs distintos "
+                f"({main_profile.audio_rate}Hz/{main_profile.audio_channels}ch/{main_profile.audio_codec} "
+                f"vs {inserted_profile.audio_rate}Hz/{inserted_profile.audio_channels}ch/{inserted_profile.audio_codec}). "
+                "Para inseri-los sem distorção, marque 'Smart Insert' ou 'Reencode Completo'."
             )
         work_dir = self.output_dir / f"insert_copy_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
