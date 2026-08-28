@@ -2027,7 +2027,8 @@ class FfmpegToolsPanel:
                 "Trechos em paralelo",
                 "O valor define quantos trechos serão criados e quantos poderão ser processados simultaneamente. "
                 "Mais trechos podem acelerar vídeos longos, mas valores altos consomem RAM, aquecem o PC e podem saturar o encoder de hardware. "
-                "Em vídeos curtos, o overhead pode piorar o tempo. Deixe vazio para usar todos os núcleos lógicos da máquina.",
+                "Em vídeos curtos, o overhead pode piorar o tempo. Deixe vazio para usar todos os núcleos lógicos em CPU; "
+                "com encoder de hardware (NVENC/QSV/AMF), o padrão é limitado a 3 processos simultâneos por segurança das sessões do driver.",
             ),
         ).pack(side=LEFT)
         self.rotate_device_limit_var = StringVar(value="")
@@ -2175,21 +2176,20 @@ class FfmpegToolsPanel:
         # Sem filtro visual (grau 0 e sem espelhamento) o worker usa -c copy: encoder não tem efeito.
         return (not metadata_only) and (degrees % 360 != 0 or hflip or vflip)
 
-    def _refresh_encoder_control_state(self) -> None:
+    def _current_tool_uses_video_encoder(self) -> bool:
         tool = self.active_tool_var.get()
-        uses_video_encoder = False
         if tool == "Cortar":
-            uses_video_encoder = self.cut_input is None or self.cut_input.suffix.lower() in VIDEO_EXTENSIONS
-        elif tool == "Girar vídeo":
+            return self.cut_input is None or self.cut_input.suffix.lower() in VIDEO_EXTENSIONS
+        if tool == "Girar vídeo":
             try:
                 degrees = int(self.rotate_degrees_var.get() or 0)
             except (ValueError, TypeError):
                 degrees = 0
-            uses_video_encoder = self._rotation_uses_video_encoder(
+            return self._rotation_uses_video_encoder(
                 self.rotate_metadata_var.get(), degrees,
                 self.rotate_hflip_var.get(), self.rotate_vflip_var.get(),
             )
-        elif tool == "Juntar áudios/vídeos":
+        if tool == "Juntar áudios/vídeos":
             is_audio_only = bool(getattr(self, "join_inputs", [])) and all(
                 path.suffix.lower() in AUDIO_EXTENSIONS for path in self.join_inputs
             )
@@ -2203,7 +2203,11 @@ class FfmpegToolsPanel:
                     has_reencode = False
             else:
                 has_reencode = False
-            uses_video_encoder = not is_audio_only and has_reencode
+            return not is_audio_only and has_reencode
+        return False
+
+    def _refresh_encoder_control_state(self) -> None:
+        uses_video_encoder = self._current_tool_uses_video_encoder()
 
         has_encoder = bool(self.available_accelerations)
         if not hasattr(self, "acceleration_combo") or not hasattr(self, "quality_label"):
@@ -3311,12 +3315,18 @@ class FfmpegToolsPanel:
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.acceleration = self._selected_acceleration()
-            self._set_status(f"Encoder selecionado: {self.acceleration.label}; qualidade: {self.video_quality_var.get()}", 0)
+            # F-16: só informa encoder de vídeo quando a ferramenta ativa realmente
+            # produz um -c:v. Operações só de áudio/cópia não devem sugerir o contrário.
+            tool_uses_video_encoder = self._current_tool_uses_video_encoder()
+            if tool_uses_video_encoder:
+                self._set_status(f"Encoder selecionado: {self.acceleration.label}; qualidade: {self.video_quality_var.get()}", 0)
+            else:
+                self._set_status(f"Encoder de vídeo: não aplicável; qualidade: {self.video_quality_var.get()}", 0)
             worker()
             if not self.cancel_event.is_set():
                 self._set_status("Concluído. Arquivo(s) salvo(s) na pasta de saída.", 100)
                 elapsed = max(.001, time.monotonic() - self.task_started_at)
-                encoder = self.acceleration.encoder if self.acceleration else "não informado"
+                encoder = self.acceleration.encoder if (self.acceleration and tool_uses_video_encoder) else "não aplicável"
                 self.task_tracker.success(f"Tempo de processamento: {elapsed:.1f}s\nEncoder: {encoder}") if self.task_tracker else None
         except Cancelled:
             self._set_status("Operação cancelada.")
@@ -3902,7 +3912,23 @@ class FfmpegToolsPanel:
                 self._append_log("Modo somente metadados com recorte: o corte é alinhado aos keyframes mais próximos (sem reencodar).")
             target_rotation = (media.rotation + degrees) % 360
             output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={target_rotation}", str(output)]
+            # F-02/F-03: -metadata:s:v:0 rotate=N não grava display matrix em MP4 (falha
+            # silenciosa no FFmpeg 8). Usar -display_rotation ANTES de -i, que o muxer MP4
+            # converte em display matrix de verdade. Para containers com codecs sem tag no
+            # MP4 (ex.: AVI+WMA), recusar com orientação em vez de falhar no meio do mux.
+            if output.suffix.lower() == ".mp4":
+                video_ok = media.video_codec in ("h264", "hevc", "mpeg4", "mjpeg") or not media.video_codec
+                audio_ok = (media.audio_codec in self._MP4_SAFE_AUDIO_CODECS) or not media.has_audio
+                if not (video_ok and audio_ok):
+                    raise RuntimeError(
+                        f"Os codecs do arquivo ({media.video_codec or 'sem vídeo'}/"
+                        f"{media.audio_codec or 'sem áudio'}) não podem ser copiados para MP4 sem reencodar. "
+                        "Desmarque 'Somente metadados de rotação' para aplicar o giro com reencode."
+                    )
+            command = [str(self._ffmpeg()), "-hide_banner", "-y"]
+            if target_rotation % 360 != 0:
+                command += ["-display_rotation:v:0", str(target_rotation)]
+            command += [*seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", str(output)]
             self._execute(command, "Cortando e atualizando rotação" if has_trim else "Atualizando metadados de rotação", 1, 1, trim_duration)
             return
         filters: list[str] = []
@@ -4175,10 +4201,10 @@ class FfmpegToolsPanel:
             extension = self.join_inputs[0].suffix.lower() or ".m4a"
             first = clips[0]
             for idx, clip in enumerate(clips[1:], start=2):
-                if clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels or clip.audio_codec != first.audio_codec:
+                if clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels or clip.audio_codec != first.audio_codec or clip.audio_layout != first.audio_layout:
                     raise RuntimeError(
-                        f"Os áudios possuem taxas, canais ou codecs distintos ({first.audio_rate}Hz/{first.audio_channels}ch/{first.audio_codec} "
-                        f"vs {clip.audio_rate}Hz/{clip.audio_channels}ch/{clip.audio_codec}). "
+                        f"Os áudios possuem taxas, canais, codecs ou layouts distintos ({first.audio_rate}Hz/{first.audio_channels}ch/{first.audio_codec}/{first.audio_layout} "
+                        f"vs {clip.audio_rate}Hz/{clip.audio_channels}ch/{clip.audio_codec}/{clip.audio_layout}). "
                         "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
                     )
             output = self._safe_output(self.output_dir, "audios_juntos", extension)
@@ -4261,10 +4287,22 @@ class FfmpegToolsPanel:
 
     # Codecs de áudio que o container MP4 aceita em fluxo -c copy.
     _MP4_SAFE_AUDIO_CODECS = {"aac", "mp3", "ac3", "eac3", "alac", "flac", "opus"}
+    # Codecs de vídeo que o container MP4 aceita em fluxo -c copy.
+    _MP4_SAFE_VIDEO_CODECS = {"h264", "hevc", "mpeg4", "mjpeg", "h263"}
 
     def _validate_video_copy_compatibility(self, clips: list[MediaProfile]) -> None:
         first = clips[0]
+        if first.video_codec and first.video_codec not in self._MP4_SAFE_VIDEO_CODECS:
+            raise RuntimeError(
+                f"O codec de vídeo '{first.video_codec}' do primeiro arquivo não é compatível com o container MP4. "
+                "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para convertê-lo."
+            )
         for idx, clip in enumerate(clips[1:], start=2):
+            if clip.video_codec and clip.video_codec not in self._MP4_SAFE_VIDEO_CODECS:
+                raise RuntimeError(
+                    f"O codec de vídeo '{clip.video_codec}' não é compatível com o container MP4. "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para convertê-lo."
+                )
             if clip.video_codec and first.video_codec and clip.video_codec != first.video_codec:
                 raise RuntimeError(
                     f"As mídias possuem codecs de vídeo distintos ({first.video_codec} vs {clip.video_codec}). "
@@ -4295,9 +4333,9 @@ class FfmpegToolsPanel:
                     "Algumas mídias possuem áudio e outras não. "
                     "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
                 )
-            if clip.has_audio and (clip.audio_codec != first.audio_codec or clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels):
+            if clip.has_audio and (clip.audio_codec != first.audio_codec or clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels or clip.audio_layout != first.audio_layout):
                 raise RuntimeError(
-                    f"As trilhas de áudio possuem formatos divergentes ({first.audio_codec}/{first.audio_rate}Hz vs {clip.audio_codec}/{clip.audio_rate}Hz). "
+                    f"As trilhas de áudio possuem formatos divergentes ({first.audio_codec}/{first.audio_rate}Hz/{first.audio_layout} vs {clip.audio_codec}/{clip.audio_rate}Hz/{clip.audio_layout}). "
                     "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
                 )
             if clip.has_audio and clip.audio_codec and clip.audio_codec not in self._MP4_SAFE_AUDIO_CODECS:
@@ -4716,8 +4754,8 @@ class FfmpegToolsPanel:
                 video_fades.append(f"fade=t=out:st={self._fmt_seconds(fade_out)}:d={self._fmt_seconds(fade_duration)}")
                 audio_fades.append(f"afade=t=out:st={self._fmt_seconds(fade_out)}:d={self._fmt_seconds(fade_duration)}")
             video = (
-                f"[{index}:v]scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=increase,"
-                f"crop={profile['width']}:{profile['height']},setsar=1,fps={profile['fps']},format=yuv420p"
+                f"[{index}:v]scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease,"
+                f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={profile['fps']},format=yuv420p"
             )
             if video_fades:
                 video += "," + ",".join(video_fades)
@@ -4744,7 +4782,7 @@ class FfmpegToolsPanel:
         for index in range(1, len(clips)):
             video_out, audio_out = f"vx{index}", f"ax{index}"
             offset = max(0.0, accumulated - seconds)
-            parts.append(f"[{last_video}][v{index}]xfade=transition={transition_name}:duration={self._fmt_seconds(seconds)}:offset={self._fmt_seconds(offset)}[{video_out}]")
+            parts.append(f"[{last_video}][v{index}]xfade=transition={transition_name}:duration={self._fmt_seconds(seconds)}:offset={self._fmt_seconds(offset)},format=yuv420p[{video_out}]")
             parts.append(f"[{last_audio}][a{index}]acrossfade=d={self._fmt_seconds(seconds)}[{audio_out}]")
             last_video, last_audio = video_out, audio_out
             accumulated += clips[index][0] - seconds

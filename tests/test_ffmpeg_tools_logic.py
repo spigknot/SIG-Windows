@@ -713,6 +713,139 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._jump_to_preview_position.assert_called_once_with(panel.preview_context, 5.0)
         panel._seek_preview.assert_not_called()
 
+    # ---- Fase D: correções da auditoria FFmpeg (rotação metadados, join copy,
+    #       xfade 4:2:0, fade pad, log de encoder) ----
+
+    def _rotation_panel(self, degrees=90, metadata=True, hflip=False, vflip=False, has_trim=False, duration=4.0, source_suffix=".mp4", video_codec="h264", audio_codec="aac", has_audio=True):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.rotate_degrees_var = MagicMock(); panel.rotate_degrees_var.get.return_value = str(degrees)
+        panel.rotate_metadata_var = MagicMock(); panel.rotate_metadata_var.get.return_value = metadata
+        panel.rotate_hflip_var = MagicMock(); panel.rotate_hflip_var.get.return_value = hflip
+        panel.rotate_vflip_var = MagicMock(); panel.rotate_vflip_var.get.return_value = vflip
+        panel.rotate_start_var = MagicMock(); panel.rotate_start_var.get.return_value = "0"
+        panel.rotate_end_var = MagicMock(); panel.rotate_end_var.get.return_value = "4"
+        panel.rotate_parallel_var = MagicMock(); panel.rotate_parallel_var.get.return_value = False
+        panel.rotate_segments_var = MagicMock(); panel.rotate_segments_var.get.return_value = ""
+        panel._MP4_SAFE_AUDIO_CODECS = FfmpegToolsPanel._MP4_SAFE_AUDIO_CODECS
+        panel._seconds = lambda *a, **k: float(a[0]) if a[0] else 0.0
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda d, stem, ext: Path(f"{stem}{ext}")
+        panel._fmt_seconds = lambda s: f"{s:.3f}"
+        panel._metadata_rotate_output_suffix = FfmpegToolsPanel._metadata_rotate_output_suffix
+        panel._append_log = MagicMock()
+        panel._execute = MagicMock()
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel.rotate_input = MagicMock()
+        panel.rotate_input.exists.return_value = True
+        panel.rotate_input.stem = "v"
+        panel.rotate_input.suffix = source_suffix
+        panel._probe_media = lambda _p: MediaProfile(
+            duration, has_audio, 320, 240, "30", "1000k", "128k", 48000, 2, "stereo",
+            has_video=True, rotation=0, audio_codec=audio_codec, video_codec=video_codec,
+        )
+        return panel
+
+    def test_rotate_metadata_uses_display_rotation_input_option(self):
+        panel = self._rotation_panel(degrees=90, metadata=True)
+        panel._rotate_worker()
+        cmd = panel._execute.call_args[0][0]
+        # -display_rotation deve vir ANTES de -i (opção de entrada) e não usar -metadata rotate.
+        self.assertIn("-display_rotation:v:0", cmd)
+        self.assertIn("90", cmd)
+        self.assertIn("-i", cmd)
+        self.assertLess(cmd.index("-display_rotation:v:0"), cmd.index("-i"))
+        self.assertNotIn("-metadata:s:v:0", cmd)
+        self.assertNotIn("rotate=", cmd)
+
+    def test_rotate_metadata_skips_rotation_when_zero_degrees(self):
+        panel = self._rotation_panel(degrees=0, metadata=True)
+        panel._rotate_worker()
+        cmd = panel._execute.call_args[0][0]
+        self.assertNotIn("-display_rotation:v:0", cmd)
+
+    def test_rotate_metadata_rejects_non_mp4_safe_audio_codec(self):
+        # AVI+WMA não pode ser copiado para MP4 sem reencodar (F-03).
+        panel = self._rotation_panel(degrees=90, metadata=True, source_suffix=".avi", audio_codec="wmav2")
+        with self.assertRaises(RuntimeError):
+            panel._rotate_worker()
+
+    def test_rotate_metadata_accepts_mp4_safe_audio_codec(self):
+        panel = self._rotation_panel(degrees=90, metadata=True, source_suffix=".avi", audio_codec="aac")
+        panel._rotate_worker()
+        cmd = panel._execute.call_args[0][0]
+        self.assertIn("-display_rotation:v:0", cmd)
+
+    def test_validate_video_copy_rejects_non_mp4_video_codec(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._MP4_SAFE_VIDEO_CODECS = FfmpegToolsPanel._MP4_SAFE_VIDEO_CODECS
+        panel._MP4_SAFE_AUDIO_CODECS = FfmpegToolsPanel._MP4_SAFE_AUDIO_CODECS
+        first = MediaProfile(4.0, True, 1280, 720, "30", "1M", "128k", 48000, 2, "stereo", has_video=True, audio_codec="aac", video_codec="theora")
+        second = MediaProfile(4.0, True, 1280, 720, "30", "1M", "128k", 48000, 2, "stereo", has_video=True, audio_codec="aac", video_codec="theora")
+        with self.assertRaises(RuntimeError):
+            panel._validate_video_copy_compatibility([first, second])
+
+    def test_validate_video_copy_rejects_divergent_audio_layout(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._MP4_SAFE_VIDEO_CODECS = FfmpegToolsPanel._MP4_SAFE_VIDEO_CODECS
+        panel._MP4_SAFE_AUDIO_CODECS = FfmpegToolsPanel._MP4_SAFE_AUDIO_CODECS
+        first = MediaProfile(4.0, True, 1280, 720, "30", "1M", "128k", 48000, 6, "5.1", has_video=True, audio_codec="aac", video_codec="h264")
+        second = MediaProfile(4.0, True, 1280, 720, "30", "1M", "128k", 48000, 6, "5.1(side)", has_video=True, audio_codec="aac", video_codec="h264")
+        with self.assertRaises(RuntimeError):
+            panel._validate_video_copy_compatibility([first, second])
+
+    def test_xfade_join_filter_applies_yuv420p_after_transition(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        clips = [
+            MediaProfile(4.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo"),
+            MediaProfile(4.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo"),
+        ]
+        panel._fmt_seconds = lambda s: f"{s:.3f}"
+        panel._video_normalize_filter = FfmpegToolsPanel._video_normalize_filter.__get__(panel, FfmpegToolsPanel)
+        panel._audio_normalize_filter = FfmpegToolsPanel._audio_normalize_filter.__get__(panel, FfmpegToolsPanel)
+        profile = {"width": 320, "height": 240, "fps": "30", "audio_rate": 48000, "audio_layout": "stereo"}
+        fc = panel._xfade_join_filter(clips, profile, 0.5, "dissolve")
+        self.assertIn(",format=yuv420p[", fc)
+
+    def test_fade_join_filter_uses_pad_not_crop(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        clips = [
+            MediaProfile(4.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo"),
+            MediaProfile(4.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo"),
+        ]
+        panel._fmt_seconds = lambda s: f"{s:.3f}"
+        panel._audio_normalize_filter = FfmpegToolsPanel._audio_normalize_filter.__get__(panel, FfmpegToolsPanel)
+        profile = {"width": 320, "height": 240, "fps": "30", "audio_rate": 48000, "audio_layout": "stereo"}
+        fc = panel._fade_join_filter(clips, profile, 0.5)
+        self.assertIn("pad=", fc)
+        self.assertNotIn("crop=", fc)
+
+    def test_current_tool_uses_video_encoder_audio_only_tools_false(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.active_tool_var = MagicMock()
+        for tool in ("Extrair áudio", "Inserir áudio", "Limpar áudio"):
+            panel.active_tool_var.get.return_value = tool
+            self.assertFalse(panel._current_tool_uses_video_encoder(), tool)
+
+    def test_worker_wrapper_logs_not_applicable_for_audio_only(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.active_tool_var = MagicMock(); panel.active_tool_var.get.return_value = "Limpar áudio"
+        panel._current_tool_uses_video_encoder = lambda: False
+        panel._set_status = MagicMock()
+        panel.acceleration = None
+        panel.video_quality_var = MagicMock(); panel.video_quality_var.get.return_value = "Alta"
+        panel.cancel_event = MagicMock(); panel.cancel_event.is_set.return_value = False
+        panel.task_tracker = MagicMock()
+        panel.task_started_at = 0.0
+        panel.root = MagicMock()
+        panel.output_dir = Path(".")
+        panel._selected_acceleration = lambda: None
+        panel._set_running_ui = MagicMock()
+        panel._worker_wrapper(lambda: None)
+        status_args = [c.args[0] for c in panel._set_status.call_args_list]
+        self.assertTrue(any("não aplicável" in s for s in status_args), status_args)
+        panel.task_tracker.success.assert_called_once()
+        self.assertIn("não aplicável", panel.task_tracker.success.call_args[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

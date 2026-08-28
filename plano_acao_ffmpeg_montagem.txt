@@ -1,0 +1,171 @@
+================================================================================
+PLANO DE AÇÃO MINUCIOSO — MONTAGEM DOS COMANDOS FFMPEG DAS SEIS FERRAMENTAS
+Projeto: SIG Windows
+Arquivo: src/sig_app.py (FfmpegToolsPanel) + tests/test_ffmpeg_tools_logic.py
+Data: 28/08/2026
+================================================================================
+
+OBJETIVO
+========
+Verificar se a montagem dos comandos ffmpeg do processamento final das seis
+ferramentas (Cortar, Extrair áudio, Girar vídeo, Juntar, Inserir áudio, Limpar
+áudio) corresponde fielmente à opção escolhida pelo usuário, e corrigir os
+findings.
+
+MÉTODO
+======
+- Leitura integral do FfmpegToolsPanel (linhas ~1533-5025).
+- Validação empírica dos comandos com dist/ffmpeg.exe (FFmpeg 8.0.1).
+- Execução da suíte: 257 testes (247 baseline + 10 novos).
+
+Estado: correções críticas de alta prioridade APLICADAS e testadas (P0/P1).
+Findings de P2 (complexos/risco) documentados como pendência.
+
+================================================================================
+FINDINGS CORRIGIDOS (já aplicados e testados nesta sessão)
+================================================================================
+
+[F-02] [ALTA] Rotação "Somente metadados" NÃO gravava rotação em MP4
+--------------------------------------------------------------------
+Bug: -metadata:s:v:0 rotate=N (após -i) não grava display matrix em MP4 com
+     FFmpeg 8; o processo retornava sucesso mas o arquivo saía sem rotação.
+     Confirmado empiricamente.
+Fix: Usar -display_rotation:v:0 N ANTES de -i (opção de entrada), que o muxer
+     MP4 converte em display matrix. Omitido quando target_rotation % 360 == 0.
+Arquivo: src/sig_app.py (~3905)
+Teste: test_rotate_metadata_uses_display_rotation_input_option,
+       test_rotate_metadata_skips_rotation_when_zero_degrees
+
+[F-03] [ALTA] Rotação por metadados forçava AVI+WMA para MP4 e falhava no mux
+----------------------------------------------------------------------------
+Bug: AVI com WMA (sem tag no MP4) era copiado para .mp4 com -map 0 -c copy,
+     falhando com "Could not find tag for codec wmav2" no meio do mux.
+Fix: Preflight antes de forçar MP4: recusa com mensagem acionável se o codec de
+     vídeo/áudio não for compatível com o container, orientando a desmarcar
+     "Somente metadados" para reencodar.
+Arquivo: src/sig_app.py (~3910)
+Teste: test_rotate_metadata_rejects_non_mp4_safe_audio_codec,
+       test_rotate_metadata_accepts_mp4_safe_audio_codec
+
+[F-05] [ALTA] Junção de vídeo em cópia não validava codec de vídeo contra o MP4
+------------------------------------------------------------------------------
+Bug: A validação de copy só cobria codecs de áudio MP4; Theora/etc. chegava ao
+     muxer e falhava tarde.
+Fix: Nova allowlist _MP4_SAFE_VIDEO_CODECS (h264, hevc, mpeg4, mjpeg, h263)
+     validada no primeiro clipe e em cada um dos demais.
+Arquivo: src/sig_app.py (_MP4_SAFE_VIDEO_CODECS, _validate_video_copy_compatibility)
+Teste: test_validate_video_copy_rejects_non_mp4_video_codec
+
+[F-07] [MÉDIA] Layout de canais ignorado na validação de cópia
+--------------------------------------------------------------
+Bug: 5.1 vs 5.1(side) com mesma taxa/canais era aceito, encaminhando canais a
+     caixas diferentes.
+Fix: Comparar audio_layout na validação de copy do Join de vídeo e do Join de
+     áudio (copy-only).
+Arquivo: src/sig_app.py (_validate_video_copy_compatibility, _join_audio_worker)
+Teste: test_validate_video_copy_rejects_divergent_audio_layout
+
+[F-15] [MÉDIA] Fallback Fade recortava proporções incompatíveis (increase+crop)
+------------------------------------------------------------------------------
+Bug: O Fade in/out do Join usava scale increase + crop, descartando bordas.
+Fix: Unificado para decrease + pad (mesma política do SmartJoin/normalizer),
+     preservando o quadro inteiro com faixas.
+Arquivo: src/sig_app.py (_fade_join_filter ~4734)
+Teste: test_fade_join_filter_uses_pad_not_crop
+
+[F-16] [BAIXA] Log afirmava encoder de vídeo em operações só de áudio
+--------------------------------------------------------------------
+Bug: _worker_wrapper sempre registrava "Encoder: h264_nvenc/libx264" mesmo em
+     operações que só produzem -c:a.
+Fix: Novo _current_tool_uses_video_encoder() decide se a ferramenta ativa
+     realmente emite -c:v; caso contrário loga "Encoder de vídeo: não aplicável".
+Arquivo: src/sig_app.py (_current_tool_uses_video_encoder, _worker_wrapper)
+Teste: test_current_tool_uses_video_encoder_audio_only_tools_false,
+       test_worker_wrapper_logs_not_applicable_for_audio_only
+
+[F-19] [MÉDIA] Xfade terminava em H.264 4:4:4 apesar da normalização 4:2:0
+-------------------------------------------------------------------------
+Bug: Após o xfade, a saída ficava yuv444p (format=yuv420p das entradas se perdia).
+     Confirmado empiricamente.
+Fix: format=yuv420p adicionado após cada xfade no _xfade_join_filter.
+Arquivo: src/sig_app.py (_xfade_join_filter ~4763)
+Teste: test_xfade_join_filter_applies_yuv420p_after_transition
+
+[F-22] [BAIXA] Ajuda do paralelismo contradizia o limite de 3 em hardware
+------------------------------------------------------------------------
+Bug: A ajuda dizia "Deixe vazio para usar todos os núcleos", mas o default de
+     NVENC/QSV/AMF é limitado a 3 workers.
+Fix: Ajuda atualizada explicando CPU (todos os núcleos) vs hardware (padrão 3).
+Arquivo: src/sig_app.py (ajuda "Trechos em paralelo" ~2030)
+
+================================================================================
+FINDINGS PENDENTES (recomendados para próxima rodada — risco/mudança maior)
+================================================================================
+
+[F-01] [ALTA] SmartJoin de vídeo: duração/timestamps incorretos.
+  O caminho híbrido (corpos TS + transições + concat) não reproduz a duração
+  esperada (sum(durações) - d*(N-1) para xfade; Fade não sobreposto = soma).
+  Requer rever start/end/window de cada transição e validar PTS/DTS monotônico
+  antes do concat. Alternativa segura: usar Reencode Completo como fallback até
+  equivalência garantida.
+  Aceite: 2/3/N clipes, 10 transições, áudio presente/ausente, clipes curtos,
+  duração dentro de 1 quadro + tolerância de amostras.
+
+[F-04/F-18] [CRÍTICA/ALTA] Smart Insert e concat copy podem misturar codecs.
+  O trecho central é codificado pelo sufixo (ex.: .m4a -> aac) enquanto as
+  laterais são copiadas; em ALAC+MP3 ou OGG/Opus isso corrompe o áudio. Também
+  FLAC/OGG/WMA em copy concat produzem duração errada ou DTS não monotônico.
+  Recomendado: usar o codec REAL do principal para o trecho central; pré-probar
+  codec/extradata/layout de cada peça; para formatos não seguros, reencodar
+  todas as peças em um único fluxo. Executar probe de duração e decodificação
+  integral (return code 0 não basta).
+
+[F-17] [MÉDIA] Reencode/SmartJoin de vídeo sem áudio cria trilha AAC silenciosa.
+  Propagar has_audio para o grafo; se nenhum clipe tem áudio, não gerar anullsrc
+  nem -map [aout]. Se houver mistura, pedir política explícita.
+
+[F-12] [MÉDIA] Inserção em cópia não respeita posição em milissegundos.
+  Documentar "posição aproximada por pacote" ou encaminhar para reencode quando
+  precisão for requisito.
+
+[F-13] [MÉDIA] Tempo de transição da Inserção é reduzido sem mostrar o efetivo.
+  Logar/expôr o clamping (pedido vs efetivo).
+
+[F-14] [MÉDIA] Prévia da Inserção não aplica a transição selecionada.
+  Construir prévia com o mesmo grafo afade/acrossfade ou rotular como "estrutural".
+
+[F-06] [ALTA] Container de vídeo só com áudio recebe controles errados.
+  Substituir decisões por extensão por has_video/has_audio em _refresh_encoder_control_state,
+  _update_join_controls, preview, thumbnail e _workflow (F-20).
+
+[F-20] [MÉDIA] Pipeline força WAV para MP4 somente áudio e ignora o modo.
+  Usar MediaProfile.has_video no _workflow; manter override só para vídeo real/VAD.
+
+[F-08] [MÉDIA] SAR não validado na cópia (proporção perdida).
+  Adicionar SAR/DAR ao perfil e à validação; exigir igualdade em copy, setsar em reencode.
+
+[F-09] [MÉDIA] Estado do encoder de Giro desatualizado ao mudar transformação.
+  Unificar callback de transformação que atualiza thumbnail + encoder + preview.
+
+[F-10] [MÉDIA] Espelhos marcados ficam na prévia mas são ignorados em metadata-only.
+  Limpar/desabilitar espelhos ao ativar "Somente metadados".
+
+[F-11] [MÉDIA] Campo de tempo da Inserção com estado/validação incoerentes.
+  Normalizar transição antes de decidir o widget; só fazer parse quando aplicável.
+
+[F-21] [MÉDIA] Fallback de hardware para CPU é amplo.
+  Restringir a erros de hardware; registrar solicitado/efetivo/motivo.
+
+================================================================================
+GATES DE REGRESSÃO (por correção)
+================================================================================
+1. Teste unitário de captura de argv.
+2. Execução com FFmpeg empacotado.
+3. Probe de duração/streams/codec/pixel format/layout/SAR.
+4. Decodificação integral com -loglevel warning.
+5. Teste visual para pad/crop/SAR.
+6. Suíte completa do repositório (257 testes atuais).
+
+================================================================================
+FIM DO PLANO DE AÇÃO
+================================================================================
