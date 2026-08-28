@@ -2502,7 +2502,8 @@ class FfmpegToolsPanel:
             except Exception as exc:
                 messagebox.showerror("sig", f"Não foi possível reproduzir o áudio:\n{exc}")
             return
-        if not self.preview_player.open(context["source"], context["canvas"]):
+        use_canvas = self.preview_speed != 1.0 or (context["tool"] == "rotate" and bool(self._rotate_preview_filter()))
+        if use_canvas or not self.preview_player.open(context["source"], context["canvas"]):
             try:
                 self._start_canvas_preview(context, position)
             except Exception as exc:

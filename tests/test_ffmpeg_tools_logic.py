@@ -602,6 +602,25 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertIn("pad=", f)
         self.assertNotIn("crop=", f)
 
+    # ---- Fase C: regressões ----
+
+    def test_concat_escape_handles_apostrophe(self):
+        expected = "D:/x/a" + "'" + chr(92) + "''" + "b.mp4"
+        self.assertEqual(FfmpegToolsPanel._concat_escape("D:/x/a'b.mp4"), expected)
+
+    def test_concat_escape_normalizes_backslashes(self):
+        self.assertEqual(FfmpegToolsPanel._concat_escape("D:" + chr(92) + "x" + chr(92) + "a.mp4"), "D:/x/a.mp4")
+
+    def test_preview_video_filters_include_setsar(self):
+        filters = FfmpegToolsPanel._preview_video_filters(320, 180, 15, 1.0)
+        self.assertIn("setsar=1", filters)
+
+    def test_rotation_uses_video_encoder(self):
+        self.assertTrue(FfmpegToolsPanel._rotation_uses_video_encoder(False, 90, False, False))
+        self.assertTrue(FfmpegToolsPanel._rotation_uses_video_encoder(False, 0, True, False))
+        self.assertFalse(FfmpegToolsPanel._rotation_uses_video_encoder(True, 90, False, False))
+        self.assertFalse(FfmpegToolsPanel._rotation_uses_video_encoder(False, 0, False, False))
+
 
 if __name__ == "__main__":
     unittest.main()
