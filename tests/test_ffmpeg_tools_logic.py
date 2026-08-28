@@ -621,6 +621,98 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertFalse(FfmpegToolsPanel._rotation_uses_video_encoder(True, 90, False, False))
         self.assertFalse(FfmpegToolsPanel._rotation_uses_video_encoder(False, 0, False, False))
 
+    def test_audio_preview_tick_multiplies_by_speed(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.preview_playing = True
+        panel.preview_generation = 1
+        panel.preview_speed = 2.0
+        panel.frame_preview_stop_event = MagicMock()
+        panel.frame_preview_stop_event.is_set.return_value = False
+        timeline = MagicMock()
+        timeline.end = 10.0
+        current_var = MagicMock()
+        context = {
+            "timeline": timeline,
+            "current_var": current_var,
+        }
+        panel.preview_context = context
+        panel.external_preview_offset = 1.0
+        panel.external_preview_started_at = 100.0
+        panel.external_preview_process = MagicMock()
+        panel.external_preview_process.poll.return_value = None
+        panel._clock = lambda s: f"{s:.1f}"
+        panel.root = MagicMock()
+
+        with patch("time.monotonic", return_value=101.5):
+            panel._audio_preview_tick(context, 1)
+
+        # 1.0 + (1.5 * 2.0) = 4.0
+        timeline.set_position.assert_called_with(4.0)
+        current_var.set.assert_called_with("4.0")
+
+    def test_cut_worker_treats_audio_only_mp4_as_audio(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        src = MagicMock()
+        src.exists.return_value = True
+        src.suffix = ".mp4"
+        src.stem = "podcast"
+        panel.cut_input = src
+        panel.cut_start_var = MagicMock(); panel.cut_start_var.get.return_value = "0"
+        panel.cut_end_var = MagicMock(); panel.cut_end_var.get.return_value = "5"
+        panel._seconds = lambda *a, **k: float(a[0])
+        panel._probe_media = lambda _p: MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False)
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda d, stem, ext: Path(f"{stem}{ext}")
+        panel._audio_codec_args = lambda ext, br: ["-c:a", "aac"]
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda s: f"{s:.3f}"
+        panel._execute = MagicMock()
+        panel._cut_worker()
+        cmd = panel._execute.call_args[0][0]
+        self.assertIn("-vn", cmd)
+        self.assertIn("0:a:0?", cmd)
+
+    def test_join_audio_0s_transition_uses_normalized_inputs(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.join_inputs = [Path("a1.wav"), Path("a2.wav")]
+        panel.join_reencode_var = MagicMock(); panel.join_reencode_var.get.return_value = True
+        panel.join_smart_var = MagicMock(); panel.join_smart_var.get.return_value = False
+        panel.join_seconds_var = MagicMock(); panel.join_seconds_var.get.return_value = "0"
+        panel.join_transition_var = MagicMock(); panel.join_transition_var.get.return_value = "Fade in/out"
+        panel.AUDIO_TRANSITIONS = FfmpegToolsPanel.AUDIO_TRANSITIONS
+        panel._max_audio_transition = lambda clips: 5.0
+        panel._append_log = MagicMock()
+        panel._safe_output = lambda d, stem, ext: Path(f"{stem}{ext}")
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel.output_dir = Path(".")
+        panel._execute = MagicMock()
+
+        clip1 = MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 44100, 2, "stereo")
+        clip2 = MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo")
+        panel._join_audio_worker([clip1, clip2])
+
+        cmd = panel._execute.call_args[0][0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("[a0_norm][a1_norm]concat=n=2:v=0:a=1[aout]", fc)
+        self.assertIn("aresample=44100", fc)
+
+    def test_timeline_changed_seek_routes_to_jump_when_canvas_active(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.preview_playing = True
+        panel.preview_player = MagicMock()
+        panel.preview_player.opened = True
+        panel.frame_preview_process = MagicMock()
+        panel.external_preview_process = None
+        panel.preview_context = {"timeline": MagicMock()}
+        panel._jump_to_preview_position = MagicMock()
+        panel._seek_preview = MagicMock()
+
+        current_var = MagicMock()
+        panel._timeline_changed("position", 5.0, current_var)
+
+        panel._jump_to_preview_position.assert_called_once_with(panel.preview_context, 5.0)
+        panel._seek_preview.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

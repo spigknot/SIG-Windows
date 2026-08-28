@@ -2445,6 +2445,7 @@ class FfmpegToolsPanel:
             "duration": duration,
             "tool": tool,
             "audio_only": source.suffix.lower() in AUDIO_EXTENSIONS,
+            "has_audio": media.has_audio,
         }
         if not self.preview_context["audio_only"]:
             self._show_video_thumbnail(canvas, source, 0.0, self._rotate_preview_filter() if tool == "rotate" else "")
@@ -2748,13 +2749,16 @@ class FfmpegToolsPanel:
             stderr=subprocess.DEVNULL,
             creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
         )
-        audio_command = [
-            str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)), "-af", self._preview_atempo_filter(), str(context["source"]),
-        ]
-        self.external_preview_process = subprocess.Popen(
-            audio_command,
-            creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
-        )
+        if context.get("has_audio", True):
+            audio_command = [
+                str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)), "-af", self._preview_atempo_filter(), str(context["source"]),
+            ]
+            self.external_preview_process = subprocess.Popen(
+                audio_command,
+                creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+            )
+        else:
+            self.external_preview_process = None
         self.preview_playing = True
         context["button"].configure(text="||")
         self.status_var.set("Prévia reproduzida dentro da ferramenta.")
@@ -2812,7 +2816,8 @@ class FfmpegToolsPanel:
         ):
             return
         timeline = context["timeline"]
-        position = min(timeline.end, self.external_preview_offset + time.monotonic() - self.external_preview_started_at)
+        elapsed = (time.monotonic() - self.external_preview_started_at) * self.preview_speed
+        position = min(timeline.end, self.external_preview_offset + elapsed)
         timeline.set_position(position)
         context["current_var"].set(self._clock(position))
         process = self.external_preview_process
@@ -2875,7 +2880,8 @@ class FfmpegToolsPanel:
             return
         timeline = context["timeline"]
         if target == "position":
-            if self.preview_playing and not self.preview_player.opened:
+            is_canvas = bool(self.frame_preview_process or self.external_preview_process)
+            if self.preview_playing and (is_canvas or not self.preview_player.opened):
                 self._jump_to_preview_position(context, seconds)
                 return
             self._seek_preview(seconds, current_var, restart_playback=True)
@@ -2891,7 +2897,8 @@ class FfmpegToolsPanel:
         timeline = context["timeline"]
         timeline.set_position(seconds)
         context["current_var"].set(self._clock(seconds))
-        if self.preview_player.opened:
+        is_canvas = bool(self.frame_preview_process or self.external_preview_process)
+        if self.preview_player.opened and not is_canvas:
             self.preview_player.pause()
             self.preview_player.seek(seconds)
             self.preview_player.play(seconds)
@@ -3675,12 +3682,12 @@ class FfmpegToolsPanel:
         if end is None or end <= start:
             raise RuntimeError("O fim deve ser maior que o início")
         duration = end - start
-        is_video = source.suffix.lower() in VIDEO_EXTENSIONS
-        extension = ".mp4" if is_video else source.suffix.lower()
-        output = self._safe_output(self.output_dir, f"{source.stem}_cortado", extension)
         media = self._probe_media(source)
         if media.duration > 0 and (start >= media.duration - 0.001 or end > media.duration + 0.05):
             raise RuntimeError(f"O intervalo excede a duração do arquivo ({self._clock(media.duration)}).")
+        is_video = media.has_video
+        extension = ".mp4" if is_video else source.suffix.lower()
+        output = self._safe_output(self.output_dir, f"{source.stem}_cortado", extension)
 
         if is_video:
             self._cut_video_hybrid(source, output, start, end, media)
@@ -3891,6 +3898,8 @@ class FfmpegToolsPanel:
         seek_args = ["-ss", self._fmt_seconds(start)] if has_trim else []
         duration_args = ["-t", self._fmt_seconds(trim_duration)] if has_trim else []
         if self.rotate_metadata_var.get():
+            if has_trim:
+                self._append_log("Modo somente metadados com recorte: o corte é alinhado aos keyframes mais próximos (sem reencodar).")
             target_rotation = (media.rotation + degrees) % 360
             output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
             command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={target_rotation}", str(output)]
@@ -3960,8 +3969,11 @@ class FfmpegToolsPanel:
         media: MediaProfile,
     ) -> None:
         # O valor manual controla tanto a quantidade de partes quanto a de
-        # processos simultâneos. Sem valor, usamos todos os núcleos lógicos.
-        requested_workers = requested_segments or max(1, os.cpu_count() or 1)
+        # processos simultâneos. Sem valor manual, hardware encoders (NVENC/QSV/AMF)
+        # são limitados a 3 para respeitar limites de sessões do driver.
+        is_hw = bool(self.acceleration and self.acceleration.key in {"nvenc", "qsv", "amf"})
+        default_workers = min(3, max(1, os.cpu_count() or 1)) if is_hw else max(1, os.cpu_count() or 1)
+        requested_workers = requested_segments or default_workers
         if len(keyframes) < 1:
             raise RuntimeError("não há keyframes suficientes para dividir o vídeo")
         if len(keyframes) < requested_workers - 1:
@@ -4196,13 +4208,13 @@ class FfmpegToolsPanel:
         command = [str(self._ffmpeg()), "-hide_banner", "-y"]
         for path in self.join_inputs:
             command += ["-i", str(path)]
-        if transition_seconds > 0:
-            filters: list[str] = []
-            first = clips[0]
-            target_rate = first.audio_rate
-            for idx in range(len(self.join_inputs)):
-                filters.append(f"[{idx}:a]aresample={target_rate},aformat=sample_rates={target_rate}:channel_layouts={first.audio_layout}[a{idx}_norm]")
+        filters: list[str] = []
+        first = clips[0]
+        target_rate = first.audio_rate
+        for idx in range(len(self.join_inputs)):
+            filters.append(f"[{idx}:a]aresample={target_rate},aformat=sample_rates={target_rate}:channel_layouts={first.audio_layout}[a{idx}_norm]")
 
+        if transition_seconds > 0:
             if transition_choice == "Fade in/out" or transition_code == "fade":
                 faded_labels: list[str] = []
                 for idx, clip in enumerate(clips):
@@ -4233,9 +4245,10 @@ class FfmpegToolsPanel:
                 filter_text = ";".join(filters)
                 command += ["-filter_complex", filter_text, "-map", f"[{previous}]"]
         else:
-            inputs = "".join(f"[{index}:a]" for index in range(len(self.join_inputs)))
+            inputs = "".join(f"[a{index}_norm]" for index in range(len(self.join_inputs)))
+            filters.append(f"{inputs}concat=n={len(self.join_inputs)}:v=0:a=1[aout]")
             command += [
-                "-filter_complex", f"{inputs}concat=n={len(self.join_inputs)}:v=0:a=1[aout]",
+                "-filter_complex", ";".join(filters),
                 "-map", "[aout]",
             ]
         first = clips[0]
