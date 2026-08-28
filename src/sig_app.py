@@ -1014,6 +1014,9 @@ class MediaProfile:
     has_video: bool = True
     rotation: int = 0
     audio_codec: str = ""
+    video_codec: str = ""
+    pix_fmt: str = ""
+    timebase: str = ""
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -1571,6 +1574,22 @@ class FfmpegToolsPanel:
         ("Squared half sine wave (hsin2)", "hsin2"),
         ("No fade (nofade)", "nofade"),
     )
+    VORBIS_VALID_BITRATES = {
+        1: {
+            8000: ("32k",),
+            16000: ("32k", "48k", "64k", "96k"),
+            22050: ("32k", "48k", "64k"),
+            44100: ("32k", "48k", "64k", "96k", "128k", "192k"),
+            48000: ("32k", "48k", "64k", "96k", "128k", "192k"),
+        },
+        2: {
+            8000: ("32k", "48k", "64k"),
+            16000: ("32k", "48k", "64k", "96k", "128k", "192k"),
+            22050: ("32k", "48k", "64k", "96k", "128k"),
+            44100: ("48k", "64k", "96k", "128k", "192k", "256k"),
+            48000: ("48k", "64k", "96k", "128k", "192k", "256k"),
+        },
+    }
 
     def __init__(self, parent, app: "SigApp"):
         import tkinter as tk
@@ -1634,6 +1653,7 @@ class FfmpegToolsPanel:
         self.join_smart_var = BooleanVar(value=False)
         self.join_transition_var = StringVar(value="Fade in/out")
         self.join_seconds_var = StringVar(value="0.5")
+        self.join_seconds_var.trace_add("write", lambda *_: self._refresh_encoder_control_state())
 
         self.insert_main_input: Path | None = None
         self.insert_secondary_input: Path | None = None
@@ -1936,6 +1956,9 @@ class FfmpegToolsPanel:
         self.extract_channels_combo = self.extract_custom_widgets[2]
         self.extract_bitrate_combo = self.extract_custom_widgets[3]
         self.extract_extension_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_extract_format_changed())
+        self.extract_rate_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
+        self.extract_channels_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
+        self._on_extract_format_changed()
         trim = ttk.Frame(self.extract_tab)
         trim.pack(anchor="w", pady=(12, 0))
         ttk.Label(trim, text="Recorte opcional - início (s):").grid(row=0, column=0, sticky="w")
@@ -2157,10 +2180,21 @@ class FfmpegToolsPanel:
             is_audio_only = bool(getattr(self, "join_inputs", [])) and all(
                 path.suffix.lower() in AUDIO_EXTENSIONS for path in self.join_inputs
             )
-            has_reencode = self.join_reencode_var.get() or self.join_smart_var.get()
+            if self.join_reencode_var.get():
+                has_reencode = True
+            elif self.join_smart_var.get():
+                try:
+                    sec = float(self.join_seconds_var.get().replace(",", "."))
+                    has_reencode = sec > 0.001
+                except (ValueError, AttributeError):
+                    has_reencode = False
+            else:
+                has_reencode = False
             uses_video_encoder = not is_audio_only and has_reencode
 
         has_encoder = bool(self.available_accelerations)
+        if not hasattr(self, "acceleration_combo") or not hasattr(self, "quality_label"):
+            return
         if not uses_video_encoder or not has_encoder:
             self.acceleration_combo.configure(state="disabled")
             self.quality_menu_button.pack_forget()
@@ -2218,15 +2252,43 @@ class FfmpegToolsPanel:
             else:
                 standard_rates = ("8000", "16000", "22050", "44100", "48000")
                 self.extract_rate_combo.configure(values=standard_rates)
+                if self.extract_rate_var.get() not in standard_rates:
+                    self.extract_rate_var.set("48000")
+        self._refresh_extract_bitrate_choices()
 
+    def _refresh_extract_bitrate_choices(self) -> None:
+        if not hasattr(self, "extract_bitrate_combo"):
+            return
+        locked = self.extract_transcription_preset_var.get() or self.extract_compact_preset_var.get()
+        fmt = self.extract_extension_var.get().lower()
         is_lossless = fmt in {"wav", "flac"}
-        if hasattr(self, "extract_bitrate_combo"):
-            self.extract_bitrate_combo.configure(state="disabled" if is_lossless else "readonly")
+        if locked or is_lossless:
+            self.extract_bitrate_combo.configure(state="disabled")
+            return
+        all_bitrates = ("32k", "48k", "64k", "96k", "128k", "192k", "256k")
+        if fmt == "ogg":
+            try:
+                rate = int(self.extract_rate_var.get())
+            except ValueError:
+                rate = 48000
+            try:
+                channels = int(self.extract_channels_var.get())
+            except ValueError:
+                channels = 2
+            channel_map = self.VORBIS_VALID_BITRATES.get(channels, self.VORBIS_VALID_BITRATES[2])
+            allowed = channel_map.get(rate, ("48k", "64k", "96k", "128k"))
+            self.extract_bitrate_combo.configure(state="readonly", values=allowed)
+            if self.extract_bitrate_var.get() not in allowed:
+                self.extract_bitrate_var.set(allowed[0] if allowed else "64k")
+        else:
+            self.extract_bitrate_combo.configure(state="readonly", values=all_bitrates)
 
     def _refresh_extract_preset_controls(self) -> None:
         locked = self.extract_transcription_preset_var.get() or self.extract_compact_preset_var.get()
         for widget in self.extract_custom_widgets:
             widget.configure(state="disabled" if locked else "readonly")
+        if not locked:
+            self._refresh_extract_bitrate_choices()
 
     def _update_rotate_control_state(self) -> None:
         metadata_only = self.rotate_metadata_var.get()
@@ -3725,6 +3787,16 @@ class FfmpegToolsPanel:
         bitrate = self.extract_bitrate_var.get()
         if extension == "opus" and rate not in {"8000", "12000", "16000", "24000", "48000"}:
             rate = "48000"
+        if extension == "ogg":
+            try:
+                r_int = int(rate)
+                c_int = int(channels)
+            except ValueError:
+                r_int, c_int = 48000, 2
+            channel_map = self.VORBIS_VALID_BITRATES.get(c_int, self.VORBIS_VALID_BITRATES[2])
+            allowed = channel_map.get(r_int, ("48k", "64k", "96k", "128k"))
+            if bitrate not in allowed:
+                bitrate = allowed[0]
         total = len(self.extract_inputs)
         for index, source in enumerate(self.extract_inputs, start=1):
             if not source.exists():
@@ -3976,10 +4048,20 @@ class FfmpegToolsPanel:
         audio_codec_match = re.search(r"Audio:\s*([a-zA-Z0-9_]+)", audio_line)
         audio_codec = audio_codec_match.group(1).lower() if audio_codec_match else ""
 
+        video_codec_match = re.search(r"Video:\s*([a-zA-Z0-9_]+)", video_line)
+        video_codec = video_codec_match.group(1).lower() if video_codec_match else ""
+
+        pix_fmt_match = re.search(r"Video:\s*[^,]+,\s*([a-zA-Z0-9_]+)", video_line)
+        pix_fmt = pix_fmt_match.group(1).lower() if pix_fmt_match else ""
+
+        tbn_match = re.search(r"(\d+(?:\.\d+)?k?)\s*tbn", video_line)
+        timebase = tbn_match.group(1).lower() if tbn_match else ""
+
         return MediaProfile(
             duration, bool(audio_line), width - width % 2, height - height % 2, fps,
             video_bitrate, audio_bitrate, audio_rate, audio_channels, audio_layout,
             bool(video_line), rotation, audio_codec,
+            video_codec, pix_fmt, timebase,
         )
 
     def _join_audio_worker(self, clips: list[MediaProfile]) -> None:
@@ -4079,6 +4161,45 @@ class FfmpegToolsPanel:
         total_duration = sum(item.duration for item in clips) - (transition_seconds * (len(clips) - 1) if transition_choice != "Fade in/out" else 0.0)
         self._execute(command, "Aplicando transições e juntando áudios", 1, 1, max(0.1, total_duration))
 
+    def _validate_video_copy_compatibility(self, clips: list[MediaProfile]) -> None:
+        first = clips[0]
+        for idx, clip in enumerate(clips[1:], start=2):
+            if clip.video_codec and first.video_codec and clip.video_codec != first.video_codec:
+                raise RuntimeError(
+                    f"As mídias possuem codecs de vídeo distintos ({first.video_codec} vs {clip.video_codec}). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.width != first.width or clip.height != first.height:
+                raise RuntimeError(
+                    f"As mídias possuem resoluções distintas ({first.width}x{first.height} vs {clip.width}x{clip.height}). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.fps != first.fps:
+                raise RuntimeError(
+                    f"As mídias possuem taxas de quadros distintas ({first.fps} fps vs {clip.fps} fps). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.pix_fmt and first.pix_fmt and clip.pix_fmt != first.pix_fmt:
+                raise RuntimeError(
+                    f"As mídias possuem formatos de pixel distintos ({first.pix_fmt} vs {clip.pix_fmt}). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.timebase and first.timebase and clip.timebase != first.timebase:
+                raise RuntimeError(
+                    f"As mídias possuem bases de tempo distintas ({first.timebase} tbn vs {clip.timebase} tbn). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.has_audio != first.has_audio:
+                raise RuntimeError(
+                    "Algumas mídias possuem áudio e outras não. "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.has_audio and (clip.audio_codec != first.audio_codec or clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels):
+                raise RuntimeError(
+                    f"As trilhas de áudio possuem formatos divergentes ({first.audio_codec}/{first.audio_rate}Hz vs {clip.audio_codec}/{clip.audio_rate}Hz). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+
     def _join_worker(self) -> None:
         if len(self.join_inputs) < 2:
             raise RuntimeError("Selecione pelo menos dois áudios ou vídeos")
@@ -4092,28 +4213,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("Junte somente áudios ou somente vídeos na mesma tarefa")
         output = self._safe_output(self.output_dir, "videos_juntos", ".mp4")
         if not self.join_reencode_var.get() and not self.join_smart_var.get():
-            first = clips[0]
-            for idx, clip in enumerate(clips[1:], start=2):
-                if clip.width != first.width or clip.height != first.height:
-                    raise RuntimeError(
-                        f"As mídias possuem resoluções distintas ({first.width}x{first.height} vs {clip.width}x{clip.height}). "
-                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
-                    )
-                if clip.fps != first.fps:
-                    raise RuntimeError(
-                        f"As mídias possuem taxas de quadros distintas ({first.fps} fps vs {clip.fps} fps). "
-                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
-                    )
-                if clip.has_audio != first.has_audio:
-                    raise RuntimeError(
-                        "Algumas mídias possuem áudio e outras não. "
-                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
-                    )
-                if clip.has_audio and (clip.audio_codec != first.audio_codec or clip.audio_rate != first.audio_rate or clip.audio_channels != first.audio_channels):
-                    raise RuntimeError(
-                        f"As trilhas de áudio possuem formatos divergentes ({first.audio_codec}/{first.audio_rate}Hz vs {clip.audio_codec}/{clip.audio_rate}Hz). "
-                        "Marque 'Reencode Completo' ou 'SmartJoin' para compatibilizá-las."
-                    )
+            self._validate_video_copy_compatibility(clips)
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
             lines = []
             for path in self.join_inputs:
@@ -4138,7 +4238,8 @@ class FfmpegToolsPanel:
             raise RuntimeError("Tempo de transição não pode ser negativo")
         strategy = "Smart Join" if self.join_smart_var.get() else "Reencodar"
         transition = self.join_transition_var.get()
-        if strategy == "Smart Join" and transition_seconds == 0:
+        if strategy == "Smart Join" and transition_seconds <= 0.001:
+            self._validate_video_copy_compatibility(clips)
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
             lines = []
             for path in self.join_inputs:

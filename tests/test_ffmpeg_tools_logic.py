@@ -274,6 +274,133 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertEqual(panel.acceleration.encoder, "mpeg4")
         self.assertIn("mpeg4", executed_commands[0])
 
+    def test_probe_media_extracts_video_codec_pix_fmt_timebase(self):
+        fake_output = (
+            "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'sample.mp4':\n"
+            "  Duration: 00:01:00.00, start: 0.000000, bitrate: 2500 kb/s\n"
+            "  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], 2300 kb/s, 30 fps, 30 tbr, 15360 tbn (default)\n"
+            "  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 192 kb/s (default)\n"
+        )
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _cmd: None
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
+            profile = panel._probe_media(Path("sample.mp4"))
+
+        self.assertTrue(profile.has_video)
+        self.assertEqual(profile.video_codec, "h264")
+        self.assertEqual(profile.pix_fmt, "yuv420p")
+        self.assertEqual(profile.timebase, "15360")
+        self.assertEqual(profile.audio_codec, "aac")
+
+    def test_validate_video_copy_compatibility_rejects_different_codecs(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        p1 = MediaProfile(10.0, True, 1920, 1080, "30", "2000k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "15360")
+        p2 = MediaProfile(10.0, True, 1920, 1080, "30", "2000k", "128k", 48000, 2, "stereo", True, 0, "aac", "mpeg4", "yuv420p", "15360")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            panel._validate_video_copy_compatibility([p1, p2])
+        self.assertIn("codecs de vídeo distintos", str(ctx.exception))
+
+    def test_validate_video_copy_compatibility_rejects_different_pix_fmt_and_timebase(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        p1 = MediaProfile(10.0, True, 1920, 1080, "30", "2000k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "15360")
+        p2_fmt = MediaProfile(10.0, True, 1920, 1080, "30", "2000k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv422p", "15360")
+        p3_tbn = MediaProfile(10.0, True, 1920, 1080, "30", "2000k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "90k")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            panel._validate_video_copy_compatibility([p1, p2_fmt])
+        self.assertIn("formatos de pixel distintos", str(ctx.exception))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            panel._validate_video_copy_compatibility([p1, p3_tbn])
+        self.assertIn("bases de tempo distintas", str(ctx.exception))
+
+    def test_encoder_controls_disabled_when_smart_join_zero_seconds(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.active_tool_var = MagicMock()
+        panel.active_tool_var.get.return_value = "Juntar áudios/vídeos"
+        panel.join_inputs = [Path("vid1.mp4"), Path("vid2.mp4")]
+        panel.join_reencode_var = MagicMock()
+        panel.join_reencode_var.get.return_value = False
+        panel.join_smart_var = MagicMock()
+        panel.join_smart_var.get.return_value = True
+        panel.join_seconds_var = MagicMock()
+        panel.join_seconds_var.get.return_value = "0"
+        panel.available_accelerations = [VideoAcceleration("cpu", "CPU", "libx264")]
+
+        panel.acceleration_combo = MagicMock()
+        panel.quality_label = MagicMock()
+        panel.quality_menu_button = MagicMock()
+        panel.quality_help_button = MagicMock()
+
+        panel._refresh_encoder_control_state()
+
+        # Com SmartJoin e tempo zero, é cópia direta: combo deve ser disabled e botões de qualidade escondidos
+        panel.acceleration_combo.configure.assert_called_with(state="disabled")
+        panel.quality_menu_button.pack_forget.assert_called()
+
+        # Com SmartJoin e tempo > 0, o encoder volta a ser usado
+        panel.join_seconds_var.get.return_value = "1.5"
+        panel.quality_label.winfo_ismapped.return_value = False
+        panel._refresh_encoder_control_state()
+        panel.acceleration_combo.configure.assert_called_with(state="readonly")
+
+    def test_extract_bitrate_disabled_for_wav_and_enabled_for_mp3(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.extract_transcription_preset_var = MagicMock()
+        panel.extract_transcription_preset_var.get.return_value = False
+        panel.extract_compact_preset_var = MagicMock()
+        panel.extract_compact_preset_var.get.return_value = False
+        panel.extract_extension_var = MagicMock()
+        panel.extract_rate_var = MagicMock()
+        panel.extract_rate_var.get.return_value = "48000"
+        panel.extract_channels_var = MagicMock()
+        panel.extract_channels_var.get.return_value = "2"
+        panel.extract_bitrate_var = MagicMock()
+        panel.extract_bitrate_combo = MagicMock()
+        panel.extract_rate_combo = MagicMock()
+        panel.VORBIS_VALID_BITRATES = FfmpegToolsPanel.VORBIS_VALID_BITRATES
+
+        # Teste WAV (lossless)
+        panel.extract_extension_var.get.return_value = "wav"
+        panel._on_extract_format_changed()
+        panel.extract_bitrate_combo.configure.assert_called_with(state="disabled")
+
+        # Teste MP3 (lossy com bitrate livre)
+        panel.extract_extension_var.get.return_value = "mp3"
+        panel._on_extract_format_changed()
+        panel.extract_bitrate_combo.configure.assert_called_with(
+            state="readonly",
+            values=("32k", "48k", "64k", "96k", "128k", "192k", "256k"),
+        )
+
+    def test_ogg_vorbis_bitrates_constrained_for_8khz_mono(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.extract_transcription_preset_var = MagicMock()
+        panel.extract_transcription_preset_var.get.return_value = False
+        panel.extract_compact_preset_var = MagicMock()
+        panel.extract_compact_preset_var.get.return_value = False
+        panel.extract_extension_var = MagicMock()
+        panel.extract_extension_var.get.return_value = "ogg"
+        panel.extract_rate_var = MagicMock()
+        panel.extract_rate_var.get.return_value = "8000"
+        panel.extract_channels_var = MagicMock()
+        panel.extract_channels_var.get.return_value = "1"
+        panel.extract_bitrate_var = MagicMock()
+        panel.extract_bitrate_var.get.return_value = "64k"
+        panel.extract_bitrate_combo = MagicMock()
+        panel.extract_rate_combo = MagicMock()
+        panel.VORBIS_VALID_BITRATES = FfmpegToolsPanel.VORBIS_VALID_BITRATES
+
+        panel._refresh_extract_bitrate_choices()
+
+        # Para 8000 Hz Mono, OGG só aceita 32k
+        panel.extract_bitrate_combo.configure.assert_called_with(state="readonly", values=("32k",))
+        panel.extract_bitrate_var.set.assert_called_with("32k")
+
 
 if __name__ == "__main__":
     unittest.main()
