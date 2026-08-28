@@ -1894,7 +1894,7 @@ class FfmpegToolsPanel:
             self._toggle_preview()
 
     def _build_cut_tab(self) -> None:
-        self._section_title(self.cut_tab, "Cortar áudio/vídeo", "Corte preciso: reencoda apenas quando necessário para respeitar o início e o fim selecionados.")
+        self._section_title(self.cut_tab, "Cortar áudio/vídeo", "Corte preciso: reencoda apenas quando necessário para respeitar o início e o fim selecionados (modo híbrido pode variar frações de segundo por alinhamento de keyframe).")
         self._file_row(self.cut_tab, self.cut_input_var, self.select_cut_input)
         self.cut_preview = self._create_stable_preview(self.cut_tab, "Selecione uma mídia para visualizar")
         self.cut_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.cut_preview))
@@ -2079,7 +2079,7 @@ class FfmpegToolsPanel:
         self._section_title(
             self.insert_tab,
             "Inserir áudio",
-            "Insere um segundo áudio no ponto escolhido do áudio principal. Smart Insert preserva o máximo possível do áudio original; Reencodar libera transições e cortes precisos.",
+            "Insere um segundo áudio no ponto escolhido do áudio principal. Smart Insert preserva o máximo possível do áudio original (o 'Fade in/out' suaviza apenas o áudio inserido); Reencodar libera transições e cortes precisos.",
         )
         select_row = ttk.Frame(self.insert_tab)
         select_row.pack(anchor="w", pady=(0, 6))
@@ -2119,6 +2119,7 @@ class FfmpegToolsPanel:
             width=30,
         )
         self.insert_transition_combo.pack(side=LEFT, padx=(6, 12))
+        self.insert_transition_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_insert_controls())
         ttk.Label(transition_row, text="Tempo (s):").pack(side=LEFT)
         self.insert_seconds_entry = ttk.Entry(transition_row, textvariable=self.insert_seconds_var, width=7, state="disabled")
         self.insert_seconds_entry.pack(side=LEFT, padx=(6, 0))
@@ -2169,13 +2170,25 @@ class FfmpegToolsPanel:
         self.active_tool_var.set(selected)
         self._refresh_encoder_control_state()
 
+    @staticmethod
+    def _rotation_uses_video_encoder(metadata_only: bool, degrees: int, hflip: bool, vflip: bool) -> bool:
+        # Sem filtro visual (grau 0 e sem espelhamento) o worker usa -c copy: encoder não tem efeito.
+        return (not metadata_only) and (degrees % 360 != 0 or hflip or vflip)
+
     def _refresh_encoder_control_state(self) -> None:
         tool = self.active_tool_var.get()
         uses_video_encoder = False
         if tool == "Cortar":
             uses_video_encoder = self.cut_input is None or self.cut_input.suffix.lower() in VIDEO_EXTENSIONS
         elif tool == "Girar vídeo":
-            uses_video_encoder = not self.rotate_metadata_var.get()
+            try:
+                degrees = int(self.rotate_degrees_var.get() or 0)
+            except (ValueError, TypeError):
+                degrees = 0
+            uses_video_encoder = self._rotation_uses_video_encoder(
+                self.rotate_metadata_var.get(), degrees,
+                self.rotate_hflip_var.get(), self.rotate_vflip_var.get(),
+            )
         elif tool == "Juntar áudios/vídeos":
             is_audio_only = bool(getattr(self, "join_inputs", [])) and all(
                 path.suffix.lower() in AUDIO_EXTENSIONS for path in self.join_inputs
@@ -2382,7 +2395,8 @@ class FfmpegToolsPanel:
         self.insert_reencode_check.configure(state="normal" if not self.running else "disabled")
         self.insert_smart_check.configure(state="normal" if not self.running else "disabled")
         self.insert_transition_combo.configure(state="readonly" if enabled else "disabled")
-        self.insert_seconds_entry.configure(state="normal" if enabled else "disabled")
+        seconds_relevant = enabled and (reencode or (smart and self.insert_transition_var.get() == "Fade in/out"))
+        self.insert_seconds_entry.configure(state="normal" if seconds_relevant else "disabled")
 
         if smart:
             # Fade in/out disponível apenas para Smart Insert
@@ -2539,6 +2553,22 @@ class FfmpegToolsPanel:
         factors.append(target)
         return ",".join(f"atempo={factor:.6g}" for factor in factors)
 
+    @staticmethod
+    def _audio_preview_media_duration(end: float, offset: float) -> float:
+        # O -t do FFplay é tempo de MÍDIA (o atempo já acelera a saída): não dividir por velocidade.
+        return max(0.01, end - offset)
+
+    @staticmethod
+    def _preview_video_filters(width: int, height: int, fps: int, speed: float) -> list[str]:
+        # setsar=1 evita distorção de vídeos anamórficos (SAR != 1:1) na prévia.
+        return [
+            f"setpts=PTS/{speed}",
+            f"fps={fps}",
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            "setsar=1",
+        ]
+
     def _start_insert_preview_segment(self, context: dict, composite_position: float) -> None:
         self.preview_generation += 1
         generation = self.preview_generation
@@ -2561,7 +2591,7 @@ class FfmpegToolsPanel:
             source = self.insert_main_input
             source_offset = composite_position - inserted_duration if inserted and composite_position >= insertion + inserted_duration else composite_position
             phase_end = total
-        remaining = max(0.02, (phase_end - composite_position) / max(0.01, self.preview_speed))
+        remaining = max(0.02, phase_end - composite_position)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             self.external_preview_process = subprocess.Popen(
@@ -2687,7 +2717,7 @@ class FfmpegToolsPanel:
             self.external_preview_process = subprocess.Popen(
                 [
                     str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
-                    "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(play_duration), "-af", self._preview_atempo_filter(), str(context["source"]),
+                    "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)), "-af", self._preview_atempo_filter(), str(context["source"]),
                 ],
                 creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
             )
@@ -2704,12 +2734,7 @@ class FfmpegToolsPanel:
             rotate_filter = self._rotate_preview_filter()
             if rotate_filter:
                 filters.append(rotate_filter)
-        filters += [
-            f"setpts=PTS/{self.preview_speed}",
-            f"fps={fps}",
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        ]
+        filters += self._preview_video_filters(width, height, fps, self.preview_speed)
         self.frame_preview_stop_event.clear()
         video_command = [
             str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-ss", self._fmt_seconds(offset),
@@ -2723,7 +2748,7 @@ class FfmpegToolsPanel:
             creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
         )
         audio_command = [
-            str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(play_duration), "-af", self._preview_atempo_filter(), str(context["source"]),
+            str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)), "-af", self._preview_atempo_filter(), str(context["source"]),
         ]
         self.external_preview_process = subprocess.Popen(
             audio_command,
@@ -3215,8 +3240,14 @@ class FfmpegToolsPanel:
             self._update_insert_controls()
 
     def _append_log(self, message: str) -> None:
-        # Diagnóstico completo continua salvo nos arquivos de erro; a UI usa apenas etapas.
-        return
+        # Avisos de ajuste automático (transição reduzida, fallback de paralelo, etc.)
+        # voltam a aparecer no log de atividade como aviso (amarelo).
+        try:
+            app = getattr(self, "app", None)
+            if app is not None and hasattr(app, "_append_activity_log"):
+                app._append_activity_log(message, tag="warning")
+        except Exception:
+            pass
 
     def _record_ffmpeg_command(self, command: list[object], *, force: bool = False) -> None:
         """Registra a linha real antes de iniciar um processo FFmpeg."""
@@ -3420,7 +3451,17 @@ class FfmpegToolsPanel:
         match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmM])", bitrate.strip())
         if not match:
             return bitrate
-        return f"{max(1, round(float(match.group(1)) * multiplier))}{match.group(2)}"
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit == "m":
+            value *= 1000  # normaliza para kilobits antes de arredondar (evita colapso de "1M")
+            unit = "k"
+        return f"{max(1, round(value * multiplier))}{unit}"
+
+    @staticmethod
+    def _concat_escape(path_str: str) -> str:
+        # Normaliza barras e escapa apóstrofos para o demuxer concat (`file '...'`).
+        return path_str.replace(chr(92), "/").replace("'", "'\\''")
 
     def _encoder_help(self, encoder: str) -> str:
         cached = self.encoder_help.get(encoder)
@@ -3445,6 +3486,9 @@ class FfmpegToolsPanel:
     def _encoder_supports(self, profile: VideoAcceleration, option: str) -> bool:
         return option.lower() in self._encoder_help(profile.encoder)
 
+    # QVBR da AMD usa escala tipo QP: MENOR valor = MELHOR qualidade.
+    AMF_QVBR_LEVELS = {"Máxima": 16, "Muito alta": 22, "Alta": 28, "Média": 34, "Econômica": 40}
+
     def _video_args(self, profile: VideoAcceleration, bitrate: str = "1M") -> list[str]:
         quality = self.video_quality_var.get()
         hardware_scale = {"Máxima": 1.60, "Muito alta": 1.25, "Alta": 1.00, "Média": 0.70, "Econômica": 0.45}[quality]
@@ -3462,13 +3506,13 @@ class FfmpegToolsPanel:
                 return ["-c:v", profile.encoder, "-preset", "p4", "-rc", "vbr", "-cq", str(cq), *rate_control]
             return ["-c:v", profile.encoder, "-preset", "p4", *rate_control]
         if profile.key == "qsv":
-            if self._encoder_supports(profile, "-global_quality"):
-                global_quality = {"Máxima": 17, "Muito alta": 20, "Alta": 23, "Média": 26, "Econômica": 29}[quality]
-                return ["-c:v", profile.encoder, "-global_quality", str(global_quality)]
-            return ["-c:v", profile.encoder, "-preset", "medium", *rate_control]
+            # -global_quality é opção genérica do libavcodec (não aparece em `-h encoder=`),
+            # então a detecção anterior nunca a encontrava. Emitir direto + rate_control.
+            global_quality = {"Máxima": 17, "Muito alta": 20, "Alta": 23, "Média": 26, "Econômica": 29}[quality]
+            return ["-c:v", profile.encoder, "-global_quality", str(global_quality), *rate_control]
         if profile.key == "amf":
             if self._encoder_supports(profile, "-qvbr_quality_level") and self._encoder_supports(profile, "-rc"):
-                qvbr = {"Máxima": 40, "Muito alta": 34, "Alta": 28, "Média": 22, "Econômica": 16}[quality]
+                qvbr = self.AMF_QVBR_LEVELS[quality]
                 return ["-c:v", profile.encoder, "-quality", "balanced", "-rc", "qvbr", "-qvbr_quality_level", str(qvbr), *rate_control]
             return ["-c:v", profile.encoder, "-quality", "balanced", *rate_control]
         if profile.key == "vaapi":
@@ -3634,6 +3678,8 @@ class FfmpegToolsPanel:
         extension = ".mp4" if is_video else source.suffix.lower()
         output = self._safe_output(self.output_dir, f"{source.stem}_cortado", extension)
         media = self._probe_media(source)
+        if media.duration > 0 and (start >= media.duration - 0.001 or end > media.duration + 0.05):
+            raise RuntimeError(f"O intervalo excede a duração do arquivo ({self._clock(media.duration)}).")
 
         if is_video:
             self._cut_video_hybrid(source, output, start, end, media)
@@ -3686,7 +3732,7 @@ class FfmpegToolsPanel:
                 pieces.append(end_piece)
 
             list_file = work_dir / "partes.txt"
-            lines = [f"file '{str(piece.resolve()).replace(chr(92), '/')}'" for piece in pieces]
+            lines = [f"file '{self._concat_escape(str(piece.resolve()))}'" for piece in pieces]
             list_file.write_text("\n".join(lines), encoding="utf-8")
             concat_command = [
                 str(self._ffmpeg()), "-hide_banner", "-y", "-fflags", "+genpts",
@@ -3801,6 +3847,10 @@ class FfmpegToolsPanel:
         for index, source in enumerate(self.extract_inputs, start=1):
             if not source.exists():
                 raise RuntimeError(f"Arquivo não encontrado: {source.name}")
+            if start is not None and end is not None:
+                dur = self._get_duration_only(source)
+                if dur > 0 and (start >= dur - 0.001 or end > dur + 0.05):
+                    raise RuntimeError(f"O recorte excede a duração de {source.name} ({self._clock(dur)}).")
             output = self._safe_output(self.output_dir, f"{source.stem}_audio", f".{extension}")
             command = [str(self._ffmpeg()), "-hide_banner", "-y"]
             if start is not None:
@@ -3808,8 +3858,15 @@ class FfmpegToolsPanel:
             command += ["-i", str(source)]
             if start is not None and end is not None:
                 command += ["-t", self._fmt_seconds(end - start)]
-            command += ["-vn", "-map", "0:a:0", "-ar", rate, "-ac", channels, *self._audio_codec_args(extension, bitrate), str(output)]
+            command += ["-vn", "-map", "0:a:0?", "-ar", rate, "-ac", channels, *self._audio_codec_args(extension, bitrate), str(output)]
             self._execute(command, f"Extraindo {source.name}", index, total)
+
+    @staticmethod
+    def _metadata_rotate_output_suffix(input_suffix: str) -> str:
+        # Preserva o container de origem no modo "somente metadados", evitando que
+        # -map 0 -c copy quebre no muxer MP4 com legendas/áudio incompatíveis (MKV/WebM).
+        s = input_suffix.lower()
+        return s if s in {".mp4", ".mkv", ".webm", ".mov", ".m4v"} else ".mp4"
 
     def _rotate_worker(self) -> None:
         source = self.rotate_input
@@ -3834,6 +3891,7 @@ class FfmpegToolsPanel:
         duration_args = ["-t", self._fmt_seconds(trim_duration)] if has_trim else []
         if self.rotate_metadata_var.get():
             target_rotation = (media.rotation + degrees) % 360
+            output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
             command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-metadata:s:v:0", f"rotate={target_rotation}", str(output)]
             self._execute(command, "Cortando e atualizando rotação" if has_trim else "Atualizando metadados de rotação", 1, 1, trim_duration)
             return
@@ -3864,21 +3922,30 @@ class FfmpegToolsPanel:
                 raise RuntimeError("Trechos deve ser um número inteiro positivo ou ficar vazio") from exc
             if requested_segments < 1:
                 raise RuntimeError("Trechos deve ser maior que zero")
+        if self.rotate_parallel_var.get() and (has_trim or duration < 6):
+            self._append_log("Processamento paralelo indisponível para recorte ou vídeo curto; usando um único processo.")
         if self.rotate_parallel_var.get() and not has_trim and duration >= 6:
             keyframes = [value for value in self._extract_keyframes(source) if 0.1 < value < duration - 0.1]
             if keyframes:
                 try:
-                    self._rotate_video_parallel(source, output, filter_text, duration, keyframes, media.video_bitrate, requested_segments)
+                    self._rotate_video_parallel(source, output, filter_text, duration, keyframes, media.video_bitrate, requested_segments, media)
                     return
                 except Cancelled:
                     raise
                 except Exception as exc:
                     self._append_log(f"Giro paralelo não concluiu ({exc}); repetindo em um único processo.")
+            else:
+                self._append_log("Nenhum keyframe interno encontrado; processamento paralelo indisponível.")
         def build(profile):
             input_args, filter_args = self._filter_for_profile(filter_text, profile)
-            audio_args = ["-c:a", "copy"] if media.audio_codec in {"aac", "mp3", "ac3", "eac3", ""} else ["-c:a", "aac", "-b:a", media.audio_bitrate, "-ar", str(media.audio_rate), "-ac", str(media.audio_channels)]
+            audio_args = self._rotate_audio_args(media)
             return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, *seek_args, "-i", str(source), *duration_args, "-map", "0:v:0", "-map", "0:a?", *filter_args, *self._video_args(profile, media.video_bitrate), *audio_args, "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart", str(output)]
         self._execute_video("Girando e cortando vídeo" if has_trim else "Girando vídeo", build, duration_seconds=trim_duration)
+
+    def _rotate_audio_args(self, media: MediaProfile) -> list[str]:
+        if media.audio_codec in {"aac", "mp3", "ac3", "eac3", ""}:
+            return ["-c:a", "copy"]
+        return ["-c:a", "aac", "-b:a", media.audio_bitrate, "-ar", str(media.audio_rate), "-ac", str(media.audio_channels)]
 
     def _rotate_video_parallel(
         self,
@@ -3889,6 +3956,7 @@ class FfmpegToolsPanel:
         keyframes: list[float],
         video_bitrate: str,
         requested_segments: int | None,
+        media: MediaProfile,
     ) -> None:
         # O valor manual controla tanto a quantidade de partes quanto a de
         # processos simultâneos. Sem valor, usamos todos os núcleos lógicos.
@@ -3944,7 +4012,7 @@ class FfmpegToolsPanel:
                     return [
                         str(self._ffmpeg()), "-hide_banner", "-y", *input_args, "-i", str(segment),
                         "-map", "0:v:0", "-map", "0:a?", *filter_args, *self._video_args(profile, video_bitrate),
-                        "-c:a", "copy", "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0",
+                        *self._rotate_audio_args(media), "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0",
                         "-movflags", "+faststart", str(destination),
                     ]
                 def on_progress(percent: int, speed_text: str):
@@ -3977,7 +4045,7 @@ class FfmpegToolsPanel:
             list_file = work_dir / "partes.txt"
             lines = []
             for path in rotated:
-                lines.append(f"file '{str(path.resolve()).replace(chr(92), '/')}'")
+                lines.append(f"file '{self._concat_escape(str(path.resolve()))}'")
             list_file.write_text("\n".join(lines), encoding="utf-8")
             concat_command = [
                 str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
@@ -3990,6 +4058,13 @@ class FfmpegToolsPanel:
             for path in work_dir.glob("*"):
                 path.unlink(missing_ok=True)
             work_dir.rmdir()
+
+    # Layouts nomeados que o FFmpeg reporta na linha de áudio ("48000 Hz, 5.1, ...").
+    _CHANNEL_LAYOUT_COUNTS = {
+        "mono": 1, "stereo": 2, "2.1": 3, "3.0": 3, "3.1": 4, "quad": 4, "4.0": 4,
+        "5.0": 5, "5.1": 6, "5.1(side)": 6, "6.0": 6, "6.1": 7, "7.0": 7,
+        "7.1": 8, "7.1(wide)": 8, "7.1(wide-side)": 8, "octagonal": 8,
+    }
 
     def _probe_media(self, source: Path) -> MediaProfile:
         command = [str(self._ffmpeg()), "-hide_banner", "-i", str(source)]
@@ -4031,10 +4106,11 @@ class FfmpegToolsPanel:
 
         rate_match = re.search(r"(\d+)\s*Hz", audio_line)
         audio_rate = int(rate_match.group(1)) if rate_match else 48000
-        if re.search(r"\bmono\b", audio_line):
-            audio_channels, audio_layout = 1, "mono"
-        elif re.search(r"\bstereo\b", audio_line):
-            audio_channels, audio_layout = 2, "stereo"
+        layout_match = re.search(r"(\d+)\s*Hz,\s*([a-zA-Z0-9][a-zA-Z0-9.()]*)", audio_line)
+        layout_token = layout_match.group(2) if layout_match else ""
+        if layout_token in self._CHANNEL_LAYOUT_COUNTS:
+            audio_layout = layout_token
+            audio_channels = self._CHANNEL_LAYOUT_COUNTS[layout_token]
         else:
             channels_match = re.search(r"(\d+)\s*channels", audio_line)
             audio_channels = int(channels_match.group(1)) if channels_match else 2
@@ -4064,6 +4140,15 @@ class FfmpegToolsPanel:
             video_codec, pix_fmt, timebase,
         )
 
+    def _max_audio_transition(self, clips) -> float:
+        # Clipes internos recebem duas transições (uma em cada extremidade); os das
+        # pontas recebem apenas uma. O limite deve respeitar todos.
+        limits = []
+        for i, clip in enumerate(clips):
+            factor = 2.05 if (0 < i < len(clips) - 1) else 1.05
+            limits.append(clip.duration / factor)
+        return min(limits) if limits else 0.0
+
     def _join_audio_worker(self, clips: list[MediaProfile]) -> None:
         try:
             transition_seconds = float(self.join_seconds_var.get().replace(",", "."))
@@ -4086,7 +4171,7 @@ class FfmpegToolsPanel:
             output = self._safe_output(self.output_dir, "audios_juntos", extension)
             list_file = self.output_dir / f"join_audio_{uuid.uuid4().hex}.txt"
             list_file.write_text(
-                "\n".join(f"file '{str(path.resolve()).replace(chr(92), '/')}'" for path in self.join_inputs),
+                "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path in self.join_inputs),
                 encoding="utf-8",
             )
             try:
@@ -4099,8 +4184,7 @@ class FfmpegToolsPanel:
             finally:
                 list_file.unlink(missing_ok=True)
 
-        shortest = min(item.duration for item in clips)
-        max_transition = min(clips[i].duration / 2.05 for i in range(1, len(clips) - 1)) if len(clips) > 2 else shortest / 1.05
+        max_transition = self._max_audio_transition(clips)
         if transition_seconds > max_transition:
             transition_seconds = max(0.01, max_transition)
             self._append_log(f"Tempo de transição de áudio ajustado para {transition_seconds:.2f}s para caber nos clipes sem perda.")
@@ -4161,6 +4245,9 @@ class FfmpegToolsPanel:
         total_duration = sum(item.duration for item in clips) - (transition_seconds * (len(clips) - 1) if transition_choice != "Fade in/out" else 0.0)
         self._execute(command, "Aplicando transições e juntando áudios", 1, 1, max(0.1, total_duration))
 
+    # Codecs de áudio que o container MP4 aceita em fluxo -c copy.
+    _MP4_SAFE_AUDIO_CODECS = {"aac", "mp3", "ac3", "eac3", "alac", "flac", "opus"}
+
     def _validate_video_copy_compatibility(self, clips: list[MediaProfile]) -> None:
         first = clips[0]
         for idx, clip in enumerate(clips[1:], start=2):
@@ -4199,6 +4286,11 @@ class FfmpegToolsPanel:
                     f"As trilhas de áudio possuem formatos divergentes ({first.audio_codec}/{first.audio_rate}Hz vs {clip.audio_codec}/{clip.audio_rate}Hz). "
                     "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
                 )
+            if clip.has_audio and clip.audio_codec and clip.audio_codec not in self._MP4_SAFE_AUDIO_CODECS:
+                raise RuntimeError(
+                    f"O codec de áudio '{clip.audio_codec}' não é compatível com o container MP4. "
+                    "Marque 'Reencode Completo' para convertê-lo."
+                )
 
     def _join_worker(self) -> None:
         if len(self.join_inputs) < 2:
@@ -4217,8 +4309,7 @@ class FfmpegToolsPanel:
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
             lines = []
             for path in self.join_inputs:
-                normalized = str(path.resolve()).replace("\\", "/")
-                lines.append(f"file '{normalized}'")
+                lines.append(f"file '{self._concat_escape(str(path.resolve()))}'")
             list_file.write_text("\n".join(lines), encoding="utf-8")
             try:
                 self._execute(
@@ -4243,8 +4334,7 @@ class FfmpegToolsPanel:
             list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
             lines = []
             for path in self.join_inputs:
-                normalized = str(path.resolve()).replace("\\", "/")
-                lines.append(f"file '{normalized}'")
+                lines.append(f"file '{self._concat_escape(str(path.resolve()))}'")
             list_file.write_text("\n".join(lines), encoding="utf-8")
             try:
                 self._execute([str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(output)], "Smart Join sem perda", 1, 1)
@@ -4305,6 +4395,19 @@ class FfmpegToolsPanel:
             return [*input_args[:3], *prefix, *input_args[3:], "-filter_complex", filter_text, "-map", map_video, "-map", "[aout]", *self._video_args(acceleration, profile["video_bitrate"]), "-r", profile["fps"], *self._join_audio_args(profile), "-movflags", "+faststart", str(output)]
         self._execute_video("Juntando vídeos", build)
 
+    def _validate_smart_video_compatibility(self, clips: list[MediaProfile]) -> None:
+        # Os corpos do SmartJoin são copiados com -c:v copy; parâmetros de vídeo
+        # divergentes produzem saída inválida. Falha aqui → _join_worker faz reencode completo.
+        first = clips[0]
+        for clip in clips[1:]:
+            for field in ("width", "height", "fps", "pix_fmt", "timebase", "video_codec"):
+                a = getattr(first, field)
+                b = getattr(clip, field)
+                if a and b and a != b:
+                    raise RuntimeError(
+                        f"As mídias possuem {field} distintos ({a} vs {b}); usando reencode completo para normalizar."
+                    )
+
     def _join_smart_hybrid(
         self,
         inputs: list[Path],
@@ -4318,6 +4421,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("a transição deve ser maior que zero")
         if not all(self._is_h264_video(path) for path in inputs):
             raise RuntimeError("Smart Join preservado requer vídeos H.264 compatíveis")
+        self._validate_smart_video_compatibility(clips)
         work_dir = self.output_dir / f"smart_join_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
         pieces: list[Path] = []
@@ -4371,6 +4475,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("a transição deve ser maior que zero")
         if not all(self._is_h264_video(path) for path in inputs):
             raise RuntimeError("Fade otimizado requer vídeos H.264 compatíveis")
+        self._validate_smart_video_compatibility(clips)
         work_dir = self.output_dir / f"fade_join_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
         pieces: list[Path] = []
@@ -4527,7 +4632,7 @@ class FfmpegToolsPanel:
 
     def _join_ts_concat(self, pieces: list[Path], output: Path, label: str, progress: int, total: int) -> None:
         list_file = pieces[0].parent / "lista.txt"
-        lines = [f"file '{str(path.resolve()).replace(chr(92), '/')}'" for path in pieces]
+        lines = [f"file '{self._concat_escape(str(path.resolve()))}'" for path in pieces]
         list_file.write_text("\n".join(lines), encoding="utf-8")
         command = [
             str(self._ffmpeg()), "-hide_banner", "-y", "-fflags", "+genpts", "-f", "concat", "-safe", "0", "-i", str(list_file),
@@ -4574,7 +4679,7 @@ class FfmpegToolsPanel:
         return ";".join((video0, video1, audio0, audio1, xfade, audio_mix))
 
     def _video_normalize_filter(self, index: int, profile: dict) -> str:
-        return f"[{index}:v]scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=increase,crop={profile['width']}:{profile['height']},setsar=1,fps={profile['fps']},format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
+        return f"[{index}:v]scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease,pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={profile['fps']},format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
 
     def _audio_normalize_filter(self, index: int, clip: tuple, profile: dict) -> str:
         duration, has_audio, *_rest = clip
@@ -4819,7 +4924,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("Nenhum trecho foi criado para a inserção")
         list_file = output.parent / f"{output.stem}_pieces_{uuid.uuid4().hex}.txt"
         list_file.write_text(
-            "\n".join(f"file '{str(piece.resolve()).replace(chr(92), '/')}'" for piece in pieces),
+            "\n".join(f"file '{self._concat_escape(str(piece.resolve()))}'" for piece in pieces),
             encoding="utf-8",
         )
         try:
@@ -4876,7 +4981,7 @@ class FfmpegToolsPanel:
         labels.append("a1")
         if has_right:
             fade_in = f",afade=t=in:st=0:d={self._fmt_seconds(effective)}" if use_fade else ""
-            filters.append(f"[0:a]atrim=start={self._fmt_seconds(insertion)}:end={self._fmt_seconds(main_end)},{normalize}{fade_in},asetpts=PTS-STARTPTS[a2]")
+            filters.append(f"[0:a]atrim=start={self._fmt_seconds(insertion)}:end={self._fmt_seconds(main_end)},{normalize},asetpts=PTS-STARTPTS{fade_in}[a2]")
             labels.append("a2")
         if use_crossfade and len(labels) > 1:
             previous = labels[0]
@@ -16660,6 +16765,8 @@ try {
                 job.converted_path = audio_dir / f"{stem}.vad_entrada.wav"
                 job.vad_output_path = audio_dir / f"{stem}.vad.wav"
             elif is_video_file(path):
+                if mode != "ready":
+                    self._append_activity_log(f"Vídeo {Path(path).name}: será convertido para WAV (a transcrição exige áudio).", tag="warning")
                 job.mode = "ready"
                 job.converted_path = audio_dir / f"{stem}.wav"
             elif mode == "ready":
