@@ -89,6 +89,23 @@ def format_process_command(command: list[object]) -> str:
     return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
 
 
+def format_ffmpeg_command_for_log(command: list[object]) -> str:
+    """Renderiza o comando FFmpeg para o log, sem o caminho do executável nem a
+    extensão .exe — apenas ``ffmpeg`` seguido do resto da linha.
+
+    Ex.: "D:\\...\\ffmpeg.exe" -hide_banner ...  ->  ffmpeg -hide_banner ...
+    """
+    if not command:
+        return ""
+    executable = str(command[0])
+    name = Path(executable).stem
+    if name.lower() in ("ffmpeg", "ffplay", "ffprobe"):
+        display = [name] + [str(part) for part in command[1:]]
+    else:
+        display = [str(part) for part in command]
+    return subprocess.list2cmdline(display) if os.name == "nt" else shlex.join(display)
+
+
 SUPPORTED_EXTENSIONS = {
     ".wav",
     ".mp3",
@@ -1504,7 +1521,7 @@ class FfmpegTaskTracker:
         box.tag_configure("active", foreground="#1d2b2a")
         box.tag_configure("pending", foreground="#667371")
         box.tag_configure("error", foreground="#b3261e")
-        box.tag_configure("command", foreground="#536471")
+        box.tag_configure("ffmpeg_command", foreground="#c99a2e")
         for name, item in tasks:
             state, progress, detail = item["state"], int(item["progress"]), str(item["detail"])
             if state == "completed":
@@ -1518,9 +1535,9 @@ class FfmpegTaskTracker:
                 line, tag = f"{name}\n", "pending"
             box.insert(END, line, tag)
         if commands:
-            box.insert(END, "\nComandos FFmpeg:\n", "command")
+            box.insert(END, "\nComandos FFmpeg:\n", "ffmpeg_command")
             for rendered_command in commands:
-                box.insert(END, f"$ {rendered_command}\n", "command")
+                box.insert(END, f"$ {rendered_command}\n", "ffmpeg_command")
         if live:
             box.insert(END, f"{live}\n", "active")
         if error:
@@ -3263,7 +3280,7 @@ class FfmpegToolsPanel:
 
     def _record_ffmpeg_command(self, command: list[object], *, force: bool = False) -> None:
         """Registra a linha real antes de iniciar um processo FFmpeg."""
-        rendered_command = format_process_command(command)
+        rendered_command = format_ffmpeg_command_for_log(command)
         if self.running and self.task_tracker:
             self.task_tracker.command(rendered_command)
         elif force:
@@ -7916,11 +7933,36 @@ class SigApp:
         lower = str(message or "").strip().lower()
         if not lower:
             return None
-        if lower.startswith("ffmpeg:"):
+        # Comandos FFmpeg (inclusive a forma renderizada "$ ffmpeg ..." e a
+        # forma antiga com caminho completo "...\\ffmpeg.exe").
+        ffmpeg_detected = (
+            lower.startswith("ffmpeg:")
+            or lower.startswith("ffmpeg ")
+            or "ffmpeg" in lower.split(" ")[0:2]
+            or "ffmpeg.exe" in lower
+        )
+        if lower.startswith("$ "):
+            ffmpeg_detected = "ffmpeg" in lower
+        if ffmpeg_detected:
+            # Erros que mencionam o FFmpeg (ex.: "FFmpeg retornou código 1",
+            # "ffmpeg.exe não foi encontrado") são vermelhos, não amarelos.
+            strong_error = (
+                r"retornou código",
+                r"não foi encontrad",
+                r"não foi poss",
+                r"\bfalh",
+                r"\berro\b",
+                r"inválid",
+                r"\binvalid",
+                r"recusad",
+            )
+            if any(re.search(pattern, lower) for pattern in strong_error):
+                return "activity_step_error"
             return "ffmpeg_command"
         error_patterns = (
             r"\berro\b",
             r"\bfalha\b",
+            r"\bfalhou\b",
             r"não consegui",
             r"não foi possível",
             r"não foi possivel",
@@ -7930,18 +7972,23 @@ class SigApp:
             r"^http [45]\d{2}",
             r"falhou",
             r"fechou a conexão",
+            r"conexão fechada",
+            r"conexao fechada",
             r"retornou código",
             r"resposta vazia",
             r"gravação vazia",
             r"sem conteúdo",
             r"nenhum microfone",
             r"não há microfone",
+            r"não foi encontrad",
+            r"não foi criad",
+            r"não existe",
         )
         if any(re.search(pattern, lower) for pattern in error_patterns):
             return "activity_step_error"
         warning_patterns = (
             r"reconectando",
-            r"desconectado",
+            r"desconectad",
             r"não enviou uma confirmação",
             r"não havia conexão ativa",
             r"sem áudio foi gravado",
@@ -8050,14 +8097,22 @@ class SigApp:
         box.configure(state="disabled")
 
     def _activity_log_click(self, event):
-        """Clique em linha vermelha/amarela do log copia o texto da mensagem."""
+        """Clique em linha amarela/vermelha do log copia o texto da mensagem."""
         box = getattr(self, "activity_log", None)
         if box is None or not box.winfo_exists():
             return
         try:
             index = box.index(f"@{event.x},{event.y}")
             tags = set(box.tag_names(index))
-            if tags & {"activity_step_error", "activity_step_warning", "warning"}:
+            # Amarelo: warning, activity_step_warning, ffmpeg_command.
+            # Vermelho: error, activity_step_error.
+            if tags & {
+                "activity_step_error",
+                "activity_step_warning",
+                "warning",
+                "ffmpeg_command",
+                "error",
+            }:
                 start = box.index(f"{index} linestart")
                 end = box.index(f"{index} lineend")
                 text = box.get(start, end).strip()
@@ -17537,7 +17592,7 @@ try {
             ]
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         with job.log_path.open("wb") as log:
-            self._queue("ffmpeg_command", format_process_command(command))
+            self._queue("ffmpeg_command", format_ffmpeg_command_for_log(command))
             process = subprocess.Popen(
                 command,
                 stdout=log,
