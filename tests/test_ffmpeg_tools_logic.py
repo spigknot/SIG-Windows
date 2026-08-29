@@ -537,6 +537,9 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._seconds = lambda *a, **k: None
         panel._safe_output = lambda d, stem, ext: Path(f"{stem}{ext}")
         panel._audio_codec_args = lambda ext, br: ["-c:a", "libmp3lame"]
+        panel._probe_media = lambda _src: MediaProfile(
+            10.0, True, 0, 0, "0", "0k", "128k", 44100, 2, "stereo", False, audio_codec="mp3"
+        )
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
         panel.output_dir = Path(".")
         panel._execute = MagicMock()
@@ -672,6 +675,26 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertIn("-vn", cmd)
         self.assertIn("0:a:0?", cmd)
 
+    def test_cut_video_uses_full_precise_reencode(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        src = MagicMock()
+        src.exists.return_value = True
+        src.suffix = ".mp4"
+        src.stem = "video"
+        panel.cut_input = src
+        panel.cut_start_var = MagicMock(); panel.cut_start_var.get.return_value = "1"
+        panel.cut_end_var = MagicMock(); panel.cut_end_var.get.return_value = "5"
+        panel._seconds = lambda value, *_args: float(value)
+        profile = MediaProfile(10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo", True, audio_codec="aac", video_codec="h264")
+        panel._probe_media = lambda _path: profile
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
+        panel._cut_video_precise = MagicMock()
+        panel._cut_video_hybrid = MagicMock()
+        panel._cut_worker()
+        panel._cut_video_precise.assert_called_once()
+        panel._cut_video_hybrid.assert_not_called()
+
     def test_join_audio_0s_transition_uses_normalized_inputs(self):
         panel = object.__new__(FfmpegToolsPanel)
         panel.join_inputs = [Path("a1.wav"), Path("a2.wav")]
@@ -716,7 +739,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
     # ---- Fase D: correções da auditoria FFmpeg (rotação metadados, join copy,
     #       xfade 4:2:0, fade pad, log de encoder) ----
 
-    def _rotation_panel(self, degrees=90, metadata=True, hflip=False, vflip=False, has_trim=False, duration=4.0, source_suffix=".mp4", video_codec="h264", audio_codec="aac", has_audio=True):
+    def _rotation_panel(self, degrees=90, metadata=True, hflip=False, vflip=False, has_trim=False, duration=4.0, source_suffix=".mp4", video_codec="h264", audio_codec="aac", has_audio=True, rotation=0):
         panel = object.__new__(FfmpegToolsPanel)
         panel.rotate_degrees_var = MagicMock(); panel.rotate_degrees_var.get.return_value = str(degrees)
         panel.rotate_metadata_var = MagicMock(); panel.rotate_metadata_var.get.return_value = metadata
@@ -741,7 +764,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.rotate_input.suffix = source_suffix
         panel._probe_media = lambda _p: MediaProfile(
             duration, has_audio, 320, 240, "30", "1000k", "128k", 48000, 2, "stereo",
-            has_video=True, rotation=0, audio_codec=audio_codec, video_codec=video_codec,
+            has_video=True, rotation=rotation, audio_codec=audio_codec, video_codec=video_codec,
         )
         return panel
 
@@ -757,11 +780,19 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertNotIn("-metadata:s:v:0", cmd)
         self.assertNotIn("rotate=", cmd)
 
-    def test_rotate_metadata_skips_rotation_when_zero_degrees(self):
+    def test_rotate_metadata_emits_zero_rotation_to_clear_existing_matrix(self):
         panel = self._rotation_panel(degrees=0, metadata=True)
         panel._rotate_worker()
         cmd = panel._execute.call_args[0][0]
-        self.assertNotIn("-display_rotation:v:0", cmd)
+        index = cmd.index("-display_rotation:v:0")
+        self.assertEqual(cmd[index + 1], "0")
+
+    def test_rotate_metadata_combines_existing_rotation_and_emits_zero(self):
+        panel = self._rotation_panel(degrees=-90, metadata=True, rotation=90)
+        panel._rotate_worker()
+        cmd = panel._execute.call_args[0][0]
+        index = cmd.index("-display_rotation:v:0")
+        self.assertEqual(cmd[index + 1], "0")
 
     def test_rotate_metadata_rejects_non_mp4_safe_audio_codec(self):
         # AVI+WMA não pode ser copiado para MP4 sem reencodar (F-03).
@@ -845,6 +876,75 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertTrue(any("não aplicável" in s for s in status_args), status_args)
         panel.task_tracker.success.assert_called_once()
         self.assertIn("não aplicável", panel.task_tracker.success.call_args[0][0])
+
+    def test_audio_only_webm_uses_safe_m4a_output(self):
+        self.assertEqual(
+            FfmpegToolsPanel._audio_only_output_extension(Path("audio.webm")),
+            ".m4a",
+        )
+        self.assertEqual(
+            FfmpegToolsPanel._audio_only_output_extension(Path("audio.ogg")),
+            ".ogg",
+        )
+
+    def test_smart_insert_preserves_alac_and_opus_codecs(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        alac = panel._audio_codec_args_for_source_codec("alac", ".m4a", "256k")
+        opus = panel._audio_codec_args_for_source_codec("opus", ".ogg", "128k")
+        self.assertEqual(alac[:2], ["-c:a", "alac"])
+        self.assertEqual(opus[:2], ["-c:a", "libopus"])
+        self.assertIn("audio", opus)
+        self.assertIn("on", opus)
+
+    def test_video_copy_rejects_divergent_sar(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._MP4_SAFE_VIDEO_CODECS = FfmpegToolsPanel._MP4_SAFE_VIDEO_CODECS
+        panel._MP4_SAFE_AUDIO_CODECS = FfmpegToolsPanel._MP4_SAFE_AUDIO_CODECS
+        first = MediaProfile(
+            4.0, True, 1440, 1080, "30", "1M", "128k", 48000, 2, "stereo",
+            True, 0, "aac", "h264", "yuv420p", "90k", "4:3",
+        )
+        second = MediaProfile(
+            4.0, True, 1440, 1080, "30", "1M", "128k", 48000, 2, "stereo",
+            True, 0, "aac", "h264", "yuv420p", "90k", "1:1",
+        )
+        with self.assertRaises(RuntimeError):
+            panel._validate_video_copy_compatibility([first, second])
+
+    def test_hardware_fallback_classifier_rejects_unrelated_errors(self):
+        self.assertTrue(FfmpegToolsPanel._is_hardware_encoder_error("Cannot load NVENC library"))
+        self.assertFalse(FfmpegToolsPanel._is_hardware_encoder_error("No space left on device"))
+        self.assertFalse(FfmpegToolsPanel._is_hardware_encoder_error("Output file does not contain any stream"))
+
+    def test_probe_media_extracts_sar(self):
+        fake_output = (
+            "Input #0, mov, from 'video.mp4':\n"
+            "  Duration: 00:00:04.00, bitrate: 1000 kb/s\n"
+            "  Stream #0:0: Video: h264, yuv420p, 1440x1080 [SAR 4:3 DAR 16:9], 30 fps, 90k tbn\n"
+            "  Stream #0:1: Audio: aac, 48000 Hz, stereo, 128 kb/s\n"
+        )
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _command: None
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
+            profile = panel._probe_media(Path("video.mp4"))
+        self.assertEqual(profile.sar, "4:3")
+
+    def test_insert_fades_run_after_timestamp_reset(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._get_duration_only = lambda _path: 2.0
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._audio_codec_args = lambda _ext, _bitrate: ["-c:a", "aac"]
+        panel._append_log = MagicMock()
+        profile = MediaProfile(8.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, audio_codec="aac")
+        command = panel._insert_full_reencode_arguments(
+            Path("main.m4a"), Path("insert.m4a"), Path("out.m4a"), profile, 3.0, 0.5, "fade"
+        )
+        filters = command[command.index("-filter_complex") + 1]
+        self.assertIn("asetpts=PTS-STARTPTS,afade=t=out", filters)
+        self.assertIn("asetpts=PTS-STARTPTS,afade=t=in", filters)
 
 
 if __name__ == "__main__":

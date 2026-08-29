@@ -1034,6 +1034,7 @@ class MediaProfile:
     video_codec: str = ""
     pix_fmt: str = ""
     timebase: str = ""
+    sar: str = ""
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -1911,7 +1912,7 @@ class FfmpegToolsPanel:
             self._toggle_preview()
 
     def _build_cut_tab(self) -> None:
-        self._section_title(self.cut_tab, "Cortar áudio/vídeo", "Corte preciso: reencoda apenas quando necessário para respeitar o início e o fim selecionados (modo híbrido pode variar frações de segundo por alinhamento de keyframe).")
+        self._section_title(self.cut_tab, "Cortar áudio/vídeo", "Corte preciso: vídeos são reencodados de ponta a ponta para preservar sincronismo e compatibilidade; áudios são recodificados no formato original.")
         self._file_row(self.cut_tab, self.cut_input_var, self.select_cut_input)
         self.cut_preview = self._create_stable_preview(self.cut_tab, "Selecione uma mídia para visualizar")
         self.cut_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.cut_preview))
@@ -2011,10 +2012,10 @@ class FfmpegToolsPanel:
         ttk.Label(row, text="Giro:").pack(side=LEFT)
         rotate_combo = ttk.Combobox(row, textvariable=self.rotate_degrees_var, values=("-90", "0", "90", "180"), state="readonly", width=7)
         rotate_combo.pack(side=LEFT, padx=(6, 18))
-        rotate_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_rotate_thumbnail())
-        self.rotate_hflip_check = ttk.Checkbutton(row, text="Espelhar horizontal", variable=self.rotate_hflip_var, command=self._refresh_rotate_thumbnail)
+        rotate_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_rotate_transform_changed())
+        self.rotate_hflip_check = ttk.Checkbutton(row, text="Espelhar horizontal", variable=self.rotate_hflip_var, command=self._on_rotate_transform_changed)
         self.rotate_hflip_check.pack(side=LEFT, padx=(0, 12))
-        self.rotate_vflip_check = ttk.Checkbutton(row, text="Espelhar vertical", variable=self.rotate_vflip_var, command=self._refresh_rotate_thumbnail)
+        self.rotate_vflip_check = ttk.Checkbutton(row, text="Espelhar vertical", variable=self.rotate_vflip_var, command=self._on_rotate_transform_changed)
         self.rotate_vflip_check.pack(side=LEFT, padx=(0, 12))
         rotate_options = ttk.Frame(self.rotate_tab)
         rotate_options.pack(anchor="w", pady=(12, 0))
@@ -2326,6 +2327,9 @@ class FfmpegToolsPanel:
 
     def _update_rotate_control_state(self) -> None:
         metadata_only = self.rotate_metadata_var.get()
+        if metadata_only:
+            self.rotate_hflip_var.set(False)
+            self.rotate_vflip_var.set(False)
         state = "disabled" if metadata_only else "normal"
         self.rotate_parallel_check.configure(state=state)
         self.rotate_hflip_check.configure(state=state)
@@ -2338,6 +2342,10 @@ class FfmpegToolsPanel:
             self.rotate_parallel_frame.pack_forget()
             self.rotate_device_limit_label.pack_forget()
         self._refresh_rotate_device_limit()
+        self._refresh_rotate_thumbnail()
+        self._refresh_encoder_control_state()
+
+    def _on_rotate_transform_changed(self) -> None:
         self._refresh_rotate_thumbnail()
         self._refresh_encoder_control_state()
 
@@ -2416,7 +2424,7 @@ class FfmpegToolsPanel:
         self.insert_reencode_check.configure(state="normal" if not self.running else "disabled")
         self.insert_smart_check.configure(state="normal" if not self.running else "disabled")
         self.insert_transition_combo.configure(state="readonly" if enabled else "disabled")
-        seconds_relevant = enabled and (reencode or (smart and self.insert_transition_var.get() == "Fade in/out"))
+        seconds_relevant = enabled and self.insert_transition_var.get() != "No transition"
         self.insert_seconds_entry.configure(state="normal" if seconds_relevant else "disabled")
 
         if smart:
@@ -3338,7 +3346,7 @@ class FfmpegToolsPanel:
             if tool_uses_video_encoder:
                 self._set_status(f"Encoder selecionado: {self.acceleration.label}; qualidade: {self.video_quality_var.get()}", 0)
             else:
-                self._set_status(f"Encoder de vídeo: não aplicável; qualidade: {self.video_quality_var.get()}", 0)
+                self._set_status("Encoder de vídeo: não aplicável", 0)
             worker()
             if not self.cancel_event.is_set():
                 self._set_status("Concluído. Arquivo(s) salvo(s) na pasta de saída.", 100)
@@ -3640,12 +3648,22 @@ class FfmpegToolsPanel:
         profile = self.acceleration or cpu_fallback
         try:
             self._execute(builder(profile), label, progress, total, duration_seconds, progress_callback)
-        except RuntimeError:
-            if profile.key == "cpu":
+        except RuntimeError as exc:
+            if profile.key == "cpu" or not self._is_hardware_encoder_error(str(exc)):
                 raise
             self._append_log(f"{profile.label} não concluiu a tarefa; repetindo com CPU ({cpu_fallback.encoder}).")
             self.acceleration = cpu_fallback
             self._execute(builder(cpu_fallback), f"{label} (CPU)", progress, total, duration_seconds, progress_callback)
+
+    @staticmethod
+    def _is_hardware_encoder_error(message: str) -> bool:
+        lower = message.lower()
+        markers = (
+            "nvenc", "cuda", "qsv", "mfx", "amf", "vaapi", "d3d11", "d3d12",
+            "hardware device", "device setup failed", "encoder initialization",
+            "initializing output stream", "no capable devices", "session limit",
+        )
+        return any(marker in lower for marker in markers)
 
     @staticmethod
     def _seconds(value: str, label: str, allow_empty: bool = False) -> float | None:
@@ -3694,6 +3712,34 @@ class FfmpegToolsPanel:
         return ["-c:a", "aac", "-b:a", bitrate]
 
     @staticmethod
+    def _audio_only_output_extension(source: Path) -> str:
+        extension = source.suffix.lower()
+        return extension if extension in AUDIO_EXTENSIONS else ".m4a"
+
+    def _audio_codec_args_for_source_codec(self, codec: str, extension: str, bitrate: str) -> list[str] | None:
+        codec = codec.lower()
+        if codec == "aac":
+            args = ["-c:a", "aac", "-b:a", bitrate]
+            if extension.lower() == ".m4a":
+                args += ["-movflags", "+faststart"]
+            return args
+        if codec == "mp3":
+            return ["-c:a", "libmp3lame", "-b:a", bitrate, "-minrate", bitrate, "-maxrate", bitrate]
+        if codec == "alac":
+            return ["-c:a", "alac", "-movflags", "+faststart"]
+        if codec in {"vorbis", "libvorbis"}:
+            return ["-c:a", "libvorbis", "-b:a", bitrate]
+        if codec in {"opus", "libopus"}:
+            return ["-c:a", "libopus", "-application", "audio", "-b:a", bitrate, "-vbr", "on"]
+        if codec == "flac":
+            return ["-c:a", "flac"]
+        if codec == "wmav2":
+            return ["-c:a", "wmav2", "-b:a", bitrate]
+        if codec.startswith("pcm_") and extension.lower() == ".wav":
+            return ["-c:a", codec, "-f", "wav"]
+        return None
+
+    @staticmethod
     def _join_audio_args(profile: dict) -> list[str]:
         return [
             "-c:a", "aac", "-b:a", profile["audio_bitrate"],
@@ -3713,11 +3759,11 @@ class FfmpegToolsPanel:
         if media.duration > 0 and (start >= media.duration - 0.001 or end > media.duration + 0.05):
             raise RuntimeError(f"O intervalo excede a duração do arquivo ({self._clock(media.duration)}).")
         is_video = media.has_video
-        extension = ".mp4" if is_video else source.suffix.lower()
+        extension = ".mp4" if is_video else self._audio_only_output_extension(source)
         output = self._safe_output(self.output_dir, f"{source.stem}_cortado", extension)
 
         if is_video:
-            self._cut_video_hybrid(source, output, start, end, media)
+            self._cut_video_precise(source, output, start, end, media)
         else:
             command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration), "-map", "0:a:0?", "-vn", *self._audio_codec_args(extension, media.audio_bitrate), str(output)]
             self._execute(command, "Cortando áudio", 1, 1)
@@ -3879,9 +3925,14 @@ class FfmpegToolsPanel:
             if bitrate not in allowed:
                 bitrate = allowed[0]
         total = len(self.extract_inputs)
+        processed = 0
         for index, source in enumerate(self.extract_inputs, start=1):
             if not source.exists():
                 raise RuntimeError(f"Arquivo não encontrado: {source.name}")
+            media = self._probe_media(source)
+            if not media.has_audio:
+                self._append_log(f"{source.name} não possui trilha de áudio e foi ignorado.")
+                continue
             if start is not None and end is not None:
                 dur = self._get_duration_only(source)
                 if dur > 0 and (start >= dur - 0.001 or end > dur + 0.05):
@@ -3895,6 +3946,9 @@ class FfmpegToolsPanel:
                 command += ["-t", self._fmt_seconds(end - start)]
             command += ["-vn", "-map", "0:a:0?", "-ar", rate, "-ac", channels, *self._audio_codec_args(extension, bitrate), str(output)]
             self._execute(command, f"Extraindo {source.name}", index, total)
+            processed += 1
+        if processed == 0:
+            raise RuntimeError("Nenhum dos arquivos selecionados possui trilha de áudio.")
 
     @staticmethod
     def _metadata_rotate_output_suffix(input_suffix: str) -> str:
@@ -3943,8 +3997,7 @@ class FfmpegToolsPanel:
                         "Desmarque 'Somente metadados de rotação' para aplicar o giro com reencode."
                     )
             command = [str(self._ffmpeg()), "-hide_banner", "-y"]
-            if target_rotation % 360 != 0:
-                command += ["-display_rotation:v:0", str(target_rotation)]
+            command += ["-display_rotation:v:0", str(target_rotation)]
             command += [*seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", str(output)]
             self._execute(command, "Cortando e atualizando rotação" if has_trim else "Atualizando metadados de rotação", 1, 1, trim_duration)
             return
@@ -4043,7 +4096,7 @@ class FfmpegToolsPanel:
             pattern = work_dir / "parte_%05d.mp4"
             split_times = ",".join(self._fmt_seconds(value) for value in sorted(split_points))
             split_command = [
-                str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-map", "0", "-c", "copy",
+                str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
                 "-f", "segment", "-segment_times", split_times, "-reset_timestamps", "1",
                 "-segment_format", "mp4", "-avoid_negative_ts", "make_zero", str(pattern),
             ]
@@ -4188,12 +4241,14 @@ class FfmpegToolsPanel:
 
         tbn_match = re.search(r"(\d+(?:\.\d+)?k?)\s*tbn", video_line)
         timebase = tbn_match.group(1).lower() if tbn_match else ""
+        sar_match = re.search(r"SAR\s+(\d+[:/]\d+)", video_line, re.IGNORECASE)
+        sar = sar_match.group(1).replace("/", ":") if sar_match else ""
 
         return MediaProfile(
             duration, bool(audio_line), width - width % 2, height - height % 2, fps,
             video_bitrate, audio_bitrate, audio_rate, audio_channels, audio_layout,
             bool(video_line), rotation, audio_codec,
-            video_codec, pix_fmt, timebase,
+            video_codec, pix_fmt, timebase, sar,
         )
 
     def _max_audio_transition(self, clips) -> float:
@@ -4247,7 +4302,8 @@ class FfmpegToolsPanel:
 
         transition_choice = self.join_transition_var.get()
         transition_code = dict(self.AUDIO_TRANSITIONS).get(transition_choice, "tri")
-        output = self._safe_output(self.output_dir, "audios_juntos", ".m4a")
+        extension = self._audio_only_output_extension(self.join_inputs[0])
+        output = self._safe_output(self.output_dir, "audios_juntos", extension)
         command = [str(self._ffmpeg()), "-hide_banner", "-y"]
         for path in self.join_inputs:
             command += ["-i", str(path)]
@@ -4296,8 +4352,8 @@ class FfmpegToolsPanel:
             ]
         first = clips[0]
         command += [
-            "-c:a", "aac", "-b:a", first.audio_bitrate, "-ar", str(first.audio_rate),
-            "-ac", str(first.audio_channels), "-movflags", "+faststart", str(output),
+            "-ar", str(first.audio_rate), "-ac", str(first.audio_channels),
+            *self._audio_codec_args(extension, first.audio_bitrate), str(output),
         ]
         total_duration = sum(item.duration for item in clips) - (transition_seconds * (len(clips) - 1) if transition_choice != "Fade in/out" else 0.0)
         self._execute(command, "Aplicando transições e juntando áudios", 1, 1, max(0.1, total_duration))
@@ -4343,6 +4399,11 @@ class FfmpegToolsPanel:
             if clip.timebase and first.timebase and clip.timebase != first.timebase:
                 raise RuntimeError(
                     f"As mídias possuem bases de tempo distintas ({first.timebase} tbn vs {clip.timebase} tbn). "
+                    "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
+                )
+            if clip.sar and first.sar and clip.sar != first.sar:
+                raise RuntimeError(
+                    f"As mídias possuem proporções de pixel distintas ({first.sar} SAR vs {clip.sar} SAR). "
                     "Marque 'Reencode Completo' ou use transição no 'SmartJoin' para compatibilizá-las."
                 )
             if clip.has_audio != first.has_audio:
@@ -4435,16 +4496,7 @@ class FfmpegToolsPanel:
             f"{profile['audio_rate']} Hz/{profile['audio_channels']} canal(is)."
         )
         if strategy == "Smart Join":
-            try:
-                if transition == "Fade in/out":
-                    self._join_fade_hybrid(self.join_inputs, clips, profile, transition_seconds, output)
-                else:
-                    self._join_smart_hybrid(self.join_inputs, clips, profile, transition_seconds, transition, output)
-                return
-            except Cancelled:
-                raise
-            except Exception as exc:
-                self._append_log(f"Smart Join não ficou compatível ({exc}); usando junção completa.")
+            self._append_log("SmartJoin com transição usa reencode completo para manter vídeo e áudio sincronizados.")
         if transition == "Fade in/out":
             filters = self._fade_join_filter(clips, profile, transition_seconds)
         else:
@@ -4469,7 +4521,7 @@ class FfmpegToolsPanel:
         # divergentes produzem saída inválida. Falha aqui → _join_worker faz reencode completo.
         first = clips[0]
         for clip in clips[1:]:
-            for field in ("width", "height", "fps", "pix_fmt", "timebase", "video_codec"):
+            for field in ("width", "height", "fps", "pix_fmt", "timebase", "sar", "video_codec"):
                 a = getattr(first, field)
                 b = getattr(clip, field)
                 if a and b and a != b:
@@ -4820,10 +4872,13 @@ class FfmpegToolsPanel:
             raise RuntimeError("Os dois arquivos precisam conter áudio")
         insertion = max(0.0, min(self.insert_timeline.insertion, main_profile.duration))
         transition_code = dict(self.AUDIO_TRANSITIONS).get(self.insert_transition_var.get(), "none")
-        try:
-            transition_seconds = float(self.insert_seconds_var.get().replace(",", "."))
-        except ValueError as exc:
-            raise RuntimeError("Tempo de transição inválido") from exc
+        if transition_code == "none":
+            transition_seconds = 0.0
+        else:
+            try:
+                transition_seconds = float(self.insert_seconds_var.get().replace(",", "."))
+            except ValueError as exc:
+                raise RuntimeError("Tempo de transição inválido") from exc
         if transition_seconds < 0:
             raise RuntimeError("Tempo de transição não pode ser negativo")
 
@@ -4847,6 +4902,19 @@ class FfmpegToolsPanel:
             return
         if use_smart:
             use_fade = self.insert_transition_var.get() == "Fade in/out" and transition_seconds > 0
+            if self._audio_codec_args_for_source_codec(
+                main_profile.audio_codec, extension, main_profile.audio_bitrate
+            ) is None:
+                self._append_log(
+                    f"Smart Insert não pode preservar o codec '{main_profile.audio_codec}'; "
+                    "usando reencode completo para gerar uma saída válida."
+                )
+                fallback_transition = "fade" if use_fade else "none"
+                command = self._insert_full_reencode_arguments(
+                    main, inserted, output, main_profile, insertion, transition_seconds, fallback_transition
+                )
+                self._execute(command, "Inserindo áudio (compatibilização completa)", 1, 1, total_duration)
+                return
             self._insert_smart_worker(main, inserted, output, main_profile, insertion, total_duration, use_fade, transition_seconds)
             return
         self._insert_copy_worker(main, inserted, output, main_profile, inserted_profile, insertion, total_duration)
@@ -4955,11 +5023,15 @@ class FfmpegToolsPanel:
             if fade_filters:
                 middle_cmd += ["-af", ",".join(fade_filters)]
 
-            if extension.lower() == ".wav":
-                pcm_codec = profile.audio_codec if profile.audio_codec.startswith("pcm_") else "pcm_s16le"
-                middle_cmd += ["-c:a", pcm_codec, "-f", "wav"]
-            else:
-                middle_cmd += self._audio_codec_args(extension, profile.audio_bitrate)
+            codec_args = self._audio_codec_args_for_source_codec(
+                profile.audio_codec, extension, profile.audio_bitrate
+            )
+            if codec_args is None:
+                raise RuntimeError(
+                    f"Smart Insert não consegue preservar com segurança o codec '{profile.audio_codec}'. "
+                    "Use Reencode Completo."
+                )
+            middle_cmd += codec_args
             middle_cmd.append(str(middle))
 
             self._execute(
@@ -5029,6 +5101,10 @@ class FfmpegToolsPanel:
         if main_end > insertion:
             neighbors.append(main_end - insertion)
         effective = min(transition_seconds, max(0.0, min(neighbors) / 2 if neighbors else 0.0))
+        if effective + 0.001 < transition_seconds:
+            self._append_log(
+                f"Tempo de transição ajustado de {transition_seconds:.2f}s para {effective:.2f}s para caber nos trechos."
+            )
         has_left = insertion > 0.001
         has_right = main_end - insertion > 0.001
         use_fade = transition_code == "fade" and effective > 0
@@ -5039,14 +5115,14 @@ class FfmpegToolsPanel:
         labels: list[str] = []
         if has_left:
             fade_out = f",afade=t=out:st={self._fmt_seconds(max(0.0, insertion - effective))}:d={self._fmt_seconds(effective)}" if use_fade else ""
-            filters.append(f"[0:a]atrim=start=0:end={self._fmt_seconds(insertion)},{normalize}{fade_out},asetpts=PTS-STARTPTS[a0]")
+            filters.append(f"[0:a]atrim=start=0:end={self._fmt_seconds(insertion)},{normalize},asetpts=PTS-STARTPTS{fade_out}[a0]")
             labels.append("a0")
         inserted_fades = ""
         if use_fade and has_left:
             inserted_fades += f",afade=t=in:st=0:d={self._fmt_seconds(effective)}"
         if use_fade and has_right:
             inserted_fades += f",afade=t=out:st={self._fmt_seconds(max(0.0, inserted_duration - effective))}:d={self._fmt_seconds(effective)}"
-        filters.append(f"[1:a]atrim=start=0:end={self._fmt_seconds(inserted_duration)},{normalize}{inserted_fades},asetpts=PTS-STARTPTS[a1]")
+        filters.append(f"[1:a]atrim=start=0:end={self._fmt_seconds(inserted_duration)},{normalize},asetpts=PTS-STARTPTS{inserted_fades}[a1]")
         labels.append("a1")
         if has_right:
             fade_in = f",afade=t=in:st=0:d={self._fmt_seconds(effective)}" if use_fade else ""
@@ -5074,6 +5150,8 @@ class FfmpegToolsPanel:
         source = self.clean_input
         if not source or not source.exists():
             raise RuntimeError("Selecione o áudio para limpar")
+        if not self._probe_media(source).has_audio:
+            raise RuntimeError("O arquivo selecionado não possui trilha de áudio.")
         filter_value = "afftdn=nf=-25" if self.clean_mode_var.get() == "equilibrado" else "anlmdn=s=0.00003:p=0.002:r=0.002"
         output = self._safe_output(self.output_dir, f"{source.stem}_limpo", ".wav")
         command = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-vn", "-map", "0:a:0", "-af", filter_value, "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", "-f", "wav", str(output)]
