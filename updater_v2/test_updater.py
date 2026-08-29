@@ -263,6 +263,68 @@ class UpdaterV2ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(UpdateError, "recursos de runtime"):
                 validate_zip(zip_path)
 
+    def test_recover_ignores_journal_from_another_installation(self):
+        """Diário órfão de outro target não pode travar a recuperação local.
+
+        Um harness de teste abortado (ou uma instalação removida) deixa um
+        diário em %LOCALAPPDATA%\\sig\\updater\\transactions que aponta para um
+        target que não é o desta execução. O _recover_interrupted_transactions
+        deve IGNORAR esse diário (não tentar rollback — que falharia com
+        \"diário aponta para outra instalação\" e travaria TODA atualização).
+        """
+        import json
+        from unittest import mock
+
+        import updater
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transactions = root / "transactions"
+            transactions.mkdir()
+            target = root / "instalacao"
+            target.mkdir()
+            (target / "sig.exe").write_bytes(b"sig")
+            log_path = root / "updater.log"
+
+            # Diário de OUTRA instalação (target temporário que não é o nosso).
+            foreign = transactions / ".sig-sync-foreign"
+            foreign.mkdir()
+            (foreign / "journal.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "target": str(root / "outro-target"),
+                        "phase": "new-moved",
+                        "mode": "file",
+                        "names": ["sig.exe"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # Diário de NOSSA instalação, já validado — deve ser limpo.
+            ours = transactions / ".sig-sync-ours"
+            ours.mkdir()
+            (ours / "journal.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "target": str(target),
+                        "phase": "validated",
+                        "mode": "file",
+                        "names": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("updater._transaction_root", return_value=transactions):
+                with mock.patch("updater.validate_install_tree", return_value=None):
+                    updater._recover_interrupted_transactions(target, log_path)
+
+            # O diário estrangeiro permanece (não é nosso), o nosso foi limpo.
+            self.assertTrue((foreign / "journal.json").is_file())
+            self.assertFalse(ours.exists())
+
 
 class SyncTransactionLogTests(unittest.TestCase):
     """F4: o --sync-staged grava versão + run id por tentativa, distinguíveis

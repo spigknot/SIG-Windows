@@ -10,6 +10,10 @@
     "ffplay.exe": {
       "sha256": "97d64f4304bba3d924451f7cc15911077c0915e24f5de57454d16db072bb9cf6",
       "size": 212614144
+    },
+    "ffprobe.exe": {
+      "sha256": "55bb6c6289367ae2383efa86b26bf2596f8adb72ac747360eb13df162354161c",
+      "size": 210895360
     }
   },
   "schema": 1

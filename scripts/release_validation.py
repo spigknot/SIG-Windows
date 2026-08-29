@@ -34,6 +34,7 @@ REQUIRED_FULL_FILES = (
     "SigUpdater.exe",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "prompts/historico_system.txt",
     "prompts/historico_user.txt",
@@ -46,18 +47,19 @@ REQUIRED_FULL_FILES = (
     "modelos/modelo_depoimento.docx",
 )
 REQUIRED_FULL_DIRECTORIES = ("_internal", "vad_deps", "prompts", "modelos")
-RUNTIME_ASSET_FILES = ("ffmpeg.exe", "ffplay.exe")
+RUNTIME_ASSET_FILES = ("ffmpeg.exe", "ffplay.exe", "ffprobe.exe")
 RUNTIME_ASSET_DIRECTORIES = ("vad_deps",)
 INCREMENTAL_FORBIDDEN_TOP_LEVEL = {
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 }
 REQUIRED_INCREMENTAL_FILES = tuple(
     relative
     for relative in REQUIRED_FULL_FILES
-    if relative not in {"ffmpeg.exe", "ffplay.exe", "vad_worker.py"}
+    if relative not in {"ffmpeg.exe", "ffplay.exe", "ffprobe.exe", "vad_worker.py"}
 )
 REQUIRED_INCREMENTAL_DIRECTORIES = ("_internal", "prompts", "modelos")
 DIFF_REQUIRED_FILES = ("sig.exe", "build-info.json", "removidos.txt")

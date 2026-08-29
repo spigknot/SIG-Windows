@@ -39,6 +39,7 @@ SYNC_REQUIRED_FILES = (
     "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "prompts/historico_system.txt",
     "prompts/historico_user.txt",
@@ -60,6 +61,7 @@ SYNC_MANAGED_TOP_LEVELS = (
     "modelos",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 )
@@ -73,6 +75,7 @@ SYNC_ALLOWED_TOP_LEVELS = (
     "modelos",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 )

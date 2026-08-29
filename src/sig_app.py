@@ -80,7 +80,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260826_001"
+APP_VERSION = "20260829_001"
 
 
 def format_process_command(command: list[object]) -> str:

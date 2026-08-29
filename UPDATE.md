@@ -15,6 +15,7 @@ bump da versão → preflight → release.py (build + harness completo) → sync
 
 - **Sync por arquivo (atualização automática)**: Cloudflare R2, SEMPRE no bucket `sig` (`https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`).
 - **Download manual / reparo**: GitHub Releases (full.zip + instaladores).
+- **Runtime assets** (`ffmpeg.exe`, `ffplay.exe`, `ffprobe.exe`, `vad_deps/`): copiados de `assets/`/`dist/` para o `package/` pelo `copy_runtime_assets()`; o `ffprobe.exe` (8.0.1, do mesmo build gyan.dev do ffmpeg) é usado pelo app para medir duração de forma rápida e precisa, com fallback para o parse do `ffmpeg -i`. São EXCLUÍDOS do diff incremental (`INCREMENTAL_EXCLUDED_TOP_LEVEL`) e entram no full/instalador/R2.
 - **Drive do Google**: APOSENTADO desde a versão `20260821_013`. Não publicar mais lá.
 - O R2.dev é POR BUCKET: o URL de um objeto é `https://pub-<hash>.r2.dev/<path>` (SEM o bucket no path).
 - O updater/app buscam o manifesto em `https://pub-<hash>.r2.dev/sync_manifest.json` (schema 2, assinado).
@@ -209,6 +210,7 @@ a fonte da verdade e deve evoluir com a prática.
 | `componente desconhecido no manifesto: <v>_full.zip` | o `--package` apontou para a raiz (subiu o full.zip no manifesto) | usar `--package .../package`; re-publicar o sync |
 | `no matches found for C:/...` no `gh` | shell MSYS trata `C:/` como glob | `cd` no diretório e usar `./arquivo` |
 | `SigUpdater.exe não corresponde ao artefato bom` | `updater.py` mudou ou PyInstaller/Windows incluiu novas DLLs de API Set e o hash do fresh divergiu | revisar a composição, seguir a seção 3.1 e atualizar os 2 metadados; manter a validação exata por hash |
+| Runtime assets exigem `ffprobe.exe` mas ele não está no pacote | `runtime_artifact.json`/`REQUIRED_RUNTIME_FILES`/`SYNC_REQUIRED_FILES` sem a entrada; ou `assets/` sem o binário | adicionar `ffprobe.exe` nas 3 listas e no `runtime_artifact.json` (sha256+size) e copiar o binário do mesmo build gyan.dev do ffmpeg para `assets/` e `dist/` |
 | Google bloqueia `.exe` como malware | Drive flagra PyInstaller (aposentado — R2 não bloqueia) | se o R2 algum dia bloquear: assets avulsos no GitHub + `--github-tag` |
 | `[Erro: 13] Permission denied` no lock | updater sem admin / SIG aberto | fechar o SIG; executar o updater como Administrador |
 | `HTTP 1010` no R2.dev | User-Agent de bot (urllib) | o updater/app usam o UA `SigUpdater/2.0 (+https://github.com/spigknot/SIG-Windows)` — nunca o UA do urllib |

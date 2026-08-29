@@ -53,6 +53,7 @@ REQUIRED_CORE_FILES = (
 REQUIRED_RUNTIME_FILES = (
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
 )
 REQUIRED_UPDATE_FILES = REQUIRED_CORE_FILES + ("SigUpdater.exe",)
@@ -60,6 +61,7 @@ REQUIRED_DIRECTORIES = ("_internal", "vad_deps")
 INCREMENTAL_FORBIDDEN_TOP_LEVEL = {
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 }
@@ -71,6 +73,7 @@ ALLOWED_TOP_LEVEL_NAMES = {
     "SigUpdater.exe",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
     "prompts",
@@ -242,6 +245,7 @@ SYNC_REQUIRED_FILES = (
     "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "prompts/historico_system.txt",
     "prompts/historico_user.txt",
@@ -366,6 +370,7 @@ SYNC_MANAGED_TOP_LEVELS = (
     "modelos",
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 )
@@ -892,6 +897,14 @@ def _recover_interrupted_transactions(target: Path, log_path: Path) -> None:
             continue
         journal_path = transaction / "journal.json"
         journal = _read_journal(journal_path)
+        # Diário de OUTRA instalação (ex.: um harness de teste abortado que
+        # apontava para um diretório temporário) não pode ser recuperado aqui:
+        # tentar rollback falharia com "diário aponta para outra instalação" e
+        # travaria TODA atualização futura. Ignorar — cada instalação recupera
+        # os próprios diários.
+        journal_target = str(journal.get("target") or "")
+        if os.path.normcase(os.path.abspath(journal_target)) != os.path.normcase(os.path.abspath(str(target))):
+            continue
         if journal.get("phase") == "validated":
             try:
                 validate_install_tree(target, full=True)

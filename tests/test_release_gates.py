@@ -221,6 +221,7 @@ class ReleaseGateTests(unittest.TestCase):
             (runtime / "vad_deps").mkdir(parents=True)
             (runtime / "ffmpeg.exe").write_bytes(b"ffmpeg")
             (runtime / "ffplay.exe").write_bytes(b"ffplay")
+            (runtime / "ffprobe.exe").write_bytes(b"ffprobe")
             (runtime / "vad_deps" / "fixture.txt").write_text("fixture", encoding="utf-8")
             from release_validation import runtime_asset_fingerprint
 
@@ -246,6 +247,7 @@ class ReleaseGateTests(unittest.TestCase):
             dependency.mkdir(parents=True)
             (runtime / "ffmpeg.exe").write_bytes(b"ffmpeg")
             (runtime / "ffplay.exe").write_bytes(b"ffplay")
+            (runtime / "ffprobe.exe").write_bytes(b"ffprobe")
             (dependency / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
             expected = runtime_asset_fingerprint(runtime)
 

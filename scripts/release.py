@@ -138,7 +138,7 @@ def run_command(
 
 
 def copy_runtime_assets(runtime_root: Path, package_root: Path, updater_path: Path | None = None) -> None:
-    required = ("ffmpeg.exe", "ffplay.exe", "vad_deps")
+    required = ("ffmpeg.exe", "ffplay.exe", "ffprobe.exe", "vad_deps")
     for relative in required:
         source = runtime_root / relative
         if not source.exists():
@@ -167,6 +167,7 @@ def zip_directory(source_root: Path, zip_path: Path) -> None:
 INCREMENTAL_EXCLUDED_TOP_LEVEL = {
     "ffmpeg.exe",
     "ffplay.exe",
+    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 }
@@ -436,7 +437,11 @@ def build_release(args: argparse.Namespace) -> int:
         raise ValidationError(f"release {version} não é posterior à versão publicada {current_version}")
 
     check_build_environment()
-    run_preflight(root, quiet=True)
+    # O harness do updater roda abaixo, com o pacote NOVO (com ffprobe). O
+    # preflight interno não deve rodá-lo contra o pacote da última release:
+    # quando um runtime asset novo é adicionado (ex.: ffprobe), o pacote
+    # antigo não o contém e o updater novo o rejeitaria (falso negativo).
+    run_preflight(root, quiet=True, skip_updater_harness=True)
     runtime_root = (args.runtime_root or root / "dist").resolve()
     runtime_manifest = root / "scripts/runtime_artifact.json"
     validate_runtime_assets(runtime_root, runtime_manifest)
@@ -758,7 +763,7 @@ def _current_validation_args(root: Path, *, quiet: bool) -> argparse.Namespace:
     )
 
 
-def run_preflight(root: Path, *, quiet: bool = False) -> None:
+def run_preflight(root: Path, *, quiet: bool = False, skip_updater_harness: bool = False) -> None:
     """Run every operator-facing gate before a clean release build."""
     if syntax_command(root, quiet=quiet) != 0:
         raise ValidationError("preflight: o gate de sintaxe falhou")
@@ -768,14 +773,15 @@ def run_preflight(root: Path, *, quiet: bool = False) -> None:
         raise ValidationError("preflight: a suíte de testes falhou")
     if validate_command(_current_validation_args(root, quiet=quiet)) != 0:
         raise ValidationError("preflight: a validação do estado atual falhou")
-    updater_args = argparse.Namespace(
-        package_zip=None,
-        updater=None,
-        timeout=180,
-        quiet=quiet,
-    )
-    if updater_v2_test_command(updater_args) != 0:
-        raise ValidationError("preflight: o harness do updater v2 falhou")
+    if not skip_updater_harness:
+        updater_args = argparse.Namespace(
+            package_zip=None,
+            updater=None,
+            timeout=180,
+            quiet=quiet,
+        )
+        if updater_v2_test_command(updater_args) != 0:
+            raise ValidationError("preflight: o harness do updater v2 falhou")
     ui_args = argparse.Namespace(quiet=quiet)
     if ui_smoke_command(ui_args) != 0:
         raise ValidationError("preflight: o smoke test da interface falhou")
