@@ -47,6 +47,31 @@ def _manifest(**overrides) -> dict:
 
 
 class ParityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._key = None
+        key_path = ROOT / "release" / "update_private_key.pem"
+        if key_path.is_file():
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+
+            cls._key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+            cls._hashes = hashes
+            cls._padding = padding
+
+    def _sign(self, manifest: dict) -> dict:
+        import base64
+
+        if self._key is None:
+            return manifest
+        signature = self._key.sign(
+            sync_common.canonical_sync_manifest(manifest),
+            self._padding.PKCS1v15(),
+            self._hashes.SHA256(),
+        )
+        manifest["signature"] = base64.b64encode(signature).decode("ascii")
+        return manifest
+
     def test_canonical_identical_to_updater(self):
         manifest = _manifest()
         self.assertEqual(
@@ -70,21 +95,39 @@ class ParityTests(unittest.TestCase):
         with self.assertRaises(updater_module.UpdateError):
             updater_module.validate_sync_manifest(manifest)
 
-    def test_validation_agrees_with_updater_on_bad_path(self):
+    def test_validation_agrees_with_updater_on_unknown_component_ignored(self):
+        """Componente de top-level desconhecido NÃO rejeita o manifesto.
+
+        Vacina forward-compat: uma release nova pode adicionar um runtime
+        asset (ex.: ffprobe.exe) que apps antigos não conhecem. Rejeitar o
+        manifesto inteiro por causa dele travaria instalações antigas sem
+        atualizar. A entrada desconhecida é ignorada; os obrigatórios seguem
+        validados.
+        """
         manifest = _manifest()
-        manifest["files"] = manifest["files"] + [
-            {
-                "path": "malicioso/x.txt",
-                "sha256": "a" * 64,
-                "size": 1,
-                "drive_id": "",
-                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/malicioso/x.txt",
-            }
-        ]
+        # sem assinatura ambos falham igualmente (assinatura é exigida)
         with self.assertRaises(sync_common.SyncError):
             sync_common.validate_sync_manifest(manifest)
         with self.assertRaises(updater_module.UpdateError):
             updater_module.validate_sync_manifest(manifest)
+        # Com assinatura e componente desconhecido: aceito (ignorado).
+        # Montar o manifesto com o componente desconhecido ANTES de assinar
+        # (a assinatura cobre os files).
+        manifest["files"] = list(manifest["files"]) + [
+            {
+                "path": "futuro_asset.exe",
+                "sha256": "b" * 64,
+                "size": 1,
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/futuro_asset.exe",
+            }
+        ]
+        signed = self._sign(manifest)
+        if self._key is not None:
+            result_sync = sync_common.validate_sync_manifest(signed)
+            result_updater = updater_module.validate_sync_manifest(signed)
+            self.assertNotIn("futuro_asset.exe", result_sync["files"])
+            self.assertNotIn("futuro_asset.exe", result_updater["files"])
 
     def test_classification_agrees_with_updater(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -168,6 +211,23 @@ class SigSyncCommonTests(unittest.TestCase):
     def test_validate_rejects_missing_essential(self):
         manifest = _manifest()
         manifest["files"] = [entry for entry in manifest["files"] if entry["path"] != "sig.exe"]
+        with self.assertRaisesRegex(sync_common.SyncError, "obrigatórios"):
+            sync_common.validate_sync_manifest(self._sign(manifest))
+
+    def test_validate_accepts_unknown_component_but_still_requires_essentials(self):
+        """Componente desconhecido é ignorado, mas obrigatórios ausentes falham."""
+        manifest = _manifest()
+        manifest["files"] = [
+            entry for entry in manifest["files"] if entry["path"] != "sig.exe"
+        ] + [
+            {
+                "path": "futuro_asset.exe",
+                "sha256": "b" * 64,
+                "size": 1,
+                "drive_id": "",
+                "github_url": "https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev/futuro_asset.exe",
+            }
+        ]
         with self.assertRaisesRegex(sync_common.SyncError, "obrigatórios"):
             sync_common.validate_sync_manifest(self._sign(manifest))
 

@@ -39,7 +39,6 @@ SYNC_REQUIRED_FILES = (
     "_internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll",
     "ffmpeg.exe",
     "ffplay.exe",
-    "ffprobe.exe",
     "vad_worker.py",
     "prompts/historico_system.txt",
     "prompts/historico_user.txt",
@@ -61,7 +60,6 @@ SYNC_MANAGED_TOP_LEVELS = (
     "modelos",
     "ffmpeg.exe",
     "ffplay.exe",
-    "ffprobe.exe",
     "vad_worker.py",
     "vad_deps",
 )
@@ -165,8 +163,13 @@ def validate_sync_manifest(manifest: dict) -> dict:
             raise SyncError(f"entrada {index} do manifesto é inválida")
         path = str(entry.get("path") or "")
         top = path.split("/", 1)[0]
+        # Componentes que esta versão do app não conhece (ex.: um runtime asset
+        # adicionado numa release mais nova) NÃO podem rejeitar o manifesto
+        # inteiro — senão instalações antigas ficam presas sem atualizar.
+        # Ignorar a entrada desconhecida; os obrigatórios (SYNC_REQUIRED_FILES)
+        # continuam sendo validados abaixo.
         if top not in SYNC_ALLOWED_TOP_LEVELS:
-            raise SyncError(f"componente desconhecido no manifesto de sincronização: {path}")
+            continue
         if path in files:
             raise SyncError(f"caminho duplicado no manifesto de sincronização: {path}")
         sha256 = str(entry.get("sha256") or "").lower()

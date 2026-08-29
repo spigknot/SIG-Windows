@@ -133,7 +133,16 @@ class SyncManifestTests(unittest.TestCase):
         with self.assertRaises(UpdateError):
             validate_sync_manifest(manifest)
 
-    def test_unknown_top_level_is_rejected(self):
+    def test_unknown_top_level_is_ignored(self):
+        """Componente de top-level desconhecido NÃO rejeita o manifesto.
+
+        Vacina forward-compat: uma release nova pode adicionar um runtime
+        asset (ex.: ffprobe.exe) que esta versão do updater não conhece.
+        Rejeitar o manifesto inteiro por causa dele travaria instalações
+        antigas sem atualizar. A entrada desconhecida é ignorada; os
+        obrigatórios seguem validados (testado em
+        test_missing_essential_is_rejected).
+        """
         files = _fake_files() + [
             {
                 "path": "outra_pasta/x.txt",
@@ -146,8 +155,8 @@ class SyncManifestTests(unittest.TestCase):
         manifest = _make_manifest(files)
         if PRIVATE_KEY is not None:
             manifest["signature"] = _sign(canonical_sync_manifest(manifest))
-        with self.assertRaisesRegex(UpdateError, "desconhecido"):
-            validate_sync_manifest(manifest)
+        result = validate_sync_manifest(manifest)
+        self.assertNotIn("outra_pasta/x.txt", result["files"])
 
     def test_invalid_hash_is_rejected(self):
         files = _fake_files({"sig.exe": {"sha256": "zz" * 32}})

@@ -21,6 +21,13 @@ import boto3  # noqa: E402
 
 KEY_PATH = ROOT / "release" / "update_private_key.pem"
 
+# Componentes que NÃO entram no manifesto sync (mas podem estar no package
+# para o full.zip/instalador). O ffprobe é distribuído pelo full/instalador:
+# incluí-lo no manifesto travaria updaters antigos (que rejeitam componentes
+# desconhecidos). Remover daqui quando todos os updaters em campo forem
+# tolerantes a componentes novos (>= 20260829_002).
+SYNC_EXCLUDED_TOP_LEVEL = {"ffprobe.exe"}
+
 
 def snapshot(package: pathlib.Path) -> dict[str, dict]:
     files: dict[str, dict] = {}
@@ -28,6 +35,8 @@ def snapshot(package: pathlib.Path) -> dict[str, dict]:
         if not path.is_file():
             continue
         relative = path.relative_to(package).as_posix()
+        if relative.split("/", 1)[0] in SYNC_EXCLUDED_TOP_LEVEL:
+            continue
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
