@@ -1,0 +1,238 @@
+================================================================================
+RELATÓRIO DE AUDITORIA — 6 FERRAMENTAS FFMPEG DO SIG WINDOWS
+Projeto: SIG Windows
+Arquivo auditado: src/sig_app.py (FfmpegToolsPanel e workers)
+Binário usado na validação: dist/ffmpeg.exe (FFmpeg 8.0.1-full_build-www.gyan.dev)
+Data: 29/08/2026
+Metodologia: inspeção do código ATUAL + validação empírica dos comandos
+gerados pelos workers com o ffmpeg/ffprobe reais do app (mídias sintéticas
+geradas via lavfi, keyframes reais, PTS verificados com ffprobe).
+
+OBS: relatórios anteriores (relatorio_inspecao_ffmpeg_6_ferramentas.txt,
+relatorio_bugs_ffmpeg.txt, relatorio_auditoria_ffmpeg_windows.*) referem-se a
+código antigo — vários findings já foram corrigidos no código atual. Este
+relatório é o estado FRESCO.
+================================================================================
+
+RESUMO EXECUTIVO
+================
+- Ferramentas auditadas: 6 (Cortar, Extrair áudio, Girar vídeo, Juntar,
+  Inserir áudio, Limpar áudio).
+- Bugs confirmados empiricamente: 2 CRÍTICOS, 2 ALTOS, 3 MÉDIOS.
+- O mapeamento UI -> argumentos FFmpeg está correto na maioria dos fluxos;
+  os problemas estão em casos específicos (desrotar p/ 0°, SmartJoin com
+  transição, vídeos sem áudio, formatos de saída forçados).
+
+================================================================================
+1. FERRAMENTA: CORTAR ÁUDIO/VÍDEO (_cut_worker)
+================================================================================
+
+MAPEAMENTO UI -> FFMPEG
+- Início/Fim (s): -ss <start> (fast seek) + -t <duration> .............. OK
+- Vídeo H.264: corte híbrido (bordas reencode + corpo copy) ............ OK
+- Vídeo não-H.264: reencode completo (_cut_video_precise) .............. OK
+- Áudio: -c:a <codec do formato> (sempre reencoda) ..................... VER 1.1
+- Encoder/Qualidade (topo): usados nos reencodes de vídeo .............. OK
+
+1.1 [MÉDIA] Corte de áudio reencoda SEMPRE (perda desnecessária)
+- Local: ~linha 3722.
+- Comportamento: MP3/M4A/OGG recortados passam por libmp3lame/aac/libvorbis
+  com CBR fixo mesmo quando bastaria copiar o stream.
+- Evidência: _audio_codec_args(extension, media.audio_bitrate) é sempre
+  chamado para áudio; não há caminho -c:a copy.
+- Impacto: perda de qualidade por recompressão lossy ao simplesmente
+  recortar um trecho.
+- Fix sugerido: quando a extensão de saída == extensão de entrada, usar
+  -c:a copy (com -ss/-t de precisão, o recorte em copy perde precisão de
+  keyframe em formatos de áudio comprimido; avaliar reencode apenas quando
+  a precisão importar).
+
+1.2 [INFO] Corte híbrido descarta fluxos secundários
+- Local: ~linhas 3755/3816 (-map 0:v:0? -map 0:a:0?).
+- Vídeos com múltiplas faixas de áudio ou legendas embutidas perdem os
+  fluxos extras sem aviso. Comportamento intencional do mapeamento atual;
+  documentar ou alertar o usuário.
+
+================================================================================
+2. FERRAMENTA: EXTRAIR ÁUDIO (_extract_worker)
+================================================================================
+
+MAPEAMENTO UI -> FFMPEG
+- Formatos: wav/m4a/mp3/aac/ogg/opus/flac -> _audio_codec_args ......... OK
+- Hz/Canais/Bitrate: -ar / -ac / -b:a .................................. OK
+- Preset Transcrição: WAV 16000 Hz mono 256k ............................ OK
+- Preset Compacto: OGG 16000 Hz mono 32k ............................... OK
+- Recorte opcional: -ss/-t ............................................. OK
+- Restrições de OGG/Vorbis: bitrate validado por taxa/canais ............ OK
+- Restrições de Opus: taxa ajustada para valores válidos ................ OK
+
+2.1 [ALTA] Lote de extração aborta se um arquivo não tem áudio
+- Local: ~linha 3896 (-vn -map 0:a:0?).
+- Evidência empírica (ffmpeg 8.0.1):
+    [out#0/wav] Output file does not contain any stream
+    Error opening output files: Invalid argument
+- Impacto: vídeo mudo no meio de um lote de 10 cancela TODOS os arquivos.
+- Fix sugerido: preflight com _probe_media(source); se not media.has_audio,
+  logar aviso e continuar com o próximo arquivo (continue).
+
+2.2 [MÉDIA] Opus forçado em VOIP + CBR
+- Local: ~linha 3689: -c:a libopus -application voip -b:a <bitrate> -vbr off
+- Impacto: modo voip corta agudos >12 kHz; -vbr off piora eficiência.
+- Fix sugerido: usar -application audio e -vbr on para extrações gerais.
+
+================================================================================
+3. FERRAMENTA: GIRAR VÍDEO (_rotate_worker)
+================================================================================
+
+MAPEAMENTO UI -> FFMPEG
+- Graus: transpose=1/2 ou hflip,vflip .................................. OK
+- Espelhos: hflip/vflip ............................................... OK
+- Somente metadados: -display_rotation:v:0 <N> + -c copy ............... VER 3.1
+- Recorte: -ss/-t (alinhado a keyframe no modo copy) ................... OK
+- Paralelo: segmentação por keyframe + threads + concat ................ OK
+
+3.1 [CRÍTICO] "Somente metadados" NÃO desrota vídeo para 0 graus
+- Local: ~linhas 3930 e 3945-3948.
+- Comportamento:
+    target_rotation = (media.rotation + degrees) % 360
+    if target_rotation % 360 != 0:
+        command += ["-display_rotation:v:0", str(target_rotation)]
+- Problema: ao endireitar um vídeo gravado a 90° com giro -90°,
+  target_rotation = 0; como 0 % 360 == 0, a flag NÃO é emitida; o
+  -map 0 -c copy preserva a matriz original -> arquivo continua torto.
+- Evidência empírica:
+    Fonte: rotation=90 (displaymatrix)
+    Sem flag  (-c copy):            rotation=90  (BUG: não desrota)
+    Com flag  -display_rotation:v:0 0: rotation=(vazio)  (CORRETO)
+- Fix sugerido: SEMPRE emitir -display_rotation:v:0 <target_rotation>,
+  inclusive quando for 0.
+
+3.2 [INFO] Autorotate do FFmpeg no reencode é comportamento DESEJADO
+- No reencode (sem metadados), o FFmpeg aplica a rotação automaticamente
+  antes dos filtros (verificado: 320x240 rot90 + transpose=1 -> 240x320
+  com autorotate vs 240x320 sem). Como o usuário vê a prévia já rotacionada
+  e escolhe o giro relativo, o resultado final é o esperado. NÃO corrigir.
+
+================================================================================
+4. FERRAMENTA: JUNTAR ÁUDIOS/VÍDEOS (_join_worker)
+================================================================================
+
+MAPEAMENTO UI -> FFMPEG
+- Sem reencodar (áudio/vídeo): concat demuxer -c copy + validações ...... OK
+- Reencode Completo (áudio): afade/acrossfade com curvas corretas ........ OK
+- Reencode Completo (vídeo): xfade/acrossfade + normalização ........... OK
+- SmartJoin (vídeo): corpos copy + transição reencode ................... VER 4.1
+- Transição/Tempo: duration/offset ...................................... OK
+
+4.1 [CRÍTICO] SmartJoin dessincroniza áudio/vídeo no 2º+ clipe
+- Local: _join_smart_hybrid + _join_copy_body (~4502-4508, 4601-4609).
+- Comportamento: corpo do clipe N usa -ss <transition_seconds> -c:v copy.
+- Problema: stream copy não pode iniciar em ponto arbitrário; o vídeo
+  recua ao keyframe anterior enquanto o áudio (reencodado) busca com
+  precisão -> vídeo duplicado + A/V dessincronizado.
+- Evidência empírica (keyframes a cada 1s, -ss 0.9 -c:v copy):
+    Primeiro PTS de VÍDEO: ~1,48s   (recuou ao keyframe 1.0s... na
+    verdade o demuxer copiou do keyframe anterior e o primeiro pacote
+    útil aparece bem depois)
+    Primeiro PTS de ÁUDIO: ~2,36s
+    (com -ss 0.5, vídeo ~1,48s e áudio ~1,96s: gap ≈ ponto de corte)
+- Impacto: cada clipe após o primeiro contribui com quadros duplicados e
+  dessincronia progressiva. Reproduzível com qualquer transição > 0.
+- Fix sugerido (2 opções):
+  a) Robusto: SmartJoin com transição > 0.001 redireciona para o pipeline
+     de Reencode Completo (_xfade_join_filter) — A/V perfeito, mais lento.
+  b) Rápido: cortar o corpo no keyframe mais próximo do início desejado e
+     compensar o áudio com -ss preciso no áudio (complexo, frágil).
+
+4.2 [MÉDIA] Join de áudio força saída .m4a/AAC para qualquer entrada
+- Local: ~linha 4250.
+- Comportamento: output = audios_juntos.m4a com -c:a aac SEMPRE que há
+  transição/reencode.
+- Impacto: juntar dois MP3 ou dois WAV com transição gera M4A/AAC.
+- Fix sugerido: derivar extensão/codec do formato predominante das
+  entradas (mp3 -> libmp3lame, wav -> pcm_s16le, etc.) ou expor seletor.
+
+4.3 [INFO] Curvas de transição de áudio estão corretas
+- Código antigo usava sempre c1=tri:c2=tri; o atual mapeia via
+  dict(AUDIO_TRANSITIONS) (ex.: "Quarter sine wave (qsin)" -> qsin).
+  Confirmado no código atual (~4249). NÃO é mais bug.
+
+4.4 [INFO] Validação de cópia de vídeo está completa
+- _validate_video_copy_compatibility (~4310-4362) valida codec de vídeo,
+  resolução, fps, pix_fmt, timebase, presença de áudio, codec/taxa/canais/
+  layout de áudio e compatibilidade com MP4. NÃO é mais bug.
+
+================================================================================
+5. FERRAMENTA: INSERIR ÁUDIO (_insert_worker)
+================================================================================
+
+MAPEAMENTO UI -> FFMPEG
+- Áudio principal/inserido: -i main -i inserted ........................ OK
+- Ponto de inserção: timeline + -ss/-t ou atrim ........................ OK
+- Reencode Completo: atrim + normalize + afade/acrossfade .............. OK
+- Smart Insert: 3 peças (copy) + compatibilização do miolo ............. OK
+- Sem reencodar: valida formatos/codecs compatíveis .................... OK
+
+5.1 [INFO] Modo copy valida corretamente (não é mais bug)
+- _insert_copy_worker (~4854) compara extensão E codec/taxa/canais antes
+  de copiar; se divergentes, orienta marcar Smart Insert ou Reencode.
+  Código antigo comparava só a extensão. CORRIGIDO.
+
+5.2 [INFO] Smart Insert compatibiliza o miolo com o codec do principal
+- _insert_smart_worker (~4958-4963) usa profile.audio_codec quando pcm_*
+  ou _audio_codec_args; o concat -c copy junta peças do MESMO codec.
+  CORRIGIDO em relação ao relatório antigo (que misturava ALAC+AAC).
+
+================================================================================
+6. FERRAMENTA: LIMPAR ÁUDIO (_clean_worker)
+================================================================================
+
+MAPEAMENTO UI -> FFMPEG
+- Equilibrado: -af afftdn=nf=-25 ........................................ OK
+- Forte: -af anlmdn=s=0.00003:p=0.002:r=0.002 .......................... OK
+- Saída: WAV mono 16 kHz 16-bit (-c:a pcm_s16le -ar 16000 -ac 1 -f wav) . OK
+
+6.1 [ALTA] Vídeo mudo gera erro cru de mapeamento
+- Local: ~linha 5079 (-vn -map 0:a:0, sem ?).
+- Evidência empírica:
+    Failed to set value '0:a:0' for option 'map': Invalid argument
+- Impacto: usuário recebe caixa de erro Python em vez de mensagem amigável.
+- Fix sugerido: preflight com _probe_media(source); se not media.has_audio,
+  raise RuntimeError("O arquivo selecionado não possui trilha de áudio.").
+
+================================================================================
+7. COMPONENTES COMPARTILHADOS
+================================================================================
+
+- Detecção de encoders: -encoders + teste real (color 256x256 0.1s) ...... OK
+- NVENC: -c:v h264_nvenc -preset p4 -rc vbr -cq <16..28> + bitrate ...... OK
+- QSV: -c:v h264_qsv -global_quality <17..29> + bitrate ................ OK
+- AMF: -c:v h264_amf -quality balanced -rc qvbr -qvbr_quality_level ..... OK
+- CPU: -c:v libx264 -preset medium -crf <16..26> ....................... OK
+- Fallback HW -> CPU em RuntimeError: incondicional (~3642-3648) ....... MÉDIA
+  (qualquer erro, inclusive de sintaxe/disco/corrupção, reinicia em CPU
+  duplicando a espera; sugerido filtrar erros de driver/hardware antes).
+
+================================================================================
+PRIORIZAÇÃO DE CORREÇÃO (sugestão)
+================================================================================
+1. [CRÍTICO] Girar 0° em metadados — fix trivial, sem trade-off.
+2. [CRÍTICO] SmartJoin dessincroniza A/V — decidir entre reencode completo
+   (robusto, lento) e corte alinhado a keyframe (rápido, complexo).
+3. [ALTA] Extrair lote aborta em vídeo mudo — preflight + continue.
+4. [ALTA] Limpar vídeo mudo — preflight + mensagem amigável.
+5. [MÉDIA] Cortar áudio reencoda sempre — -c:a copy quando formato igual.
+6. [MÉDIA] Join de áudio força .m4a — derivar formato das entradas.
+7. [MÉDIA] Opus voip/vbr off — -application audio -vbr on.
+
+================================================================================
+ARQUIVOS DE EVIDÊNCIA (empírica)
+================================================================================
+Os scripts e mídias de teste usados ficaram em:
+C:\Users\Gustavo\AppData\Local\Temp\ffaudit\
+  setup.sh, rot_methods.sh, verify_bugs.sh, verify_smartjoin.sh,
+  verify_smartjoin2.sh, src_*.mp4, t*.wav/t*.mp4/t*.ts
+
+================================================================================
+FIM DO RELATÓRIO
+================================================================================

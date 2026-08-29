@@ -1,0 +1,389 @@
+================================================================================
+RELATÓRIO MINUCIOSO DE INSPEÇÃO: 6 FERRAMENTAS FFMPEG DO SIG WINDOWS
+Projeto: SIG Windows
+Arquivo Auditado: src/sig_app.py (FfmpegToolsPanel e workers)
+Data: 29/08/2026
+================================================================================
+
+OBJETIVO DA INSPEÇÃO
+===================
+Verificar minuciosamente se as opções disponíveis na interface gráfica (UI)
+para o usuário estão se refletindo nos argumentos corretos do binário FFmpeg,
+assegurando que o aplicativo realmente executa as operações desejadas em todos
+os cenários e combinações de parâmetros (formatos, codecs, taxas e filtros).
+
+SUMÁRIO EXECUTIVO
+=================
+- Total de ferramentas auditadas: 6 (Cortar, Extrair, Girar, Juntar, Inserir, Limpar).
+- Findings Críticos: 4 (Giro para 0° em metadados ignora rotação; SmartJoin com
+  transição gera cópia desalinhada com duplicação de vídeo e dessincronia A/V;
+  Smart Insert mistura codecs incompatíveis em stream copy; Corte híbrido concatena
+  bitstreams H.264 com SPS/PPS divergentes).
+- Findings de Alta Severidade: 4 (Queda em lote de extração se arquivo não tem áudio;
+  Recorte rígido aborta lote de extração; Espelhos mantidos ativos no preview mas
+  ignorados no processamento de metadados; Join de áudio força .m4a em qualquer entrada).
+- Findings de Média Severidade: 6 (Opus forçado em VOIP e CBR; Inconsistência afade/asetpts
+  no Reencode de Inserção; Desatualização de estado do encoder na rotação; SAR anamórfico
+  não validado em cópia; Limpar áudio sem preflight amigável; Fallback CPU genérico).
+- Desmistificações Empíricas: O filtro `copy` e `acopy` do FFmpeg 8.0.1 existe nativamente
+  e executa sem falhas (finding antigo 4-A foi refutado empiricamente).
+
+
+================================================================================
+1. FERRAMENTA: CORTAR ÁUDIO/VÍDEO (_cut_worker)
+================================================================================
+
+1.1. MAPEAMENTO DE OPÇÕES DA UI -> ARGUMENTOS FFMPEG
+---------------------------------------------------
+- Arquivo de entrada: self.cut_input_var -> -i <source> [OK]
+- Início (segundos): self.cut_start_var -> -ss <start> (antes de -i) [Fast Seek]
+- Fim (segundos): self.cut_end_var -> -t <duration> [OK]
+- Encoder de vídeo (topo): self.acceleration_var -> -c:v <encoder> [Usado nos reencodes]
+- Qualidade de vídeo (topo): self.video_quality_var -> CRF / -cq / -b:v [Usado nos reencodes]
+- Escolha Modo Preciso vs Híbrido: Inexistente na UI [Decisão forçada via código]
+
+1.2. FINDINGS DETALHADOS E FIXES
+--------------------------------
+
+[FINDING 1.1] [CRÍTICO] Concatenação de trechos com parâmetros divergentes no corte híbrido
+- Arquivo / Linhas: src/sig_app.py (~3745 a ~3778)
+- Comportamento Atual:
+  Em _cut_video_hybrid, o app gera inicio.ts (reencodado com libx264/NVENC),
+  corpo.ts (-c:v copy do arquivo original) e fim.ts (reencodado). Depois concatena
+  com `ffmpeg -f concat -c copy -bsf:a aac_adtstoasc output.mp4`.
+- Problema:
+  O container MP4 armazena os parâmetros de sequência (SPS/PPS) no átomo global
+  avcC. Os trechos reencodados possuem SPS/PPS diferentes do trecho original copiado.
+  Decodificadores de hardware (GPU, Windows Media Player, browsers e celulares)
+  travam ou exibem blocos verdes na junção entre inicio.ts e corpo.ts.
+- Fix Proposto:
+  Oferecer na interface opção explícita entre "Corte Rápido (sem perdas por keyframe)"
+  e "Corte Preciso (reencode integral)". No corte preciso, direcionar para
+  `_cut_video_precise` (que reencoda o fluxo de ponta a ponta sem criar emendas).
+
+[FINDING 1.2] [ALTA] Ausência de seletor na UI entre Corte Preciso e Modo Híbrido
+- Arquivo / Linhas: src/sig_app.py (~1914 e ~3720)
+- Comportamento Atual:
+  O cabeçalho descreve os dois modos ("Corte preciso: ... modo híbrido ..."), mas
+  não existe nenhum controle na tela para o usuário escolher entre eles.
+- Problema:
+  O aplicativo força _cut_video_hybrid automaticamente sempre que o vídeo é H.264,
+  sem permitir que o usuário force um corte sem perdas rápido ou um reencode limpo.
+- Fix Proposto:
+  Adicionar um checkbox ou radio button na aba "Cortar": [X] Reencode completo para
+  máxima precisão (evita emendas de bitstream).
+
+[FINDING 1.3] [ALTA] Descarte silencioso de áudios secundários e legendas
+- Arquivo / Linhas: src/sig_app.py (~3755 e ~3816)
+- Comportamento Atual:
+  Os comandos utilizam explicitamente `-map 0:v:0? -map 0:a:0?`.
+- Problema:
+  Vídeos com múltiplos idiomas, comentários ou faixas de legenda embutidas perdem
+  todos os fluxos extras sem aviso.
+- Fix Proposto:
+  No corte de vídeo, mapear todos os fluxos com `-map 0` (preservando legendas com
+  `-c:s copy`) ou emitir alerta se houver múltiplas faixas de áudio.
+
+[FINDING 1.4] [MÉDIA] Recodificação forçada com perda de qualidade no corte de áudio
+- Arquivo / Linhas: src/sig_app.py (~3722)
+- Comportamento Atual:
+  Arquivos só de áudio sempre chamam `_audio_codec_args`, reencodando MP3 para CBR
+  fixo (`libmp3lame -b:a bitrate -minrate bitrate -maxrate bitrate`).
+- Problema:
+  O usuário que apenas quer recortar um MP3 ou M4A sofre perda desnecessária por
+  recompressão com perdas (*lossy*).
+- Fix Proposto:
+  Permitir cópia direta de stream (`-c:a copy`) quando a extensão de entrada e
+  saída forem idênticas.
+
+
+================================================================================
+2. FERRAMENTA: EXTRAIR ÁUDIO (_extract_worker)
+================================================================================
+
+2.1. MAPEAMENTO DE OPÇÕES DA UI -> ARGUMENTOS FFMPEG
+---------------------------------------------------
+- Arquivos de entrada: self.extract_inputs -> -i <source> [OK]
+- Preset Transcrição: WAV / 16000 Hz / mono -> -c:a pcm_s16le -ar 16000 -ac 1 -f wav [OK]
+- Preset Compacto: OGG / 16000 Hz / mono -> -c:a libvorbis -b:a 32k -ar 16000 -ac 1 [OK]
+- Formato: self.extract_extension_var -> Seleciona encoder em _audio_codec_args [OK]
+- Hz: self.extract_rate_var -> -ar <taxa> [OK]
+- Canais: self.extract_channels_var -> -ac <canais> [OK]
+- Bitrate: self.extract_bitrate_var -> -b:a <taxa> [OK]
+- Recorte: self.extract_start_var / end_var -> -ss <start> / -t <duration> [OK]
+
+2.2. FINDINGS DETALHADOS E FIXES
+--------------------------------
+
+[FINDING 2.1] [ALTA] Falha da fila inteira de extração se um arquivo não tiver áudio
+- Arquivo / Linhas: src/sig_app.py (~3896)
+- Comportamento Atual:
+  O comando usa `-vn -map 0:a:0?`.
+- Problema:
+  A interrogação torna a entrada opcional, mas se o vídeo for mudo, `-vn` descarta
+  o vídeo e nenhuma stream resta para gravação. O FFmpeg falha com:
+  `Output file #0 does not contain any stream`. A exceção interrompe o loop e
+  cancela todos os outros arquivos da fila.
+- Fix Proposto:
+  Adicionar preflight com `_probe_media(source)`. Se `not media.has_audio`, emitir
+  aviso no log e prosseguir com `continue`.
+
+[FINDING 2.2] [ALTA] Recorte em lote aborta fila se encontrar arquivo menor
+- Arquivo / Linhas: src/sig_app.py (~3885-3888)
+- Comportamento Atual:
+  Se `start` e `end` forem definidos e `end > dur + 0.05`, levanta RuntimeError.
+- Problema:
+  Em um lote de 10 vídeos, se o usuário recortar de 0 a 60s e um vídeo tiver 45s,
+  a fila inteira é cancelada.
+- Fix Proposto:
+  Limitar o fim à duração do clipe (`eff_end = min(end, dur)`) se `start < dur`,
+  registrando um aviso no log.
+
+[FINDING 2.3] [MÉDIA] Codec Opus forçado em VOIP e CBR
+- Arquivo / Linhas: src/sig_app.py (~3689)
+- Comportamento Atual:
+  `["-c:a", "libopus", "-application", "voip", "-b:a", bitrate, "-vbr", "off"]`
+- Problema:
+  O modo VOIP corta agudos acima de 12 kHz e `-vbr off` piora a eficiência do Opus.
+  Ao extrair músicas ou clipes gerais em 192k/256k, o som perde qualidade.
+- Fix Proposto:
+  Usar `-application audio` e `-vbr on` em extrações personalizadas.
+
+
+================================================================================
+3. FERRAMENTA: GIRAR VÍDEO (_rotate_worker)
+================================================================================
+
+3.1. MAPEAMENTO DE OPÇÕES DA UI -> ARGUMENTOS FFMPEG
+---------------------------------------------------
+- Vídeo de entrada: self.rotate_input_var -> -i <source> [OK]
+- Grau: self.rotate_degrees_var -> transpose=1/2 ou hflip,vflip [OK]
+- Espelhar horizontal / vertical: rotate_hflip_var / vflip_var -> hflip, vflip [OK]
+- Somente metadados: self.rotate_metadata_var -> -display_rotation:v:0 <N> + -c copy [Falha em 0°]
+- Processar paralelo: self.rotate_parallel_var -> segment + threads + concat [OK]
+- Trechos: self.rotate_segments_var -> Controla número de workers [OK]
+- Encoder / Qualidade: acceleration_var / video_quality_var -> -c:v + CRF/Bitrate [OK]
+
+3.2. FINDINGS DETALHADOS E FIXES
+--------------------------------
+
+[FINDING 3.1] [CRÍTICO] Desrotar vídeo para 0° em modo metadados falha silenciosamente
+- Arquivo / Linhas: src/sig_app.py (~3930, ~3946-3948)
+- Comportamento Atual:
+  `target_rotation = (media.rotation + degrees) % 360`
+  `if target_rotation % 360 != 0: command += ["-display_rotation:v:0", str(target_rotation)]`
+- Problema:
+  Quando o usuário quer corrigir um vídeo gravado torto a 90° e escolhe -90°,
+  `target_rotation` resulta em 0. Como `0 % 360 != 0` é Falso, o comando omite
+  `-display_rotation:v:0`. O FFmpeg roda `-map 0 -c copy`, que PRESERVA a matriz
+  original de 90°. O arquivo final continua torto!
+- Fix Proposto:
+  Emitir sempre a flag de rotação quando em modo metadados, mesmo quando for 0:
+  `command += ["-display_rotation:v:0", str(target_rotation)]`
+
+[FINDING 3.2] [ALTA] Checkboxes de espelho continuam ativos no preview com metadados
+- Arquivo / Linhas: src/sig_app.py (~2328-2332)
+- Comportamento Atual:
+  Ao marcar "Somente metadados", os checkboxes de espelho são desabilitados na UI,
+  mas seus valores BooleanVar não são resetados.
+- Problema:
+  A miniatura de prévia exibe o vídeo espelhado, mas a saída de metadados (-c copy)
+  não realiza flip. O vídeo final não sai espelhado.
+- Fix Proposto:
+  Em `_update_rotate_control_state()`, se `metadata_only`:
+  `self.rotate_hflip_var.set(False)`
+  `self.rotate_vflip_var.set(False)`
+
+[FINDING 3.3] [MÉDIA] Giro não atualiza visibilidade dos controles de Encoder/Qualidade
+- Arquivo / Linhas: src/sig_app.py (~2014-2018)
+- Comportamento Atual:
+  O combobox de rotação e os checkboxes de espelho só chamam `_refresh_rotate_thumbnail`.
+- Problema:
+  Se o usuário altera de 0° para 90° com reencode, o seletor de encoder e o botão
+  de qualidade na barra superior permanecem ocultos/desabilitados.
+- Fix Proposto:
+  Chamar `self._refresh_encoder_control_state()` sempre que a rotação ou espelhos mudarem.
+
+[FINDING 3.4] [MÉDIA] Giro paralelo falha com entradas MKV contendo legendas
+- Arquivo / Linhas: src/sig_app.py (~4047)
+- Comportamento Atual:
+  Usa `-map 0 -c copy -f segment -segment_format mp4`.
+- Problema:
+  Se a fonte for MKV com legendas incompatíveis (ASS/PGS), o muxer MP4 aborta a divisão.
+- Fix Proposto:
+  Mapear apenas vídeo e áudio compatível na segmentação: `-map 0:v:0 -map 0:a?`.
+
+
+================================================================================
+4. FERRAMENTA: JUNTAR ÁUDIOS/VÍDEOS (_join_worker)
+================================================================================
+
+4.1. MAPEAMENTO DE OPÇÕES DA UI -> ARGUMENTOS FFMPEG
+---------------------------------------------------
+- Lista de mídias: self.join_inputs -> -i múltiplos ou list.txt concat [OK]
+- Reencode Completo: self.join_reencode_var -> xfade / acrossfade / concat filters [OK]
+- SmartJoin: self.join_smart_var -> Híbrido TS (corpo copy + transição reencode) [Quebra A/V]
+- Transição: self.join_transition_var -> xfade=transition=... ou afade/acrossfade [OK]
+- Tempo (s): self.join_seconds_var -> duration=... / offset=... [OK]
+- Sem reencode (cópia crua): Concat demuxer direto (-c copy) [OK]
+
+4.2. FINDINGS DETALHADOS E FIXES
+--------------------------------
+
+[FINDING 4.1] [CRÍTICO] SmartJoin duplica trechos e causa grave dessincronia A/V
+- Arquivo / Linhas: src/sig_app.py (~4502-4508 e ~4601-4609)
+- Comportamento Atual:
+  Para clipes após o primeiro, o corpo é extraído com `body_start = transition_seconds`
+  usando `-ss <body_start> -i <source> -c:v copy corpo_xxx.ts`.
+- Problema:
+  O FFmpeg não pode iniciar cópia de stream (-c:v copy) em segundo arbitrário
+  sem que haja um keyframe. O demuxer retrocede para o keyframe anterior (tempo 0.0s).
+  Portanto:
+  1) O trecho inicial é renderizado na peça de transição.
+  2) O corpo copia o trecho novamente do início, duplicando quadros de vídeo.
+  3) O áudio do corpo é reencodado a partir de 1.0s, enquanto o vídeo foi copiado
+     a partir de 0.0s. O áudio e o vídeo ficam permanentemente dessincronizados.
+- Fix Proposto:
+  Quando `transition_seconds > 0.001`, direcionar automaticamente a junção de vídeo
+  para o pipeline de Reencode Completo (`_xfade_join_filter`), que é perfeitamente
+  sincronizado e contínuo.
+
+[FINDING 4.2] [ALTA] Join de áudio com transição força .m4a para qualquer formato
+- Arquivo / Linhas: src/sig_app.py (~4250 e ~4299)
+- Comportamento Atual:
+  `output = self._safe_output(self.output_dir, "audios_juntos", ".m4a")`
+- Problema:
+  Se o usuário junta dois arquivos MP3 ou dois WAV com transição, o app cospe
+  um arquivo M4A com codec AAC, ignorando o formato das entradas.
+- Fix Proposto:
+  Se todas as entradas forem .mp3, gerar .mp3 com `libmp3lame`; se forem .wav,
+  gerar .wav com `pcm_s16le`.
+
+[FINDING 4.3] [MÉDIA] Aspect Ratio Anamórfico (SAR) não validado na cópia direta
+- Arquivo / Linhas: src/sig_app.py (~4310-4362)
+- Problema:
+  Dois vídeos de mesma resolução (ex: 1440x1080), um anamórfico 16:9 (SAR 4:3) e
+  outro 4:3 (SAR 1:1), são aceitos na cópia crua. O segundo vídeo fica esticado.
+- Fix Proposto:
+  Adicionar comparação de SAR (`media.sar`) em `_validate_video_copy_compatibility`.
+
+[FINDING 4.4] [DESMISTIFICAÇÃO EMPÍRICA] Confirmação dos filtros copy e acopy
+- Observação Técnica:
+  Testado diretamente no FFmpeg 8.0.1 empacotado: os filtros `copy` (vídeo) e `acopy`
+  (áudio) existem nativamente e funcionam sem falhas em grafos complexos.
+
+
+================================================================================
+5. FERRAMENTA: INSERIR ÁUDIO (_insert_worker)
+================================================================================
+
+5.1. MAPEAMENTO DE OPÇÕES DA UI -> ARGUMENTOS FFMPEG
+---------------------------------------------------
+- Áudio principal: self.insert_main_input -> -i <main> [OK]
+- Áudio inserido: self.insert_secondary_input -> -i <inserted> [OK]
+- Ponto de inserção: self.insert_time_var -> atrim=start=...:end=... ou -ss [OK]
+- Reencode Completo: self.insert_reencode_var -> atrim + asetpts + afade/acrossfade [OK]
+- Smart Insert: self.insert_smart_var -> 3 peças temporárias concatenadas (-c copy) [Risco de codecs]
+- Transições: insert_transition_var / seconds_var -> afade/acrossfade e duration [OK]
+
+5.2. FINDINGS DETALHADOS E FIXES
+--------------------------------
+
+[FINDING 5.1] [CRÍTICO] Smart Insert mistura codecs incompatíveis em stream copy
+- Arquivo / Linhas: src/sig_app.py (~4958-4963)
+- Comportamento Atual:
+  O trecho inserido é recodificado chamando `_audio_codec_args(extension)` com base
+  apenas na extensão do arquivo de saída. Em seguida roda `concat -c copy`.
+- Problema:
+  Se o áudio principal for um `.m4a` com codec ALAC (lossless), as pontas são copiadas
+  em ALAC, mas o centro é forçado para AAC. O concat demuxer junta pacotes ALAC e AAC
+  no mesmo arquivo, gerando áudio mudo ou corrompido. O mesmo ocorre com OGG Opus vs Vorbis.
+- Fix Proposto:
+  No Smart Insert, codificar o miolo usando o codec real detectado no áudio principal
+  (`profile.audio_codec`). Se o container não permitir concat seguro, direcionar
+  para `_insert_full_reencode_arguments`.
+
+[FINDING 5.2] [MÉDIA] Inconsistência na ordem dos filtros afade e asetpts
+- Arquivo / Linhas: src/sig_app.py (~5042 vs ~5053)
+- Comportamento Atual:
+  Em `[a0]`, `afade` vem antes de `asetpts=PTS-STARTPTS`.
+  Em `[a2]`, `afade` vem depois de `asetpts=PTS-STARTPTS`.
+- Problema:
+  Se o arquivo tiver offset inicial de timestamp, o cálculo do início do fade out em
+  `[a0]` pode divergir.
+- Fix Proposto:
+  Padronizar todos os trechos para reiniciar o timestamp imediatamente após o atrim:
+  `atrim=...,normalize,asetpts=PTS-STARTPTS,afade=...`
+
+[FINDING 5.3] [MÉDIA] Redução silenciosa do tempo de transição sem aviso
+- Arquivo / Linhas: src/sig_app.py (~5031)
+- Comportamento Atual:
+  `effective = min(transition_seconds, max(0.0, min(neighbors) / 2))`
+- Problema:
+  Se o usuário define 2s de transição e insere um áudio de 1s, o tempo de transição
+  cai para 0.5s sem nenhum aviso visual ou no log.
+- Fix Proposto:
+  Logar quando houver redução:
+  `if effective < transition_seconds: self._append_log(...)`
+
+
+================================================================================
+6. FERRAMENTA: LIMPAR ÁUDIO (_clean_worker)
+================================================================================
+
+6.1. MAPEAMENTO DE OPÇÕES DA UI -> ARGUMENTOS FFMPEG
+---------------------------------------------------
+- Arquivo de entrada: self.clean_input_var -> -i <source> [OK]
+- Filtro Equilibrado: self.clean_mode_var == "equilibrado" -> -af afftdn=nf=-25 [OK]
+- Filtro Forte: self.clean_mode_var == "forte" -> -af anlmdn=s=0.00003:p=0.002:r=0.002 [OK]
+- Formato de saída: Fixo em WAV mono 16 kHz 16-bit -> -c:a pcm_s16le -ar 16000 -ac 1 -f wav [OK]
+
+6.2. FINDINGS DETALHADOS E FIXES
+--------------------------------
+
+[FINDING 6.1] [MÉDIA] Falta de preflight de áudio gera erro cru de stream mapping
+- Arquivo / Linhas: src/sig_app.py (~5079)
+- Comportamento Atual:
+  `-vn -map 0:a:0` sem `?`.
+- Problema:
+  Se o usuário selecionar um vídeo mudo, o FFmpeg falha com `Stream map '0:a:0' matches no streams`
+  gerando uma caixa de erro de exceção Python.
+- Fix Proposto:
+  Verificar com `_probe_media(source)`. Se `not media.has_audio`, emitir aviso amigável:
+  `raise RuntimeError("O arquivo selecionado não possui trilha de áudio.")`
+
+[FINDING 6.2] [BAIXA] Log exibe qualidade de vídeo em tarefa exclusivamente de áudio
+- Arquivo / Linhas: src/sig_app.py (~3341)
+- Problema:
+  O status exibe "Encoder de vídeo: não aplicável; qualidade: Alta", confundindo o usuário.
+- Fix Proposto:
+  Omitir a qualidade de vídeo quando a ferramenta ativa for exclusivamente de áudio.
+
+
+================================================================================
+7. COMPONENTES COMPARTILHADOS E ACELERAÇÃO DE VÍDEO
+================================================================================
+
+7.1. ENCODERS E CONTROLE DE QUALIDADE
+-------------------------------------
+- NVENC (NVIDIA): -c:v h264_nvenc -preset p4 -rc vbr -cq <16..28> -b:v <bitrate> [OK]
+- QSV (Intel): -c:v h264_qsv -global_quality <17..29> -b:v <bitrate> [OK]
+- AMF (AMD): -c:v h264_amf -quality balanced -rc qvbr -qvbr_quality_level <16..40> -b:v <bitrate> [OK]
+- CPU (Fallback): -c:v libx264 -preset medium -crf <16..26> [OK]
+
+7.2. FINDINGS GLOBAIS
+---------------------
+
+[FINDING 7.1] [MÉDIA] Fallback incondicional para CPU em qualquer erro
+- Arquivo / Linhas: src/sig_app.py (~3642-3648)
+- Problema:
+  Qualquer RuntimeError em `_execute_video` faz o sistema reiniciar o processo inteiro
+  em CPU. Se o erro for sintaxe incorreta, disco cheio ou arquivo corrompido, o app
+  repete a tarefa inútil em CPU duplicando o tempo de espera.
+- Fix Proposto:
+  Verificar se a mensagem de erro do FFmpeg contém termos de driver/hardware antes
+  de disparar o fallback para CPU.
+
+================================================================================
+FIM DO RELATÓRIO
+================================================================================
