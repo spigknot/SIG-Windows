@@ -1022,6 +1022,72 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         command = panel._execute.call_args[0][0]
         self.assertIn("copy", command)
         self.assertNotIn("libx264", command)
+        self.assertNotIn("-avoid_negative_ts", command)
+
+    def test_rotate_copy_trim_does_not_expand_timestamps(self):
+        panel = self._rotation_panel(degrees=90, metadata=True, has_trim=True)
+        panel.rotate_start_var.get.return_value = "1"
+        panel.rotate_end_var.get.return_value = "3"
+        panel._rotate_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertIn("-ss", command)
+        self.assertNotIn("-avoid_negative_ts", command)
+
+    def test_rotate_zero_degree_trim_does_not_expand_timestamps(self):
+        panel = self._rotation_panel(degrees=0, metadata=False, has_trim=True)
+        panel.rotate_start_var.get.return_value = "1"
+        panel.rotate_end_var.get.return_value = "3"
+        panel._rotate_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertIn("-ss", command)
+        self.assertNotIn("-avoid_negative_ts", command)
+
+    def test_insert_copy_tail_does_not_expand_timestamps(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.output_dir = Path(tempfile.mkdtemp())
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._get_duration_only = lambda path: 10.0 if path.name == "main.m4a" else 2.0
+        panel._execute = MagicMock()
+        panel._concat_insert_pieces = MagicMock()
+        profile = MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, audio_codec="aac")
+        try:
+            panel._insert_copy_worker(
+                Path("main.m4a"), Path("inserted.m4a"), Path("out.m4a"),
+                profile, profile, 3.0, 12.0,
+            )
+        finally:
+            panel.output_dir.rmdir()
+        tail_command = next(
+            call.args[0] for call in panel._execute.call_args_list
+            if call.args[1] == "Preparando trecho final"
+        )
+        self.assertIn("-ss", tail_command)
+        self.assertNotIn("-avoid_negative_ts", tail_command)
+
+    def test_smart_insert_tail_does_not_expand_timestamps(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.output_dir = Path(tempfile.mkdtemp())
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._get_duration_only = lambda path: 10.0 if path.name == "main.m4a" else 2.0
+        panel._audio_codec_args_for_source_codec = lambda *_args: ["-c:a", "aac"]
+        panel._execute = MagicMock()
+        panel._concat_insert_pieces = MagicMock()
+        profile = MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, audio_codec="aac")
+        try:
+            panel._insert_smart_worker(
+                Path("main.m4a"), Path("inserted.m4a"), Path("out.m4a"),
+                profile, 3.0, 12.0,
+            )
+        finally:
+            panel.output_dir.rmdir()
+        tail_command = next(
+            call.args[0] for call in panel._execute.call_args_list
+            if call.args[1] == "Smart Insert: trecho final"
+        )
+        self.assertIn("-ss", tail_command)
+        self.assertNotIn("-avoid_negative_ts", tail_command)
 
     def test_join_profile_selector_uses_requested_resolution(self):
         small = MediaProfile(4.0, True, 640, 360, "30", "500k", "128k", 48000, 2, "stereo", True)

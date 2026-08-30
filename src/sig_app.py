@@ -4248,16 +4248,15 @@ class FfmpegToolsPanel:
             ]
             if is_video:
                 if preserve_all_streams:
-                    command += ["-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]
+                    command += ["-map", "0", "-c", "copy"]
                 else:
                     command += [
                         "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", "-c", "copy",
-                        "-avoid_negative_ts", "make_zero",
                     ]
                 if output.suffix.lower() in {".mp4", ".mov", ".m4v"}:
                     command += ["-movflags", "+faststart"]
             else:
-                command += ["-map", "0:a:0", "-vn", "-c", "copy", "-avoid_negative_ts", "make_zero"]
+                command += ["-map", "0:a:0", "-vn", "-c", "copy"]
             command.append(str(output))
             self._execute(command, "Cortando sem reencodar", 1, 1, duration)
         elif is_video:
@@ -4455,7 +4454,8 @@ class FfmpegToolsPanel:
                 self._validate_mp4_copy_codecs(media)
             command = [str(self._ffmpeg()), "-hide_banner", "-y"]
             command += ["-display_rotation:v:0", str(target_rotation)]
-            command += [*seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(output)]
+            timestamp_args = [] if has_trim else ["-avoid_negative_ts", "make_zero"]
+            command += [*seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", *timestamp_args, str(output)]
             self._execute(command, "Cortando e atualizando rotação" if has_trim else "Atualizando metadados de rotação", 1, 1, trim_duration)
             return
         filters: list[str] = []
@@ -4473,7 +4473,8 @@ class FfmpegToolsPanel:
             output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
             if output.suffix.lower() == ".mp4":
                 self._validate_mp4_copy_codecs(media)
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(output)]
+            timestamp_args = [] if has_trim else ["-avoid_negative_ts", "make_zero"]
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", *seek_args, "-i", str(source), *duration_args, "-map", "0", "-c", "copy", *timestamp_args, str(output)]
             self._execute(command, "Cortando vídeo" if has_trim else "Copiando vídeo", 1, 1, trim_duration)
             return
         filter_text = ",".join(filters)
@@ -5283,7 +5284,7 @@ class FfmpegToolsPanel:
             if insertion < main_duration - 0.001:
                 right = work_dir / f"{len(pieces):03d}{extension}"
                 self._execute(
-                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(right)],
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", str(right)],
                     "Preparando trecho final",
                     3,
                     4,
@@ -5366,7 +5367,7 @@ class FfmpegToolsPanel:
                 step += 1
                 right = work_dir / f"{len(pieces):03d}{extension}"
                 self._execute(
-                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(right)],
+                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", str(right)],
                     "Smart Insert: trecho final",
                     step,
                     4,
