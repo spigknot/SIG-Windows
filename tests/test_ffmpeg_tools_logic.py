@@ -774,7 +774,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         cmd = panel._execute.call_args[0][0]
         # -display_rotation deve vir ANTES de -i (opção de entrada) e não usar -metadata rotate.
         self.assertIn("-display_rotation:v:0", cmd)
-        self.assertIn("90", cmd)
+        self.assertIn("270", cmd)
         self.assertIn("-i", cmd)
         self.assertLess(cmd.index("-display_rotation:v:0"), cmd.index("-i"))
         self.assertNotIn("-metadata:s:v:0", cmd)
@@ -787,8 +787,8 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         index = cmd.index("-display_rotation:v:0")
         self.assertEqual(cmd[index + 1], "0")
 
-    def test_rotate_metadata_combines_existing_rotation_and_emits_zero(self):
-        panel = self._rotation_panel(degrees=-90, metadata=True, rotation=90)
+    def test_rotate_metadata_clockwise_clears_existing_counterclockwise_rotation(self):
+        panel = self._rotation_panel(degrees=90, metadata=True, rotation=90)
         panel._rotate_worker()
         cmd = panel._execute.call_args[0][0]
         index = cmd.index("-display_rotation:v:0")
@@ -945,6 +945,81 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         filters = command[command.index("-filter_complex") + 1]
         self.assertIn("asetpts=PTS-STARTPTS,afade=t=out", filters)
         self.assertIn("asetpts=PTS-STARTPTS,afade=t=in", filters)
+
+    def test_metadata_rotation_uses_clockwise_ui_convention(self):
+        panel = self._rotation_panel(degrees=90, metadata=True, rotation=0)
+        panel._rotate_worker()
+        cmd = panel._execute.call_args[0][0]
+        index = cmd.index("-display_rotation:v:0")
+        self.assertEqual(cmd[index + 1], "270")
+
+    def test_video_copy_rejects_divergent_display_rotation(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        first = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264")
+        second = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 90, "aac", "h264")
+        with self.assertRaisesRegex(RuntimeError, "rotações"):
+            panel._validate_video_copy_compatibility([first, second])
+
+    def test_video_copy_accepts_equal_nonzero_display_rotation(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        first = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 90, "aac", "h264")
+        second = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 90, "aac", "h264")
+        panel._validate_video_copy_compatibility([first, second])
+
+    def test_join_filter_without_audio_does_not_create_aout(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._video_normalize_filter = FfmpegToolsPanel._video_normalize_filter.__get__(panel, FfmpegToolsPanel)
+        clips = [
+            MediaProfile(2.0, False, 320, 240, "30", "500k", "128k", 48000, 2, "stereo"),
+            MediaProfile(2.0, False, 320, 240, "30", "500k", "128k", 48000, 2, "stereo"),
+        ]
+        profile = {"width": 320, "height": 240, "fps": "30", "audio_rate": 48000, "audio_layout": "stereo"}
+        graph = panel._xfade_join_filter(clips, profile, 0.5, "fade", include_audio=False)
+        self.assertNotIn("[aout]", graph)
+        self.assertNotIn("anullsrc", graph)
+
+    def test_insert_copy_rejects_divergent_channel_layout(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        main = MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 48000, 6, "5.1", False, audio_codec="aac")
+        inserted = MediaProfile(5.0, True, 0, 0, "0", "0k", "128k", 48000, 6, "5.1(side)", False, audio_codec="aac")
+        with self.assertRaisesRegex(RuntimeError, "layouts"):
+            panel._insert_copy_worker(Path("main.m4a"), Path("sub.m4a"), Path("out.m4a"), main, inserted, 2.0, 15.0)
+
+    def test_general_opus_profile_uses_audio_vbr(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        args = panel._audio_codec_args("opus", "128k")
+        self.assertIn("audio", args)
+        self.assertIn("on", args)
+        self.assertNotIn("voip", args)
+        self.assertNotIn("off", args)
+
+    def test_rotate_copy_preserves_mkv_container_and_normalizes_timestamps(self):
+        panel = self._rotation_panel(degrees=0, metadata=False, source_suffix=".mkv")
+        panel._rotate_worker()
+        cmd = panel._execute.call_args[0][0]
+        self.assertTrue(str(cmd[-1]).endswith(".mkv"), cmd)
+        self.assertIn("-avoid_negative_ts", cmd)
+
+    def test_probe_media_counts_extra_stream_types(self):
+        fake_output = (
+            "Input #0, matroska, from 'video.mkv':\n"
+            "  Duration: 00:00:04.00, bitrate: 1000 kb/s\n"
+            "  Stream #0:0: Video: h264, yuv420p, 320x240, 30 fps, 90k tbn\n"
+            "  Stream #0:1: Audio: aac, 48000 Hz, stereo, 128 kb/s\n"
+            "  Stream #0:2: Audio: aac, 48000 Hz, stereo, 128 kb/s\n"
+            "  Stream #0:3: Subtitle: subrip\n"
+            "  Stream #0:4: Attachment: ttf\n"
+        )
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _command: None
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
+            profile = panel._probe_media(Path("video.mkv"))
+        self.assertEqual(profile.audio_streams, 2)
+        self.assertEqual(profile.subtitle_streams, 1)
+        self.assertEqual(profile.data_streams, 1)
 
 
 if __name__ == "__main__":
