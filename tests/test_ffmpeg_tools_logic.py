@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -117,10 +118,16 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.join_reencode_var = MagicMock()
         panel.join_smart_var = MagicMock()
         panel.join_transition_var = MagicMock()
+        panel.join_seconds_var = MagicMock(); panel.join_seconds_var.get.return_value = "0.5"
+        panel.join_stream_policy_var = MagicMock(); panel.join_stream_policy_var.get.return_value = "Primeira faixa (MP4)"
+        panel.join_audio_policy_var = MagicMock(); panel.join_audio_policy_var.get.return_value = "Preservar áudio e preencher silêncio"
         panel.join_reencode_check = MagicMock()
         panel.join_smart_check = MagicMock()
         panel.join_transition_combo = MagicMock()
         panel.join_seconds_entry = MagicMock()
+        panel.join_profile_combo = MagicMock()
+        panel.join_stream_policy_combo = MagicMock()
+        panel.join_audio_policy_combo = MagicMock()
         panel.active_tool_var = MagicMock()
         panel.active_tool_var.get.return_value = "Juntar áudios/vídeos"
         panel.available_accelerations = [VideoAcceleration("cpu", "CPU", "libx264")]
@@ -1070,6 +1077,142 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._extract_worker()
         command = panel._execute.call_args[0][0]
         self.assertEqual(command[command.index("-t") + 1], "3.000")
+
+    def test_cut_precise_can_copy_audio_packets(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._append_log = MagicMock()
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._filter_for_profile = lambda _filter, _profile: ([], ["-vf", "null"])
+        panel._video_args = lambda _profile, _bitrate: ["-c:v", "libx264"]
+        captured = []
+        panel._execute_video = lambda _label, builder, **_kwargs: captured.append(
+            builder(VideoAcceleration("cpu", "CPU", "libx264"))
+        )
+        media = MediaProfile(
+            10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo",
+            True, audio_codec="aac", video_codec="h264",
+        )
+        panel._cut_video_precise(Path("in.mp4"), Path("out.mp4"), 1.0, 5.0, media, copy_audio=True)
+        command = captured[0]
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-ar", command)
+        self.assertNotIn("-avoid_negative_ts", command)
+
+    def test_join_copy_mapping_covers_all_stream_and_video_only_modes(self):
+        self.assertEqual(FfmpegToolsPanel._join_copy_mapping(True, True), ["-map", "0"])
+        self.assertEqual(
+            FfmpegToolsPanel._join_copy_mapping(True, False),
+            ["-map", "0", "-map", "-0:a?"],
+        )
+        video_only = FfmpegToolsPanel._join_copy_mapping(False, False)
+        self.assertIn("-an", video_only)
+        self.assertIn("-sn", video_only)
+
+    def test_join_mixed_audio_forces_reencode_only_when_audio_is_preserved(self):
+        clips = [
+            MediaProfile(4.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo", True),
+            MediaProfile(4.0, False, 320, 240, "30", "1M", "128k", 48000, 2, "stereo", True),
+        ]
+        self.assertTrue(FfmpegToolsPanel._join_requires_silence_reencode(clips, True, False, False, 0.0))
+        self.assertFalse(FfmpegToolsPanel._join_requires_silence_reencode(clips, False, False, False, 0.0))
+        self.assertFalse(FfmpegToolsPanel._join_requires_silence_reencode(clips, True, True, False, 0.0))
+
+    def test_audio_only_join_all_streams_maps_everything_to_mkv(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.join_inputs = [Path("a.mka"), Path("b.mka")]
+        panel.join_reencode_var = MagicMock(); panel.join_reencode_var.get.return_value = False
+        panel.join_smart_var = MagicMock(); panel.join_smart_var.get.return_value = False
+        panel.join_seconds_var = MagicMock(); panel.join_seconds_var.get.return_value = "0"
+        panel.join_stream_policy_var = MagicMock(); panel.join_stream_policy_var.get.return_value = "Todas as faixas (MKV, sem transição)"
+        panel._append_log = MagicMock()
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._execute = MagicMock()
+        clips = [
+            MediaProfile(2.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, audio_codec="aac", audio_streams=2),
+            MediaProfile(2.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, audio_codec="aac", audio_streams=2),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            panel.output_dir = Path(directory)
+            panel._join_audio_worker(clips)
+        command = panel._execute.call_args[0][0]
+        self.assertEqual(command[command.index("-map") + 1], "0")
+        self.assertTrue(str(command[-1]).endswith(".mkv"))
+
+    def test_insert_crossfade_position_mapping_accounts_for_overlaps(self):
+        output = FfmpegToolsPanel._insert_composite_to_output_position(8.0, 5.0, 2.0, 0.5, True, True, True)
+        self.assertEqual(output, 7.0)
+        composite = FfmpegToolsPanel._insert_output_to_composite_position(output, 5.0, 2.0, 0.5, True, True, True)
+        self.assertEqual(composite, 8.0)
+
+    def test_smart_insert_preview_filter_contains_real_fades(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        profile = MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo")
+        graph = panel._insert_smart_preview_filter(profile, 2.0, 4.0, 0.5)
+        self.assertIn("afade=t=in", graph)
+        self.assertIn("afade=t=out", graph)
+        self.assertIn("concat=n=3:v=0:a=1[aout]", graph)
+
+    def test_clean_strong_uses_benchmarked_afftdn_preset(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        source = MagicMock(); source.exists.return_value = True; source.stem = "audio"
+        panel.clean_input = source
+        panel.clean_mode_var = MagicMock(); panel.clean_mode_var.get.return_value = "forte"
+        panel.clean_output_profile_var = MagicMock(); panel.clean_output_profile_var.get.return_value = "Transcrição (mono, 16 kHz)"
+        panel._probe_media = lambda _path: MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo")
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._execute = MagicMock()
+        panel._clean_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertEqual(command[command.index("-af") + 1], "afftdn=nr=18:nf=-35:tn=1")
+
+    def _video_join_policy_panel(self, directory: str, audio_policy: str):
+        panel = object.__new__(FfmpegToolsPanel)
+        first = Path(directory) / "a.mp4"; first.touch()
+        second = Path(directory) / "b.mp4"; second.touch()
+        panel.join_inputs = [first, second]
+        clips = {
+            first: MediaProfile(1.0, True, 160, 90, "10", "200k", "128k", 48000, 1, "mono", True, audio_codec="aac", video_codec="h264"),
+            second: MediaProfile(1.0, False, 160, 90, "10", "200k", "128k", 48000, 1, "mono", True, video_codec="h264"),
+        }
+        panel._probe_media = lambda path: clips[path]
+        panel.join_reencode_var = MagicMock(); panel.join_reencode_var.get.return_value = False
+        panel.join_smart_var = MagicMock(); panel.join_smart_var.get.return_value = False
+        panel.join_seconds_var = MagicMock(); panel.join_seconds_var.get.return_value = "0.5"
+        panel.join_transition_var = MagicMock(); panel.join_transition_var.get.return_value = "Fundir"
+        panel.join_profile_var = MagicMock(); panel.join_profile_var.get.return_value = "Primeiro clipe"
+        panel.join_stream_policy_var = MagicMock(); panel.join_stream_policy_var.get.return_value = "Primeira faixa (MP4)"
+        panel.join_audio_policy_var = MagicMock(); panel.join_audio_policy_var.get.return_value = audio_policy
+        panel.output_dir = Path(directory)
+        panel._append_log = MagicMock()
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._video_args = lambda _profile, _bitrate: ["-c:v", "libx264"]
+        panel._execute = MagicMock()
+        return panel
+
+    def test_join_worker_reencodes_to_fill_silence_for_mixed_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            panel = self._video_join_policy_panel(directory, "Preservar áudio e preencher silêncio")
+            captured = []
+            panel._execute_video = lambda _label, builder, **_kwargs: captured.append(
+                builder(VideoAcceleration("cpu", "CPU", "libx264"))
+            )
+            panel._join_worker()
+        command = captured[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("anullsrc", graph)
+        self.assertNotIn("-c copy", " ".join(command))
+
+    def test_join_worker_can_copy_video_without_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            panel = self._video_join_policy_panel(directory, "Gerar saída sem áudio")
+            panel._join_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertIn("-an", command)
+        self.assertIn("copy", command)
 
 
 if __name__ == "__main__":
