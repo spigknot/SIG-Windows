@@ -166,13 +166,13 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         # Marcando Smart Insert desmarca Reencode Completo
         panel.insert_smart_var.get.return_value = True
         panel.insert_reencode_var.get.return_value = False
-        panel.insert_transition_var.get.return_value = "Linear slope (tri)"
+        panel.insert_transition_var.get.return_value = "Linear"
 
         panel._on_toggle_insert_smart()
         panel.insert_reencode_var.set.assert_called_with(False)
-        # Smart Insert só deve ter No transition e Fade in/out
+        # Smart Insert só deve ter Sem transição e Fade in/out
         args, kwargs = panel.insert_transition_combo.configure.call_args_list[-1]
-        self.assertEqual(kwargs.get("values", ()), ("No transition", "Fade in/out"))
+        self.assertEqual(kwargs.get("values", ()), ("Sem transição", "Fade in/out"))
 
     def test_wma_audio_codec_args(self):
         panel = object.__new__(FfmpegToolsPanel)
@@ -197,40 +197,6 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         smart = False
         copy_only = (not reencode and not smart) or (smart and transition_seconds <= 0.001)
         self.assertTrue(copy_only)
-
-    def test_join_copy_body_generates_silence_for_audioless_clip(self):
-        panel = object.__new__(FfmpegToolsPanel)
-        panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._fmt_seconds = lambda s: f"{s:.2f}"
-        panel._join_audio_args = lambda p: ["-c:a", "aac", "-b:a", "128k"]
-
-        captured_commands = []
-        panel._execute = lambda cmd, label, prog, tot: captured_commands.append(cmd)
-
-        profile = {
-            "audio_layout": "stereo",
-            "audio_rate": 48000,
-            "audio_bitrate": "128k",
-        }
-        clip_without_audio = (5.0, False, 1920, 1080, "30")
-
-        panel._join_copy_body(
-            source=Path("video_mudo.mp4"),
-            clip=clip_without_audio,
-            profile=profile,
-            destination=Path("out.ts"),
-            start=0.0,
-            duration=5.0,
-            label="Corpo mudo",
-            progress=1,
-            total=1,
-        )
-
-        self.assertEqual(len(captured_commands), 1)
-        cmd = captured_commands[0]
-        # Deve conter anullsrc para manter integridade da trilha de áudio
-        self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000", " ".join(cmd))
-        self.assertIn("-map 1:a:0", " ".join(cmd))
 
     def test_insert_copy_worker_rejects_incompatible_streams(self):
         panel = object.__new__(FfmpegToolsPanel)
@@ -481,19 +447,6 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         second = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "90k")
         panel._validate_video_copy_compatibility([first, second])  # não levanta
 
-    def test_validate_smart_video_compatibility_rejects_resolution_mismatch(self):
-        panel = object.__new__(FfmpegToolsPanel)
-        first = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "90k")
-        second = MediaProfile(4.0, True, 640, 360, "30", "500k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "90k")
-        with self.assertRaises(RuntimeError):
-            panel._validate_smart_video_compatibility([first, second])
-
-    def test_validate_smart_video_compatibility_accepts_no_audio_clip(self):
-        panel = object.__new__(FfmpegToolsPanel)
-        first = MediaProfile(4.0, True, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "90k")
-        second = MediaProfile(4.0, False, 320, 240, "30", "500k", "128k", 48000, 2, "stereo", True, 0, "aac", "h264", "yuv420p", "90k")
-        panel._validate_smart_video_compatibility([first, second])  # sem áudio é OK (anullsrc)
-
     # ---- Fase B: regressões ----
 
     def test_rotate_audio_args_copy_vs_reencode(self):
@@ -690,10 +643,8 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.output_dir = Path(".")
         panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
         panel._cut_video_precise = MagicMock()
-        panel._cut_video_hybrid = MagicMock()
         panel._cut_worker()
         panel._cut_video_precise.assert_called_once()
-        panel._cut_video_hybrid.assert_not_called()
 
     def test_join_audio_0s_transition_uses_normalized_inputs(self):
         panel = object.__new__(FfmpegToolsPanel)
@@ -1020,6 +971,105 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertEqual(profile.audio_streams, 2)
         self.assertEqual(profile.subtitle_streams, 1)
         self.assertEqual(profile.data_streams, 1)
+
+    def test_probe_media_prefers_display_matrix_over_legacy_rotate_tag(self):
+        fake_output = (
+            "Input #0, mov, from 'video.mp4':\n"
+            "  Duration: 00:00:04.00, bitrate: 1000 kb/s\n"
+            "  Stream #0:0: Video: h264, yuv420p, 320x240, 30 fps, 90k tbn\n"
+            "    Metadata:\n"
+            "      rotate          : 180\n"
+            "    Side data:\n"
+            "      displaymatrix: rotation of 90.00 degrees\n"
+        )
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _command: None
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
+            profile = panel._probe_media(Path("video.mp4"))
+        self.assertEqual(profile.rotation, 90)
+
+    def test_cut_fast_mode_uses_stream_copy(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        src = MagicMock()
+        src.exists.return_value = True
+        src.suffix = ".mp4"
+        src.stem = "video"
+        panel.cut_input = src
+        panel.cut_start_var = MagicMock(); panel.cut_start_var.get.return_value = "1"
+        panel.cut_end_var = MagicMock(); panel.cut_end_var.get.return_value = "5"
+        panel.cut_mode_var = MagicMock(); panel.cut_mode_var.get.return_value = "Rápido (sem reencodar)"
+        panel._seconds = lambda value, *_args: float(value)
+        panel._probe_media = lambda _path: MediaProfile(
+            10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo",
+            True, audio_codec="aac", video_codec="h264",
+        )
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._append_log = MagicMock()
+        panel._execute = MagicMock()
+        panel._cut_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertIn("copy", command)
+        self.assertNotIn("libx264", command)
+
+    def test_join_profile_selector_uses_requested_resolution(self):
+        small = MediaProfile(4.0, True, 640, 360, "30", "500k", "128k", 48000, 2, "stereo", True)
+        large = MediaProfile(4.0, True, 1920, 1080, "30", "2M", "128k", 48000, 2, "stereo", True)
+        self.assertIs(FfmpegToolsPanel._select_join_base([small, large], "Maior resolução"), large)
+        self.assertIs(FfmpegToolsPanel._select_join_base([small, large], "Menor resolução (sem upscale)"), small)
+
+    def test_clean_preserve_profile_keeps_source_rate_and_channels(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        source = MagicMock(); source.exists.return_value = True; source.stem = "audio"
+        panel.clean_input = source
+        panel.clean_mode_var = MagicMock(); panel.clean_mode_var.get.return_value = "equilibrado"
+        panel.clean_output_profile_var = MagicMock(); panel.clean_output_profile_var.get.return_value = "Preservar taxa e canais da fonte"
+        panel._probe_media = lambda _path: MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 44100, 2, "stereo")
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._execute = MagicMock()
+        panel._clean_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertEqual(command[command.index("-ar") + 1], "44100")
+        self.assertEqual(command[command.index("-ac") + 1], "2")
+
+    def test_rotate_worker_rejects_media_without_video(self):
+        panel = self._rotation_panel()
+        panel._probe_media = lambda _path: MediaProfile(
+            4.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", has_video=False
+        )
+        with self.assertRaisesRegex(RuntimeError, "faixa de vídeo"):
+            panel._rotate_worker()
+        panel._execute.assert_not_called()
+
+    def test_extract_batch_clamps_end_to_each_file_duration(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        source = MagicMock(); source.exists.return_value = True; source.name = "curto.mp4"; source.stem = "curto"
+        panel.extract_inputs = [source]
+        panel.extract_extension_var = MagicMock(); panel.extract_extension_var.get.return_value = "wav"
+        panel.extract_start_var = MagicMock(); panel.extract_start_var.get.return_value = "1"
+        panel.extract_end_var = MagicMock(); panel.extract_end_var.get.return_value = "10"
+        panel.extract_rate_var = MagicMock(); panel.extract_rate_var.get.return_value = "16000"
+        panel.extract_channels_var = MagicMock(); panel.extract_channels_var.get.return_value = "1"
+        panel.extract_bitrate_var = MagicMock(); panel.extract_bitrate_var.get.return_value = "64k"
+        panel._seconds = lambda value, *_args: float(value) if value else None
+        panel._probe_media = lambda _path: MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo")
+        panel._append_log = MagicMock()
+        panel._clock = lambda value: f"{value:.1f}s"
+        panel.output_dir = Path(".")
+        panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._fmt_seconds = lambda value: f"{value:.3f}"
+        panel._audio_codec_args = lambda *_args: ["-c:a", "pcm_s16le"]
+        panel._execute = MagicMock()
+        panel._extract_worker()
+        command = panel._execute.call_args[0][0]
+        self.assertEqual(command[command.index("-t") + 1], "3.000")
 
 
 if __name__ == "__main__":
