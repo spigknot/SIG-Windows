@@ -27,6 +27,15 @@ class LogMessageTagTests(unittest.TestCase):
     def test_ffmpeg_prefix_line_is_yellow(self):
         self.assertEqual(self.app._log_message_tag("FFmpeg: ffmpeg -hide_banner -i a.mp4"), "ffmpeg_command")
 
+    def test_ffmpeg_clean_line_is_yellow(self):
+        # Novo formato: sem prefixo "FFmpeg:" e com caminhos reduzidos ao nome base.
+        msg = "ffmpeg -hide_banner -y -i audio.mp3 -vn -ac 1 -ar 16000 -c:a pcm_s16le audio.wav"
+        self.assertEqual(self.app._log_message_tag(msg), "ffmpeg_command")
+
+    def test_ffmpeg_conversion_error_is_red(self):
+        msg = "VID-20250923-WA0067.mp4: ERRO conversão: FFmpeg retornou código 1 — o arquivo não possui faixa de áudio"
+        self.assertEqual(self.app._log_message_tag(msg), "activity_step_error")
+
     def test_ffmpeg_error_is_red(self):
         self.assertEqual(self.app._log_message_tag("FFmpeg retornou código 1"), "activity_step_error")
         self.assertEqual(self.app._log_message_tag("ffmpeg.exe não foi encontrado na pasta do aplicativo"), "activity_step_error")

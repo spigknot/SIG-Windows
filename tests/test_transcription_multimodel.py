@@ -49,6 +49,30 @@ class MultiTranscriptionTests(unittest.TestCase):
             self.assertIn("Resposta 3", report)
             self.assertTrue(problem_path.exists())
 
+    def test_report_transcript_columns_have_equal_widths(self):
+        # 3 modelos: a 1ª coluna (nome) reserva 20%; as 3 colunas de
+        # transcrição dividem igualmente os 80% restantes (~26.67% cada).
+        from sig_app import html_document
+
+        doc = html_document(
+            "Teste",
+            ["<tr><td>a.wav</td><td>1</td><td>2</td><td>3</td></tr>"],
+            ("Arquivo original", "servidor", GROK_API_NAME, DEEPGRAM_API_NAME),
+        )
+        self.assertIn('<colgroup><col style="width: 20%">', doc)
+        self.assertEqual(doc.count('<col style="width: 26.67%">'), 3)
+
+    def test_report_single_transcript_column_fills_rest(self):
+        from sig_app import html_document
+
+        doc = html_document(
+            "Teste",
+            ["<tr><td>a.wav</td><td>1</td></tr>"],
+            ("Arquivo original", "Transcrição"),
+        )
+        self.assertIn('<colgroup><col style="width: 20%">', doc)
+        self.assertIn('<col style="width: 80.00%">', doc)
+
     def test_old_secondary_settings_are_not_kept(self):
         settings = normalize_settings({
             "transcription_server": "servidor",

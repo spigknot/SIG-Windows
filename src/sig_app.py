@@ -89,20 +89,39 @@ def format_process_command(command: list[object]) -> str:
     return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
 
 
-def format_ffmpeg_command_for_log(command: list[object]) -> str:
-    """Renderiza o comando FFmpeg para o log, sem o caminho do executável nem a
-    extensão .exe — apenas ``ffmpeg`` seguido do resto da linha.
+def _log_path_basename(part: str) -> str:
+    """Reduz um argumento que é caminho de arquivo ao nome base, apenas para a
+    apresentação no log. Filtros/expressões (contêm ``=``) e valores simples
+    (``16000``, ``pcm_s16le``, ``0.5``) ficam intactos.
 
-    Ex.: "D:\\...\\ffmpeg.exe" -hide_banner ...  ->  ffmpeg -hide_banner ...
+    Ex.: "C:\\...\\audios\\audio.wav"  ->  "audio.wav"
+    """
+    if "=" in part:
+        return part
+    if ("\\" in part or "/" in part or os.path.isabs(part)) and (
+        "." in Path(part).name or os.path.isabs(part)
+    ):
+        return Path(part).name or part
+    return part
+
+
+def format_ffmpeg_command_for_log(command: list[object]) -> str:
+    """Renderiza o comando FFmpeg para o log de forma enxuta e objetiva: apenas
+    ``ffmpeg`` + argumentos, com os caminhos de arquivo reduzidos ao nome base
+    (sem diretórios). Somente a APRESENTAÇÃO muda — o comando efetivamente
+    executado não é alterado de forma alguma.
+
+    Ex.: ffmpeg -hide_banner -y -i audio.mp3 -vn -ac 1 -ar 16000 -c:a pcm_s16le audio.wav
     """
     if not command:
         return ""
-    executable = str(command[0])
+    parts = [str(part) for part in command]
+    executable = parts[0]
     name = Path(executable).stem
     if name.lower() in ("ffmpeg", "ffplay", "ffprobe"):
-        display = [name] + [str(part) for part in command[1:]]
+        display = [name] + [_log_path_basename(part) for part in parts[1:]]
     else:
-        display = [str(part) for part in command]
+        display = [_log_path_basename(part) for part in parts]
     return subprocess.list2cmdline(display) if os.name == "nt" else shlex.join(display)
 
 
@@ -3707,7 +3726,7 @@ class FfmpegToolsPanel:
             self.task_tracker.command(rendered_command)
         elif force:
             self.app._append_activity_log(
-                f"FFmpeg: {rendered_command}",
+                rendered_command,
                 "ffmpeg_command",
                 raw=True,
             )
@@ -7137,6 +7156,16 @@ def html_document(title: str, rows: list[str], headers: tuple[str, ...], stats: 
             f"<td colspan=\"{len(headers)}\">Nenhum item nesta tabela.</td>"
             "</tr>"
         ]
+    # A 1ª coluna (nome do arquivo) reserva espaço fixo (20%); as demais
+    # colunas de transcrição/modelo dividem igualmente o restante (larguras idênticas).
+    n_content = max(1, len(headers) - 1)
+    filename_width = 20
+    content_width = (100.0 - filename_width) / n_content
+    colgroup = (
+        f'<colgroup><col style="width: {filename_width}%">'
+        + "".join(f'<col style="width: {content_width:.2f}%">' for _ in range(n_content))
+        + "</colgroup>"
+    )
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -7167,7 +7196,6 @@ th, td {{
 }}
 th {{ background: #182127; text-align: left; }}
 td:first-child {{
-  width: 32%;
   font-family: Consolas, monospace;
   color: #9ee7ff;
   word-break: break-word;
@@ -7179,6 +7207,7 @@ td {{ white-space: pre-wrap; line-height: 1.45; }}
 <h1>{html.escape(title)}</h1>
 {stats_html}
 <table>
+{colgroup}
 <thead><tr>{header_cells}</tr></thead>
 <tbody>
 {os.linesep.join(rows)}
@@ -7689,6 +7718,19 @@ def cpu_parallel_options(cpu_count: int) -> list[int]:
     usuário: 6 núcleos -> 3, 6, 12, 24; Xeon 18 -> 9, 18, 36, 72)."""
     half = max(1, cpu_count // 2)
     return sorted({half, cpu_count, cpu_count * 2, cpu_count * 4})
+
+
+def default_parallelism(cpu_count: int) -> int:
+    """Valor padrão das slidebars de paralelismo: metade dos núcleos (n/2).
+
+    Tratamento inteligente para número ímpar de núcleos (regra do usuário):
+    - arredonda n/2 para o inteiro mais próximo, sem nunca zerar;
+    - 1 núcleo  -> 1 (n/2 = 0.5 -> 1, nunca 0);
+    - 3 núcleos -> 2 (n/2 = 1.5 -> 2, não 1);
+    - 5 núcleos -> 3 (n/2 = 2.5 -> 3);
+    - 18 núcleos -> 9 (n/2 = 9).
+    """
+    return max(1, (cpu_count + 1) // 2)
 
 
 class SigApp:
@@ -13653,6 +13695,26 @@ try {
         except Exception:
             pass
 
+    def _job_size_column_text(self, job) -> str:
+        """Texto da coluna Tamanho após conversão/VAD.
+
+        Sem transformação: apenas o tamanho original (ex.: "2523 KB").
+        Após converter/VAD: "2523 KB -> 786 KB" — original -> arquivo que
+        será enviado para transcrição (eventualmente menor).
+        """
+        try:
+            original_kb = job.original_path.stat().st_size // 1024
+        except OSError:
+            original_kb = 0
+        if job.upload_path and job.upload_path.exists():
+            try:
+                final_kb = job.upload_path.stat().st_size // 1024
+            except OSError:
+                final_kb = 0
+            if final_kb != original_kb:
+                return f"{original_kb} KB -> {final_kb} KB"
+        return f"{original_kb} KB"
+
     # _compute_and_update_duration removida — coluna agora é Tamanho (KB), definida na inserção
 
     def _format_duration(self, path: Path) -> str:
@@ -13973,35 +14035,79 @@ try {
         ).pack(side=RIGHT)
 
         cpu_count = max(1, os.cpu_count() or 1)
+        # Valor padrão das duas slidebars: metade dos núcleos da CPU (n/2),
+        # com arredondamento inteligente para números ímpares.
+        default_parallel = default_parallelism(cpu_count)
 
-        def parallel_selector(
+        def parallel_scale(
             row: int,
             label: str,
             variable: IntVar,
             maximum: int,
-            values: list[int] | None = None,
+            help_text: str,
         ):
+            # Valor salvo fora da faixa (ou ausente) cai para o padrão n/2.
+            if not (1 <= variable.get() <= maximum):
+                variable.set(default_parallel)
             ttk.Label(parallel_frame, text=label).grid(
                 row=row, column=0, sticky="w", pady=5, padx=(0, 12)
             )
-            label_var = StringVar(value=str(variable.get()))
-            button = ttk.Menubutton(parallel_frame, textvariable=label_var, width=3)
-            menu = tk.Menu(button, tearoff=False)
-            options = values if values is not None else list(range(1, maximum + 1))
-            for value in options:
-                menu.add_command(
-                    label=str(value),
-                    command=lambda selected=value: (variable.set(selected), label_var.set(str(selected))),
-                )
-            button.configure(menu=menu)
-            button.grid(row=row, column=1, sticky="w", pady=5)
-            return button
+            value_label = ttk.Label(parallel_frame, text=str(variable.get()), width=4)
+            value_label.grid(row=row, column=2, sticky="w", pady=5, padx=(8, 0))
 
-        cpu_options = cpu_parallel_options(cpu_count)
-        if conv_var.get() not in cpu_options:
-            conv_var.set(cpu_count)
-        parallel_selector(0, "Conversões paralelas", conv_var, cpu_count * 4, values=cpu_options)
-        parallel_selector(1, "Requisições paralelas", req_var, 16)
+            def on_scale(value: str):
+                try:
+                    selected = int(round(float(str(value).replace(",", "."))))
+                except (TypeError, ValueError):
+                    selected = variable.get()
+                selected = max(1, min(selected, maximum))
+                variable.set(selected)
+                value_label.configure(text=str(selected))
+
+            scale = ttk.Scale(
+                parallel_frame,
+                from_=1,
+                to=maximum,
+                value=variable.get(),
+                command=on_scale,
+            )
+            scale.grid(row=row, column=1, sticky="ew", pady=5)
+
+            help_button = ttk.Button(
+                parallel_frame,
+                text="?",
+                width=2,
+                command=lambda: messagebox.showinfo(
+                    f"{label}",
+                    help_text,
+                    parent=win,
+                ),
+            )
+            help_button.grid(row=row, column=3, sticky="w", pady=5, padx=(8, 0))
+            return scale
+
+        # Conversões paralelas: 1..2n (n = núcleos da CPU); padrão n/2.
+        conv_max = cpu_count * 2
+        conv_help = (
+            "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
+            "Cada conversão FFmpeg usa bastante CPU e leitura/escrita de disco. "
+            "Paralelismo alto demais disputa recursos com o resto do sistema "
+            "(e com a transcrição, quando roda em sequência), podendo até "
+            "diminuir a velocidade total em vez de aumentar. "
+            "Metade dos núcleos mantém a máquina responsiva e a conversão eficiente."
+        )
+        parallel_scale(0, "Conversões paralelas", conv_var, conv_max, conv_help)
+
+        # Requisições paralelas: 1..16; padrão n/2.
+        req_help = (
+            "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
+            "Cada requisição de transcrição envia áudio e espera a resposta "
+            "do servidor — o gargalo é a rede e o servidor, não a CPU local. "
+            "Paralelismo alto demais satura a conexão e pode causar timeouts "
+            "ou respostas instáveis. Metade dos núcleos dá o melhor equilíbrio "
+            "entre velocidade e estabilidade."
+        )
+        parallel_scale(1, "Requisições paralelas", req_var, 16, req_help)
 
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
@@ -17164,7 +17270,9 @@ try {
         self._draw_action_button()
         self._draw_save_button()
         self._set_controls_state("disabled")
-        self.status_var.set("Preparando fila...")
+        self._set_activity_status("Preparando fila...", log=False)
+        self._begin_activity_step("prepare", "Preparando fila")
+        self._prepare_started = time.perf_counter()
         paths = list(self.selected_paths)
         mode = self.mode_var.get()
         convert_only = self.convert_only_var.get()
@@ -17277,8 +17385,6 @@ try {
                 job.converted_path = audio_dir / f"{stem}.vad_entrada.wav"
                 job.vad_output_path = audio_dir / f"{stem}.vad.wav"
             elif is_video_file(path):
-                if mode != "ready":
-                    self._append_activity_log(f"Vídeo {Path(path).name}: será convertido para WAV (a transcrição exige áudio).", tag="warning")
                 job.mode = "ready"
                 job.converted_path = audio_dir / f"{stem}.wav"
             elif mode == "ready":
@@ -17288,6 +17394,12 @@ try {
             else:
                 job.upload_path = path
             jobs.append(job)
+
+        # Lote com mais de um arquivo na aba Transcrição: não poluir o log com
+        # cada comando FFmpeg nem com o resumo de cada arquivo — a linha viva
+        # "Convertendo arquivos: N/M" já informa o progresso (regra do usuário).
+        self._suppress_ffmpeg_command_log = len(jobs) > 1
+        self._queue("activity_step_finish", "prepare", time.perf_counter() - getattr(self, "_prepare_started", time.perf_counter()))
 
         try:
             zip_stats = None
@@ -17311,7 +17423,7 @@ try {
                     if self.cancel_event.is_set():
                         raise Cancelled()
                 if convert_only and not vad_only:
-                    self._queue("status", "Convertido.")
+                    self._queue("status_silent", "Convertido.")
                     self._queue("progress", 100)
                     self._show_folder_button(visible=True)
                     return
@@ -17382,6 +17494,7 @@ try {
         for job in eligible:
             self._queue("job", job.original_path, "Aplicando VAD")
         self._queue("progress", 0)
+        vad_started = time.perf_counter()
 
         worker = app_base_dir() / "vad_worker.py"
         deps = app_base_dir() / "vad_deps"
@@ -17455,6 +17568,7 @@ try {
                 if job.vad_output_path.exists() and job.vad_output_path.stat().st_size > 44:
                     job.upload_path = job.vad_output_path
                     self._queue("job", job.original_path, "VAD aplicado")
+                    self._queue("tree_size", job.original_path, self._job_size_column_text(job))
                 else:
                     job.error = "ERRO VAD: arquivo filtrado vazio"
                     self._queue("job", job.original_path, "Erro no VAD")
@@ -17466,7 +17580,7 @@ try {
                     job.txt_path.write_text(job.error, encoding="utf-8")
                 self._queue("job", job.original_path, "Erro no VAD")
             completed += 1
-            self._queue_phase_progress("Aplicando VAD", completed, len(eligible))
+            self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
 
         try:
             assert process.stdin is not None
@@ -17519,7 +17633,7 @@ try {
                 job.txt_path.write_text(job.error, encoding="utf-8")
             self._queue("job", job.original_path, "Erro no VAD")
             completed += 1
-            self._queue_phase_progress("Aplicando VAD", completed, len(eligible))
+            self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
         if all(job.error for job in eligible):
             raise RuntimeError("o VAD falhou em todos os arquivos")
 
@@ -17544,6 +17658,9 @@ try {
             tag = None
         if phase_key:
             self._queue("activity_line", phase_key, message, tag)
+            # Atualiza a barra de status sem repetir a linha no log (a linha viva
+            # do log já mostra o progresso).
+            self._queue("status_silent", message)
         else:
             self._queue("status", message)
 
@@ -17814,9 +17931,13 @@ try {
     def _run_conversions(self, jobs: list[AudioJob], settings: dict, next_stage_vad: bool = False):
         total = len(jobs)
         done = 0
-        convert_started = time.perf_counter()
+        # Mede a conversão desde o início do lote (quando "Preparando fila"
+        # apareceu) para o tempo mostrado bater com o relógio do log
+        # (preparação + conversão), sem "sumir" com a preparação.
+        convert_started = getattr(self, "_prepare_started", time.perf_counter())
         self._queue_phase_progress("Convertendo arquivos", done, total, "convert", convert_started)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=settings["convert_parallel"]) as executor:
+        convert_workers = max(1, int(settings.get("convert_parallel") or 1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=convert_workers) as executor:
             future_map = {executor.submit(self._convert_job, job): job for job in jobs}
             for future in concurrent.futures.as_completed(future_map):
                 job = future_map[future]
@@ -17834,7 +17955,8 @@ try {
                 except Exception as exc:
                     job.error = f"ERRO conversão: {exc}"
                     job.txt_path.write_text(job.error, encoding="utf-8")
-                    self._queue("job", job.original_path, "Erro na conversão")
+                    self._queue("job", job.original_path, self._conversion_failure_status(exc))
+                    self._queue("activity", f"{job.original_name}: {job.error}", "activity_step_error")
                 done += 1
                 self._queue_phase_progress("Convertendo arquivos", done, total, "convert", convert_started)
 
@@ -17873,7 +17995,8 @@ try {
             except Exception as exc:
                 job.error = f"ERRO conversão: {exc}"
                 job.txt_path.write_text(job.error, encoding="utf-8")
-                self._queue("job", job.original_path, "Erro na conversão")
+                self._queue("job", job.original_path, self._conversion_failure_status(exc))
+                self._queue("activity", f"{job.original_name}: {job.error}", "activity_step_error")
                 update_progress(convert_delta=1, transcribe_delta=1)
 
         def transcribe_worker():
@@ -17899,13 +18022,15 @@ try {
                 finally:
                     converted_queue.task_done()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=settings["transcribe_parallel"]) as transcribe_executor:
+        transcribe_workers = max(1, int(settings.get("transcribe_parallel") or 1))
+        convert_workers = max(1, int(settings.get("convert_parallel") or 1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=transcribe_workers) as transcribe_executor:
             transcribe_futures = [
                 transcribe_executor.submit(transcribe_worker)
-                for _ in range(settings["transcribe_parallel"])
+                for _ in range(transcribe_workers)
             ]
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=settings["convert_parallel"]) as convert_executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=convert_workers) as convert_executor:
                     convert_futures = [convert_executor.submit(convert_runner, job) for job in jobs]
                     for future in concurrent.futures.as_completed(convert_futures):
                         if self.cancel_event.is_set():
@@ -17921,6 +18046,44 @@ try {
                 for _ in transcribe_futures:
                     converted_queue.put(sentinel)
                 raise
+
+    @staticmethod
+    def _ffmpeg_error_reason(log_path: Path) -> str:
+        """Extrai do log do FFmpeg um motivo curto e legível para a falha.
+
+        Ex.: log com "Output file does not contain any stream" ->
+        " — o arquivo não possui faixa de áudio".
+        """
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return ""
+        tail = lines[-40:]
+        for line in tail:
+            if "does not contain any stream" in line.lower():
+                return " — o arquivo não possui faixa de áudio"
+        error_hints = (
+            "error", "invalid", "no such", "not found", "could not", "cannot",
+            "failed", "unsupported", "permission", "does not contain",
+        )
+        for line in reversed(tail):
+            low = line.lower()
+            if any(hint in low for hint in error_hints):
+                cleaned = re.sub(r"^\[[^\]]*\]\s*", "", line.strip()).strip()
+                if cleaned:
+                    return f" — {cleaned[:180]}"
+        return ""
+
+    @staticmethod
+    def _conversion_failure_status(exc: Exception) -> str:
+        """Status na coluna Status quando a conversão falha.
+
+        Vídeo sem faixa de áudio vira "Sem audio" (o ffmpeg não tem o que
+        converter); demais falhas seguem como "Erro na conversão".
+        """
+        if "não possui faixa de áudio" in str(exc):
+            return "Sem audio"
+        return "Erro na conversão"
 
     def _convert_job(self, job: AudioJob):
         if self.cancel_event.is_set():
@@ -17952,6 +18115,7 @@ try {
                     job.log_path.write_text(conversion_summary + "\n", encoding="utf-8")
                 except OSError:
                     pass
+            self._queue("tree_size", job.original_path, self._job_size_column_text(job))
             return
 
         ffmpeg = app_base_dir() / "ffmpeg.exe"
@@ -17997,7 +18161,8 @@ try {
             ]
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         with job.log_path.open("wb") as log:
-            self._queue("ffmpeg_command", format_ffmpeg_command_for_log(command))
+            if not getattr(self, "_suppress_ffmpeg_command_log", False):
+                self._queue("ffmpeg_command", format_ffmpeg_command_for_log(command))
             process = subprocess.Popen(
                 command,
                 stdout=log,
@@ -18020,7 +18185,8 @@ try {
                 with self.process_lock:
                     self.active_processes.discard(process)
         if process.returncode != 0:
-            raise RuntimeError(f"FFmpeg retornou código {process.returncode}")
+            reason = self._ffmpeg_error_reason(job.log_path)
+            raise RuntimeError(f"FFmpeg retornou código {process.returncode}{reason}")
         if not job.converted_path.exists():
             raise RuntimeError("arquivo convertido não foi criado")
         job.conversion_elapsed = time.perf_counter() - conversion_started
@@ -18035,7 +18201,9 @@ try {
                     log.write(f"\n{conversion_summary}\n")
             except OSError:
                 pass
-        self._queue("status", f"{job.original_name}: {conversion_summary}")
+        # O tamanho inicial -> final aparece na coluna Tamanho da tabela
+        # (não mais no log nem na barra de status).
+        self._queue("tree_size", job.original_path, self._job_size_column_text(job))
         # VAD removido da pipeline principal
 
 
@@ -18406,6 +18574,14 @@ try {
                         if len(values) >= 3:
                             values[2] = status
                             self.tree.item(item, values=values)
+                elif kind == "tree_size":
+                    path, size_str = message[1], message[2]
+                    item = self.tree_items.get(path)
+                    if item:
+                        values = list(self.tree.item(item, "values"))
+                        if len(values) >= 2:
+                            values[1] = size_str
+                            self.tree.item(item, values=values)
 
 
 
@@ -18414,12 +18590,14 @@ try {
 
                 elif kind == "status":
                     self.status_var.set(message[1])
+                elif kind == "status_silent":
+                    self._set_activity_status(message[1], log=False)
                 elif kind == "activity":
                     tag = message[2] if len(message) > 2 else None
                     self._append_activity_log(message[1], tag)
                 elif kind == "ffmpeg_command":
                     self._append_activity_log(
-                        f"FFmpeg: {message[1]}",
+                        message[1],
                         "ffmpeg_command",
                         raw=True,
                     )
