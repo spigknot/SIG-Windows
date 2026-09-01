@@ -250,6 +250,53 @@ class SigSyncCommonTests(unittest.TestCase):
             self.assertEqual(result["download"], ["prompts/x.txt"])
             self.assertEqual(result["remove"], [])
 
+    def test_classify_never_removes_cache_or_runtime_assets(self):
+        """Vacina do bug 20260901: .pyc de vad_deps/__pycache__ quebrava o
+        update com "removidos.txt não pode remover asset de runtime"."""
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            # Arquivo local que NÃO está no manifesto (sumiu) — seria removido.
+            pyc = target / "vad_deps" / "__pycache__" / "webrtcvad.cpython-311.pyc"
+            pyc.parent.mkdir(parents=True)
+            pyc.write_bytes(b"cache")
+            runtime = target / "vad_deps" / "silero_vad" / "model.onnx"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"modelo")
+            # Manifesto sem esses arquivos.
+            files = {
+                "sig.exe": {"sha256": "a" * 64, "size": 5, "drive_id": ""},
+            }
+            result = sync_common.classify_sync_files(target, files)
+            self.assertEqual(result["remove"], [])
+            self.assertNotIn("vad_deps/__pycache__/webrtcvad.cpython-311.pyc", result["remove"])
+            self.assertNotIn("vad_deps/silero_vad/model.onnx", result["remove"])
+
+    def test_classify_never_downloads_cache_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            files = {
+                "sig.exe": {"sha256": "a" * 64, "size": 5, "drive_id": ""},
+                "_internal/__pycache__/mod.cpython-311.pyc": {
+                    "sha256": "b" * 64, "size": 7, "drive_id": "",
+                },
+            }
+            result = sync_common.classify_sync_files(target, files)
+            self.assertNotIn("_internal/__pycache__/mod.cpython-311.pyc", result["download"])
+
+    def test_updater_removidos_ignores_cache_but_rejects_runtime(self):
+        """Paridade: o updater ignora .pyc/__pycache__ no removidos.txt, mas
+        continua rejeitando remoção de asset de runtime."""
+        self.assertEqual(
+            updater_module._validate_removidos_entries(
+                ["vad_deps/__pycache__/webrtcvad.cpython-311.pyc"]
+            ),
+            [],
+        )
+        with self.assertRaises(updater_module.UpdateError):
+            updater_module._validate_removidos_entries(
+                ["vad_deps/silero_vad/model.onnx"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -209,6 +209,10 @@ def build_content_snapshot(package_root: Path) -> dict[str, dict]:
         relative = path.relative_to(package_root).as_posix()
         if relative.split("/", 1)[0] in INCREMENTAL_EXCLUDED_TOP_LEVEL:
             continue
+        # Nunca rastrear artefatos de cache local (__pycache__/*.pyc) — se um
+        # .pyc sumir do package, o diff geraria remoção rejeitada pelo updater.
+        if "__pycache__" in relative.split("/") or relative.endswith(".pyc"):
+            continue
         snapshot[relative] = {
             "sha256": sha256_file(path),
             "size": path.stat().st_size,

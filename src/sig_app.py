@@ -80,7 +80,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260831_001"
+APP_VERSION = "20260901_001"
 
 
 def format_process_command(command: list[object]) -> str:
@@ -7929,8 +7929,6 @@ class SigApp:
         self.live_assistant_progress_var = StringVar(value="")
         self.live_assistant_part_var = StringVar(value="Partes")
         self.live_assistant_part_var_2 = StringVar(value="Partes")
-        self.transcription_model_display_var = StringVar()
-        self.text_model_display_var = StringVar()
         self.multi_transcription_model_vars: dict[str, BooleanVar] = {}
         self.multi_transcription_model_labels: dict[str, str] = {}
         self.multi_text_model_var = BooleanVar(value=False)
@@ -8073,7 +8071,6 @@ class SigApp:
             foreground="#536565",
             font=("Segoe UI Semibold", 9),
         )
-        style.configure("ModelSummary.TLabel", background="#f4f7f6", foreground="#667371", font=("Consolas", 9))
         style.configure("Title.TLabel", background="#f4f7f6", foreground="#10201f", font=("Segoe UI Semibold", 24))
         style.configure("TButton", font=("Segoe UI", 10), padding=(8, -1))
         style.configure("TMenubutton", font=("Segoe UI", 10), padding=(8, -1))
@@ -9024,28 +9021,6 @@ try {
             style="Update.TButton",
             command=self.install_available_update,
         )
-        model_summary = ttk.Frame(top)
-        model_summary.pack(side=LEFT, anchor="nw")
-        ttk.Label(
-            model_summary,
-            text="Modelo de transcrição:",
-            style="ModelSummary.TLabel",
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            model_summary,
-            textvariable=self.transcription_model_display_var,
-            style="ModelSummary.TLabel",
-        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(
-            model_summary,
-            text="Modelo(s) de texto:",
-            style="ModelSummary.TLabel",
-        ).grid(row=1, column=0, sticky="w")
-        ttk.Label(
-            model_summary,
-            textvariable=self.text_model_display_var,
-            style="ModelSummary.TLabel",
-        ).grid(row=1, column=1, sticky="w", padx=(8, 0))
 
         tab_bar = tk.Frame(outer, background="#f4f7f6")
         tab_bar.pack(fill=X, pady=(12, 0))
@@ -9844,7 +9819,6 @@ try {
         self._set_assistant_names([])
         self._set_live_assistant_names([])
         self.root.after(100, self._position_live_parts_button)
-        self._refresh_assistant_model_label()
 
         imei_frame = ttk.Frame(self.imei_tab)
         imei_frame.pack(fill=BOTH, expand=True)
@@ -10492,19 +10466,6 @@ try {
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.root.after_idle(self._position_live_parts_button)
-
-    def _refresh_assistant_model_label(self):
-        transcription = selected_transcription_server(self.settings)
-        transcription_model = transcription["parameters"].get("model", "modelo não informado")
-        text = selected_text_model_for(self.settings, "qualification")
-        text_model = text["parameters"].get("model", "modelo não informado")
-        transcription_display = transcription_server_label(transcription)
-        self.transcription_model_display_var.set(transcription_display)
-        if text.get("is_grok_api") or text.get("is_deepseek_api"):
-            text_display = text["name"]
-        else:
-            text_display = f"{text['name']} ({text_model})"
-        self.text_model_display_var.set(text_display)
 
     def _update_imei_inputs(self):
         if self.imei_formatting:
@@ -11582,7 +11543,6 @@ try {
             )
         else:
             self.assistant_multi_model_labels = ("Modelo 1", "Modelo 2")
-        self._refresh_assistant_model_label()
         return generation, self.settings.copy()
 
     def request_assistant_history(self):
@@ -13267,7 +13227,6 @@ try {
 
     def _refresh_server_label(self):
         self.server_var.set("")
-        self._refresh_assistant_model_label()
 
     def _show_multi_text_help(self):
         messagebox.showinfo(
@@ -13383,7 +13342,6 @@ try {
                 area.columnconfigure(1, minsize=0)
                 area.columnconfigure(2, weight=0, uniform="")
                 primary_text._editor_frame.configure(width=900)
-        self._refresh_assistant_model_label()
 
     def _refresh_primary_transcript_actions(self, compact: bool):
         action_sets = (
@@ -14938,7 +14896,6 @@ try {
                 }
             )
             self._refresh_server_label()
-            self._refresh_assistant_model_label()
             self._refresh_live_grok_controls()
             win.destroy()
 

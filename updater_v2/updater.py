@@ -587,6 +587,11 @@ def _validate_removidos_entries(lines: list[str]) -> list[str]:
         if not line or line.startswith("#"):
             continue
         name = _normalized_member_name(line)
+        # Artefatos de cache local (__pycache__/*.pyc) são lixo de execução:
+        # ignorar em vez de abortar (bug 20260901 — .pyc de vad_deps/__pycache__
+        # quebrava a atualização; o Python recria o cache sozinho).
+        if "__pycache__" in name.split("/") or name.endswith(".pyc"):
+            continue
         top = name.split("/", 1)[0]
         if top in INCREMENTAL_FORBIDDEN_TOP_LEVEL:
             raise UpdateError(f"removidos.txt não pode remover asset de runtime: {line}")

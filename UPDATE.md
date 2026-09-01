@@ -100,6 +100,10 @@ SOURCE_DATE_EPOCH=946684800 PYTHONHASHSEED=0 "C:/Users/Gustavo/AppData/Local/Pro
 # 2. Copiar para o bin de referência
 cp /d/d/tmp/updater-rebuild/SigUpdater.exe updater_v2/bin/SigUpdater.exe
 
+# 2b. O preflight também valida a instalação de referência em dist/; manter
+#     nela o mesmo updater recém-recompilado antes de repetir os gates
+cp /d/d/tmp/updater-rebuild/SigUpdater.exe dist/SigUpdater.exe
+
 # 3. Após revisar e aprovar a nova composição de dependências, atualizar os DOIS metadados com o size + sha256 novos
 #    O source_sha256 permanece igual quando updater_v2/updater.py não mudou.
 #    (scripts/updater_artifact.json e updater_v2/artifact.json)
@@ -212,6 +216,7 @@ a fonte da verdade e deve evoluir com a prática.
 | `componente desconhecido no manifesto de sincronização: ffprobe.exe` (usuário com app antigo não atualiza) | o manifesto R2 ganhou um componente que updaters antigos não conhecem e a validação antiga REJEITAVA o manifesto inteiro | corrigir `validate_sync_manifest` para IGNORAR componentes desconhecidos (vacina forward-compat, src + updater); tirar o componente novo de `SYNC_REQUIRED_FILES`/`SYNC_MANAGED_TOP_LEVELS` (manter em ALLOWED); excluir o componente do snapshot no `sync_r2.py` (`SYNC_EXCLUDED_TOP_LEVEL`) e distribuí-lo pelo full/instalador; release nova |
 | `no matches found for C:/...` no `gh` | shell MSYS trata `C:/` como glob | `cd` no diretório e usar `./arquivo` |
 | `SigUpdater.exe não corresponde ao artefato bom` | `updater.py` mudou ou PyInstaller/Windows incluiu novas DLLs de API Set e o hash do fresh divergiu | revisar a composição, seguir a seção 3.1 e atualizar os 2 metadados; manter a validação exata por hash |
+| O preflight continua acusando `SigUpdater.exe` depois de atualizar `updater_v2/bin` | a validação padrão também compara `dist/SigUpdater.exe`, que permaneceu com o binário anterior | copiar o mesmo rebuild determinístico para `dist/SigUpdater.exe` e repetir o preflight |
 | Runtime assets exigem `ffprobe.exe` mas ele não está no pacote | `runtime_artifact.json`/`REQUIRED_RUNTIME_FILES`/`SYNC_REQUIRED_FILES` sem a entrada; ou `assets/` sem o binário | adicionar `ffprobe.exe` nas 3 listas e no `runtime_artifact.json` (sha256+size) e copiar o binário do mesmo build gyan.dev do ffmpeg para `assets/` e `dist/` |
 | Google bloqueia `.exe` como malware | Drive flagra PyInstaller (aposentado — R2 não bloqueia) | se o R2 algum dia bloquear: assets avulsos no GitHub + `--github-tag` |
 | `[Erro: 13] Permission denied` no lock | updater sem admin / SIG aberto | fechar o SIG; executar o updater como Administrador |

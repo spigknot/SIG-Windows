@@ -37,6 +37,11 @@ def snapshot(package: pathlib.Path) -> dict[str, dict]:
         relative = path.relative_to(package).as_posix()
         if relative.split("/", 1)[0] in SYNC_EXCLUDED_TOP_LEVEL:
             continue
+        # Nunca publicar artefatos de cache local (__pycache__/*.pyc): variam
+        # de máquina e, se sumirem do package, o diff geraria remoção que o
+        # updater rejeita (bug 20260901).
+        if "__pycache__" in relative.split("/") or relative.endswith(".pyc"):
+            continue
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):

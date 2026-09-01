@@ -216,6 +216,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def is_sync_cache_artifact(relpath: str) -> bool:
+    """True para artefatos de cache local (__pycache__/*.pyc).
+
+    Estes arquivos são gerados pelo Python em execução, variam de máquina para
+    máquina e NUNCA devem ser sincronizados nem removidos pela atualização.
+    """
+    parts = PurePosixPath(relpath).parts
+    return "__pycache__" in parts or parts[-1].endswith(".pyc")
+
+
+# Espelha INCREMENTAL_FORBIDDEN_TOP_LEVEL do updater: assets de runtime que a
+# atualização nunca pode remover (chegam pelo full/instalador).
+SYNC_REMOVE_FORBIDDEN_TOP_LEVELS = frozenset(
+    {"ffmpeg.exe", "ffplay.exe", "ffprobe.exe", "vad_worker.py", "vad_deps"}
+)
+
+
 def classify_sync_files(target: Path, files: dict[str, dict]) -> dict:
     """Classifica a instalação local contra o manifesto.
 
@@ -225,6 +242,10 @@ def classify_sync_files(target: Path, files: dict[str, dict]) -> dict:
     download: list[str] = []
     unchanged = 0
     for path, entry in sorted(files.items()):
+        # Nunca baixar artefatos de cache local (__pycache__/*.pyc) — são
+        # lixo de execução e não fazem parte do aplicativo.
+        if is_sync_cache_artifact(path):
+            continue
         local = target / Path(*PurePosixPath(path).parts)
         if not local.is_file():
             download.append(path)
@@ -246,7 +267,17 @@ def classify_sync_files(target: Path, files: dict[str, dict]) -> dict:
             for local in candidate.rglob("*"):
                 if local.is_file():
                     managed_paths.add(local.relative_to(target).as_posix())
-    remove = sorted(path for path in managed_paths if path not in files)
+    remove = sorted(
+        path
+        for path in managed_paths
+        if path not in files
+        # Nunca remover artefatos de cache local nem assets de runtime: o
+        # updater rejeita remoção de runtime e o cache é lixo que o Python
+        # recria sozinho (bug 20260901: .pyc de vad_deps/__pycache__ quebrava
+        # a atualização com "removidos.txt não pode remover asset de runtime").
+        and not is_sync_cache_artifact(path)
+        and path.split("/", 1)[0] not in SYNC_REMOVE_FORBIDDEN_TOP_LEVELS
+    )
 
     return {
         "download": download,
