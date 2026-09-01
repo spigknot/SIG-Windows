@@ -10,7 +10,7 @@
 ## 0. Visão geral do fluxo
 
 ```
-bump da versão → preflight → release.py (build + harness completo) → sync no R2 (diff) → GitHub (full + instaladores) → commit
+bump da versão → preflight → release.py (build + harness completo) → sync no R2 (diff) → commit + push → GitHub (full + instaladores)
 ```
 
 - **Sync por arquivo (atualização automática)**: Cloudflare R2, SEMPRE no bucket `sig` (`https://pub-abb3913e7d83457bae19e41b1e4020cc.r2.dev`).
@@ -34,8 +34,8 @@ bump da versão → preflight → release.py (build + harness completo) → sync
 2. O `--package` do `sync_r2.py` DEVE apontar para a pasta `package/` — nunca a raiz `release/generated/<v>` (corrompe o manifesto — seção 4).
 3. O sync é SOMENTE no Cloudflare R2. O Google Drive está APOSENTADO desde `20260821_013`.
 4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` + `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos (eles são servidos pelo R2).
-5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 5).
-6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 6).
+5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 6).
+6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 5).
 7. O preflight e o harness devem terminar com código zero — QUALQUER `FAIL` impede a publicação. Em modo `--quiet`, cada comando produz um resumo curto; sem `--quiet`, o release mantém as linhas PASS detalhadas e os 9 cenários do harness. Consulte `docs/agents/validation-output.md` para o contrato de saída.
 8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
 9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
@@ -135,7 +135,17 @@ print('manifesto R2:', m['version'], len(m['files']), 'arquivos')
 
 Deve imprimir a versão nova. Se falhar, o manifesto não foi publicado corretamente.
 
-## 5. GitHub Releases (full + instaladores — SEM os executáveis avulsos)
+## 5. Commit e push
+
+```bash
+cd "D:/Projetos/SIG Windows"
+rm -f release_*.log sync_*.log          # NUNCA commitar os logs
+git add -A
+git commit -m "Versao YYYYMMDD_NNN: <descrição curta>"
+git push origin main
+```
+
+## 6. GitHub Releases (full + instaladores — SEM os executáveis avulsos)
 
 Arquivos grandes NÃO devem ser passados junto do `gh release create`: se a
 janela do terminal for encerrada durante o upload, o GitHub pode deixar uma
@@ -168,16 +178,6 @@ gh release view YYYYMMDD_NNN --repo spigknot/SIG-Windows --json tagName,url,asse
   ```bash
   gh release delete <VERSAO_ANTERIOR> --repo spigknot/SIG-Windows --yes
   ```
-
-## 6. Commit e push
-
-```bash
-cd "D:/Projetos/SIG Windows"
-rm -f release_*.log sync_*.log          # NUNCA commitar os logs
-git add -A
-git commit -m "Versao YYYYMMDD_NNN: <descrição curta>"
-git push origin main
-```
 
 ## 7. Verificação final (antes de declarar pronto)
 
@@ -217,6 +217,7 @@ a fonte da verdade e deve evoluir com a prática.
 | `no matches found for C:/...` no `gh` | shell MSYS trata `C:/` como glob | `cd` no diretório e usar `./arquivo` |
 | `SigUpdater.exe não corresponde ao artefato bom` | `updater.py` mudou ou PyInstaller/Windows incluiu novas DLLs de API Set e o hash do fresh divergiu | revisar a composição, seguir a seção 3.1 e atualizar os 2 metadados; manter a validação exata por hash |
 | O preflight continua acusando `SigUpdater.exe` depois de atualizar `updater_v2/bin` | a validação padrão também compara `dist/SigUpdater.exe`, que permaneceu com o binário anterior | copiar o mesmo rebuild determinístico para `dist/SigUpdater.exe` e repetir o preflight |
+| A tag da release aponta para o commit anterior | `gh release create` foi executado antes do commit/push, então a tag foi criada a partir do `origin/main` antigo | executar as seções 5 e 6 nessa ordem; se a release já existir, retargetear a tag para o commit publicado com `git push origin +<COMMIT>:refs/tags/<VERSAO>` e verificar o SHA |
 | Runtime assets exigem `ffprobe.exe` mas ele não está no pacote | `runtime_artifact.json`/`REQUIRED_RUNTIME_FILES`/`SYNC_REQUIRED_FILES` sem a entrada; ou `assets/` sem o binário | adicionar `ffprobe.exe` nas 3 listas e no `runtime_artifact.json` (sha256+size) e copiar o binário do mesmo build gyan.dev do ffmpeg para `assets/` e `dist/` |
 | Google bloqueia `.exe` como malware | Drive flagra PyInstaller (aposentado — R2 não bloqueia) | se o R2 algum dia bloquear: assets avulsos no GitHub + `--github-tag` |
 | `[Erro: 13] Permission denied` no lock | updater sem admin / SIG aberto | fechar o SIG; executar o updater como Administrador |
