@@ -233,6 +233,8 @@ a fonte da verdade e deve evoluir com a prática.
 | Versão publicada com a data do dia anterior | A sequência foi incrementada sem comparar `YYYYMMDD` com a data atual | usar a data real do dia e reiniciar `NNN` em `001` sempre que o dia mudar |
 | Saída quiet diferente entre gates | cada script tratava `--quiet` de forma isolada e o preflight deixava escapar linhas internas | seguir `docs/agents/validation-output.md`; sucesso em uma linha, falha com caminho do log e código não zero |
 | Wrapper reporta sucesso após falha do release | pipeline Bash para `tail` sem `pipefail` | usar `set -euo pipefail` ou propagar o exit code do `release.py` |
+| Harness falha porque o SIG atualizado encerra com código 0, e o rollback confirma outro `sig.exe` em execução | havia um processo do SIG sobrevivente antes do gate; a instância lançada pelo harness encerrou normalmente por já existir outra instância | confirmar e encerrar todos os processos `sig.exe`/`SigUpdater.exe` imediatamente antes do preflight e novamente antes do release, conforme a seção 1.2 |
+| `ui-smoke` falha com `image "pyimageN" doesn't exist` somente depois da suíte completa | ícones `ImageTk.PhotoImage` foram criados sem `master`, podendo ficar associados a um interpretador Tk anterior destruído pelos testes | criar toda `PhotoImage` da interface com `master=self.root`; manter o smoke no final do preflight para validar a sequência real dos gates |
 
 ---
 

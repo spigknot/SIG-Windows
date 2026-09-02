@@ -80,7 +80,11 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260901_001"
+APP_VERSION = "20260902_001"
+
+# Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
+# qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
+FFMPEG_COMMAND_BLOCK_TAG = "ffmpeg_command_block"
 
 
 def format_process_command(command: list[object]) -> str:
@@ -105,23 +109,64 @@ def _log_path_basename(part: str) -> str:
     return part
 
 
+_NUMERIC_LOG_ARG_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_LOG_FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,5}$")
+
+
+def _log_generic_filename(part: str, generic_stem: str) -> str:
+    """Reduz um argumento de arquivo ao nome genérico ``<generic_stem><ext>``,
+    preservando a extensão original e descartando o nome real e o diretório.
+
+    Ex.: "C:\\...\\videos\\nomedovideo.mp4"  ->  "input.mp4"  (ou "output.mp4")
+
+    Argumentos que não são arquivos ficam intactos: filtros/expressões (contêm
+    ``=``), opções (começam com ``-``), números (``0.5``, ``1.5``) e saídas
+    especiais sem extensão (``pipe:1``, ``-``).
+    """
+    base = _log_path_basename(part)
+    if not base or base.startswith("-") or "=" in base or _NUMERIC_LOG_ARG_RE.match(base):
+        return base
+    suffix = Path(base).suffix
+    if not _LOG_FILE_SUFFIX_RE.match(suffix) or not Path(base).stem:
+        return base
+    return f"{generic_stem}{suffix}"
+
+
 def format_ffmpeg_command_for_log(command: list[object]) -> str:
     """Renderiza o comando FFmpeg para o log de forma enxuta e objetiva: apenas
-    ``ffmpeg`` + argumentos, com os caminhos de arquivo reduzidos ao nome base
-    (sem diretórios). Somente a APRESENTAÇÃO muda — o comando efetivamente
-    executado não é alterado de forma alguma.
+    ``ffmpeg`` + argumentos, com os arquivos de entrada reduzidos a
+    ``input.<ext>`` e a saída a ``output.<ext>`` (sem diretórios e sem o nome
+    real, mas preservando a extensão original). Somente a APRESENTAÇÃO muda —
+    o comando efetivamente executado continua usando os caminhos e nomes reais.
 
-    Ex.: ffmpeg -hide_banner -y -i audio.mp3 -vn -ac 1 -ar 16000 -c:a pcm_s16le audio.wav
+    Ex.: ffmpeg -hide_banner -y -i input.mp3 -vn -ac 1 -ar 16000 -c:a pcm_s16le output.wav
     """
     if not command:
         return ""
     parts = [str(part) for part in command]
     executable = parts[0]
     name = Path(executable).stem
-    if name.lower() in ("ffmpeg", "ffplay", "ffprobe"):
-        display = [name] + [_log_path_basename(part) for part in parts[1:]]
-    else:
-        display = [_log_path_basename(part) for part in parts]
+    is_ffmpeg = name.lower() in ("ffmpeg", "ffplay", "ffprobe")
+    start = 1 if is_ffmpeg else 0
+    # Entradas: todo argumento que sucede imediatamente um "-i".
+    input_indices = {
+        index + 1
+        for index in range(start, len(parts))
+        if parts[index] == "-i" and index + 1 < len(parts)
+    }
+    # Saída: o último argumento (o FFmpeg exige o destino no final da linha),
+    # exceto quando ele é uma das entradas, como nos comandos de sondagem.
+    output_index = len(parts) - 1
+    if output_index < start or output_index in input_indices:
+        output_index = -1
+    display = [name] if is_ffmpeg else []
+    for index in range(start, len(parts)):
+        if index in input_indices:
+            display.append(_log_generic_filename(parts[index], "input"))
+        elif index == output_index:
+            display.append(_log_generic_filename(parts[index], "output"))
+        else:
+            display.append(_log_path_basename(parts[index]))
     return subprocess.list2cmdline(display) if os.name == "nt" else shlex.join(display)
 
 
@@ -1562,6 +1607,7 @@ class FfmpegTaskTracker:
         box.tag_configure("pending", foreground="#667371")
         box.tag_configure("error", foreground="#b3261e")
         box.tag_configure("ffmpeg_command", foreground="#c99a2e")
+        box.tag_configure(FFMPEG_COMMAND_BLOCK_TAG, foreground="#c99a2e")
         for name, item in tasks:
             state, progress, detail = item["state"], int(item["progress"]), str(item["detail"])
             if state == "completed":
@@ -1575,9 +1621,13 @@ class FfmpegTaskTracker:
                 line, tag = f"{name}\n", "pending"
             box.insert(END, line, tag)
         if commands:
-            box.insert(END, "\nComandos FFmpeg:\n", "ffmpeg_command")
-            for rendered_command in commands:
-                box.insert(END, f"$ {rendered_command}\n", "ffmpeg_command")
+            block_tags = ("ffmpeg_command", FFMPEG_COMMAND_BLOCK_TAG)
+            box.insert(END, "\nComandos FFmpeg:\n", block_tags)
+            for position, rendered_command in enumerate(commands):
+                # Linha em branco entre comandos para separar visualmente.
+                if position:
+                    box.insert(END, "\n", block_tags)
+                box.insert(END, f"$ {rendered_command}\n", block_tags)
         if live:
             box.insert(END, f"{live}\n", "active")
         if error:
@@ -8129,8 +8179,7 @@ class SigApp:
         except Exception:
             self.window_icon = None
 
-    @staticmethod
-    def _make_paste_icon():
+    def _make_paste_icon(self):
         image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         color = "#263735"
@@ -8138,19 +8187,17 @@ class SigApp:
         draw.line((7, 5, 7, 4, 8, 3, 12, 3, 13, 4, 13, 5), fill=color, width=2)
         draw.line((7, 10, 13, 10), fill=color, width=2)
         draw.line((7, 14, 12, 14), fill=color, width=2)
-        return ImageTk.PhotoImage(image)
+        return ImageTk.PhotoImage(image, master=self.root)
 
-    @staticmethod
-    def _make_copy_icon():
+    def _make_copy_icon(self):
         image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         color = "#263735"
         draw.rounded_rectangle((6, 3, 16, 14), radius=1, outline=color, width=2)
         draw.rounded_rectangle((3, 6, 13, 17), radius=1, outline=color, width=2)
-        return ImageTk.PhotoImage(image)
+        return ImageTk.PhotoImage(image, master=self.root)
 
-    @staticmethod
-    def _make_clear_icon():
+    def _make_clear_icon(self):
         image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         color = "#263735"
@@ -8158,18 +8205,16 @@ class SigApp:
         draw.polygon(((6, 9), (11, 12), (8, 18), (2, 15)), outline=color)
         draw.line((4, 14, 9, 17), fill=color, width=2)
         draw.line((6, 11, 10, 13), fill=color, width=2)
-        return ImageTk.PhotoImage(image)
+        return ImageTk.PhotoImage(image, master=self.root)
 
-    @staticmethod
-    def _make_recover_icon(color="#263735"):
+    def _make_recover_icon(self, color="#263735"):
         image = Image.new("RGBA", (17, 17), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         draw.arc((2, 2, 15, 15), start=45, end=315, fill=color, width=2)
         draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
-        return ImageTk.PhotoImage(image)
+        return ImageTk.PhotoImage(image, master=self.root)
 
-    @staticmethod
-    def _make_document_action_icon(kind: str):
+    def _make_document_action_icon(self, kind: str):
         scale = 4
         size = 36
         image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
@@ -8218,7 +8263,7 @@ class SigApp:
         else:
             raise ValueError(f"Ícone de documento desconhecido: {kind}")
         image = image.resize((size, size), Image.Resampling.LANCZOS)
-        return ImageTk.PhotoImage(image)
+        return ImageTk.PhotoImage(image, master=self.root)
 
     @staticmethod
     def _make_editor_icon_button(parent, image, tooltip, command):
@@ -8540,6 +8585,27 @@ class SigApp:
         box.see("end")
         box.configure(state="disabled")
 
+    def _copy_ffmpeg_command_block(self, box) -> bool:
+        """Copia todos os comandos do bloco FFmpeg do log, um por linha.
+
+        O cabecalho ("Comandos FFmpeg:") e as linhas em branco usadas apenas
+        para separacao visual ficam fora da copia; o prefixo "$ " tambem sai.
+        """
+        ranges = box.tag_ranges(FFMPEG_COMMAND_BLOCK_TAG)
+        if len(ranges) < 2:
+            return False
+        commands = []
+        for line in box.get(str(ranges[0]), str(ranges[-1])).splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("Comandos FFmpeg"):
+                continue
+            commands.append(stripped[2:] if stripped.startswith("$ ") else stripped)
+        if not commands:
+            return False
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(commands))
+        return True
+
     def _activity_log_click(self, event):
         """Clique em linha amarela/vermelha do log copia o texto da mensagem."""
         box = getattr(self, "activity_log", None)
@@ -8548,6 +8614,9 @@ class SigApp:
         try:
             index = box.index(f"@{event.x},{event.y}")
             tags = set(box.tag_names(index))
+            # O bloco de comandos das ferramentas FFmpeg copia inteiro.
+            if FFMPEG_COMMAND_BLOCK_TAG in tags and self._copy_ffmpeg_command_block(box):
+                return
             # Amarelo: warning, activity_step_warning, ffmpeg_command.
             # Vermelho: error, activity_step_error.
             if tags & {
@@ -8697,7 +8766,16 @@ class SigApp:
 
     def _launch_sync_update(self, staged: Path, removals_path: Path, version: str) -> None:
         """Abre o updater em modo sincronização com rollback protegido."""
-        updater_path = app_base_dir() / "SigUpdater.exe"
+        # Prefira a cópia recém-baixada. Isso é necessário para que correções
+        # do próprio updater entrem em vigor durante a mesma atualização que as
+        # entrega (bootstrap); usar sempre a cópia instalada deixaria o fluxo
+        # preso em bugs já corrigidos antes de ela conseguir substituir-se.
+        staged_updater = staged / "SigUpdater.exe"
+        updater_path = (
+            staged_updater
+            if staged_updater.is_file()
+            else app_base_dir() / "SigUpdater.exe"
+        )
         if not updater_path.is_file():
             self._queue("update_error", "SigUpdater.exe não foi encontrado ao lado do SIG.")
             return

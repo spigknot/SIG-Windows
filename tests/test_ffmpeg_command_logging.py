@@ -41,7 +41,8 @@ class FfmpegCommandLoggingTests(unittest.TestCase):
         self.assertNotIn(".exe", rendered)
         self.assertNotIn(r"D:\Projetos", rendered)
         self.assertIn("-hide_banner", rendered)
-        self.assertIn("a.mp4", rendered)
+        self.assertIn("input.mp4", rendered)
+        self.assertNotIn("a.mp4", rendered)
         self.assertNotIn(r"C:\Users\Gustavo", rendered)
 
     def test_ffmpeg_display_reduces_paths_but_keeps_quoting(self):
@@ -49,15 +50,18 @@ class FfmpegCommandLoggingTests(unittest.TestCase):
             r"C:\SIG Windows\ffmpeg.exe",
             "-i",
             r"C:\arquivos de trabalho\entrada com espaços.mp4",
+            "-af",
+            "afftdn=nf=-25, aresample=16000",
             "-t",
             "4",
             r"C:\arquivos de trabalho\saida com espaços.mp4",
         ]
         rendered = format_ffmpeg_command_for_log(command)
         self.assertTrue(rendered.startswith("ffmpeg "), rendered)
-        # Os caminhos reduzem ao nome base, mas seguem citados corretamente.
-        self.assertIn('"entrada com espaços.mp4"', rendered)
-        self.assertIn('"saida com espaços.mp4"', rendered)
+        # Os arquivos viram input/output, mas os filtros seguem citados corretamente.
+        self.assertIn("input.mp4", rendered)
+        self.assertIn("output.mp4", rendered)
+        self.assertIn('"afftdn=nf=-25, aresample=16000"', rendered)
         self.assertNotIn(r"C:\arquivos de trabalho", rendered)
 
     def test_ffmpeg_display_ffplay_and_ffprobe(self):
@@ -71,8 +75,121 @@ class FfmpegCommandLoggingTests(unittest.TestCase):
         command = [r"C:\SIG Windows\outro_tool.exe", "-i", r"C:\arquivo.mp4"]
         rendered = format_ffmpeg_command_for_log(command)
         self.assertTrue(rendered.startswith("outro_tool.exe"), rendered)
-        self.assertIn("arquivo.mp4", rendered)
+        self.assertIn("input.mp4", rendered)
+        self.assertNotIn("arquivo.mp4", rendered)
         self.assertNotIn(r"C:\SIG Windows", rendered)
+
+    def test_ffmpeg_display_uses_generic_input_and_output_names(self):
+        command = [
+            r"C:\SIG Windows\ffmpeg.exe",
+            "-hide_banner",
+            "-y",
+            "-i",
+            r"C:\Users\Gustavo\Desktop\nomedovideo.mp4",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            r"C:\Users\Gustavo\Desktop\transcricao_final.wav",
+        ]
+        expected_parts = [
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
+            "-i",
+            "input.mp4",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "output.wav",
+        ]
+        expected = (
+            subprocess.list2cmdline(expected_parts)
+            if os.name == "nt"
+            else shlex.join(expected_parts)
+        )
+        self.assertEqual(format_ffmpeg_command_for_log(command), expected)
+
+    def test_ffmpeg_display_preserves_original_extensions(self):
+        cases = [
+            (r"C:\videos\nomedovideo.mkv", r"C:\saida\resultado.mkv", "input.mkv", "output.mkv"),
+            (r"C:\audios\entrevista.opus", r"C:\saida\qualquer_nome.opus", "input.opus", "output.opus"),
+            (r"C:\videos\clipe.MP4", r"C:\saida\out.MP4", "input.MP4", "output.MP4"),
+            (r"C:\videos\filme.mov", r"C:\saida\frame.png", "input.mov", "output.png"),
+        ]
+        for source, output, expected_input, expected_output in cases:
+            with self.subTest(source=source, output=output):
+                rendered = format_ffmpeg_command_for_log(
+                    [r"C:\SIG Windows\ffmpeg.exe", "-i", source, "-c", "copy", output]
+                )
+                self.assertIn(expected_input, rendered)
+                self.assertIn(expected_output, rendered)
+
+    def test_ffmpeg_display_renames_every_input(self):
+        command = [
+            r"C:\SIG Windows\ffmpeg.exe",
+            "-hide_banner",
+            "-i",
+            r"C:\midia\principal.mp4",
+            "-i",
+            r"C:\midia\inserido.wav",
+            "-shortest",
+            r"C:\midia\final.mp4",
+        ]
+        rendered = format_ffmpeg_command_for_log(command)
+        self.assertIn("input.mp4", rendered)
+        self.assertIn("input.wav", rendered)
+        self.assertIn("output.mp4", rendered)
+        self.assertNotIn("principal", rendered)
+        self.assertNotIn("inserido", rendered)
+
+    def test_ffmpeg_display_probe_command_keeps_the_input_as_input(self):
+        # Comandos de sondagem terminam na entrada; ela nao deve virar "output".
+        command = [r"C:\SIG Windows\ffmpeg.exe", "-hide_banner", "-i", r"C:\midia\video.mp4"]
+        rendered = format_ffmpeg_command_for_log(command)
+        self.assertIn("input.mp4", rendered)
+        self.assertNotIn("output.mp4", rendered)
+
+    def test_ffmpeg_display_keeps_special_outputs_untouched(self):
+        for output in ("pipe:1", "-"):
+            with self.subTest(output=output):
+                command = [
+                    r"C:\SIG Windows\ffmpeg.exe",
+                    "-hide_banner",
+                    "-i",
+                    r"C:\midia\video.mp4",
+                    "-f",
+                    "rawvideo",
+                    output,
+                ]
+                rendered = format_ffmpeg_command_for_log(command)
+                self.assertIn("input.mp4", rendered)
+                self.assertTrue(rendered.endswith(output), rendered)
+
+    def test_ffmpeg_display_keeps_numeric_arguments_untouched(self):
+        rendered = format_ffmpeg_command_for_log(
+            [r"C:\SIG Windows\ffmpeg.exe", "-i", r"C:\midia\video.mp4", "-af", "atempo=1.5", r"C:\saida\final.mp4"]
+        )
+        self.assertIn("atempo=1.5", rendered)
+        self.assertNotIn("output.5", rendered)
+
+    def test_ffmpeg_display_does_not_mutate_the_executed_command(self):
+        command = [
+            r"C:\SIG Windows\ffmpeg.exe",
+            "-i",
+            r"C:\midia\nomedovideo.mp4",
+            r"C:\saida\qualquer_nome.wav",
+        ]
+        snapshot = list(command)
+        format_ffmpeg_command_for_log(command)
+        self.assertEqual(command, snapshot)
 
     def test_ffmpeg_error_reason_no_audio_stream(self):
         # Vídeo sem faixa de áudio: o FFmpeg não gera nenhuma stream de saída.
