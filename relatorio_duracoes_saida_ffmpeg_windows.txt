@@ -1,0 +1,115 @@
+================================================================================
+RELATORIO - DURACOES DE SAIDA DAS FERRAMENTAS FFMPEG (SIG Windows)
+================================================================================
+Projeto: D:\Projetos\SIG Windows
+Data: 2026-09-03
+Metodo: execucao REAL dos workers do FfmpegToolsPanel (src/sig_app.py) contra o
+        ffmpeg.exe/ffprobe.exe de dist/ (os MESMOS binarios que o sig.exe usa).
+        Harness: scripts/test_ffmpeg_durations_real.py
+Midias de teste (30.000s exatos cada): o script gera automaticamente em
+        test_media_ffmpeg/ (clipA_30s.mp4, clipB_30s.mp4 com H.264+AAC 96k;
+        audA_30s.m4a AAC) - pasta ignorada no git.
+Medicao: ffprobe -show_entries format=duration. Tolerancia: +-0.2s.
+Suites de testes existentes: 317 passed + 24 subtests (nada regrediu).
+
+================================================================================
+(1) RELACAO DE DURACOES CORRETAS DE SAIDA (formulas canonicas do codigo)
+================================================================================
+
+FORMULA GERAL:
+  - xfade/acrossfade entre N clipes SUBTRAI (N-1) * duracao_da_transicao do total.
+  - Fade in/out NAO subtrai: o fade e aplicado DENTRO de cada clipe e a saida
+    e a soma das duracoes.
+  - Concat sem reencodar (stream copy) preserva a soma exata.
+
+JUNTAR VIDEOS / AUDIOS (FfmpegToolsPanel._join_worker / _join_audio_worker):
+  a) Sem reencodar (concat demuxer, -c copy)     -> soma(d)
+  b) Reencode Completo / Smart Join SEM transicao -> soma(d)   (concat no filter)
+  c) Reencode Completo com transicao xfade        -> soma(d) - transicao*(n-1)
+     (ex.: Dissolver, Varredura, Fundir com tempo>0 -> _xfade_join_filter)
+  d) Reencode Completo com Fade in/out            -> soma(d)   (_fade_join_filter)
+  e) Smart Join com transicao xfade               -> soma(d) - transicao*(n-1)
+  f) Juntar AUDIOS com crossfade (Linear, Seno...) -> soma(d) - transicao*(n-1)
+
+CORTAR (FfmpegToolsPanel._cut_worker / _cut_video_precise):
+  - Qualquer modo (Preciso/reencodar ou Rapido/stream copy) -> (end - start)
+  - O app usa "-ss start -i -t (end-start)" exatamente; no modo preciso o
+    corte e por decodificacao (preciso), no rapido e por pacote/keyframe.
+
+EXTRAIR AUDIO (_extract_worker):
+  - Sem recorte: duracao do video de origem.
+  - Com recorte (inicio/fim): (end - start) ajustado ao limite da origem.
+
+GIRAR VIDEO (_rotate_worker):
+  - Sem recorte: preserva a duracao original, tanto no modo metadados
+    (-display_rotation + -c copy) quanto no reencode fisico.
+  - Com recorte (inicio/fim): (end - start).
+
+LIMPAR AUDIO (_clean_worker):
+  - Filtros afftdn nao alteram a timeline -> duracao original preservada.
+
+INSERIR AUDIO (_insert_worker):
+  - Sem transicao / Fade in/out (reencode ou copy) -> main + inserted
+  - Crossfade (Linear, curvas, etc.) no MEIO do main: ha DUAS fronteiras
+    (main-esquerda <> insert e insert <> main-direita); cada uma subtrai a
+    transicao efetiva -> main + inserted - 2*efetiva.
+  - Crossfade no INICIO (t=0): uma fronteira -> main + inserted - efetiva.
+  - A transicao efetiva e limitada a metade do menor trecho vizinho
+    (_insert_effective_transition / _insert_full_reencode_arguments).
+
+================================================================================
+(2) EXEMPLO DO USUARIO: 2 videos de 30s + transicao de 3s
+================================================================================
+  - Transicao xfade (Dissolver, etc.): saida = 30 + 30 - 3 = 57.000s
+  - Transicao Fade in/out:              saida = 30 + 30     = 60.000s
+  - Sem transicao (concat/copy):        saida = 30 + 30     = 60.000s
+  => O "tamanho correto" depende do TIPO de transicao:
+     xfade subtrai 3s; fade in/out NAO subtrai.
+
+================================================================================
+(3) RESULTADOS DOS TESTES REAIS (15/15 OK - medidos com ffprobe)
+================================================================================
+ 1. Juntar videos sem reencodar (concat, 2x30s)          saida=60.023s esp=60.0  PASS
+ 2. Juntar videos Reencode + xfade 3s (Dissolver)        saida=57.000s esp=57.0  PASS  <- exemplo do usuario
+ 3. Juntar videos Reencode + Fade in/out 3s              saida=60.000s esp=60.0  PASS
+ 4. Cortar video preciso (reencodar) 5-20s               saida=15.000s esp=15.0  PASS
+ 5. Extrair audio do video 30s (sem recorte)             saida=30.000s esp=30.0  PASS
+ 6. Girar video 90 graus (reencode, sem trim)            saida=30.000s esp=30.0  PASS
+ 7. Limpar audio 30s (afftdn equilibrado)                saida=30.000s esp=30.0  PASS
+ 8. Inserir audio 30s em 30s (sem transicao, copy)       saida=60.008s esp=60.0  PASS
+ 9. Inserir audio Reencode + crossfade Linear 2s MEIO    saida=56.000s esp=56.0  PASS  (30+30-2-2)
+10. Inserir audio Reencode + crossfade Linear 2s INICIO  saida=58.000s esp=58.0  PASS  (30+30-2)
+11. Juntar audios sem reencodar (concat, 2x30s)          saida=60.023s esp=60.0  PASS
+12. Juntar audios Reencode + crossfade Linear 2s         saida=58.000s esp=58.0  PASS
+13. Girar video 90 metadados (sem trim)                  saida=30.023s esp=30.0  PASS
+14. Girar video 90 reencode com trim 5-20s               saida=15.016s esp=15.0  PASS
+15. Cortar video rapido (stream copy) 5-20s              saida=15.016s esp=15.0  PASS
+
+================================================================================
+(4) FINDINGS
+================================================================================
+- NENHUMA divergencia de duracao encontrada: as saidas dos workers reais
+  batem com as formulas do codigo em todos os 15 cenarios.
+- As unicas imprecisoes observadas sao do proprio container:
+  * concat MP4 reporta 60.023s (overhead de ~23ms no container) - normal;
+  * corte rapido/giro com trim reportam 15.016s (~16ms acima) - normal.
+- Nota de modelagem (importante): no "Inserir audio" com crossfade no MEIO do
+  arquivo principal, a duracao subtrai a transicao em CADA uma das duas emendas
+  (main->insert e insert->main), reduzindo o exemplo para 56s (nao 58s). E o
+  comportamento correto do acrossfade em cadeia, consistente com
+  _insert_full_reencode_arguments e com o total_duration do _insert_worker.
+- Observacao (nao bloqueante): o harness exercita os workers via worker_options
+  + vars (mesmo caminho de run_current_tool). Nao cobre a camada de UI
+  (cliques) nem aceleracao por hardware, apenas o fluxo funcional real do
+  FFmpeg.
+
+================================================================================
+(5) COMO REPRODUZIR
+================================================================================
+  python scripts/test_ffmpeg_durations_real.py
+  (usa ffmpeg.exe/ffprobe.exe de dist/; gera automaticamente as midias 30s em
+   test_media_ffmpeg/ quando ausentes, executa os workers reais e mede cada
+   saida com ffprobe. O resultado cru da execucao vai para %TEMP%.
+   A pasta test_media_ffmpeg/ e ignorada no git - o script recria tudo.)
+================================================================================
+FIM DO RELATORIO

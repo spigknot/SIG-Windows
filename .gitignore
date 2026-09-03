@@ -27,3 +27,7 @@ settings.json
 release_run_*.log
 SigUpdater.spec
 sync_publish_run.log
+
+# midias geradas pelo harness de teste de duracoes ffmpeg
+test_media_ffmpeg/
+
