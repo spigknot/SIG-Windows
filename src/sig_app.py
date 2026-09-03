@@ -48,6 +48,7 @@ from assistant_prompts import (
     statement_prompt,
     statement_user_prompt,
 )
+import qr_encoder
 import stt_provider_rules
 from stt_provider_rules import (
     assemblyai_rest_diarize,
@@ -8046,6 +8047,11 @@ class SigApp:
         self.document_preview_page_var = StringVar(value="")
         self.document_preview_page_regions: list[tuple[int, int]] = []
 
+        self.qrcode_link_var = StringVar()
+        self.qrcode_status_var = StringVar(value="Cole um link e gere o QR Code.")
+        self.qrcode = None
+        self.qrcode_photo = None
+
         self._build_style()
         self.paste_icon = self._make_paste_icon()
         self.copy_icon = self._make_copy_icon()
@@ -9164,12 +9170,23 @@ try {
             font=tab_font,
             cursor="hand2",
         )
+        self.qrcode_tab_button = tk.Label(
+            tab_bar,
+            text="QR Code",
+            width=tab_width,
+            height=1,
+            borderwidth=1,
+            relief="solid",
+            font=tab_font,
+            cursor="hand2",
+        )
         self.live_tab_button.pack(side=LEFT)
         self.files_tab_button.pack(side=LEFT, padx=(4, 0))
         self.qualification_tab_button.pack(side=LEFT, padx=(4, 0))
         self.imei_tab_button.pack(side=LEFT, padx=(4, 0))
         self.ffmpeg_tab_button.pack(side=LEFT, padx=(4, 0))
         self.diarias_tab_button.pack(side=LEFT, padx=(4, 0))
+        self.qrcode_tab_button.pack(side=LEFT, padx=(4, 0))
         self.live_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("live"))
         self.files_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("files"))
         self.imei_tab_button.bind("<Button-1>", lambda _event: self.select_main_tab("imei"))
@@ -9179,6 +9196,9 @@ try {
         )
         self.diarias_tab_button.bind(
             "<Button-1>", lambda _event: self.select_main_tab("diarias")
+        )
+        self.qrcode_tab_button.bind(
+            "<Button-1>", lambda _event: self.select_main_tab("qrcode")
         )
         workspace = ttk.Frame(outer)
         workspace.pack(fill=BOTH, expand=True)
@@ -9236,6 +9256,7 @@ try {
         self.ffmpeg_tab = ttk.Frame(self.tab_content, padding=14)
         self.qualification_tab = ttk.Frame(self.tab_content, padding=14)
         self.diarias_tab = ttk.Frame(self.tab_content, padding=14)
+        self.qrcode_tab = ttk.Frame(self.tab_content, padding=14)
         ttk.Label(
             self.diarias_tab,
             text="Diárias — conteúdo em desenvolvimento.",
@@ -9992,6 +10013,7 @@ try {
 
         self.ffmpeg_tools = FfmpegToolsPanel(self.ffmpeg_tab, self)
         self._build_qualification_tab()
+        self._build_qrcode_tab()
 
         file_top = ttk.Frame(self.files_tab)
         file_top.pack(fill=X)
@@ -10209,6 +10231,187 @@ try {
             textvariable=self.qualification_status_var,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(0, 8))
+
+    def _build_qrcode_tab(self) -> None:
+        """Monta a tela de geracao de QR Code a partir de um link."""
+        frame = ttk.Frame(self.qrcode_tab, width=900)
+        frame.pack(fill=X, anchor="n")
+
+        ttk.Label(frame, text="QR Code", style="Muted.TLabel").pack(anchor="w", pady=(16, 4))
+
+        link_row = ttk.Frame(frame)
+        link_row.pack(fill=X)
+        ttk.Label(link_row, text="Link:").pack(side=LEFT, padx=(0, 8))
+        self.qrcode_link_entry = ttk.Entry(
+            link_row,
+            textvariable=self.qrcode_link_var,
+            font=("Segoe UI", 10),
+        )
+        self.qrcode_link_entry.pack(side=LEFT, fill=X, expand=True)
+        self.qrcode_link_entry.bind("<Return>", lambda _event: self.generate_qrcode())
+        self._make_editor_icon_button(
+            link_row, self.paste_icon, "Colar", self.paste_qrcode_link
+        ).pack(side=LEFT, padx=(8, 0))
+        self._make_editor_icon_button(
+            link_row, self.clear_icon, "Limpar", self.clear_qrcode
+        ).pack(side=LEFT, padx=(4, 0))
+        self.qrcode_generate_button = ttk.Button(
+            link_row,
+            text="Gerar QR code",
+            style="Action.TButton",
+            width=15,
+            command=self.generate_qrcode,
+        )
+        self.qrcode_generate_button.pack(side=LEFT, padx=(10, 0))
+
+        content = ttk.Frame(frame)
+        content.pack(anchor="w", pady=(18, 0))
+
+        self.qrcode_canvas = Canvas(
+            content,
+            width=340,
+            height=340,
+            highlightthickness=0,
+            borderwidth=1,
+            relief="solid",
+            background="#ffffff",
+        )
+        self.qrcode_canvas.pack(side=LEFT)
+
+        self.qrcode_actions_frame = ttk.Frame(content)
+        self.qrcode_actions_frame.pack(side=LEFT, padx=(16, 0), anchor="n")
+
+        def qrcode_action_button(text, image, command):
+            holder = ttk.Frame(self.qrcode_actions_frame, width=66, height=66)
+            holder.pack(side=TOP, pady=(0, 8))
+            holder.pack_propagate(False)
+            button = ttk.Button(
+                holder,
+                text=text,
+                image=image,
+                compound=TOP,
+                style="DocumentAction.TButton",
+                command=command,
+            )
+            button.pack(fill=BOTH, expand=True)
+            return button
+
+        self.qrcode_copy_button = qrcode_action_button(
+            "Copiar", self.document_copy_icon, self.copy_qrcode_image
+        )
+        self.qrcode_copy_button.configure(state="disabled")
+
+        ttk.Label(
+            frame,
+            textvariable=self.qrcode_status_var,
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(12, 0))
+        self._draw_qrcode_placeholder()
+
+    def _draw_qrcode_placeholder(self, message: str = "O QR Code aparece aqui.") -> None:
+        canvas = getattr(self, "qrcode_canvas", None)
+        if canvas is None:
+            return
+        width = int(canvas["width"])
+        height = int(canvas["height"])
+        canvas.delete("all")
+        canvas.create_text(
+            width / 2,
+            height / 2,
+            text=message,
+            fill="#8a918e",
+            font=("Segoe UI", 10),
+            width=width - 40,
+            justify="center",
+        )
+
+    def _render_qrcode(self) -> None:
+        code = self.qrcode
+        canvas = self.qrcode_canvas
+        if code is None:
+            self._draw_qrcode_placeholder()
+            return
+        canvas_size = int(canvas["width"])
+        # Conta as margens brancas para caber inteiro na area de exibicao.
+        # Sem piso artificial: versoes altas (v23+) precisam de escala menor
+        # para nao estourar o canvas e cortar o QR Code.
+        scale = max(1, canvas_size // (code.size + 8))
+        image = code.to_image(scale=scale, border=4)
+        self.qrcode_photo = ImageTk.PhotoImage(image, master=self.root)
+        canvas.delete("all")
+        offset = (canvas_size - image.width) // 2
+        canvas.create_image(offset, offset, anchor="nw", image=self.qrcode_photo)
+
+    def generate_qrcode(self) -> None:
+        link = self.qrcode_link_var.get().strip()
+        if not link:
+            messagebox.showwarning(
+                "QR Code", "Cole um link antes de gerar o QR Code.", parent=self.root
+            )
+            self.qrcode_link_entry.focus_set()
+            return
+        try:
+            code = qr_encoder.QrCode.encode_text(link, "M")
+        except qr_encoder.QrCapacityError as exc:
+            self._set_activity_status("QR Code não gerado: conteúdo longo demais.", log=False)
+            messagebox.showerror("QR Code", str(exc), parent=self.root)
+            return
+        except Exception as exc:
+            self._set_activity_status(f"QR Code ERRO: {exc}", log=False)
+            messagebox.showerror(
+                "QR Code",
+                f"Não consegui gerar o QR Code.\n\nDetalhe: {exc}",
+                parent=self.root,
+            )
+            return
+        self.qrcode = code
+        self._render_qrcode()
+        self.qrcode_copy_button.configure(state="normal")
+        self.qrcode_status_var.set(f"QR Code gerado (versão {code.version}).")
+        self._set_activity_status("QR Code gerado.", log=False)
+
+    def copy_qrcode_image(self) -> None:
+        if self.qrcode is None:
+            messagebox.showwarning(
+                "Copiar", "Gere o QR Code antes de copiar.", parent=self.root
+            )
+            return
+        try:
+            qr_encoder.copy_image_to_windows_clipboard(self.qrcode.to_image(scale=14, border=4))
+        except Exception as exc:
+            self._set_activity_status(f"Cópia do QR Code falhou: {exc}", log=False)
+            messagebox.showerror(
+                "Copiar",
+                f"Não consegui copiar a imagem.\n\nDetalhe: {exc}",
+                parent=self.root,
+            )
+            return
+        self._set_activity_status("QR Code copiado como imagem.", log=False)
+
+    def paste_qrcode_link(self) -> None:
+        try:
+            pasted = self.root.clipboard_get().strip()
+        except Exception:
+            return
+        if not pasted:
+            return
+        self.qrcode_link_var.set(pasted)
+        self._set_activity_status("Link colado na caixa do QR Code.", log=False)
+
+    def clear_qrcode(self) -> None:
+        if not self.qrcode_link_var.get().strip() and self.qrcode is None:
+            return
+        if not messagebox.askyesno(
+            "sig", "Deseja limpar o QR Code atual?", parent=self.root
+        ):
+            return
+        self.qrcode_link_var.set("")
+        self.qrcode = None
+        self.qrcode_photo = None
+        self._draw_qrcode_placeholder()
+        self.qrcode_copy_button.configure(state="disabled")
+        self.qrcode_status_var.set("Cole um link e gere o QR Code.")
+        self._set_activity_status("QR Code limpo.", log=False)
 
     def _toggle_qualification_select_all(self) -> None:
         selected = bool(self.qualification_select_all_var.get())
@@ -10492,6 +10695,7 @@ try {
             getattr(self, "ffmpeg_tab", None),
             getattr(self, "qualification_tab", None),
             getattr(self, "diarias_tab", None),
+            getattr(self, "qrcode_tab", None),
         ):
             if frame is not None:
                 frame.pack_forget()
@@ -10503,6 +10707,7 @@ try {
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "imei":
             self.imei_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -10511,6 +10716,7 @@ try {
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "ffmpeg":
             self.ffmpeg_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -10519,6 +10725,7 @@ try {
             self.ffmpeg_tab_button.configure(background=active_bg, foreground=active_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "qualification":
             self.qualification_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -10527,6 +10734,7 @@ try {
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=active_bg, foreground=active_fg)
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
         elif tab_name == "diarias":
             self.diarias_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -10535,6 +10743,16 @@ try {
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.diarias_tab_button.configure(background=active_bg, foreground=active_fg)
+            self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+        elif tab_name == "qrcode":
+            self.qrcode_tab.pack(fill=BOTH, expand=True)
+            self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.files_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qrcode_tab_button.configure(background=active_bg, foreground=active_fg)
         else:
             self.live_tab.pack(fill=BOTH, expand=True)
             self.live_tab_button.configure(background=active_bg, foreground=active_fg)
@@ -10543,6 +10761,7 @@ try {
             self.ffmpeg_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qualification_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
+            self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.root.after_idle(self._position_live_parts_button)
 
     def _update_imei_inputs(self):

@@ -12,7 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-MAIN_TABS = ("live", "files", "qualification", "imei", "ffmpeg", "diarias")
+MAIN_TABS = ("live", "files", "qualification", "imei", "ffmpeg", "diarias", "qrcode")
 TAB_BUTTONS = (
     "live_tab_button",
     "files_tab_button",
@@ -20,6 +20,7 @@ TAB_BUTTONS = (
     "imei_tab_button",
     "ffmpeg_tab_button",
     "diarias_tab_button",
+    "qrcode_tab_button",
 )
 
 
