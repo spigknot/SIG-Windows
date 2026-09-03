@@ -12,6 +12,7 @@ from __future__ import annotations
 import struct
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -557,12 +558,24 @@ class QrCodeTabTests(unittest.TestCase):
         app.qrcode_status_var = _VarStub()
         app.qrcode = None
         app.qrcode_photo = None
+        app.qrcode_shorten_var = _VarStub()
+        app.qrcode_alias_var = _VarStub()
+        app.qrcode_shortened_var = _VarStub()
+        app.qrcode_alias_entry = None
+        app.qrcode_shortened_row = None
+        app.qrcode_shortened_entry = None
+        app.qrcode_shortened_copy_button = None
+        app.qrcode_content = None
+        app.qrcode_generate_button = _ButtonStub()
+        app.qrcode_shorten_busy = False
+        app.qrcode_shorten_started = 0.0
         app.qrcode_canvas = _CanvasStub()
         app.qrcode_copy_button = _ButtonStub()
         app.qrcode_link_entry = tk.Entry(_root)
         app.status_var = _VarStub()
         app._activity_status_suppressed = 0
         app.activity_log = _ActivityLogStub()
+        app._begin_activity_step = lambda *_args, **_kwargs: None
         return app
 
     def test_generate_renders_the_code_and_enables_copy(self):
@@ -666,6 +679,145 @@ class QrCodeTabTests(unittest.TestCase):
         app._draw_qrcode_placeholder()
         self.assertEqual(len(app.qrcode_canvas.items), 1)
         self.assertIn("QR Code", app.qrcode_canvas.items[0][1]["text"])
+
+    def test_shorten_flow_rejects_links_without_http(self):
+        app = self._make_app()
+        app.qrcode_shorten_var.set(True)
+        app.qrcode_link_var.set("sig.local")
+        app.generate_qrcode()
+
+        self.assertIsNone(app.qrcode)
+        self.assertFalse(app.qrcode_shorten_busy)
+        self.assertEqual(self.messages.calls[-1][0], "warning")
+        self.assertIn("http", self.messages.calls[-1][2])
+        self.assertEqual(app.activity_log.lines[-1][1], "activity_step_error")
+
+    def test_shorten_flow_starts_worker_and_blocks_duplicates(self):
+        app = self._make_app()
+        app.qrcode_shorten_var.set(True)
+        app.qrcode_link_var.set("https://sig.local")
+        captured: list[dict] = []
+
+        class _FakeThread:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+            def start(self):
+                pass
+
+        with patch("sig_app.threading.Thread", _FakeThread):
+            app.generate_qrcode()
+            app.qrcode_link_var.set("https://outro.local")
+            app.generate_qrcode()  # bloqueado: um encurtamento por vez
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["args"], ("https://sig.local", ""))
+        self.assertTrue(app.qrcode_shorten_busy)
+        self.assertEqual(app.qrcode_generate_button.state, "disabled")
+
+    def test_shorten_flow_sends_the_filled_alias(self):
+        app = self._make_app()
+        app.qrcode_shorten_var.set(True)
+        app.qrcode_link_var.set("https://sig.local")
+        app.qrcode_alias_var.set("meu-alias")
+        captured: list[dict] = []
+
+        class _FakeThread:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+            def start(self):
+                pass
+
+        with patch("sig_app.threading.Thread", _FakeThread):
+            app.generate_qrcode()
+
+        self.assertEqual(captured[0]["args"], ("https://sig.local", "meu-alias"))
+
+    def test_shorten_worker_queues_the_shortened_link(self):
+        app = self._make_app()
+        events: list[tuple] = []
+        app._queue = lambda kind, payload=None: events.append((kind, payload))
+        requested: list[str] = []
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"https://tinyurl.com/abc123"
+
+        def fake_urlopen(request, **_kwargs):
+            requested.append(request.full_url)
+            return _FakeResponse()
+
+        with patch("sig_app.urllib.request.urlopen", fake_urlopen):
+            app._shorten_worker("https://www.example.com/relatorio?a=1", "meu-alias")
+
+        self.assertEqual(events, [("qrcode_shortened", "https://tinyurl.com/abc123")])
+        self.assertIn("https://tinyurl.com/api-create.php?", requested[0])
+        self.assertIn("url=https%3A%2F%2Fwww.example.com%2Frelatorio%3Fa%3D1", requested[0])
+        self.assertIn("alias=meu-alias", requested[0])
+
+    def test_shorten_worker_reports_alias_unavailable(self):
+        app = self._make_app()
+        events: list[tuple] = []
+        app._queue = lambda kind, payload=None: events.append((kind, payload))
+
+        def fake_urlopen(request, **_kwargs):
+            raise urllib.error.HTTPError(
+                "https://tinyurl.com/api-create.php", 422, "Error", None, None
+            )
+
+        with patch("sig_app.urllib.request.urlopen", fake_urlopen):
+            app._shorten_worker("https://www.example.com", "usado")
+
+        self.assertEqual(events[0][0], "qrcode_shorten_error")
+        self.assertIn("Alias indisponível", events[0][1])
+
+    def test_shorten_worker_reports_network_failure(self):
+        app = self._make_app()
+        events: list[tuple] = []
+        app._queue = lambda kind, payload=None: events.append((kind, payload))
+
+        def fake_urlopen(request, **_kwargs):
+            raise OSError("sem internet")
+
+        with patch("sig_app.urllib.request.urlopen", fake_urlopen):
+            app._shorten_worker("https://www.example.com", "")
+
+        self.assertEqual(events[0][0], "qrcode_shorten_error")
+        self.assertIn("Falha ao encurtar", events[0][1])
+
+    def test_copy_shortened_link_posts_text_to_clipboard(self):
+        app = self._make_app()
+        app.qrcode_shortened_var.set("https://tinyurl.com/abc123")
+        app.copy_shortened_link()
+        self.assertEqual(self.clipboard, ["https://tinyurl.com/abc123"])
+        self.assertTrue(
+            app.activity_log.lines[-1][0].endswith("Link encurtado copiado\n")
+        )
+        self.assertEqual(app.activity_log.lines[-1][1], "activity_step_done")
+
+    def test_clear_resets_alias_and_shortened_state(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.qrcode_alias_var.set("meu-alias")
+        app.qrcode_shortened_var.set("https://tinyurl.com/abc")
+        app.qrcode_shortened_copy_button = _ButtonStub()
+        app.qrcode_shortened_copy_button.configure(state="disabled")
+
+        class _RowStub:
+            def pack_forget(self):
+                pass
+
+        app.qrcode_shortened_row = _RowStub()
+        app.clear_qrcode()
+        self.assertEqual(app.qrcode_shortened_var.get(), "")
+        self.assertEqual(app.qrcode_alias_var.get(), "")
 
 
 if __name__ == "__main__":

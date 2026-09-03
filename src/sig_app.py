@@ -81,7 +81,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260903_001"
+APP_VERSION = "20260903_002"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -8051,6 +8051,16 @@ class SigApp:
         self.qrcode_status_var = StringVar(value="Cole um link e gere o QR Code.")
         self.qrcode = None
         self.qrcode_photo = None
+        self.qrcode_shorten_var = BooleanVar(value=False)
+        self.qrcode_alias_var = StringVar()
+        self.qrcode_shortened_var = StringVar()
+        self.qrcode_alias_entry = None
+        self.qrcode_shortened_row = None
+        self.qrcode_shortened_entry = None
+        self.qrcode_shortened_copy_button = None
+        self.qrcode_content = None
+        self.qrcode_shorten_busy = False
+        self.qrcode_shorten_started = 0.0
 
         self._build_style()
         self.paste_icon = self._make_paste_icon()
@@ -10264,7 +10274,43 @@ try {
         )
         self.qrcode_generate_button.pack(side=LEFT, padx=(10, 0))
 
+        shorten_row = ttk.Frame(frame)
+        shorten_row.pack(fill=X, pady=(8, 0))
+        self.qrcode_shorten_check = ttk.Checkbutton(
+            shorten_row,
+            text="Encurtar link",
+            variable=self.qrcode_shorten_var,
+            command=self._qrcode_shorten_toggled,
+        )
+        self.qrcode_shorten_check.pack(side=LEFT)
+        ttk.Label(shorten_row, text="Alias (opcional):").pack(side=LEFT, padx=(14, 6))
+        self.qrcode_alias_entry = ttk.Entry(
+            shorten_row,
+            textvariable=self.qrcode_alias_var,
+            font=("Segoe UI", 10),
+            width=30,
+        )
+        self.qrcode_alias_entry.pack(side=LEFT)
+        self.qrcode_alias_entry.bind("<Return>", lambda _event: self.generate_qrcode())
+        self.qrcode_alias_entry.configure(state="disabled")
+
+        self.qrcode_shortened_row = ttk.Frame(frame)
+        ttk.Label(self.qrcode_shortened_row, text="Encurtado:").pack(side=LEFT)
+        self.qrcode_shortened_entry = ttk.Entry(
+            self.qrcode_shortened_row,
+            textvariable=self.qrcode_shortened_var,
+            font=("Segoe UI", 10),
+            state="readonly",
+        )
+        self.qrcode_shortened_entry.pack(side=LEFT, fill=X, expand=True, padx=(8, 8))
+        self.qrcode_shortened_copy_button = self._make_editor_icon_button(
+            self.qrcode_shortened_row, self.copy_icon, "Copiar", self.copy_shortened_link
+        )
+        self.qrcode_shortened_copy_button.pack(side=LEFT)
+        self.qrcode_shortened_copy_button.configure(state="disabled")
+
         content = ttk.Frame(frame)
+        self.qrcode_content = content
         content.pack(anchor="w", pady=(18, 0))
 
         self.qrcode_canvas = Canvas(
@@ -10351,6 +10397,12 @@ try {
             )
             self.qrcode_link_entry.focus_set()
             return
+        if self.qrcode_shorten_var.get():
+            self._start_shorten_flow(link)
+            return
+        self._generate_qrcode_now(link)
+
+    def _generate_qrcode_now(self, link: str) -> None:
         try:
             code = qr_encoder.QrCode.encode_text(link, "M")
         except qr_encoder.QrCapacityError as exc:
@@ -10410,19 +10462,108 @@ try {
         self._append_activity_log("Link colado", "activity_step_done")
 
     def clear_qrcode(self) -> None:
-        if not self.qrcode_link_var.get().strip() and self.qrcode is None:
+        if (
+            not self.qrcode_link_var.get().strip()
+            and not self.qrcode_alias_var.get().strip()
+            and not self.qrcode_shortened_var.get().strip()
+            and self.qrcode is None
+        ):
             return
         if not messagebox.askyesno(
             "sig", "Deseja limpar o QR Code atual?", parent=self.root
         ):
             return
         self.qrcode_link_var.set("")
+        self.qrcode_alias_var.set("")
+        self.qrcode_shortened_var.set("")
         self.qrcode = None
         self.qrcode_photo = None
         self._draw_qrcode_placeholder()
         self.qrcode_copy_button.configure(state="disabled")
+        if self.qrcode_shortened_copy_button is not None:
+            self.qrcode_shortened_copy_button.configure(state="disabled")
+            self.qrcode_shortened_row.pack_forget()
         self.qrcode_status_var.set("Cole um link e gere o QR Code.")
         self._set_activity_status("QR Code limpo.", log=False)
+
+    def _qrcode_shorten_toggled(self) -> None:
+        state = "normal" if self.qrcode_shorten_var.get() else "disabled"
+        if self.qrcode_alias_entry is not None:
+            self.qrcode_alias_entry.configure(state=state)
+
+    def copy_shortened_link(self) -> None:
+        text = self.qrcode_shortened_var.get().strip()
+        if not text:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except Exception as exc:
+            self._set_activity_status(f"Cópia do link falhou: {exc}", log=False)
+            self._append_activity_log(
+                f"Link encurtado não copiado: {exc}", "activity_step_error"
+            )
+            messagebox.showerror(
+                "Copiar",
+                f"Não consegui copiar o link.\n\nDetalhe: {exc}",
+                parent=self.root,
+            )
+            return
+        self._set_activity_status("Link encurtado copiado.", log=False)
+        self._append_activity_log("Link encurtado copiado", "activity_step_done")
+
+    def _start_shorten_flow(self, link: str) -> None:
+        parsed = urlparse(link)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            self._append_activity_log(
+                "Link não encurtado: use http:// ou https://.", "activity_step_error"
+            )
+            messagebox.showwarning(
+                "Encurtar link",
+                "O link precisa começar com http:// ou https:// para ser encurtado.",
+                parent=self.root,
+            )
+            return
+        if self.qrcode_shorten_busy:
+            self._set_activity_status("Encurtamento em andamento...", log=False)
+            return
+        alias = self.qrcode_alias_var.get().strip()
+        self.qrcode_shorten_busy = True
+        self.qrcode_generate_button.configure(state="disabled")
+        self._begin_activity_step("qrcode:shorten", "Encurtando link")
+        self.qrcode_shorten_started = time.perf_counter()
+        threading.Thread(
+            target=self._shorten_worker, args=(link, alias), daemon=True
+        ).start()
+
+    def _shorten_worker(self, link: str, alias: str) -> None:
+        try:
+            params = [("url", link)]
+            if alias:
+                params.append(("alias", alias))
+            url = "https://tinyurl.com/api-create.php?" + urlencode(params)
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "SIG-Windows/2.0 (+https://github.com/spigknot/SIG-Windows)"
+                },
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                body = response.read(64 * 1024).decode("utf-8", errors="replace").strip()
+            if not body.startswith("http://") and not body.startswith("https://"):
+                self._queue("qrcode_shorten_error", "TinyURL não devolveu um link válido.")
+                return
+            self._queue("qrcode_shortened", body)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 422:
+                detail = "Alias indisponível: escolha outro ou deixe em branco."
+            elif exc.code == 400:
+                detail = "TinyURL recusou o link (verifique se a URL é válida)."
+            else:
+                detail = f"TinyURL recusou o pedido (HTTP {exc.code})."
+            self._queue("qrcode_shorten_error", detail)
+        except Exception as exc:
+            self._queue("qrcode_shorten_error", f"Falha ao encurtar: {exc}")
 
     def _toggle_qualification_select_all(self) -> None:
         selected = bool(self.qualification_select_all_var.get())
@@ -19275,6 +19416,32 @@ try {
                     if generation == self.imei_generation and imei == self.imei_last_processed:
                         self.imei_model_var.set(detail)
                         self.imei_status_var.set("")
+                elif kind == "qrcode_shortened":
+                    short = str(message[1])
+                    self._finish_activity_step(
+                        "qrcode:shorten",
+                        time.perf_counter()
+                        - getattr(self, "qrcode_shorten_started", time.perf_counter()),
+                    )
+                    self.qrcode_shorten_busy = False
+                    self.qrcode_generate_button.configure(state="normal")
+                    self.qrcode_shortened_var.set(short)
+                    self.qrcode_shortened_row.pack(
+                        fill=X, pady=(8, 0), before=self.qrcode_content
+                    )
+                    self.qrcode_shortened_copy_button.configure(state="normal")
+                    self.qrcode_link_var.set(short)
+                    self._generate_qrcode_now(short)
+                elif kind == "qrcode_shorten_error":
+                    detail = str(message[1])
+                    self._finish_activity_step(
+                        "qrcode:shorten",
+                        time.perf_counter()
+                        - getattr(self, "qrcode_shorten_started", time.perf_counter()),
+                        error=detail,
+                    )
+                    self.qrcode_shorten_busy = False
+                    self.qrcode_generate_button.configure(state="normal")
                 elif kind == "update_available_sync":
                     state = dict(message[1])
                     self.available_update_sync = state
