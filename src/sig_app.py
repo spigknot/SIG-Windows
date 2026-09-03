@@ -81,7 +81,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260902_001"
+APP_VERSION = "20260903_001"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -10345,6 +10345,7 @@ try {
     def generate_qrcode(self) -> None:
         link = self.qrcode_link_var.get().strip()
         if not link:
+            self._append_activity_log("QR Code solicitado sem link.", "warning")
             messagebox.showwarning(
                 "QR Code", "Cole um link antes de gerar o QR Code.", parent=self.root
             )
@@ -10354,10 +10355,14 @@ try {
             code = qr_encoder.QrCode.encode_text(link, "M")
         except qr_encoder.QrCapacityError as exc:
             self._set_activity_status("QR Code não gerado: conteúdo longo demais.", log=False)
+            self._append_activity_log(
+                "QR Code não gerado: conteúdo longo demais.", "activity_step_error"
+            )
             messagebox.showerror("QR Code", str(exc), parent=self.root)
             return
         except Exception as exc:
             self._set_activity_status(f"QR Code ERRO: {exc}", log=False)
+            self._append_activity_log(f"QR Code não gerado: {exc}", "activity_step_error")
             messagebox.showerror(
                 "QR Code",
                 f"Não consegui gerar o QR Code.\n\nDetalhe: {exc}",
@@ -10367,11 +10372,14 @@ try {
         self.qrcode = code
         self._render_qrcode()
         self.qrcode_copy_button.configure(state="normal")
-        self.qrcode_status_var.set(f"QR Code gerado (versão {code.version}).")
-        self._set_activity_status("QR Code gerado.", log=False)
+        # Nenhum texto de status abaixo do QR Code: a confirmação fica no log.
+        self.qrcode_status_var.set("")
+        self._set_activity_status("QR Code solicitado.", log=False)
+        self._append_activity_log("QR Code solicitado", "activity_step_done")
 
     def copy_qrcode_image(self) -> None:
         if self.qrcode is None:
+            self._append_activity_log("Gere o QR Code antes de copiar.", "warning")
             messagebox.showwarning(
                 "Copiar", "Gere o QR Code antes de copiar.", parent=self.root
             )
@@ -10380,13 +10388,15 @@ try {
             qr_encoder.copy_image_to_windows_clipboard(self.qrcode.to_image(scale=14, border=4))
         except Exception as exc:
             self._set_activity_status(f"Cópia do QR Code falhou: {exc}", log=False)
+            self._append_activity_log(f"QR Code não copiado: {exc}", "activity_step_error")
             messagebox.showerror(
                 "Copiar",
                 f"Não consegui copiar a imagem.\n\nDetalhe: {exc}",
                 parent=self.root,
             )
             return
-        self._set_activity_status("QR Code copiado como imagem.", log=False)
+        self._set_activity_status("QR Code copiado.", log=False)
+        self._append_activity_log("QR Code copiado", "activity_step_done")
 
     def paste_qrcode_link(self) -> None:
         try:
@@ -10396,7 +10406,8 @@ try {
         if not pasted:
             return
         self.qrcode_link_var.set(pasted)
-        self._set_activity_status("Link colado na caixa do QR Code.", log=False)
+        self._set_activity_status("Link colado.", log=False)
+        self._append_activity_log("Link colado", "activity_step_done")
 
     def clear_qrcode(self) -> None:
         if not self.qrcode_link_var.get().strip() and self.qrcode is None:

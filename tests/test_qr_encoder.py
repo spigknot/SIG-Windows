@@ -13,6 +13,7 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -203,6 +204,31 @@ class _MessageboxStub:
     def askyesno(self, title, message, **_kwargs):
         self.calls.append(("askyesno", title, message))
         return self.answer
+
+
+class _ActivityLogStub:
+    """Registra as linhas escritas no log de atividade sem um widget Tk."""
+
+    def __init__(self):
+        self.lines: list[tuple[str, str | None]] = []
+        self._tags: set[str] = set()
+        self._state = "disabled"
+
+    def configure(self, *, state: str | None = None, **_kwargs):
+        if state is not None:
+            self._state = state
+
+    def tag_names(self):
+        return self._tags
+
+    def tag_configure(self, tag, **_kwargs):
+        self._tags.add(tag)
+
+    def insert(self, index, line, tag=None):
+        self.lines.append((str(line), tag))
+
+    def see(self, index):
+        pass
 
 
 class QrEncoderTests(unittest.TestCase):
@@ -536,6 +562,7 @@ class QrCodeTabTests(unittest.TestCase):
         app.qrcode_link_entry = tk.Entry(_root)
         app.status_var = _VarStub()
         app._activity_status_suppressed = 0
+        app.activity_log = _ActivityLogStub()
         return app
 
     def test_generate_renders_the_code_and_enables_copy(self):
@@ -548,7 +575,11 @@ class QrCodeTabTests(unittest.TestCase):
         self.assertEqual(app.qrcode_copy_button.state, "normal")
         self.assertEqual(app.qrcode_canvas.cleared, 1)  # somente o desenho
         self.assertEqual(len(app.qrcode_canvas.items), 1)
-        self.assertIn("versão 2", app.qrcode_status_var.get())
+        # Nenhum texto de versao abaixo do QR Code...
+        self.assertEqual(app.qrcode_status_var.get(), "")
+        # ...e o log de atividade recebe a confirmacao em verde.
+        self.assertTrue(app.activity_log.lines[-1][0].endswith("QR Code solicitado\n"))
+        self.assertEqual(app.activity_log.lines[-1][1], "activity_step_done")
         self.assertEqual(self.messages.calls, [])
 
     def test_generate_without_a_link_warns_and_keeps_the_state(self):
@@ -557,6 +588,10 @@ class QrCodeTabTests(unittest.TestCase):
         self.assertIsNone(app.qrcode)
         self.assertEqual(app.qrcode_copy_button.configures, [])  # nunca habilitado
         self.assertEqual(self.messages.calls[0][0], "warning")
+        self.assertTrue(
+            app.activity_log.lines[-1][0].endswith("QR Code solicitado sem link\n")
+        )
+        self.assertEqual(app.activity_log.lines[-1][1], "warning")
 
     def test_content_above_the_limit_reports_an_error_keeps_the_last_code(self):
         app = self._make_app()
@@ -597,6 +632,34 @@ class QrCodeTabTests(unittest.TestCase):
         self.clipboard.append("  https://sig.local  ")
         app.paste_qrcode_link()
         self.assertEqual(app.qrcode_link_var.get(), "https://sig.local")
+        self.assertTrue(app.activity_log.lines[-1][0].endswith("Link colado\n"))
+        self.assertEqual(app.activity_log.lines[-1][1], "activity_step_done")
+
+    def test_paste_with_empty_clipboard_keeps_silence(self):
+        app = self._make_app()
+        app.paste_qrcode_link()
+        self.assertEqual(app.qrcode_link_var.get(), "")
+        self.assertEqual(app.activity_log.lines, [])
+
+    def test_copy_logs_success_and_posts_the_image(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.generate_qrcode()
+        app.activity_log.lines.clear()
+        with patch("qr_encoder.copy_image_to_windows_clipboard") as copied:
+            app.copy_qrcode_image()
+        copied.assert_called_once()
+        self.assertTrue(app.activity_log.lines[-1][0].endswith("QR Code copiado\n"))
+        self.assertEqual(app.activity_log.lines[-1][1], "activity_step_done")
+
+    def test_copy_without_a_code_warns(self):
+        app = self._make_app()
+        app.copy_qrcode_image()
+        self.assertEqual(self.messages.calls[-1][0], "warning")
+        self.assertTrue(
+            app.activity_log.lines[-1][0].endswith("Gere o QR Code antes de copiar\n")
+        )
+        self.assertEqual(app.activity_log.lines[-1][1], "warning")
 
     def test_placeholder_is_drawn_on_an_empty_canvas(self):
         app = self._make_app()
