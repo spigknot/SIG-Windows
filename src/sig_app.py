@@ -49,6 +49,7 @@ from assistant_prompts import (
     statement_user_prompt,
 )
 import qr_encoder
+import smart_join_planner
 import stt_provider_rules
 from stt_provider_rules import (
     assemblyai_rest_diarize,
@@ -1786,6 +1787,9 @@ class FfmpegToolsPanel:
         self.join_profile_var = StringVar(value="Primeiro clipe")
         self.join_stream_policy_var = StringVar(value="Primeira faixa (MP4)")
         self.join_audio_policy_var = StringVar(value="Preservar áudio e preencher silêncio")
+        self.join_orientation_mode_var = StringVar(value="bake")  # bake | preserve
+        self.join_orientation_reference_var = StringVar(value="")
+        self._join_rotation_answer: dict | None = None
         self.join_seconds_var.trace_add("write", lambda *_: self._on_join_seconds_changed())
 
         self.insert_main_input: Path | None = None
@@ -2211,7 +2215,7 @@ class FfmpegToolsPanel:
         self._section_title(
             self.join_tab,
             "Juntar áudios/vídeos",
-            "Junta arquivos do mesmo tipo. O modo automático copia sem transição e reencoda a saída inteira quando há transição.",
+            "Junta arquivos do mesmo tipo. O SmartJoin (Experimental) copia sem transição e reencoda a saída inteira quando há transição.",
         )
         controls = ttk.Frame(self.join_tab)
         controls.pack(fill=X)
@@ -2237,7 +2241,7 @@ class FfmpegToolsPanel:
         self.join_reencode_check.pack(side=LEFT)
         self.join_smart_check = ttk.Checkbutton(
             join_checks,
-            text="Automático (copia sem transição)",
+            text="SmartJoin (Experimental)",
             variable=self.join_smart_var,
             command=self._on_toggle_join_smart,
         )
@@ -3694,6 +3698,85 @@ class FfmpegToolsPanel:
             self._jump_to_insert_preview_position(main_position)
         return True
 
+    def _ask_join_rotation(self) -> bool:
+        """Pergunta (modal) como tratar o giro dos vídeos antes do join com reencode.
+
+        Devolve False se o usuário cancelou; a resposta fica em `_join_rotation_answer`
+        e é copiada para `worker_options` pelo `run_current_tool`.
+        """
+        self._join_rotation_answer = None
+        if self.active_tool_var.get() != "Juntar áudios/vídeos":
+            return True
+        inputs = list(getattr(self, "join_inputs", None) or [])
+        profiles = getattr(self, "join_media_profiles", None) or {}
+        if len(inputs) < 2 or any(path not in profiles for path in inputs):
+            return True
+        clips = [profiles[path] for path in inputs]
+        # O diálogo aplica-se ao Reencode Completo (caminho que normaliza e
+        # "assa" a rotação). O SmartJoin híbrido (com transição) copia corpos em
+        # stream copy e não oferece o modo de preservar formato.
+        reencode = bool(self.join_reencode_var.get())
+        mp4_output = not str(self.join_stream_policy_var.get()).startswith("Todas")
+        question = self._join_rotation_question(inputs, clips, bool(reencode) and mp4_output)
+        if question is None:
+            return True
+        return self._show_join_rotation_dialog(inputs, question)
+
+    def _show_join_rotation_dialog(self, paths: list[Path], question: dict) -> bool:
+        """Janela modal com as opções da pergunta de orientação. True = prosseguir."""
+        answer = {"cancelled": True}
+        win = Toplevel(self.root)
+        win.title("Giro nos vídeos")
+        win.configure(background="#101418")
+        win.resizable(False, False)
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text=question["message"], justify="left", wraplength=480).pack(
+            anchor="w", pady=(0, 10)
+        )
+        choice = StringVar(value=question["default"])
+        for option in question["options"]:
+            row = ttk.Frame(frame)
+            row.pack(fill=X, pady=(2, 0))
+            ttk.Radiobutton(
+                row,
+                text=option["label"],
+                value=option["key"],
+                variable=choice,
+            ).pack(anchor="w")
+            ttk.Label(
+                row,
+                text=option["detail"],
+                foreground="#8fa3a0",
+                wraplength=440,
+            ).pack(anchor="w", padx=(24, 0))
+
+        def confirm(_event=None):
+            key = str(choice.get())
+            if key == "bake" or not key.startswith("preserve:"):
+                self._join_rotation_answer = {"mode": "bake", "reference": ""}
+            else:
+                try:
+                    index = int(key.partition(":")[2])
+                    reference = str(paths[index])
+                except (ValueError, IndexError):
+                    self._join_rotation_answer = {"mode": "bake", "reference": ""}
+                else:
+                    self._join_rotation_answer = {"mode": "preserve", "reference": reference}
+            answer["cancelled"] = False
+            win.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=X, pady=(10, 0))
+        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT)
+        ttk.Button(buttons, text="Juntar", command=confirm).pack(side=RIGHT)
+        win.bind("<Return>", confirm)
+        win.bind("<Escape>", lambda _event: win.destroy())
+        win.grab_set()
+        self.root.wait_window(win)
+        return not answer["cancelled"]
+
     def add_join_inputs(self) -> None:
         selected = filedialog.askopenfilenames(title="Selecionar áudios ou vídeos", filetypes=self._filetypes())
         if selected:
@@ -3802,10 +3885,15 @@ class FfmpegToolsPanel:
         tool = self.active_tool_var.get()
         if tool == "Inserir áudio" and not self._apply_insert_time():
             return
+        if tool == "Juntar áudios/vídeos" and not self._ask_join_rotation():
+            return
         # Capture Tk state on the UI thread. Workers use only plain Python values.
         self.selected_acceleration_label = self.acceleration_var.get()
         self.selected_video_quality = self.video_quality_var.get()
         self.worker_tool_uses_video_encoder = self._current_tool_uses_video_encoder()
+        rotation_answer = self._join_rotation_answer or {}
+        self.join_orientation_mode_var.set(str(rotation_answer.get("mode") or "bake"))
+        self.join_orientation_reference_var.set(str(rotation_answer.get("reference") or ""))
         self.worker_options = {
             "cut_start": self.cut_start_var.get(), "cut_end": self.cut_end_var.get(), "cut_mode": self.cut_mode_var.get(),
             "cut_audio_policy": self.cut_audio_policy_var.get(), "cut_stream_policy": self.cut_stream_policy_var.get(),
@@ -3820,6 +3908,8 @@ class FfmpegToolsPanel:
             "join_transition": self.join_transition_var.get(), "join_seconds": self.join_seconds_var.get(),
             "join_profile": self.join_profile_var.get(), "join_stream_policy": self.join_stream_policy_var.get(),
             "join_audio_policy": self.join_audio_policy_var.get(),
+            "join_orientation_mode": str(rotation_answer.get("mode") or "bake"),
+            "join_orientation_reference": str(rotation_answer.get("reference") or ""),
             "insert_reencode": self.insert_reencode_var.get(), "insert_smart": self.insert_smart_var.get(),
             "insert_transition": self.insert_transition_var.get(), "insert_seconds": self.insert_seconds_var.get(),
             "clean_mode": self.clean_mode_var.get(), "clean_output_profile": self.clean_output_profile_var.get(),
@@ -4809,6 +4899,123 @@ class FfmpegToolsPanel:
         return clips[0]
 
     @staticmethod
+    def _rotation_display_angle(rotation: int) -> int:
+        """Ângulo amigável para exibir (intervalo -179..180): 270 aparece como -90."""
+        value = int(rotation) % 360
+        return value - 360 if value > 180 else value
+
+    @staticmethod
+    def _rotation_storage_transpose(rotation: int) -> str:
+        """Filtro que devolve um vídeo já exibido em pé (frames autorotacionados)
+        para a orientação de armazenamento que, combinada com a display matrix de
+        `rotation`, é exibida igual ao original.
+
+        Validação empírica com o FFmpeg 8 do dist (set/2026, MAE 0 em frames reais):
+        a volta exibido -> armazenado é transpose=1 para rotation=90 e transpose=2
+        para rotation=270; 180° é rotação pura (hflip+vflip).
+        """
+        value = int(rotation) % 360
+        if value == 90:
+            return "transpose=1"
+        if value == 270:
+            return "transpose=2"
+        if value == 180:
+            return "hflip,vflip"
+        return ""
+
+    @classmethod
+    def _join_display_size(cls, clip: MediaProfile) -> tuple[int, int]:
+        """Tamanho de EXIBIÇÃO (após o player aplicar o giro do metadado)."""
+        width, height = clip.width, clip.height
+        if clip.rotation % 360 in {90, 270} and width != height:
+            width, height = height, width
+        return width, height
+
+    def _join_rotation_question(
+        self,
+        paths: list[Path],
+        clips: list[MediaProfile],
+        reencode_mp4: bool,
+    ) -> dict | None:
+        """Monta a pergunta de orientação do join (None = não perguntar).
+
+        Dispara quando o join vai reencodar para MP4 e ao menos um vídeo carrega
+        giro no metadado. Cada forma de armazenamento com giro vira uma opção
+        'manter o formato' (o arquivo escolhido vira a referência); a opção padrão
+        aplica o giro nos frames (saída sem metadado, comportamento histórico).
+        """
+        if not reencode_mp4:
+            return None
+        video_clips = [clip for clip in clips if clip.has_video]
+        if len(video_clips) != len(clips):
+            return None
+        rotated = [clip for clip in clips if clip.rotation % 360 != 0]
+        if not rotated:
+            return None
+        display_orientations = {
+            display_width > display_height
+            for display_width, display_height in (self._join_display_size(clip) for clip in clips)
+        }
+        mixed_display = len(display_orientations) > 1
+        lines = []
+        for path, clip in zip(paths, clips):
+            if clip.rotation % 360 == 0:
+                continue
+            lines.append(
+                f"• {path.name} — {clip.width}x{clip.height} com giro de "
+                f"{self._rotation_display_angle(clip.rotation)}° "
+                f"(exibido {self._join_display_size(clip)[0]}x{self._join_display_size(clip)[1]})"
+            )
+        message = "Estes vídeos têm giro gravado nos metadados:\n" + "\n".join(lines) + "\n\nComo deseja gerar a saída?"
+        if mixed_display:
+            message += (
+                "\n\nAtenção: há vídeos em orientações de exibição diferentes; "
+                "os que não seguirem a referência entram com barras."
+            )
+        first = video_clips[0]
+        display_width, display_height = self._join_display_size(first)
+        options: list[dict] = [
+            {
+                "key": "bake",
+                "label": "Aplicar giro nos vídeos (recomendado)",
+                "detail": (
+                    f"Saída {display_width}x{display_height} com o giro aplicado aos frames; "
+                    "arquivo sem metadado de giro, igual ao que os players mostram."
+                ),
+            }
+        ]
+        seen: set[tuple[int, int, int]] = set()
+        for path, clip in zip(paths, clips):
+            rotation = clip.rotation % 360
+            if rotation == 0 or not clip.has_video:
+                continue
+            if rotation in {90, 270} and clip.width == clip.height:
+                continue  # giro de 90° em vídeo quadrado não muda o armazenamento
+            form = (clip.width, clip.height, rotation)
+            if form in seen:
+                continue
+            seen.add(form)
+            options.append(
+                {
+                    "key": f"preserve:{paths.index(path)}",
+                    "label": (
+                        f"Manter o formato de {path.name}: {clip.width}x{clip.height} "
+                        f"com giro de {self._rotation_display_angle(rotation)}°"
+                    ),
+                    "detail": (
+                        "Como o original: o arquivo guarda a resolução e o giro; "
+                        "os players giram ao exibir."
+                    ),
+                }
+            )
+        return {
+            "message": message,
+            "options": options,
+            "default": "bake",
+            "mixed_display": mixed_display,
+        }
+
+    @staticmethod
     def _join_copy_mapping(preserve_all_streams: bool, include_audio: bool) -> list[str]:
         if preserve_all_streams:
             return ["-map", "0"] + ([] if include_audio else ["-map", "-0:a?"])
@@ -5118,7 +5325,19 @@ class FfmpegToolsPanel:
         if transition_seconds > max_safe_transition:
             transition_seconds = max_safe_transition
             self._append_log(f"Tempo de transição ajustado para {transition_seconds:.2f}s para evitar perda de quadros nos clipes.")
-        base = self._select_join_base(clips, profile_choice)
+        preserve_rotation = False
+        orientation_mode = str(self._worker_value_default("join_orientation_mode", "join_orientation_mode_var", "bake"))
+        orientation_reference = str(self._worker_value_default("join_orientation_reference", "join_orientation_reference_var", ""))
+        if orientation_mode == "preserve" and orientation_reference and not preserve_all_streams:
+            reference = next(
+                (clip for path, clip in zip(self.join_inputs, clips) if str(path) == orientation_reference),
+                None,
+            )
+            if reference is None or reference.rotation % 360 not in {90, 180, 270}:
+                self._append_log("Não foi possível manter o formato original com giro; aplicando o giro nos frames.")
+            else:
+                preserve_rotation = True
+        base = self._select_join_base(clips, profile_choice) if not preserve_rotation else reference
         visual_width, visual_height = base.width, base.height
         if base.rotation % 360 in {90, 270}:
             visual_width, visual_height = visual_height, visual_width
@@ -5128,11 +5347,19 @@ class FfmpegToolsPanel:
             "audio_rate": base.audio_rate, "audio_channels": base.audio_channels,
             "audio_layout": base.audio_layout,
         }
-        self._append_log(
-            f"Perfil de saída: {profile['width']}x{profile['height']} a {profile['fps']} fps, "
-            f"vídeo {profile['video_bitrate']}, áudio {profile['audio_bitrate']} "
-            f"{profile['audio_rate']} Hz/{profile['audio_channels']} canal(is)."
-        )
+        if preserve_rotation:
+            self._append_log(
+                f"Perfil de saída: {base.width}x{base.height} com giro de "
+                f"{self._rotation_display_angle(base.rotation)}° (exibido {profile['width']}x{profile['height']}), "
+                f"a {profile['fps']} fps, vídeo {profile['video_bitrate']}, áudio {profile['audio_bitrate']} "
+                f"{profile['audio_rate']} Hz/{profile['audio_channels']} canal(is)."
+            )
+        else:
+            self._append_log(
+                f"Perfil de saída: {profile['width']}x{profile['height']} a {profile['fps']} fps, "
+                f"vídeo {profile['video_bitrate']}, áudio {profile['audio_bitrate']} "
+                f"{profile['audio_rate']} Hz/{profile['audio_channels']} canal(is)."
+            )
         normalized = [
             f"{index}: {clip.width}x{clip.height}/{clip.fps}fps/rotação {clip.rotation}°"
             for index, clip in enumerate(clips, start=1)
@@ -5140,9 +5367,21 @@ class FfmpegToolsPanel:
         ]
         if normalized:
             self._append_log("Clipes normalizados para o perfil de saída: " + "; ".join(normalized))
-        if strategy == "Smart Join":
-            self._append_log("O modo automático com transição usa reencode completo para manter vídeo e áudio sincronizados.")
         include_audio = any(clip.has_audio for clip in clips) and not audio_policy.startswith("Gerar saída sem áudio")
+        if strategy == "Smart Join" and transition_seconds > 0.001:
+            # SmartJoin hibrido portado do Android: copia os corpos entre
+            # keyframes em stream copy e recodifica apenas as emendas. Se o
+            # plano for inviavel, interrompe com diagnostico (sem reencodar
+            # o arquivo inteiro em silencio).
+            self._smart_join_execute(
+                [path for path in self.join_inputs],
+                clips,
+                output,
+                transition_seconds,
+                transition_label,
+                include_audio,
+            )
+            return
         if transition_label == "Fade in/out":
             filters = self._fade_join_filter(clips, profile, transition_seconds, include_audio)
         else:
@@ -5153,18 +5392,49 @@ class FfmpegToolsPanel:
                 input_args += ["-i", str(path)]
             prefix: list[str] = []
             filter_text = filters
+            rotation_filter = self._rotation_storage_transpose(base.rotation) if preserve_rotation else ""
             if acceleration.key == "vaapi":
                 prefix = ["-vaapi_device", "/dev/dri/renderD128"]
-                filter_text = filter_text + ";[vout]format=nv12,hwupload[vhw]"
+                if rotation_filter:
+                    filter_text = filter_text + f";[vout]{rotation_filter}[vstore];[vstore]format=nv12,hwupload[vhw]"
+                else:
+                    filter_text = filter_text + ";[vout]format=nv12,hwupload[vhw]"
                 map_video = "[vhw]"
             else:
-                map_video = "[vout]"
+                if rotation_filter:
+                    filter_text = filter_text + f";[vout]{rotation_filter}[vstore]"
+                    map_video = "[vstore]"
+                else:
+                    map_video = "[vout]"
             audio_output_args = ["-map", "[aout]", *self._join_audio_args(profile)] if include_audio else ["-an"]
-            return [*input_args[:3], *prefix, *input_args[3:], "-filter_complex", filter_text, "-map", map_video, *audio_output_args, *self._video_args(acceleration, profile["video_bitrate"]), "-r", profile["fps"], "-movflags", "+faststart", str(output)]
+            return [*input_args[:3], *prefix, *input_args[3:], "-filter_complex", filter_text, "-map", map_video, *audio_output_args, *self._video_args(acceleration, profile["video_bitrate"]), "-r", profile["fps"], "-movflags", "+faststart", str(encode_target)]
         output_duration = sum(item.duration for item in clips)
         if transition_label != "Fade in/out":
             output_duration -= transition_seconds * (len(clips) - 1)
-        self._execute_video("Juntando vídeos", build, duration_seconds=max(0.1, output_duration))
+        if preserve_rotation:
+            # Passo 1: codifica na orientação de ARMAZENAMENTO (o autorotate dos
+            # inputs consome a display matrix e o muxer não escreveria rotação).
+            encode_target = self.output_dir / f"{output.stem}_tmp{output.suffix}"
+            try:
+                self._execute_video("Juntando vídeos", build, duration_seconds=max(0.1, output_duration))
+                # Passo 2: remux rápido (-c copy) gravando a display matrix de
+                # verdade no MP4 (mesmo mecanismo F-03 da ferramenta Girar).
+                self._execute(
+                    [
+                        str(self._ffmpeg()), "-hide_banner", "-y",
+                        "-display_rotation:v:0", str(base.rotation % 360),
+                        "-i", str(encode_target), "-c", "copy", "-movflags", "+faststart", str(output),
+                    ],
+                    "Gravando giro de exibição no arquivo final",
+                    1,
+                    1,
+                    max(0.1, output_duration),
+                )
+            finally:
+                encode_target.unlink(missing_ok=True)
+        else:
+            encode_target = output
+            self._execute_video("Juntando vídeos", build, duration_seconds=max(0.1, output_duration))
 
     def _video_normalize_filter(self, index: int, profile: dict) -> str:
         return f"[{index}:v]scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease,pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={profile['fps']},format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
@@ -5238,6 +5508,616 @@ class FfmpegToolsPanel:
         if include_audio:
             parts.append(f"[{last_audio}]acopy[aout]")
         return ";".join(parts)
+
+    # =====================================================================
+    # SmartJoin (portado do Android - SmartJoinPlanner.kt + FfmpegJoinVideosActivity)
+    # Copia os corpos entre keyframes em stream copy e recodifica apenas as
+    # emendas (bridges). NUNCA reencoda o arquivo inteiro silenciosamente.
+    # =====================================================================
+
+    @staticmethod
+    def _smart_rotation_filters(degrees: int) -> list[str]:
+        degrees = ((degrees % 360) + 360) % 360
+        if degrees == 270:  # -90 -> transpose=1
+            return ["transpose=1"]
+        if degrees == 90:
+            return ["transpose=2"]
+        if degrees == 180:
+            return ["hflip", "vflip"]
+        return []
+
+    def _smart_join_video_profile(self, media: MediaProfile) -> "smart_join_planner.VideoProfile":
+        try:
+            fps = float(media.fps) if media.fps else 30.0
+        except (TypeError, ValueError):
+            fps = 30.0
+        return smart_join_planner.VideoProfile(
+            codec_family=(media.video_codec or "h264"),
+            width=media.width,
+            height=media.height,
+            fps=fps,
+            rotation_degrees=media.rotation,
+            pixel_format=(media.pix_fmt or None),
+            sample_aspect_ratio=(media.sar or None),
+            codec_profile=None,
+        )
+
+    def _smart_join_target_dict(self, target_media: MediaProfile) -> dict:
+        """Perfil de saida normalizado a partir do clipe target do planner."""
+        sar = (target_media.sar or "1:1")
+        sar_filter = sar if sar and sar.replace(":", "/").count("/") == 1 else "1"
+        return {
+            "width": target_media.width or 1280,
+            "height": target_media.height or 720,
+            "fps": target_media.fps or "30",
+            "rotation": target_media.rotation or 0,
+            "codec_family": (target_media.video_codec or "h264"),
+            "sar": sar_filter.replace(":", "/"),
+            "audio_rate": target_media.audio_rate or 48000,
+            "audio_channels": target_media.audio_channels or 2,
+            "audio_layout": target_media.audio_layout or "stereo",
+            "audio_bitrate": target_media.audio_bitrate or "128k",
+        }
+
+    def _smart_join_audio_window_filter(
+        self,
+        input_spec: str,
+        clip_media: MediaProfile | None,
+        duration: float,
+        target: dict,
+        output_label: str,
+    ) -> str:
+        rate = target["audio_rate"]
+        layout = target["audio_layout"]
+        if clip_media is not None and clip_media.has_audio:
+            return (
+                f"[{input_spec}]aresample={rate}:async=1:first_pts=0,"
+                f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts={layout},"
+                f"atrim=duration={self._fmt_seconds(duration)},asetpts=N/SR/TB[{output_label}]"
+            )
+        return (
+            f"anullsrc=channel_layout={layout}:sample_rate={rate},"
+            f"atrim=duration={self._fmt_seconds(duration)},asetpts=N/SR/TB[{output_label}]"
+        )
+
+    def _smart_join_video_normalization_filter(
+        self,
+        source_media: MediaProfile,
+        target: dict,
+    ) -> str:
+        parts = ["setpts=PTS-STARTPTS"]
+        src_rot = ((source_media.rotation or 0) % 360 + 360) % 360
+        tgt_rot = ((target.get("rotation") or 0) % 360 + 360) % 360
+        if src_rot != tgt_rot:
+            parts += self._smart_rotation_filters(src_rot)
+            parts += self._smart_rotation_filters((-tgt_rot) % 360)
+        parts.append(
+            f"scale={target['width']}:{target['height']}:force_original_aspect_ratio=decrease"
+        )
+        parts.append(f"pad={target['width']}:{target['height']}:(ow-iw)/2:(oh-ih)/2")
+        parts.append(f"setsar={target.get('sar') or '1'}")
+        parts.append(f"fps={target['fps']}")
+        parts.append("format=yuv420p")
+        parts.append("settb=AVTB")
+        parts.append("setpts=PTS-STARTPTS")
+        return ",".join(parts)
+
+    def _smart_join_acceleration_for_codec(self, codec_family: str) -> VideoAcceleration:
+        """Devolve o VideoAcceleration do Windows adequado ao codec do target.
+
+        Segue a regra do app Windows (combo de aceleracao do usuario + fallback
+        CPU): se o codec do target casar com o encoder selecionado, usa o
+        acceleration escolhido; caso contrario, fallback por software do mesmo
+        codec (libx264/libx265). O Android escolhe encoder por mediacodec; aqui
+        a parametrizacao e a do Windows (qualidade/crf/rate-control).
+        """
+        accel = getattr(self, "acceleration", None)
+        if accel is not None:
+            enc = (accel.encoder or "").lower()
+            if codec_family == "h264" and enc.startswith(("libx264", "h264_", "mpeg4")):
+                return accel
+            if codec_family == "hevc" and enc.startswith(("libx265", "hevc_")):
+                return accel
+        if codec_family == "hevc":
+            return VideoAcceleration("cpu", "CPU (HEVC)", "libx265")
+        return VideoAcceleration("cpu", "CPU (fallback)", "libx264")
+
+    def _smart_join_video_args(self, codec_family: str, bitrate: str) -> list[str]:
+        """Argumentos de encoder do SmartJoin, delegando ao _video_args do Windows.
+
+        Usa o encoder selecionado no combo (se compativel com o codec do target)
+        e a QUALIDADE selecionada (via _video_args). Sem parametrizacao do
+        Android (mediacodec/-bf/-profile): o app Windows ja resolve isso no
+        _video_args por aceleracao.
+        """
+        accel = self._smart_join_acceleration_for_codec(codec_family)
+        return self._video_args(accel, bitrate)
+
+    def _smart_join_ts_bitstream(self, codec_family: str) -> str:
+        return "hevc_mp4toannexb" if codec_family == "hevc" else "h264_mp4toannexb"
+
+    def _smart_join_body_arguments(
+        self,
+        source: Path,
+        media: MediaProfile,
+        start_seconds: float,
+        duration_seconds: float,
+        copy_video: bool,
+        target: dict,
+        include_audio: bool,
+        output_file: Path,
+        output_as_mpeg_ts: bool = True,
+    ) -> list[str]:
+        args = [str(self._ffmpeg()), "-hide_banner", "-y"]
+        if not copy_video:
+            # arquivo incompativel pode carregar edit-list/PTS nao continuos
+            args += ["-fflags", "+genpts"]
+        # O corpo comeca SEMPRE num keyframe (garantia do planner). Usamos
+        # -ss DEPOIS do input (output seek) no stream copy: com -ss antes do
+        # input + reencode de audio mono, o FFmpeg desktop nao aplica o -t ao
+        # audio copiado e a peca TS sai com a duracao cheia (bug observado).
+        # Em output seek o corte em keyframe com -c:v copy e exato.
+        args += ["-noautorotate", "-display_rotation:v:0", "0", "-i", str(source)]
+        if start_seconds > 0.0005:
+            args += ["-ss", self._fmt_seconds(start_seconds)]
+        args += ["-t", self._fmt_seconds(duration_seconds)]
+
+        filters: list[str] = []
+        if not copy_video:
+            filters.append(
+                f"[0:v:0]{self._smart_join_video_normalization_filter(media, target)}[vout]"
+            )
+        audio_filter = ""
+        if include_audio:
+            audio_filter = self._smart_join_audio_window_filter(
+                "0:a:0", media, duration_seconds, target, "aout0"
+            )
+            filters.append(audio_filter)
+        if filters:
+            args += ["-filter_complex", ";".join(filters)]
+        args += ["-map", "0:v:0" if copy_video else "[vout]"]
+        if include_audio:
+            args += ["-map", "[aout0]"]
+
+        encoder_name: str | None = None
+        encoder_args: list[str] = []
+        if copy_video:
+            args += ["-c:v", "copy"]
+        else:
+            # Encoder/qualidade do app Windows (_video_args), com o mesmo tail
+            # que o join normal usa (fps + pix_fmt) para o TS ficar consistente
+            # com os corpos copiados.
+            source_bitrate = media.video_bitrate or "1M"
+            args += self._smart_join_video_args(target["codec_family"], source_bitrate)
+            args += ["-pix_fmt", "yuv420p", "-r", str(target["fps"])]
+        if include_audio:
+            args += [
+                "-c:a", "aac", "-b:a", str(target["audio_bitrate"]),
+                "-ar", str(target["audio_rate"]), "-ac", str(target["audio_channels"]),
+            ]
+        args += ["-map_metadata", "-1", "-avoid_negative_ts", "make_zero"]
+        if output_as_mpeg_ts:
+            args += [
+                "-bsf:v", self._smart_join_ts_bitstream(target["codec_family"]),
+                "-mpegts_flags", "+resend_headers+initial_discontinuity",
+                "-muxdelay", "0", "-muxpreload", "0",
+                "-f", "mpegts",
+            ]
+        else:
+            args += ["-video_track_timescale", "90000", "-movflags", "+faststart"]
+        args += [str(output_file)]
+        return args
+
+    def _smart_join_bridge_arguments(
+        self,
+        first_input: Path,
+        second_input: Path,
+        first_media: MediaProfile,
+        second_media: MediaProfile,
+        target: dict,
+        junction: "smart_join_planner.JunctionPlan",
+        fade_in_out: bool,
+        xfade_transition: str,
+        include_audio: bool,
+        output_file: Path,
+    ) -> list[str]:
+        transition = junction.incoming_transition_end_seconds
+        outgoing_window = junction.outgoing_duration_seconds - junction.outgoing_bridge_start_seconds
+        outgoing_prefix = junction.outgoing_transition_start_seconds - junction.outgoing_bridge_start_seconds
+        incoming_window = junction.incoming_bridge_end_seconds
+        incoming_suffix = incoming_window - transition
+        min_seg = 0.020
+        expected_duration = (
+            outgoing_window + incoming_window
+            if fade_in_out
+            else outgoing_window + incoming_window - transition
+        )
+
+        args = [str(self._ffmpeg()), "-hide_banner", "-y", "-fflags", "+genpts"]
+        # A bridge reencoda (sem stream copy) e o seek do 1o input e feito
+        # antes dos inputs (input seek) - igual ao Android. A bridge nao sofre
+        # do bug de -t ignorado (que so afeta stream copy de audio mono).
+        if junction.outgoing_bridge_start_seconds > 0.0005:
+            args += ["-ss", self._fmt_seconds(junction.outgoing_bridge_start_seconds)]
+        args += ["-noautorotate", "-display_rotation:v:0", "0", "-i", str(first_input)]
+        args += ["-noautorotate", "-display_rotation:v:0", "0", "-i", str(second_input)]
+
+        nf_first = self._smart_join_video_normalization_filter(first_media, target)
+        nf_second = self._smart_join_video_normalization_filter(second_media, target)
+        filters = [
+            f"[0:v:0]trim=duration={self._fmt_seconds(outgoing_window)},{nf_first}[ovbase]",
+            f"[1:v:0]trim=duration={self._fmt_seconds(incoming_window)},{nf_second}[ivbase]",
+        ]
+        if fade_in_out:
+            filters.append(
+                f"[ovbase]fade=t=out:st={self._fmt_seconds(max(0.0, outgoing_window - transition))}:"
+                f"d={self._fmt_seconds(transition)}[ovfade]"
+            )
+            filters.append(f"[ivbase]fade=t=in:st=0:d={self._fmt_seconds(transition)}[ivfade]")
+            filters.append("[ovfade][ivfade]concat=n=2:v=1:a=0[vout]")
+        else:
+            video_sequence: list[str] = []
+            if outgoing_prefix > min_seg:
+                filters.append("[ovbase]split=2[ovprefixsrc][ovtailsrc]")
+                filters.append(
+                    f"[ovprefixsrc]trim=duration={self._fmt_seconds(outgoing_prefix)},"
+                    "setpts=PTS-STARTPTS[ovprefix]"
+                )
+                filters.append(
+                    f"[ovtailsrc]trim=start={self._fmt_seconds(outgoing_prefix)}:"
+                    f"duration={self._fmt_seconds(transition)},setpts=PTS-STARTPTS[ovtail]"
+                )
+                video_sequence += ["ovprefix"]
+            else:
+                filters.append(
+                    f"[ovbase]trim=duration={self._fmt_seconds(transition)},setpts=PTS-STARTPTS[ovtail]"
+                )
+            if incoming_suffix > min_seg:
+                filters.append("[ivbase]split=2[ivheadsrc][ivsuffixsrc]")
+                filters.append(
+                    f"[ivheadsrc]trim=duration={self._fmt_seconds(transition)},setpts=PTS-STARTPTS[ivhead]"
+                )
+                filters.append(
+                    f"[ivsuffixsrc]trim=start={self._fmt_seconds(transition)}:"
+                    f"duration={self._fmt_seconds(incoming_suffix)},setpts=PTS-STARTPTS[ivsuffix]"
+                )
+            else:
+                filters.append(
+                    f"[ivbase]trim=duration={self._fmt_seconds(transition)},setpts=PTS-STARTPTS[ivhead]"
+                )
+            filters.append(
+                f"[ovtail][ivhead]xfade=transition={xfade_transition}:"
+                f"duration={self._fmt_seconds(transition)}:offset=0[vxfade]"
+            )
+            video_sequence += ["vxfade"]
+            if incoming_suffix > min_seg:
+                video_sequence += ["ivsuffix"]
+            filters.append(
+                (f"[{video_sequence[0]}]null[vout]"
+                 if len(video_sequence) == 1
+                 else "".join(f"[{label}]" for label in video_sequence)
+                       + f"concat=n={len(video_sequence)}:v=1:a=0[vout]")
+            )
+
+        if include_audio:
+            outgoing_base = "oabase0"
+            incoming_base = "iabase0"
+            filters.append(
+                self._smart_join_audio_window_filter(
+                    "0:a:0", first_media, outgoing_window, target, outgoing_base
+                )
+            )
+            filters.append(
+                self._smart_join_audio_window_filter(
+                    "1:a:0", second_media, incoming_window, target, incoming_base
+                )
+            )
+            if fade_in_out:
+                filters.append(
+                    f"[{outgoing_base}]afade=t=out:st={self._fmt_seconds(max(0.0, outgoing_window - transition))}:"
+                    f"d={self._fmt_seconds(transition)}[oafade0]"
+                )
+                filters.append(
+                    f"[{incoming_base}]afade=t=in:st=0:d={self._fmt_seconds(transition)}[iafade0]"
+                )
+                filters.append("[oafade0][iafade0]concat=n=2:v=0:a=1[aout0]")
+            else:
+                audio_sequence: list[str] = []
+                if outgoing_prefix > min_seg:
+                    filters.append(f"[{outgoing_base}]asplit=2[oaprefixsrc0][oatailsrc0]")
+                    filters.append(
+                        f"[oaprefixsrc0]atrim=duration={self._fmt_seconds(outgoing_prefix)},"
+                        "asetpts=N/SR/TB[oaprefix0]"
+                    )
+                    filters.append(
+                        f"[oatailsrc0]atrim=start={self._fmt_seconds(outgoing_prefix)}:"
+                        f"duration={self._fmt_seconds(transition)},asetpts=N/SR/TB[oatail0]"
+                    )
+                    audio_sequence += ["oaprefix0"]
+                else:
+                    filters.append(
+                        f"[{outgoing_base}]atrim=duration={self._fmt_seconds(transition)},"
+                        "asetpts=N/SR/TB[oatail0]"
+                    )
+                if incoming_suffix > min_seg:
+                    filters.append(f"[{incoming_base}]asplit=2[iaheadsrc0][iasuffixsrc0]")
+                    filters.append(
+                        f"[iaheadsrc0]atrim=duration={self._fmt_seconds(transition)},asetpts=N/SR/TB[iahead0]"
+                    )
+                    filters.append(
+                        f"[iasuffixsrc0]atrim=start={self._fmt_seconds(transition)}:"
+                        f"duration={self._fmt_seconds(incoming_suffix)},asetpts=N/SR/TB[iasuffix0]"
+                    )
+                else:
+                    filters.append(
+                        f"[{incoming_base}]atrim=duration={self._fmt_seconds(transition)},asetpts=N/SR/TB[iahead0]"
+                    )
+                filters.append(
+                    f"[oatail0][iahead0]acrossfade=d={self._fmt_seconds(transition)}:c1=tri:c2=tri[axfade0]"
+                )
+                audio_sequence += ["axfade0"]
+                if incoming_suffix > min_seg:
+                    audio_sequence += ["iasuffix0"]
+                filters.append(
+                    (f"[{audio_sequence[0]}]anull[aout0]"
+                     if len(audio_sequence) == 1
+                     else "".join(f"[{label}]" for label in audio_sequence)
+                           + f"concat=n={len(audio_sequence)}:v=0:a=1[aout0]")
+                )
+
+        args += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
+        if include_audio:
+            args += ["-map", "[aout0]"]
+        # Encoder/qualidade do app Windows (mesma politica do join normal).
+        args += self._smart_join_video_args(
+            target["codec_family"], first_media.video_bitrate or "1M"
+        )
+        args += ["-pix_fmt", "yuv420p", "-r", str(target["fps"])]
+        if include_audio:
+            args += [
+                "-c:a", "aac", "-b:a", str(target["audio_bitrate"]),
+                "-ar", str(target["audio_rate"]), "-ac", str(target["audio_channels"]),
+            ]
+        args += [
+            "-t", self._fmt_seconds(max(0.01, expected_duration)),
+            "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+            "-video_track_timescale", "90000", "-movflags", "+faststart",
+            str(output_file),
+        ]
+        return args
+
+    def _smart_join_ts_arguments(
+        self,
+        input_file: Path,
+        output_file: Path,
+        codec_family: str,
+        include_audio: bool,
+    ) -> list[str]:
+        args = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(input_file), "-map", "0:v:0"]
+        if include_audio:
+            args += ["-map", "0:a?"]
+        args += [
+            "-c", "copy",
+            "-bsf:v", self._smart_join_ts_bitstream(codec_family),
+            "-avoid_negative_ts", "make_zero",
+            "-mpegts_flags", "+resend_headers+initial_discontinuity",
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-f", "mpegts",
+            str(output_file),
+        ]
+        return args
+
+    def _smart_join_concat_arguments(
+        self,
+        pieces: list[Path],
+        output_file: Path,
+        target: dict,
+        include_audio: bool,
+        manifest_path: Path,
+    ) -> list[str]:
+        manifest_path.write_text(
+            "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path in pieces),
+            encoding="utf-8",
+        )
+        args = [
+            str(self._ffmpeg()), "-hide_banner", "-y",
+            "-display_rotation:v:0", str(target.get("rotation") or 0),
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", str(manifest_path),
+            "-map", "0:v:0",
+        ]
+        if include_audio:
+            args += ["-map", "0:a?"]
+        args += ["-c", "copy"]
+        if include_audio:
+            args += ["-bsf:a", "aac_adtstoasc"]
+        if target["codec_family"] == "hevc":
+            args += ["-tag:v", "hvc1"]
+        args += [
+            "-avoid_negative_ts", "make_zero",
+            "-max_interleave_delta", "0",
+            "-video_track_timescale", "90000",
+            "-movflags", "+faststart",
+            str(output_file),
+        ]
+        return args
+
+    def _smart_join_execute(
+        self,
+        paths: list[Path],
+        medias: list[MediaProfile],
+        output: Path,
+        transition_seconds: float,
+        transition_label: str,
+        include_audio: bool,
+    ) -> None:
+        """Executa o pipeline SmartJoin hibrido (corpos copy + bridges + concat TS).
+
+        Portado integralmente do Android. Levanta RuntimeError sem reencodar
+        tudo quando o plano e inviavel (mesma politica do Android).
+        """
+        fade_in_out = transition_label == "Fade in/out"
+        xfade_name = self.VIDEO_TRANSITION_CODES.get(transition_label, transition_label)
+        if fade_in_out:
+            xfade_name = "fade"
+
+        self._append_log(f"SmartJoin: analisando perfis e keyframes de {len(paths)} clipe(s).")
+        sources: list[smart_join_planner.Source] = []
+        for index, (path, media) in enumerate(zip(paths, medias)):
+            keyframes = self._extract_keyframes(path)
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            sources.append(
+                smart_join_planner.Source(
+                    duration_seconds=media.duration,
+                    profile=self._smart_join_video_profile(media),
+                    keyframes_seconds=keyframes,
+                )
+            )
+
+        plan_result = smart_join_planner.plan(sources, transition_seconds, fade_in_out)
+        if not plan_result.can_smart_join:
+            raise RuntimeError(plan_result.ineligibility_reason or "SmartJoin não aplicável.")
+        if not any(clip.copy_video for clip in plan_result.clips):
+            raise RuntimeError(
+                "Nenhum corpo de vídeo pôde ser preservado por stream copy: "
+                "o SmartJoin recodificaria tudo e não traria ganho."
+            )
+
+        copied_count = sum(1 for clip in plan_result.clips if clip.copy_video)
+        self._append_log(
+            f"SmartJoin: {copied_count}/{len(plan_result.clips)} corpos em stream copy; "
+            f"target = clipe {plan_result.target_index + 1} "
+            f"({plan_result.target_profile.width}x{plan_result.target_profile.height})."
+        )
+        for clip_plan in plan_result.clips:
+            self._append_log(
+                f"SmartJoin plano clipe {clip_plan.index + 1}: copy={clip_plan.copy_video} "
+                f"corpo=[{clip_plan.body_start_seconds:.3f},{clip_plan.body_end_seconds:.3f}] "
+                f"({clip_plan.body_duration_seconds:.3f}s)"
+                + (f" motivo={clip_plan.incompatibility_reason}" if clip_plan.incompatibility_reason else "")
+            )
+        for junction in plan_result.junctions:
+            self._append_log(
+                f"SmartJoin emenda {junction.index + 1}: bridge_start="
+                f"{junction.outgoing_bridge_start_seconds:.3f} trans_start="
+                f"{junction.outgoing_transition_start_seconds:.3f} incoming_end="
+                f"{junction.incoming_bridge_end_seconds:.3f}"
+            )
+        target_media = medias[plan_result.target_index]
+        target = self._smart_join_target_dict(target_media)
+        target["codec_family"] = (
+            "hevc" if smart_join_planner._normalize_codec(plan_result.target_profile.codec_family) == "hevc" else "h264"
+        )
+
+        work_dir = self.output_dir / f"smart_join_{uuid.uuid4().hex}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        pieces: list[Path] = []
+        total_steps = (
+            len([c for c in plan_result.clips if c.body_duration_seconds > 0.020])
+            + len(plan_result.junctions) * 2
+            + 1
+        )
+        step = 0
+        try:
+            for index, clip_plan in enumerate(plan_result.clips):
+                if self.cancel_event.is_set():
+                    raise Cancelled()
+                if clip_plan.body_duration_seconds <= 0.020:
+                    continue
+                step += 1
+                ts_path = work_dir / f"body_{index:03d}.ts"
+                if clip_plan.copy_video:
+                    self._append_log(f"SmartJoin: copiando corpo {index + 1}/{len(paths)} (stream copy).")
+                    body_cmd = self._smart_join_body_arguments(
+                        paths[index], medias[index],
+                        clip_plan.body_start_seconds, clip_plan.body_duration_seconds,
+                        copy_video=True, target=target, include_audio=include_audio,
+                        output_file=ts_path, output_as_mpeg_ts=True,
+                    )
+                    self._execute(
+                        body_cmd, f"SmartJoin corpo {index + 1} (copy)", step, total_steps,
+                        clip_plan.body_duration_seconds,
+                    )
+                else:
+                    self._append_log(f"SmartJoin: recodificando clipe {index + 1}/{len(paths)} incompatível.")
+                    mp4_path = work_dir / f"body_{index:03d}.mp4"
+                    body_cmd = self._smart_join_body_arguments(
+                        paths[index], medias[index],
+                        clip_plan.body_start_seconds, clip_plan.body_duration_seconds,
+                        copy_video=False, target=target, include_audio=include_audio,
+                        output_file=mp4_path, output_as_mpeg_ts=False,
+                    )
+                    self._execute(
+                        body_cmd, f"SmartJoin recodificando clipe {index + 1}", step, total_steps,
+                        clip_plan.body_duration_seconds,
+                    )
+                    step += 1
+                    ts_cmd = self._smart_join_ts_arguments(
+                        mp4_path, ts_path, target["codec_family"], include_audio
+                    )
+                    self._execute(
+                        ts_cmd, f"SmartJoin preparando corpo {index + 1}", step, total_steps,
+                        clip_plan.body_duration_seconds,
+                    )
+                pieces.append(ts_path)
+
+            for junction in plan_result.junctions:
+                if self.cancel_event.is_set():
+                    raise Cancelled()
+                step += 1
+                j = junction.index
+                self._append_log(f"SmartJoin: recodificando emenda {j + 1}/{len(plan_result.junctions)}.")
+                mp4_path = work_dir / f"bridge_{j:03d}.mp4"
+                ts_path = work_dir / f"bridge_{j:03d}.ts"
+                bridge_cmd = self._smart_join_bridge_arguments(
+                    paths[j], paths[j + 1],
+                    medias[j], medias[j + 1],
+                    target, junction, fade_in_out, xfade_name, include_audio,
+                    mp4_path,
+                )
+                self._execute(
+                    bridge_cmd, f"SmartJoin emenda {j + 1}", step, total_steps,
+                    max(0.1, smart_join_planner.junction_duration_seconds(junction, fade_in_out)),
+                )
+                step += 1
+                ts_cmd = self._smart_join_ts_arguments(
+                    mp4_path, ts_path, target["codec_family"], include_audio
+                )
+                self._execute(
+                    ts_cmd, f"SmartJoin preparando emenda {j + 1}", step, total_steps,
+                    max(0.1, smart_join_planner.junction_duration_seconds(junction, fade_in_out)),
+                )
+                pieces.append(ts_path)
+
+            if not pieces:
+                raise RuntimeError("O SmartJoin não gerou segmentos.")
+            step += 1
+            manifest_path = work_dir / f"manifest_{uuid.uuid4().hex}.txt"
+            concat_cmd = self._smart_join_concat_arguments(
+                pieces, output, target, include_audio, manifest_path
+            )
+            expected = plan_result.expected_duration_seconds([m.duration for m in medias])
+            self._execute(concat_cmd, "SmartJoin: unindo segmentos", step, total_steps, expected)
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            # validacao pos (como Android validateSmartJoinDuration)
+            actual = self._get_duration_only(output)
+            if actual > 0:
+                tolerance = max(0.35, len(plan_result.junctions) * 0.12)
+                if abs(actual - expected) > tolerance:
+                    raise RuntimeError(
+                        f"Duração inesperada: {actual:.3f}s; esperado {expected:.3f}s."
+                    )
+            self._append_log(f"SmartJoin concluído: {expected:.2f}s em {len(pieces)} segmento(s).")
+        finally:
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def _insert_worker(self) -> None:
         main = self.insert_main_input

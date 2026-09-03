@@ -1,0 +1,138 @@
+================================================================================
+PLANO - PORTAR SMARTJOIN DO ANDROID PARA O SIG WINDOWS
+================================================================================
+Data: 2026-09-03
+Escopo: copiar INTEGRALMENTE a logica do SmartJoin do Android (D:\Projetos\SIG)
+        para o app Windows (D:\Projetos\SIG Windows), substituindo o
+        "SmartJoin" atual (que hoje so escolhe copy x reencode total).
+
+================================================================================
+(1) O QUE O ANDROID FAZ (referencia)
+================================================================================
+Arquitetura em 3 camadas:
+  A. SmartJoinPlanner.kt (PURO, testado - 12 casos em SmartJoinPlannerTest.kt):
+     - Entrada: por clipe -> {duracao, VideoProfile(codec,res,fps,rotacao,
+       pix_fmt,sar,perfil), keyframes[]}
+     - Escolhe o "target" (indice cujo perfil e compativel com mais duracao
+       total) -> chooseTargetIndex.
+     - Para cada clipe decide copyVideo (stream copy do CORPO entre keyframes)
+       ou reencode (clipe incompativel ou keyframes esparsos).
+     - Gera junctions (emendas) com bridgeStart/transitionStart/incomingEnd.
+     - expectedDurationSeconds = soma - transicao * junctions (ou soma se fade).
+     - Rejeita com motivo: codec/pix_fmt nao suportado, transicao cobre clipe,
+       transicoes sobrepoem clipe intermediario.
+  B. Execucao (FfmpegJoinVideosActivity.kt):
+     - detectVideoKeyframes: MediaExtractor (ANDROID) -> no Windows usamos o
+       showinfo do proprio ffmpeg (ja existe _extract_keyframes).
+     - Para cada clipe com corpo > 0.020s:
+       * copyVideo  -> ffmpeg -ss bodyStart -i clip -t bodyDur -c:v copy + audio
+                      filtrado AAC -> MPEG-TS (h264/hevc_mp4toannexb,
+                      -mpegts_flags +resend_headers+initial_discontinuity).
+       * !copyVideo -> reencode do corpo com normalizacao de perfil -> MP4 ->
+                      remux p/ TS (mesmos args de TS).
+     - Para cada junction (emenda): gera BRIDGE recodificada:
+       * fadeInOut: fim do clip A com fade out + inicio do B com fade in, concat.
+       * xfade: prefixo de A + [xfade da cauda de A com cabeca de B] + sufixo de
+         B (cada pedaco trim/split com setpts). Audio idem com acrossfade tri.
+       * Resultado em MP4 -> remux TS.
+     - Concat final: manifest concat demuxer de TODOS os TS -> -c copy ->
+       MP4 com aac_adtstoasc, video_track_timescale 90000, faststart.
+     - Validacao: duracao do container vs expected (tol = max(0.35, juncoes*0.12))
+       e sincronia video/audio.
+  C. Garantias: NUNCA reencoda tudo silenciosamente; se inviavel, interrompe
+     com diagnostico. O audio de cada segmento e normalizado por janela.
+
+================================================================================
+(2) O QUE O WINDOWS TEM HOJE (a substituir)
+================================================================================
+  - join_smart (checkbox "SmartJoin (Experimental)") so ramifica:
+    * sem transicao (<=0.001s) -> concat demuxer -c copy (igual a nenhum modo).
+    * com transicao -> reencode completo (filtro xfade/fade global em TODOS os
+      clipes) - linha 5144 loga "usa reencode completo".
+  - NAO ha: planejador, deteccao de keyframes no join, corpos copy, bridges.
+  - Ja existe: _extract_keyframes (showinfo), _probe_media (retorna pix_fmt,
+    sar, rotacao, codecs... MediaProfile), _xfade_join_filter (para reuso dos
+    nomes de transicao), _execute/_execute_video, output_dir, task_tracker.
+
+================================================================================
+(3) IMPLEMENTACAO NO WINDOWS
+================================================================================
+Arquitetura espelhada, num modulo NOVO puro + metodos novos na classe:
+
+  NOVO src/smart_join_planner.py  (espelho fiel do SmartJoinPlanner.kt):
+    - dataclasses VideoProfile/Source/ClipPlan/JunctionPlan/Plan
+    - plan(sources, transition_seconds, fade_in_out) identico
+    - choose_target_index, video_incompatibility, compatible_encoder_names
+    - previous/next_keyframe, normalizacoes (codec, rotation, pix_fmt, sar)
+    - expected_duration_seconds
+    Testes: tests/test_smart_join_planner.py espelhando SmartJoinPlannerTest.kt
+    (12 casos, traduzidos 1:1).
+
+  EM src/sig_app.py (FfmpegToolsPanel), novos metodos:
+    - _join_smart_worker(clips, output, transition_seconds, transition_label,
+      fade_in_out, target_profile_pick, acceleration) -> orquestra:
+      1. para cada clipe: keyframes = self._extract_keyframes(path)
+      2. source profile -> SmartJoin VideoProfile (reusar MediaProfile)
+      3. plan = smart_join_planner.plan(...)
+      4. se !plan.canSmartJoin -> levanta RuntimeError(motivo) SEM reencodar
+         tudo (comportamento Android).
+      5. se nenhum corpo copiavel -> RuntimeError("Nenhum corpo ... stream
+         copy: recodificaria tudo e nao traria ganho").
+      6. workdir = output_dir/smart_join_<uuid>/; por clipe/juncao gera
+         corpos (copy->TS direto; reencode->MP4 + remux TS) e bridges
+         (MP4 + remux TS), medindo e validando cada etapa.
+      7. concat final dos TS -> output MP4 (manifest concat -c copy,
+         aac_adtstoasc, video_track_timescale 90000, faststart).
+      8. validacao pos: duracao do arquivo via _get_duration_only vs
+         expected (tol Android).
+      9. finally: limpa workdir.
+    - _build_smart_join_body_arguments / _build_smart_join_bridge_arguments /
+      _build_smart_join_ts_arguments / _build_smart_join_concat_arguments /
+      _smart_join_video_normalization_filter / _smart_join_audio_window_filter
+      (todos espelhando os do Android, usando o encoder selecionado no
+      Windows -> libx264/h264_nvenc/hevc_nvenc/libx265 + tail com -g/-bf/
+      -pix_fmt/-fps_mode cfr conforme o encoder; libx264/libx265 aceitam
+      -profile:v; nvenc nao).
+    - _resolve_smart_join_profile: base = _select_join_base(clips, choice);
+      target profile com codec do encoder escolhido.
+
+  INTEGRACAO no _join_worker (Windows):
+    - Quando strategy == "Smart Join" E transition_seconds > 0.001:
+      * se fade_in_out -> caminho novo (SmartJoin com fade real, corpos copy)
+      * se xfade -> caminho novo (SmartJoin com bridge xfade)
+    - Quando Smart Join sem transicao -> mantem concat copy (como hoje,
+      equivalente ao Android com transition=0).
+    - Valida os MESMOS pre-requisitos de audio/topologia do fluxo atual.
+    - Saida: extensao mp4 (igual Android: smart join sempre finaliza MP4 e
+      depois remux para o container original - no Windows o fluxo de saida ja
+      escolhe mp4/mkv; manteremos .mp4 salvo o caso preserve_all_streams
+      que exige sem-transicao/copy).
+    - O LOG de progresso usa as etapas existentes (Preparando, Juntando) e o
+      task_tracker com os labels do Android traduzidos.
+
+  DETECCAO DE KEYFRAMES: reusar self._extract_keyframes(path) existente.
+
+================================================================================
+(4) ARQUIVOS
+================================================================================
+  NOVO:  src/smart_join_planner.py
+  NOVO:  tests/test_smart_join_planner.py
+  EDIT:  src/sig_app.py (metodos novos + ramificacao no _join_worker)
+  NOVO:  scripts/test_smart_join_real_windows.py (validacao com ffmpeg do dist)
+  Suites existentes: rodar pytest (317+novos) e nada quebrar.
+  Build: scripts/build_dev.py (regenera dist/sig.exe).
+
+================================================================================
+(5) DEFINICAO DE PRONTO
+================================================================================
+  1. Planner puro com os 12 casos do Android traduzidos, verdes.
+  2. _join_worker com SmartJoin + transicao executa o pipeline Android
+     (corpos copy + bridges + concat TS) e NAO reencoda o arquivo inteiro.
+  3. Validacao real (ffmpeg do dist): 2x30s + transicao 3s -> saida ~57s,
+     com corpo copiado (a maior parte sem reencode); conferir via ffprobe e
+     log (etapas mostram "Copiando corpo"/"Recodificando emenda").
+  4. Casos de inviabilidade (codec nao h264/hevc, transicao cobre clipe curto)
+     interrompem com diagnostico, sem reencodar tudo.
+  5. Suites unitarias completas verdes + build_dev OK.
+================================================================================
+FIM DO PLANO
