@@ -82,7 +82,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260903_002"
+APP_VERSION = "20260904_001"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
