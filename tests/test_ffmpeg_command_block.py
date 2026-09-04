@@ -56,60 +56,100 @@ class FfmpegCommandBlockTests(unittest.TestCase):
     def setUp(self):
         self.box = tk.Text(_root, height=20, width=120)
         self.app = _AppStub(self.box)
-        self.first = "ffmpeg -hide_banner -y -i input.mkv -vn -ac 1 -ar 16000 -c:a pcm_s16le output.wav"
-        self.second = "ffmpeg -hide_banner -y -i input.mkv -c copy output.mkv"
-        self.third = "ffmpeg -hide_banner -i input.mp4"
+        self.ffmpeg = r"C:\SIG Windows\ffmpeg.exe"
+        self.main = r"C:\midia\principal.mp4"
+        self.inserted = r"C:\midia\inserido.wav"
+        self.output = r"C:\saida\resultado.mp4"
+        # Comandos reais (cru, antes da formatacao de exibicao).
+        self.render_cmd = [
+            self.ffmpeg, "-hide_banner", "-y", "-i", self.main, "-i", self.inserted,
+            "-shortest", self.output,
+        ]
+        self.probe_main = [self.ffmpeg, "-hide_banner", "-i", self.main]
+        self.probe_inserted = [self.ffmpeg, "-hide_banner", "-i", self.inserted]
+        self.probe_keyframes = [
+            self.ffmpeg, "-hide_banner", "-skip_frame", "nokey", "-i", self.main,
+            "-vf", "showinfo", "-an", "-f", "null", "-",
+        ]
+        self.first_piece = [
+            self.ffmpeg, "-hide_banner", "-y", "-ss", "0", "-i", self.main,
+            "-t", "3.000", "-c", "copy", r"C:\saida\000.m4a",
+        ]
+        self.second_piece = [
+            self.ffmpeg, "-hide_banner", "-y", "-ss", "0", "-i", self.inserted,
+            "-t", "2.000", "-c", "copy", r"C:\saida\001.m4a",
+        ]
 
     def tearDown(self):
         self.box.destroy()
 
-    def _render(self, commands: list[str]) -> str:
+    def _render(self, entries: list[tuple[list[object], bool]]) -> str:
         tracker = FfmpegTaskTracker(self.app, [])
-        for command in commands:
-            tracker.command(command)
+        for command, probe in entries:
+            tracker.command(command, probe=probe)
         tracker._render()
         return self.box.get("1.0", "end-1c")
 
-    def test_block_omits_directories_and_uses_generic_names(self):
-        # A reducao a input./output. acontece em format_ffmpeg_command_for_log,
-        # garantida aqui com um comando ja renderizado realistico.
-        rendered = self._render([self.first, self.second])
-        self.assertIn("input.mkv", rendered)
-        self.assertIn("output.wav", rendered)
-        self.assertIn("output.mkv", rendered)
-        self.assertNotIn("C:\\", rendered)
-        self.assertNotIn("\\Users\\", rendered)
+    def _lines(self, entries: list[tuple[list[object], bool]]) -> list[str]:
+        return self._render(entries).splitlines()
 
-    def test_multiple_commands_are_separated_by_a_blank_line(self):
-        rendered = self._render([self.first, self.second, self.third])
-        lines = rendered.splitlines()
+    def test_consecutive_probes_are_grouped_without_blank_lines(self):
+        lines = self._lines([(self.probe_main, True), (self.probe_inserted, True)])
         self.assertEqual(lines[0], "")
         self.assertEqual(lines[1], "Comandos FFmpeg:")
-        self.assertEqual(lines[2], f"$ {self.first}")
+        self.assertEqual(lines[2], "$ ffmpeg -hide_banner -i input.mp4")
+        # Segundo arquivo novo: numeração continua (sem linha em branco).
+        self.assertEqual(lines[3], "$ ffmpeg -hide_banner -i input2.wav")
+        self.assertEqual(len(lines), 4)
+
+    def test_structural_probes_group_even_without_flag(self):
+        # Sondas sem flag explícita (terminam na entrada ou em sumidouro) são
+        # detectadas pela estrutura e agrupadas do mesmo jeito.
+        lines = self._lines([(self.probe_keyframes, False), (self.probe_main, False)])
+        self.assertEqual(lines[2], "$ ffmpeg -hide_banner -skip_frame nokey -i input.mp4 -vf showinfo -an -f null -")
+        self.assertEqual(lines[3], "$ ffmpeg -hide_banner -i input.mp4")
+        self.assertEqual(len(lines), 4)
+
+    def test_real_command_after_probes_keeps_blank_separator(self):
+        lines = self._lines([(self.probe_main, True), (self.render_cmd, False)])
+        self.assertEqual(lines[2], "$ ffmpeg -hide_banner -i input.mp4")
         self.assertEqual(lines[3], "")
-        self.assertEqual(lines[4], f"$ {self.second}")
-        self.assertEqual(lines[5], "")
-        self.assertEqual(lines[6], f"$ {self.third}")
+        self.assertEqual(
+            lines[4],
+            "$ ffmpeg -hide_banner -y -i input.mp4 -i input2.wav -shortest output.mp4",
+        )
+
+    def test_real_commands_keep_blank_separation(self):
+        lines = self._lines([(self.first_piece, False), (self.second_piece, False)])
+        self.assertEqual(lines[2], "$ ffmpeg -hide_banner -y -ss 0 -i input.mp4 -t 3.000 -c copy output.m4a")
+        self.assertEqual(lines[3], "")
+        self.assertEqual(lines[4], "$ ffmpeg -hide_banner -y -ss 0 -i input2.wav -t 2.000 -c copy output2.m4a")
 
     def test_single_command_has_no_extra_blank_line(self):
-        rendered = self._render([self.first])
+        lines = self._lines([(self.render_cmd, False)])
         self.assertEqual(
-            rendered.splitlines(),
-            ["", "Comandos FFmpeg:", f"$ {self.first}"],
+            lines,
+            ["", "Comandos FFmpeg:", "$ ffmpeg -hide_banner -y -i input.mp4 -i input2.wav -shortest output.mp4"],
         )
 
     def test_click_copies_every_command_of_the_block(self):
-        self._render([self.first, self.second, self.third])
+        self._render([(self.probe_main, True), (self.probe_inserted, True), (self.render_cmd, False)])
         handler = object.__new__(SigApp)
         handler.root = self.app.root
         self.assertTrue(handler._copy_ffmpeg_command_block(self.box))
         self.assertEqual(
             self.app.clipboard_text,
-            "\n".join([self.first, self.second, self.third]),
+            "\n".join(
+                [
+                    "ffmpeg -hide_banner -i input.mp4",
+                    "ffmpeg -hide_banner -i input2.wav",
+                    "ffmpeg -hide_banner -y -i input.mp4 -i input2.wav -shortest output.mp4",
+                ]
+            ),
         )
 
     def test_copy_drops_the_header_the_dollar_prefix_and_blank_lines(self):
-        self._render([self.first, self.second])
+        self._render([(self.probe_main, True), (self.render_cmd, False)])
         handler = object.__new__(SigApp)
         handler.root = self.app.root
         handler._copy_ffmpeg_command_block(self.box)
@@ -127,12 +167,11 @@ class FfmpegCommandBlockTests(unittest.TestCase):
         self.assertEqual(self.app.clipboard_text, "")
 
     def test_every_line_of_the_block_shares_the_block_tag(self):
-        # Inclusive o cabecalho e a linha em branco: clicar em qualquer ponto
-        # do bloco precisa copiar todos os comandos.
-        self._render([self.first, self.second])
+        # Probes agrupadas: 1 linha em branco inicial + cabecalho + 2 comandos.
+        self._render([(self.probe_main, True), (self.probe_inserted, True)])
         # O Text do Tk sempre termina com uma quebra de linha extra (fantasma).
         total = int(float(self.box.index("end-1c"))) - 1
-        self.assertEqual(total, 5)
+        self.assertEqual(total, 4)
         for line in range(1, total + 1):
             index = f"{line}.0"
             with self.subTest(line=line):

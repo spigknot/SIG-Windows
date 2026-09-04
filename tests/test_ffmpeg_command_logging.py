@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from sig_app import SigApp, format_ffmpeg_command_for_log, format_process_command  # noqa: E402
+from sig_app import SigApp, format_ffmpeg_command_for_log, format_ffmpeg_commands_for_log, format_process_command  # noqa: E402
 
 
 class FfmpegCommandLoggingTests(unittest.TestCase):
@@ -261,6 +261,113 @@ class FfmpegCommandLoggingTests(unittest.TestCase):
     def setUp(self):
         import tempfile
         self._tempdir = tempfile.mkdtemp(prefix="sig_ffmpeg_log_")
+
+
+class FfmpegCommandSequenceLoggingTests(unittest.TestCase):
+    """Numeração por arquivo e agrupamento de sondas na sequência das ferramentas."""
+
+    def setUp(self):
+        self.ffmpeg = r"C:\SIG Windows\ffmpeg.exe"
+
+    @staticmethod
+    def _join(tokens: list[str]) -> str:
+        return subprocess.list2cmdline(tokens) if os.name == "nt" else shlex.join(tokens)
+
+    def render(self, commands, probes=None):
+        return format_ffmpeg_commands_for_log(commands, probes)
+
+    def test_probes_of_distinct_files_are_numbered_sequentially(self):
+        entries = self.render(
+            [
+                [self.ffmpeg, "-hide_banner", "-i", r"C:\videos\um.mp4"],
+                [self.ffmpeg, "-hide_banner", "-i", r"C:\videos\dois.mp4"],
+                [self.ffmpeg, "-hide_banner", "-i", r"C:\videos\tres.mov"],
+            ]
+        )
+        self.assertEqual(
+            [text for text, _probe in entries],
+            [
+                self._join(["ffmpeg", "-hide_banner", "-i", "input.mp4"]),
+                self._join(["ffmpeg", "-hide_banner", "-i", "input2.mp4"]),
+                self._join(["ffmpeg", "-hide_banner", "-i", "input3.mov"]),
+            ],
+        )
+        self.assertTrue(all(probe for _text, probe in entries))
+
+    def test_input_numbering_is_positional_and_keeps_each_extension(self):
+        command = [
+            self.ffmpeg, "-hide_banner", "-y",
+            "-i", r"C:\videos\a.avi", "-i", r"C:\videos\b.mp4",
+            "-c", "copy", r"C:\saida\junto.mp4",
+        ]
+        text = self.render([command])[0][0]
+        expected = self._join(
+            ["ffmpeg", "-hide_banner", "-y", "-i", "input.avi", "-i", "input2.mp4", "-c", "copy", "output.mp4"]
+        )
+        self.assertEqual(text, expected)
+
+    def test_reused_input_keeps_the_first_label_in_later_commands(self):
+        main = r"C:\midia\principal.mp4"
+        inserted = r"C:\midia\inserido.wav"
+        commands = [
+            [self.ffmpeg, "-hide_banner", "-i", main],
+            [self.ffmpeg, "-hide_banner", "-y", "-i", main, "-i", inserted, "-shortest", r"C:\saida\resultado.mp4"],
+        ]
+        texts = [text for text, _probe in self.render(commands)]
+        self.assertEqual(
+            texts,
+            [
+                self._join(["ffmpeg", "-hide_banner", "-i", "input.mp4"]),
+                self._join(
+                    ["ffmpeg", "-hide_banner", "-y", "-i", "input.mp4", "-i", "input2.wav", "-shortest", "output.mp4"]
+                ),
+            ],
+        )
+
+    def test_outputs_are_numbered_across_commands_by_file(self):
+        main = r"C:\midia\principal.mp4"
+        commands = [
+            [self.ffmpeg, "-hide_banner", "-y", "-ss", "0", "-i", main, "-t", "3.000", "-c", "copy", r"C:\saida\000.m4a"],
+            [self.ffmpeg, "-hide_banner", "-y", "-ss", "0", "-i", main, "-t", "2.000", "-c", "copy", r"C:\saida\001.m4a"],
+        ]
+        texts = [text for text, _probe in self.render(commands)]
+        self.assertEqual(
+            texts,
+            [
+                self._join(["ffmpeg", "-hide_banner", "-y", "-ss", "0", "-i", "input.mp4", "-t", "3.000", "-c", "copy", "output.m4a"]),
+                self._join(["ffmpeg", "-hide_banner", "-y", "-ss", "0", "-i", "input.mp4", "-t", "2.000", "-c", "copy", "output2.m4a"]),
+            ],
+        )
+
+    def test_structural_probe_detection_without_flag(self):
+        # Sondas não marcadas são detectadas pela estrutura (sem arquivo de saída).
+        showinfo = [
+            self.ffmpeg, "-hide_banner", "-skip_frame", "nokey", "-i", r"C:\videos\um.mp4",
+            "-vf", "showinfo", "-an", "-f", "null", "-",
+        ]
+        real = [self.ffmpeg, "-hide_banner", "-y", "-i", r"C:\videos\um.mp4", "-c", "copy", r"C:\saida\final.mp4"]
+        entries = self.render([showinfo, real])
+        self.assertTrue(entries[0][1])
+        self.assertFalse(entries[1][1])
+        self.assertTrue(entries[0][0].endswith("-"))
+        # O sumidouro "-" não vira "output" e não consome a numeração de saídas.
+        self.assertNotIn("output", entries[0][0])
+        self.assertIn("output.mp4", entries[1][0])
+        self.assertNotIn("output2", entries[1][0])
+
+    def test_explicit_probe_flag_marks_commands_that_write_a_file(self):
+        # O flag explícito vence a heurística: um comando com saída de arquivo
+        # marcado como probe não quebra o bloco agrupado.
+        command = [self.ffmpeg, "-hide_banner", "-y", "-i", r"C:\videos\um.mp4", "-c", "copy", r"C:\saida\tmp.mp4"]
+        entries = self.render([command], probes=[True])
+        self.assertTrue(entries[0][1])
+
+    def test_numbering_resets_between_independent_renders(self):
+        first = self.render([[self.ffmpeg, "-hide_banner", "-i", r"C:\videos\um.mp4"]])
+        second = self.render([[self.ffmpeg, "-hide_banner", "-i", r"C:\videos\dois.mp4"]])
+        self.assertIn("input.mp4", first[0][0])
+        self.assertIn("input.mp4", second[0][0])
+        self.assertNotIn("input2", second[0][0])
 
 
 if __name__ == "__main__":

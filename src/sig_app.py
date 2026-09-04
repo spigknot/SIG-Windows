@@ -134,6 +134,41 @@ def _log_generic_filename(part: str, generic_stem: str) -> str:
     return f"{generic_stem}{suffix}"
 
 
+def _classify_ffmpeg_command_parts(command: list[object]) -> tuple[list[str], str, bool, int, set[int], int]:
+    """Classifica um comando FFmpeg para exibição enxuta no log.
+
+    Retorna (parts, nome do executável, é_ffmpeg, start, índices de entrada,
+    índice da saída). Entradas: todo argumento que sucede imediatamente um
+    ``-i``. Saída: o último argumento (o FFmpeg exige o destino no final da
+    linha), exceto quando ele é uma das entradas, como nos comandos de sondagem.
+    """
+    parts = [str(part) for part in command]
+    executable = parts[0]
+    name = Path(executable).stem
+    is_ffmpeg = name.lower() in ("ffmpeg", "ffplay", "ffprobe")
+    start = 1 if is_ffmpeg else 0
+    input_indices = {
+        index + 1
+        for index in range(start, len(parts))
+        if parts[index] == "-i" and index + 1 < len(parts)
+    }
+    output_index = len(parts) - 1
+    if output_index < start or output_index in input_indices:
+        output_index = -1
+    return parts, name, is_ffmpeg, start, input_indices, output_index
+
+
+def _is_structural_probe(parts: list[str], output_index: int) -> bool:
+    """Comando de colheita de informações não produz arquivo de saída: termina
+    na própria entrada (``ffmpeg -hide_banner -i x``) ou em um sumidouro
+    (``-f null -``, ``pipe:...``). Esses comandos são agrupados no log das
+    ferramentas para não poluir a leitura dos comandos que alteram arquivos."""
+    if output_index == -1:
+        return True
+    last = parts[output_index]
+    return last == "-" or last.startswith("pipe:")
+
+
 def format_ffmpeg_command_for_log(command: list[object]) -> str:
     """Renderiza o comando FFmpeg para o log de forma enxuta e objetiva: apenas
     ``ffmpeg`` + argumentos, com os arquivos de entrada reduzidos a
@@ -145,22 +180,7 @@ def format_ffmpeg_command_for_log(command: list[object]) -> str:
     """
     if not command:
         return ""
-    parts = [str(part) for part in command]
-    executable = parts[0]
-    name = Path(executable).stem
-    is_ffmpeg = name.lower() in ("ffmpeg", "ffplay", "ffprobe")
-    start = 1 if is_ffmpeg else 0
-    # Entradas: todo argumento que sucede imediatamente um "-i".
-    input_indices = {
-        index + 1
-        for index in range(start, len(parts))
-        if parts[index] == "-i" and index + 1 < len(parts)
-    }
-    # Saída: o último argumento (o FFmpeg exige o destino no final da linha),
-    # exceto quando ele é uma das entradas, como nos comandos de sondagem.
-    output_index = len(parts) - 1
-    if output_index < start or output_index in input_indices:
-        output_index = -1
+    parts, name, is_ffmpeg, start, input_indices, output_index = _classify_ffmpeg_command_parts(command)
     display = [name] if is_ffmpeg else []
     for index in range(start, len(parts)):
         if index in input_indices:
@@ -170,6 +190,70 @@ def format_ffmpeg_command_for_log(command: list[object]) -> str:
         else:
             display.append(_log_path_basename(parts[index]))
     return subprocess.list2cmdline(display) if os.name == "nt" else shlex.join(display)
+
+
+def _numbered_log_label(path_arg: str, category: str, labels: dict[str, str]) -> str:
+    """Rótulo genérico com numeração POR ARQUIVO DISTINTO dentro da categoria.
+
+    O primeiro arquivo de cada categoria não recebe número (``input.mp4``); os
+    arquivos novos recebem a ordem de primeira aparição (``input2.mp4``,
+    ``input3.avi``...) e arquivos repetidos mantêm o rótulo já atribuído. A
+    contagem independe da extensão — o sufixo exibido é sempre o do próprio
+    arquivo. Argumentos que não são arquivos ficam intactos (mesmas regras do
+    ``_log_generic_filename``).
+    """
+    base = _log_path_basename(path_arg)
+    if not base or base.startswith("-") or "=" in base or _NUMERIC_LOG_ARG_RE.match(base):
+        return base
+    suffix = Path(base).suffix
+    if not _LOG_FILE_SUFFIX_RE.match(suffix) or not Path(base).stem:
+        return base
+    existing = labels.get(path_arg)
+    if existing is not None:
+        return existing
+    ordinal = len(labels) + 1
+    label = f"{category}{'' if ordinal == 1 else ordinal}{suffix}"
+    labels[path_arg] = label
+    return label
+
+
+def format_ffmpeg_commands_for_log(
+    commands: list[list[object]],
+    probes: list[bool] | tuple[bool, ...] | None = None,
+) -> list[tuple[str, bool]]:
+    """Renderiza a sequência de comandos FFmpeg de uma execução das ferramentas.
+
+    A numeração de arquivos é contínua entre os comandos e independente por
+    categoria: entradas viram ``input.<ext>``/``input2.<ext>``/... e saídas
+    ``output.<ext>``/``output2.<ext>``/... na ordem em que cada ARQUIVO
+    (caminho real) aparece pela primeira vez. Assim, uma sonda por arquivo em
+    uma junção com vários clipes vira ``input.mp4``, ``input2.mp4``, ... em vez
+    de repetir ``input.mp4``.
+
+    Retorna uma entrada por comando: ``(linha exibida, é_probe)``. Um comando é
+    probe quando marcado no parâmetro ``probes`` ou quando não produz arquivo de
+    saída (termina na entrada ou em sumidouro ``-``/``pipe:``) — o chamador usa
+    essa flag para agrupar sondas consecutivas sem linha em branco.
+    """
+    input_labels: dict[str, str] = {}
+    output_labels: dict[str, str] = {}
+    entries: list[tuple[str, bool]] = []
+    for index, command in enumerate(commands):
+        if not command:
+            continue
+        parts, name, is_ffmpeg, start, input_indices, output_index = _classify_ffmpeg_command_parts(command)
+        display = [name] if is_ffmpeg else []
+        for part_index in range(start, len(parts)):
+            if part_index in input_indices:
+                display.append(_numbered_log_label(parts[part_index], "input", input_labels))
+            elif part_index == output_index:
+                display.append(_numbered_log_label(parts[part_index], "output", output_labels))
+            else:
+                display.append(_log_path_basename(parts[part_index]))
+        rendered = subprocess.list2cmdline(display) if os.name == "nt" else shlex.join(display)
+        flagged = bool(probes[index]) if probes else False
+        entries.append((rendered, flagged or _is_structural_probe(parts, output_index)))
+    return entries
 
 
 SUPPORTED_EXTENSIONS = {
@@ -1529,7 +1613,7 @@ class FfmpegTaskTracker:
     def __init__(self, app: "SigApp", tasks: list[str]):
         self.app = app
         self.tasks: dict[str, dict[str, object]] = {task: {"progress": 0, "state": "pending", "detail": ""} for task in tasks}
-        self.commands: list[str] = []
+        self.commands: list[tuple[list[object], bool]] = []
         self.live_status = ""
         self.success_message = ""
         self.error_message = ""
@@ -1580,10 +1664,14 @@ class FfmpegTaskTracker:
             self.error_message = text
         self._render_later()
 
-    def command(self, rendered_command: str):
-        """Mantem cada comando FFmpeg executado visivel durante os updates."""
+    def command(self, command: list[object], *, probe: bool = False) -> None:
+        """Mantem cada comando FFmpeg executado visivel durante os updates.
+
+        Guarda o comando CRU (argumentos reais) para que a numeração
+        input/output e o agrupamento de sondas sejam aplicados na renderização,
+        quando a sequência completa já é conhecida."""
         with self._lock:
-            self.commands.append(rendered_command)
+            self.commands.append((list(command), bool(probe)))
         self._render_later()
 
     def _render_later(self):
@@ -1625,11 +1713,17 @@ class FfmpegTaskTracker:
         if commands:
             block_tags = ("ffmpeg_command", FFMPEG_COMMAND_BLOCK_TAG)
             box.insert(END, "\nComandos FFmpeg:\n", block_tags)
-            for position, rendered_command in enumerate(commands):
-                # Linha em branco entre comandos para separar visualmente.
-                if position:
+            raw_commands = [command for command, _probe in commands]
+            probe_flags = [probe for _command, probe in commands]
+            rendered_entries = format_ffmpeg_commands_for_log(raw_commands, probe_flags)
+            previous_probe = False
+            for position, (rendered_command, probe) in enumerate(rendered_entries):
+                # Linha em branco apenas para isolar comandos que ALTERAM
+                # arquivos; sondas consecutivas ficam em um único bloco.
+                if position and not (previous_probe and probe):
                     box.insert(END, "\n", block_tags)
                 box.insert(END, f"$ {rendered_command}\n", block_tags)
+                previous_probe = probe
         if live:
             box.insert(END, f"{live}\n", "active")
         if error:
@@ -2291,7 +2385,7 @@ class FfmpegToolsPanel:
         self._section_title(
             self.insert_tab,
             "Inserir áudio",
-            "Insere um segundo áudio no ponto escolhido do áudio principal. Smart Insert preserva o máximo possível do áudio original (o 'Fade in/out' suaviza apenas o áudio inserido); Reencodar libera transições e cortes precisos.",
+            "Insere um segundo áudio no ponto escolhido do áudio principal. Smart Insert preserva o máximo possível do áudio original (as curvas de transição, incluindo 'Fade in/out', suavizam apenas o áudio inserido); Reencode Completo também oferece 'Fade in/out' e as demais curvas com sobreposição (crossfade) e cortes precisos.",
         )
         select_row = ttk.Frame(self.insert_tab)
         select_row.pack(anchor="w", pady=(0, 6))
@@ -2696,16 +2790,18 @@ class FfmpegToolsPanel:
         self.insert_seconds_entry.configure(state="normal" if seconds_relevant else "disabled")
 
         if smart:
-            # Fade in/out disponível apenas para Smart Insert
-            choices = ("Sem transição", "Fade in/out")
+            # Smart Insert: todas as curvas disponíveis — cada uma suaviza
+            # apenas o áudio inserido (afade com a curva escolhida).
+            choices = tuple(label for label, _value in self.AUDIO_TRANSITIONS)
             self.insert_transition_combo.configure(values=choices)
             if self.insert_transition_var.get() not in choices:
                 self.insert_transition_var.set("Fade in/out")
         elif reencode:
-            # Reencode Completo: curvas de transição, sem "Fade in/out"
-            transitions = tuple(label for label, _value in self.AUDIO_TRANSITIONS if label != "Fade in/out")
-            self.insert_transition_combo.configure(values=transitions)
-            if self.insert_transition_var.get() == "Fade in/out" or self.insert_transition_var.get() not in transitions:
+            # Reencode Completo: mesmo conjunto do Smart (inclui "Fade in/out",
+            # aplicado com afade; as demais curvas usam acrossfade).
+            choices = tuple(label for label, _value in self.AUDIO_TRANSITIONS)
+            self.insert_transition_combo.configure(values=choices)
+            if self.insert_transition_var.get() not in choices:
                 self.insert_transition_var.set("Linear")
         else:
             self.insert_transition_var.set("Sem transição")
@@ -2927,6 +3023,7 @@ class FfmpegToolsPanel:
         inserted_duration: float,
         insertion: float,
         fade_seconds: float,
+        fade_curve: str = "fade",
     ) -> str:
         normalize = (
             f"aresample={profile.audio_rate},"
@@ -2940,9 +3037,10 @@ class FfmpegToolsPanel:
         effective = min(fade_seconds, inserted_duration / 2)
         fades = ""
         if effective > 0:
+            curve = "" if fade_curve in ("", "fade", "none") else f":curve={fade_curve}"
             fades = (
-                f",afade=t=in:st=0:d={self._fmt_seconds(effective)},"
-                f"afade=t=out:st={self._fmt_seconds(max(0.0, inserted_duration - effective))}:d={self._fmt_seconds(effective)}"
+                f",afade=t=in:st=0:d={self._fmt_seconds(effective)}{curve},"
+                f"afade=t=out:st={self._fmt_seconds(max(0.0, inserted_duration - effective))}:d={self._fmt_seconds(effective)}{curve}"
             )
         parts.append(
             f"[1:a]atrim=0:{self._fmt_seconds(inserted_duration)},{normalize},"
@@ -2970,8 +3068,8 @@ class FfmpegToolsPanel:
         except ValueError:
             return False
         full_reencode = self.insert_reencode_var.get()
-        smart_fade = self.insert_smart_var.get() and transition_code == "fade" and requested > 0
-        if not (full_reencode and transition_code != "none" and requested > 0) and not smart_fade:
+        smart_transition = self.insert_smart_var.get() and transition_code != "none" and requested > 0
+        if not (full_reencode and transition_code != "none" and requested > 0) and not smart_transition:
             return False
 
         profile = self._probe_media(main)
@@ -2985,7 +3083,9 @@ class FfmpegToolsPanel:
             )
             filter_text = preview_args[preview_args.index("-filter_complex") + 1]
         else:
-            filter_text = self._insert_smart_preview_filter(profile, inserted_duration, insertion, effective)
+            filter_text = self._insert_smart_preview_filter(
+                profile, inserted_duration, insertion, effective, transition_code
+            )
         crossfade = full_reencode and transition_code not in {"none", "fade"} and effective > 0
         output_position = self._insert_composite_to_output_position(
             composite_position,
@@ -3853,12 +3953,16 @@ class FfmpegToolsPanel:
         except Exception:
             pass
 
-    def _record_ffmpeg_command(self, command: list[object], *, force: bool = False) -> None:
-        """Registra a linha real antes de iniciar um processo FFmpeg."""
-        rendered_command = format_ffmpeg_command_for_log(command)
+    def _record_ffmpeg_command(self, command: list[object], *, force: bool = False, probe: bool = False) -> None:
+        """Registra a linha real antes de iniciar um processo FFmpeg.
+
+        Com o rastreador ativo (ferramenta em execução) guarda o comando cru
+        para a renderização numerada/agrupada. Fora da execução, ``force`` grava
+        direto no log de atividade com a formatação de comando único."""
         if self.running and self.task_tracker:
-            self.task_tracker.command(rendered_command)
+            self.task_tracker.command(command, probe=probe)
         elif force:
+            rendered_command = format_ffmpeg_command_for_log(command)
             self.app._append_activity_log(
                 rendered_command,
                 "ffmpeg_command",
@@ -4472,11 +4576,10 @@ class FfmpegToolsPanel:
         self._execute_video("Cortando vídeo com precisão", build, duration_seconds=end - start)
 
     def _extract_keyframes(self, source: Path) -> list[float]:
-        command = [
-            str(self._ffmpeg()), "-hide_banner", "-skip_frame", "nokey", "-i", str(source),
+        command = [str(self._ffmpeg()), "-hide_banner", "-skip_frame", "nokey", "-i", str(source),
             "-vf", "showinfo", "-an", "-f", "null", "-",
         ]
-        self._record_ffmpeg_command(command)
+        self._record_ffmpeg_command(command, probe=True)
         result = subprocess.run(
             command,
             capture_output=True,
@@ -4801,7 +4904,7 @@ class FfmpegToolsPanel:
 
     def _probe_media(self, source: Path) -> MediaProfile:
         command = [str(self._ffmpeg()), "-hide_banner", "-i", str(source)]
-        self._record_ffmpeg_command(command)
+        self._record_ffmpeg_command(command, probe=True)
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         text = result.stderr + result.stdout
         duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
@@ -6169,7 +6272,6 @@ class FfmpegToolsPanel:
             return
         if use_smart:
             self._append_log("Smart Insert preserva o corpo do áudio, mas o ponto de corte é aproximado ao frame/pacote do codec.")
-            use_fade = transition_label == "Fade in/out" and transition_seconds > 0
             if self._audio_codec_args_for_source_codec(
                 main_profile.audio_codec, extension, main_profile.audio_bitrate
             ) is None:
@@ -6177,13 +6279,16 @@ class FfmpegToolsPanel:
                     f"Smart Insert não pode preservar o codec '{main_profile.audio_codec}'; "
                     "usando reencode completo para gerar uma saída válida."
                 )
-                fallback_transition = "fade" if use_fade else "none"
+                fallback_transition = transition_code if transition_code != "none" else "none"
                 command = self._insert_full_reencode_arguments(
                     main, inserted, output, main_profile, insertion, transition_seconds, fallback_transition
                 )
                 self._execute(command, "Inserindo áudio (compatibilização completa)", 1, 1, total_duration)
                 return
-            self._insert_smart_worker(main, inserted, output, main_profile, insertion, total_duration, use_fade, transition_seconds)
+            self._insert_smart_worker(
+                main, inserted, output, main_profile, insertion, total_duration,
+                transition_code if transition_seconds > 0 else "none", transition_seconds,
+            )
             return
         self._append_log("Inserção sem reencode usa cortes aproximados ao frame/pacote do codec; use Reencode Completo para precisão de amostra.")
         self._insert_copy_worker(main, inserted, output, main_profile, inserted_profile, insertion, total_duration)
@@ -6255,8 +6360,8 @@ class FfmpegToolsPanel:
         profile: MediaProfile,
         insertion: float,
         total_duration: float,
-        use_fade: bool = False,
-        fade_seconds: float = 0.5,
+        transition_code: str = "none",
+        transition_seconds: float = 0.5,
     ) -> None:
         work_dir = self.output_dir / f"smart_insert_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -6278,13 +6383,21 @@ class FfmpegToolsPanel:
             step += 1
             middle = work_dir / f"{len(pieces):03d}{extension}"
             inserted_dur = self._get_duration_only(inserted)
-            eff_fade = min(fade_seconds, inserted_dur / 2) if use_fade else 0.0
+            eff_fade = (
+                min(transition_seconds, inserted_dur / 2)
+                if transition_code != "none" and transition_seconds > 0
+                else 0.0
+            )
 
             fade_filters: list[str] = []
             if eff_fade > 0:
-                fade_filters.append(f"afade=t=in:st=0:d={self._fmt_seconds(eff_fade)}")
+                # "Fade in/out" (código "fade") usa a curva padrão do afade; as
+                # demais curvas (Linear, Seno, Logarítmica...) são aplicadas
+                # com a mesma forma escolhida — sempre apenas no áudio inserido.
+                curve = "" if transition_code == "fade" else f":curve={transition_code}"
+                fade_filters.append(f"afade=t=in:st=0:d={self._fmt_seconds(eff_fade)}{curve}")
                 fade_out_st = max(0.0, inserted_dur - eff_fade)
-                fade_filters.append(f"afade=t=out:st={self._fmt_seconds(fade_out_st)}:d={self._fmt_seconds(eff_fade)}")
+                fade_filters.append(f"afade=t=out:st={self._fmt_seconds(fade_out_st)}:d={self._fmt_seconds(eff_fade)}{curve}")
 
             middle_cmd = [
                 str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0",

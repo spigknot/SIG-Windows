@@ -22,7 +22,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _cmd: None
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
@@ -43,7 +43,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _cmd: None
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
@@ -161,6 +161,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.running = False
         panel.insert_secondary_input = Path("extra.wav")
         panel.AUDIO_TRANSITIONS = FfmpegToolsPanel.AUDIO_TRANSITIONS
+        all_labels = tuple(label for label, _value in FfmpegToolsPanel.AUDIO_TRANSITIONS)
 
         panel.insert_reencode_var = MagicMock()
         panel.insert_smart_var = MagicMock()
@@ -177,9 +178,21 @@ class FfmpegToolsLogicTests(unittest.TestCase):
 
         panel._on_toggle_insert_smart()
         panel.insert_reencode_var.set.assert_called_with(False)
-        # Smart Insert só deve ter Sem transição e Fade in/out
+        # Smart Insert oferece TODAS as transições (Fade in/out + curvas).
         args, kwargs = panel.insert_transition_combo.configure.call_args_list[-1]
-        self.assertEqual(kwargs.get("values", ()), ("Sem transição", "Fade in/out"))
+        self.assertEqual(kwargs.get("values", ()), all_labels)
+
+        # Marcando Reencode Completo desmarca Smart Insert
+        panel.insert_smart_var.get.return_value = False
+        panel.insert_reencode_var.get.return_value = True
+        panel.insert_transition_var.get.return_value = "Fade in/out"
+
+        panel._on_toggle_insert_reencode()
+        panel.insert_smart_var.set.assert_called_with(False)
+        # Reencode Completo também libera o "Fade in/out" (mesmo conjunto).
+        args, kwargs = panel.insert_transition_combo.configure.call_args_list[-1]
+        self.assertEqual(kwargs.get("values", ()), all_labels)
+        self.assertIn("Fade in/out", kwargs.get("values", ()))
 
     def test_wma_audio_codec_args(self):
         panel = object.__new__(FfmpegToolsPanel)
@@ -256,7 +269,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _cmd: None
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
@@ -419,7 +432,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _cmd: None
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake)
             profile = panel._probe_media(Path("audio51.wav"))
@@ -434,7 +447,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _cmd: None
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake)
             profile = panel._probe_media(Path("audio71.wav"))
@@ -883,7 +896,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _command: None
+        panel._record_ffmpeg_command = lambda _command, **_kwargs: None
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
             profile = panel._probe_media(Path("video.mp4"))
@@ -971,7 +984,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _command: None
+        panel._record_ffmpeg_command = lambda _command, **_kwargs: None
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
             profile = panel._probe_media(Path("video.mkv"))
@@ -991,7 +1004,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         )
         panel = object.__new__(FfmpegToolsPanel)
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
-        panel._record_ffmpeg_command = lambda _command: None
+        panel._record_ffmpeg_command = lambda _command, **_kwargs: None
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr=fake_output)
             profile = panel._probe_media(Path("video.mp4"))
