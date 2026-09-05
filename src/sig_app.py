@@ -82,7 +82,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260904_002"
+APP_VERSION = "20260904_003"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -363,6 +363,40 @@ LIVE_QUALIFICATION_FIELD_IDS = (
     "bairro",
     "cidade",
     "telefone",
+)
+
+# Rótulos usados na janela de seleção de campos da qualificação (engrenagem).
+LIVE_QUALIFICATION_FIELD_LABELS = {
+    "nome": "Nome",
+    "rg": "RG",
+    "cpf": "CPF",
+    "nascimento": "Nascimento",
+    "naturalidade": "Naturalidade",
+    "profissao": "Profissão",
+    "pai": "Pai",
+    "mae": "Mãe",
+    "endereco": "Endereço",
+    "bairro": "Bairro",
+    "cidade": "Cidade",
+    "telefone": "Telefone",
+}
+
+# Campos marcados por padrão na janela da engrenagem: os que já eram usados
+# para preencher a caixa + RG (que passa a aparecer logo após o nome).
+LIVE_QUALIFICATION_DEFAULT_SELECTED = frozenset(
+    {
+        "nome",
+        "rg",
+        "nascimento",
+        "naturalidade",
+        "profissao",
+        "pai",
+        "mae",
+        "endereco",
+        "bairro",
+        "cidade",
+        "telefone",
+    }
 )
 
 GROK_TEXT_URL = "https://api.x.ai/v1/responses"
@@ -7843,8 +7877,13 @@ def _qualification_age_in_years(value: str, today: date | None = None) -> int | 
 def format_occurrence_qualification(
     raw_text: str,
     field_order: tuple[tuple[str, str], ...],
+    selected_ids: set[str] | None = None,
 ) -> str:
-    """Converte o JSON fixo da Ocorrência no texto narrativo usado pelo policial."""
+    """Converte o JSON fixo da Ocorrência no texto narrativo usado pelo policial.
+
+    ``selected_ids`` decide quais campos do JSON entram no texto; quando
+    None, usa os campos padrão (LIVE_QUALIFICATION_DEFAULT_SELECTED).
+    """
     fields = parse_qualification_json(raw_text, list(LIVE_QUALIFICATION_FIELD_IDS), field_order)
     absent_values = {
         "nao informado",
@@ -7863,14 +7902,30 @@ def format_occurrence_qualification(
         for field_id, value in fields.items()
         if str(value).strip().casefold() not in absent_values
     }
+    if selected_ids is None:
+        selected = LIVE_QUALIFICATION_DEFAULT_SELECTED
+    else:
+        selected = set(selected_ids)
+
+    def included(field_id: str) -> bool:
+        return field_id in selected and bool(str(fields.get(field_id, "")).strip())
+
     parts: list[str] = []
 
     name = fields.get("nome", "").strip()
-    if name:
+    if included("nome") and name:
         parts.append(name.upper())
 
-    mother = fields.get("mae", "").strip()
-    father = fields.get("pai", "").strip()
+    # RG e CPF aparecem logo após o nome, com a sigla em maiúsculas.
+    rg = fields.get("rg", "").strip()
+    if included("rg") and rg:
+        parts.append(f"RG: {rg}")
+    cpf = fields.get("cpf", "").strip()
+    if included("cpf") and cpf:
+        parts.append(f"CPF: {cpf}")
+
+    mother = fields.get("mae", "").strip() if included("mae") else ""
+    father = fields.get("pai", "").strip() if included("pai") else ""
     if mother and father:
         parts.append(f"filho(a) de {mother} e {father}")
     elif mother:
@@ -7878,25 +7933,24 @@ def format_occurrence_qualification(
     elif father:
         parts.append(f"filho(a) de {father}")
 
-    age = _qualification_age_in_years(fields.get("nascimento", ""))
-    if age is not None:
-        parts.append(f"{age} anos")
-    if fields.get("estado_civil"):
-        parts.append(f"estado civil {fields['estado_civil'].strip()}")
+    if included("nascimento"):
+        age = _qualification_age_in_years(fields.get("nascimento", ""))
+        if age is not None:
+            parts.append(f"{age} anos")
 
     # Nacionalidade Brasileira é parte fixa do modelo solicitado para esta tela.
     parts.append("de nacionalidade Brasileira")
-    if fields.get("naturalidade"):
+    if included("naturalidade"):
         parts.append(f"natural de {fields['naturalidade'].strip()}")
-    if fields.get("profissao"):
+    if included("profissao"):
         parts.append(f"de profissão {fields['profissao'].strip()}")
-    if fields.get("endereco"):
+    if included("endereco"):
         parts.append(f"residente e domiciliado(a) à {fields['endereco'].strip()}")
-    if fields.get("bairro"):
+    if included("bairro"):
         parts.append(fields["bairro"].strip())
-    if fields.get("cidade"):
+    if included("cidade"):
         parts.append(f"na cidade de {fields['cidade'].strip()}")
-    if fields.get("telefone"):
+    if included("telefone"):
         parts.append(f"Telefone: {fields['telefone'].strip()}")
 
     return f"{', '.join(parts)}." if parts else ""
@@ -8863,6 +8917,7 @@ class SigApp:
         self.last_live_statement_text = ""
         self.last_live_statement_text_2 = ""
         self.last_live_qualification_text = ""
+        self._last_live_qualification_fields: dict[str, str] = {}
         self.last_generated_document_path: Path | None = None
         self.last_generated_document_preview_path: Path | None = None
         self.last_generated_document_preview_image_path: Path | None = None
@@ -9036,6 +9091,11 @@ class SigApp:
         self.qualification_other_ids_var = StringVar()
         self.qualification_declarations_var = BooleanVar(value=True)
         self.qualification_deposition_var = BooleanVar(value=False)
+        self.live_qualification_field_vars = {
+            field_id: BooleanVar(value=field_id in LIVE_QUALIFICATION_DEFAULT_SELECTED)
+            for field_id in LIVE_QUALIFICATION_FIELD_IDS
+        }
+        self.live_qualification_fields_win = None
         self.document_preview_zoom_var = StringVar(value="100%")
         self.document_preview_page_var = StringVar(value="")
         self.document_preview_page_regions: list[tuple[int, int]] = []
@@ -9059,6 +9119,7 @@ class SigApp:
         self.paste_icon = self._make_paste_icon()
         self.copy_icon = self._make_copy_icon()
         self.clear_icon = self._make_clear_icon()
+        self.gear_icon = self._make_gear_icon()
         self.recover_icon = self._make_recover_icon()
         self.recover_audio_icon = self._make_recover_icon("#d39b00")
         self.document_copy_icon = self._make_document_action_icon("copy")
@@ -9214,6 +9275,24 @@ class SigApp:
         draw.polygon(((6, 9), (11, 12), (8, 18), (2, 15)), outline=color)
         draw.line((4, 14, 9, 17), fill=color, width=2)
         draw.line((6, 11, 10, 13), fill=color, width=2)
+        return ImageTk.PhotoImage(image, master=self.root)
+
+    def _make_gear_icon(self):
+        image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        color = "#263735"
+        cx, cy = 10, 10
+        draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=color)
+        draw.ellipse((cx - 7, cy - 7, cx + 7, cy + 7), outline=color, width=2)
+        for angle in (0, 45, 90, 135, 180, 225, 270, 315):
+            radians = math.radians(angle)
+            outer = 9.5
+            inner = 6.5
+            x1 = cx + math.cos(radians) * inner
+            y1 = cy + math.sin(radians) * inner
+            x2 = cx + math.cos(radians) * outer
+            y2 = cy + math.sin(radians) * outer
+            draw.line((x1, y1, x2, y2), fill=color, width=3)
         return ImageTk.PhotoImage(image, master=self.root)
 
     def _make_recover_icon(self, color="#263735"):
@@ -10668,12 +10747,26 @@ try {
             self.live_qualification_recover_button,
             "Recuperar o último texto de qualificação gerado pelo app",
         )
+        self.live_qualification_organize_button = ttk.Button(
+            self.live_qualification_actions,
+            text="Organizar",
+            style="Action.TButton",
+            width=9,
+            command=self.request_organize_live_qualification,
+        )
         self.live_qualification_clear_button = self._make_editor_icon_button(
             self.live_qualification_actions,
             self.clear_icon,
             "Limpar",
             lambda: self.clear_live_editor("qualification"),
         )
+        self.live_qualification_fields_button = self._make_editor_icon_button(
+            self.live_qualification_actions,
+            self.gear_icon,
+            "Campos da qualificação",
+            self.open_live_qualification_fields_window,
+        )
+        self.live_qualification_fields_button.configure(state="disabled")
         self.live_qualification_copy_button = self._make_editor_icon_button(
             self.live_qualification_actions,
             self.copy_icon,
@@ -12286,14 +12379,35 @@ try {
 
         self.live_qualification_recover_button.place(x=0, y=center_y, anchor="w")
         right_x = width
+        # O botão de campos (engrenagem) fica imediatamente à esquerda do
+        # Limpar: [Colar] [Copiar] [Limpar] [engrenagem] (da direita p/ esquerda).
         for button in (
             self.live_qualification_paste_button,
             self.live_qualification_copy_button,
             self.live_qualification_clear_button,
+            self.live_qualification_fields_button,
         ):
             right_x -= button.winfo_reqwidth()
             button.place(x=right_x, y=center_y, anchor="w")
             right_x -= 4
+        # Botão verde "Organizar", centralizado no vão entre o recuperar
+        # (esquerda) e o bloco Limpar/Copiar/Colar (direita), como Oitiva e
+        # Histórico nas demais caixas.
+        organize = getattr(self, "live_qualification_organize_button", None)
+        if organize is not None and organize.winfo_exists():
+            left_edge = (
+                self.live_qualification_recover_button.winfo_x()
+                + self.live_qualification_recover_button.winfo_width()
+            )
+            right_edge = self.live_qualification_fields_button.winfo_x()
+            organize_half = organize.winfo_reqwidth() / 2
+            midpoint = (left_edge + right_edge) / 2
+            midpoint = min(
+                max(organize_half, midpoint),
+                max(organize_half, width - organize_half),
+            )
+            organize.place_forget()
+            organize.place(x=midpoint, y=center_y, anchor="w")
 
     def _document_preview_max_width(self) -> int:
         """Largura máxima da caixa da prévia.
@@ -12915,6 +13029,7 @@ try {
             "live_history_button_2",
             "live_statement_button",
             "live_statement_button_2",
+            "live_qualification_organize_button",
             "live_document_execute_button",
         ):
             button = getattr(self, button_name, None)
@@ -13616,7 +13731,17 @@ try {
         text._editor_frame = frame
         text.bind("<FocusIn>", lambda _event, widget=text: self._clear_live_placeholder(widget), add="+")
         text.bind("<FocusOut>", lambda _event, widget=text: self._restore_live_placeholder(widget), add="+")
+        if _kind == "qualification":
+            # Marca que o conteúdo atual é resultado de uma requisição de
+            # organização (usada pelo botão 'Gerar documento'); é removida
+            # quando o usuário edita a caixa manualmente.
+            text._qualification_organized = False
+            text.bind("<<Modified>>", self._on_qualification_modified, add="+")
         self._restore_live_placeholder(text)
+        try:
+            text.edit_modified(False)
+        except Exception:
+            pass
         return text
 
     @staticmethod
@@ -13664,7 +13789,7 @@ try {
             return ""
         return widget.get("1.0", END).strip()
 
-    def _set_live_editor(self, kind: str, text: str):
+    def _set_live_editor(self, kind: str, text: str, *, qualification_organized: bool | None = None):
         widget = self._live_editor(kind)
         at_end = widget.yview()[1] >= .98
         top = widget.yview()[0]
@@ -13676,6 +13801,17 @@ try {
             widget._placeholder_active = False
         else:
             self._restore_live_placeholder(widget)
+        try:
+            widget.edit_modified(False)
+        except Exception:
+            pass
+        if kind == "qualification" and qualification_organized is not None:
+            self._set_qualification_organized(qualification_organized)
+        elif kind == "qualification":
+            # Qualquer outro preenchimento programático (colar, limpar,
+            # recuperar) não é uma organização: remove a tag, a menos que o
+            # chamador diga explicitamente que o texto veio de organização.
+            self._set_qualification_organized(False)
         if self.live_state != "idle" or self.assistant_busy:
             widget.configure(state="disabled")
         if kind in ("transcript", "transcript2") and self.live_state != "idle":
@@ -13684,6 +13820,113 @@ try {
             widget.see(END)
         else:
             widget.yview_moveto(top)
+
+    def _on_qualification_modified(self, _event=None):
+        """Remove a marca de 'organizada' quando o usuário edita a caixa."""
+        widget = getattr(self, "live_qualification_text", None)
+        if not widget:
+            return
+        try:
+            if widget.edit_modified():
+                widget.edit_modified(False)
+                if not self._is_live_placeholder(widget):
+                    widget._qualification_organized = False
+        except Exception:
+            pass
+
+    def _set_qualification_organized(self, organized: bool = True):
+        widget = getattr(self, "live_qualification_text", None)
+        if widget is not None:
+            widget._qualification_organized = bool(organized)
+        # A engrenagem (seleção de campos) só faz sentido quando existe um
+        # JSON da última organização para filtrar.
+        button = getattr(self, "live_qualification_fields_button", None)
+        if button is not None and button.winfo_exists():
+            button.configure(state="normal" if organized else "disabled")
+
+    def qualification_is_organized(self) -> bool:
+        widget = getattr(self, "live_qualification_text", None)
+        if widget is None or self._is_live_placeholder(widget):
+            return False
+        return bool(getattr(widget, "_qualification_organized", False))
+
+    def _live_qualification_selected_ids(self) -> set[str]:
+        """IDs selecionados nas checkboxes da engrenagem (campos do JSON)."""
+        return {
+            field_id
+            for field_id in LIVE_QUALIFICATION_FIELD_IDS
+            if self.live_qualification_field_vars[field_id].get()
+        }
+
+    def _refresh_live_qualification_from_fields(self):
+        """Recompõe o texto da caixa de qualificação a partir do JSON da
+        última organização, respeitando as checkboxes da engrenagem."""
+        fields = getattr(self, "_last_live_qualification_fields", None)
+        if not fields:
+            return
+        # Como a função de formatação aceita texto bruto, serializamos o
+        # dict já parseado de volta em JSON para reutilizar o mesmo caminho.
+        payload = json.dumps(fields, ensure_ascii=False)
+        formatted = format_occurrence_qualification(
+            payload,
+            self.qualification_fields,
+            self._live_qualification_selected_ids(),
+        )
+        if formatted:
+            self._set_live_editor(
+                "qualification", formatted, qualification_organized=True
+            )
+            self.last_live_qualification_text = formatted
+
+    def open_live_qualification_fields_window(self):
+        """Abre a janela com as checkboxes dos campos do JSON da qualificação."""
+        win = getattr(self, "live_qualification_fields_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+        win = Toplevel(self.root)
+        win.title("Campos da qualificação")
+        win.geometry("560x520")
+        win.minsize(420, 320)
+        win.transient(self.root)
+        self.live_qualification_fields_win = win
+
+        container = ttk.Frame(win, padding=(16, 12))
+        container.pack(fill=BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text="Escolha os campos do JSON que compõem a qualificação:",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 10))
+
+        fields_frame = ttk.Frame(container)
+        fields_frame.pack(fill=BOTH, expand=True)
+        for column in range(3):
+            fields_frame.columnconfigure(column, minsize=160)
+
+        def on_field_changed(_field_id=None):
+            self._refresh_live_qualification_from_fields()
+
+        for index, field_id in enumerate(LIVE_QUALIFICATION_FIELD_IDS):
+            row, column = divmod(index, 3)
+            check = ttk.Checkbutton(
+                fields_frame,
+                text=LIVE_QUALIFICATION_FIELD_LABELS.get(field_id, field_id),
+                variable=self.live_qualification_field_vars[field_id],
+                command=lambda fid=field_id: on_field_changed(fid),
+            )
+            check.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=(0, 6))
+
+        actions = ttk.Frame(container)
+        actions.pack(fill=X, pady=(12, 0))
+        ttk.Button(
+            actions,
+            text="Fechar",
+            command=win.destroy,
+        ).pack(side=RIGHT)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
 
     def _remember_live_assistant_result(self, task: str, index: int, text: str):
         if task not in ("history", "statement"):
@@ -13755,7 +13998,20 @@ try {
         if not self.last_live_qualification_text:
             self.status_var.set("Ainda não há uma qualificação gerada pelo app.")
             return
-        self.recover_live_assistant_text("qualification")
+        saved = self.last_live_qualification_text
+        if self.live_state != "idle" or self.assistant_busy:
+            return
+        if self._live_editor_value("qualification") and not messagebox.askyesno(
+            "sig", "Deseja sobrescrever o texto atual?", parent=self.root
+        ):
+            return
+        has_fields = bool(self._last_live_qualification_fields)
+        self._set_live_editor(
+            "qualification",
+            saved,
+            qualification_organized=True if has_fields else None,
+        )
+        self._set_activity_status("Última qualificação recuperada.", log=False)
 
     def _occurrence_document_replacements(self) -> dict[str, str]:
         now = datetime.now()
@@ -13811,6 +14067,13 @@ try {
         self._set_embedded_document_preview_message(
             "Aguardando a geração do documento..."
         )
+        if self.qualification_is_organized():
+            # A qualificação já foi organizada (via botão Organizar ou numa
+            # geração anterior); usa o texto atual e apenas gera o documento.
+            self._generate_occurrence_document_from_current_text()
+            return
+        # Qualificação ainda não organizada: organiza primeiro e, ao terminar,
+        # o fluxo encadeia a geração do documento automaticamente.
         self.request_live_qualification(generate_document=True)
 
     def _generate_occurrence_document_from_current_text(self):
@@ -14181,6 +14444,11 @@ try {
             )
         except Exception as exc:
             self._queue("document_viewer_error", viewer, canvas, str(exc))
+
+    def request_organize_live_qualification(self):
+        """Organiza a qualificação (mesma requisição do 'Gerar documento'),
+        mas sem gerar o documento em seguida."""
+        self.request_live_qualification(generate_document=False)
 
     def request_live_qualification(self, *, generate_document: bool = False):
         raw_text = self._live_editor_value("qualification")
@@ -20129,14 +20397,30 @@ try {
                         generate_document = self.pending_occurrence_document_generation
                         self.pending_occurrence_document_generation = False
                         try:
+                            selected_fields = self._live_qualification_selected_ids()
                             formatted = format_occurrence_qualification(
                                 raw_result,
                                 self.qualification_fields,
+                                selected_fields,
                             )
                             if not formatted:
                                 raise ValueError("a IA não devolveu informações utilizáveis")
                             self.last_live_qualification_text = formatted
-                            self._set_live_editor("qualification", formatted)
+                            self._set_live_editor(
+                                "qualification",
+                                formatted,
+                                qualification_organized=True,
+                            )
+                            # O texto atual veio de uma organização (tag usada
+                            # pelo 'Gerar documento'); guarda o JSON para o
+                            # filtro por checkboxes.
+                            self._last_live_qualification_fields = (
+                                parse_qualification_json(
+                                    raw_result,
+                                    list(LIVE_QUALIFICATION_FIELD_IDS),
+                                    self.qualification_fields,
+                                )
+                            )
                             self._finish_activity_step("assistant:qualification", float(elapsed))
                             self.live_assistant_status_var.set(
                                 f"Qualificação concluída em {float(elapsed):.1f}s."
