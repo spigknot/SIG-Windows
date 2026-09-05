@@ -6,8 +6,10 @@ maiúsculas (RG: ... / CPF: ...); o default inclui RG mas não CPF.
 """
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -15,6 +17,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from sig_app import (  # noqa: E402
     LIVE_QUALIFICATION_DEFAULT_SELECTED,
     LIVE_QUALIFICATION_FIELD_IDS,
+    QUALIFICATION_ORGANIZED_TIMEOUT_S,
+    SigApp,
     format_occurrence_qualification,
     parse_qualification_json,
 )
@@ -128,6 +132,57 @@ class QualificationParseTests(unittest.TestCase):
         )
         self.assertNotIn("rg", fields)
         self.assertNotIn("cpf", fields)
+
+
+class QualificationOrganizedTimeoutTests(unittest.TestCase):
+    """A janela de 60s: dentro dela o 'Gerar documento' NÃO re-organiza;
+    depois de expirar volta a re-organizar antes de gerar."""
+
+    def _app(self):
+        app = object.__new__(SigApp)
+        app._qualification_organized_at = None
+        app.live_qualification_fields_button = None
+        widget = mock.Mock()
+        widget._placeholder_active = False
+        widget._qualification_organized = False
+        app.live_qualification_text = widget
+        return app
+
+    def test_just_organized_is_within_window(self):
+        app = self._app()
+        app._qualification_organized_at = time.monotonic()
+        self.assertTrue(app.qualification_is_organized())
+
+    def test_expired_is_outside_window(self):
+        app = self._app()
+        app._qualification_organized_at = (
+            time.monotonic() - QUALIFICATION_ORGANIZED_TIMEOUT_S - 1
+        )
+        self.assertFalse(app.qualification_is_organized())
+
+    def test_no_timestamp_is_outside_window(self):
+        app = self._app()
+        app._qualification_organized_at = None
+        self.assertFalse(app.qualification_is_organized())
+
+    def test_set_organized_marks_timestamp(self):
+        app = self._app()
+        app._set_qualification_organized(True)
+        self.assertIsNotNone(app._qualification_organized_at)
+        self.assertTrue(app.qualification_is_organized())
+
+    def test_clear_organized_removes_timestamp(self):
+        app = self._app()
+        app._set_qualification_organized(True)
+        app._set_qualification_organized(False)
+        self.assertIsNone(app._qualification_organized_at)
+        self.assertFalse(app.qualification_is_organized())
+
+    def test_placeholder_is_never_organized(self):
+        app = self._app()
+        app.live_qualification_text._placeholder_active = True
+        app._qualification_organized_at = time.monotonic()
+        self.assertFalse(app.qualification_is_organized())
 
 
 if __name__ == "__main__":

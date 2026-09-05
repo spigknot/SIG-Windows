@@ -82,7 +82,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260904_003"
+APP_VERSION = "20260905_001"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -398,6 +398,11 @@ LIVE_QUALIFICATION_DEFAULT_SELECTED = frozenset(
         "telefone",
     }
 )
+
+# Janela de tempo (segundos) em que a qualificação é considerada "recém
+# organizada": dentro dela o botão 'Gerar documento' NÃO re-organiza — apenas
+# gera o documento com o texto atual. Após expirar, volta a organizar antes.
+QUALIFICATION_ORGANIZED_TIMEOUT_S = 60
 
 GROK_TEXT_URL = "https://api.x.ai/v1/responses"
 DEEPSEEK_TEXT_URL = "https://api.deepseek.com/chat/completions"
@@ -8918,6 +8923,10 @@ class SigApp:
         self.last_live_statement_text_2 = ""
         self.last_live_qualification_text = ""
         self._last_live_qualification_fields: dict[str, str] = {}
+        # Instante (monotônico) em que a qualificação foi organizada pela IA;
+        # durante QUALIFICATION_ORGANIZED_TIMEOUT_S o 'Gerar documento' usa o
+        # texto atual sem re-organizar.
+        self._qualification_organized_at: float | None = None
         self.last_generated_document_path: Path | None = None
         self.last_generated_document_preview_path: Path | None = None
         self.last_generated_document_preview_image_path: Path | None = None
@@ -12390,9 +12399,8 @@ try {
             right_x -= button.winfo_reqwidth()
             button.place(x=right_x, y=center_y, anchor="w")
             right_x -= 4
-        # Botão verde "Organizar", centralizado no vão entre o recuperar
-        # (esquerda) e o bloco Limpar/Copiar/Colar (direita), como Oitiva e
-        # Histórico nas demais caixas.
+        # Botão verde "Organizar", com o CENTRO na metade da distância
+        # horizontal entre o Recuperar (esquerda) e a Engrenagem (direita).
         organize = getattr(self, "live_qualification_organize_button", None)
         if organize is not None and organize.winfo_exists():
             left_edge = (
@@ -12407,7 +12415,7 @@ try {
                 max(organize_half, width - organize_half),
             )
             organize.place_forget()
-            organize.place(x=midpoint, y=center_y, anchor="w")
+            organize.place(x=midpoint, y=center_y, anchor="center")
 
     def _document_preview_max_width(self) -> int:
         """Largura máxima da caixa da prévia.
@@ -13822,7 +13830,8 @@ try {
             widget.yview_moveto(top)
 
     def _on_qualification_modified(self, _event=None):
-        """Remove a marca de 'organizada' quando o usuário edita a caixa."""
+        """Edição manual do usuário não é uma organização recente: derruba a
+        janela de timeout (o texto deixa de ser o resultado da última IA)."""
         widget = getattr(self, "live_qualification_text", None)
         if not widget:
             return
@@ -13831,6 +13840,7 @@ try {
                 widget.edit_modified(False)
                 if not self._is_live_placeholder(widget):
                     widget._qualification_organized = False
+                    self._qualification_organized_at = None
         except Exception:
             pass
 
@@ -13838,6 +13848,10 @@ try {
         widget = getattr(self, "live_qualification_text", None)
         if widget is not None:
             widget._qualification_organized = bool(organized)
+        if organized:
+            self._qualification_organized_at = time.monotonic()
+        else:
+            self._qualification_organized_at = None
         # A engrenagem (seleção de campos) só faz sentido quando existe um
         # JSON da última organização para filtrar.
         button = getattr(self, "live_qualification_fields_button", None)
@@ -13845,10 +13859,17 @@ try {
             button.configure(state="normal" if organized else "disabled")
 
     def qualification_is_organized(self) -> bool:
+        """True se a qualificação foi organizada há menos de 60s (janela em
+        que o 'Gerar documento' usa o texto atual sem re-organizar)."""
         widget = getattr(self, "live_qualification_text", None)
         if widget is None or self._is_live_placeholder(widget):
             return False
-        return bool(getattr(widget, "_qualification_organized", False))
+        stamp = self._qualification_organized_at
+        if stamp is None:
+            return False
+        if time.monotonic() - stamp > QUALIFICATION_ORGANIZED_TIMEOUT_S:
+            return False
+        return True
 
     def _live_qualification_selected_ids(self) -> set[str]:
         """IDs selecionados nas checkboxes da engrenagem (campos do JSON)."""
@@ -14448,6 +14469,10 @@ try {
     def request_organize_live_qualification(self):
         """Organiza a qualificação (mesma requisição do 'Gerar documento'),
         mas sem gerar o documento em seguida."""
+        # Inicia a janela de 60s no CLIQUE: enquanto a requisição roda e por
+        # até 60s após, o 'Gerar documento' não re-organiza (o handler de
+        # sucesso re-marca o instante ao concluir; falha limpa a janela).
+        self._qualification_organized_at = time.monotonic()
         self.request_live_qualification(generate_document=False)
 
     def request_live_qualification(self, *, generate_document: bool = False):
@@ -20434,6 +20459,7 @@ try {
                                     self._generate_occurrence_document_from_current_text
                                 )
                         except Exception as exc:
+                            self._qualification_organized_at = None
                             self._finish_activity_step(
                                 "assistant:qualification",
                                 float(elapsed),
@@ -20446,6 +20472,7 @@ try {
                 elif kind == "live_qualification_error":
                     generation, detail, elapsed = message[1:]
                     if generation == self.assistant_generation:
+                        self._qualification_organized_at = None
                         self._finish_activity_step(
                             "assistant:qualification",
                             float(elapsed),
