@@ -384,9 +384,6 @@ class QrCode:
                 if not function_row[x] and self._mask_bit(mask, x, y):
                     row[x] = not row[x]
 
-    def _xor_mask(self, mask: int) -> None:
-        """Aplica ou remove a mascara (a operacao e involutiva)."""
-        self._apply_mask(mask)
 
     def _choose_best_mask(self) -> int:
         best_mask = 0

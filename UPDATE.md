@@ -57,6 +57,12 @@ bump da versão → preflight → release.py (build + harness completo) → sync
    `python scripts\check_prompt_context.py --quiet`. A verificacao confirma que
    a sintaxe Python está válida e que o prefixo estatico continua separado dos
    documentos condicionais sem divulgar conteudo de prompts, credenciais ou estado privado.
+6. **Binário de referência do updater**: o gate `updater-v2-test` (dentro do
+   preflight) valida `updater_v2/bin/SigUpdater.exe` contra
+   `updater_v2/artifact.json`. Esse `.exe` é ignorado pelo git (`*.exe`) e pode
+   não existir numa pasta recém-limpa — nesse caso, se o
+   `dist/SigUpdater.exe` tiver o mesmo size+sha256 do `artifact.json`, basta
+   copiá-lo para `updater_v2/bin/`; se divergir, seguir a seção 3.1 completa.
 
 ## 2. Bump da versão
 

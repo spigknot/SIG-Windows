@@ -82,7 +82,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260905_001"
+APP_VERSION = "20260906_001"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -1168,32 +1168,6 @@ def download_github_url(url: str, destination: Path, progress_callback=None) -> 
             if progress_callback:
                 progress_callback(downloaded, total)
     return digest.hexdigest()
-
-
-_PROTECTED_NAMES = {"assets", "dist", "release", "src", "sig.spec"}
-
-
-def _clean_project_root() -> None:
-    """Remove todos os arquivos/pastas da raiz do projeto exceto os protegidos e dist/temp/."""
-    root = project_root()
-    # 1 — raiz do projeto
-    for entry in sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name)):
-        if entry.name in _PROTECTED_NAMES:
-            continue
-        try:
-            if entry.is_file() or entry.is_symlink():
-                entry.unlink()
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-        except OSError:
-            continue
-    # 2 — dist/temp/ (runtime files)
-    dist_temp = app_base_dir() / "temp"
-    if dist_temp.exists():
-        try:
-            shutil.rmtree(dist_temp)
-        except OSError:
-            pass
 
 
 @dataclass(frozen=True)
@@ -4203,9 +4177,6 @@ class FfmpegToolsPanel:
         profiles = self._available_accelerations()
         return profiles[0]
 
-    def _detect_acceleration(self) -> VideoAcceleration:
-        """Compatibilidade para chamadas internas: retorna a opção prioritária."""
-        return self._available_accelerations()[0]
 
     def _available_accelerations(self) -> list[VideoAcceleration]:
         ffmpeg = self._ffmpeg()
@@ -7018,31 +6989,6 @@ def normalize_settings(data: dict) -> dict:
     )
     # VAD removido
     return clean
-
-
-def selected_parts_model(settings: dict) -> dict:
-    model_name = str(settings.get("parts_model") or IA_PROXY_NAME)
-    selected = dict(settings)
-    selected["text_model"] = model_name
-    proxy_model = str(
-        settings.get("parts_proxy_model")
-        or (
-            DEEPSEEK_TEXT_NAME
-            if str(settings.get("parts_proxy_provider") or "grok").casefold() == "deepseek"
-            else GROK_TEXT_NAME
-        )
-    )
-    uses_deepseek = model_name == DEEPSEEK_TEXT_NAME or (
-        model_name == IA_PROXY_NAME and proxy_model == DEEPSEEK_TEXT_NAME
-    )
-    if uses_deepseek:
-        selected["text_reasoning"] = str(settings.get("parts_reasoning") or "none")
-    else:
-        selected["text_reasoning"] = str(settings.get("parts_reasoning") or "low")
-    if model_name == IA_PROXY_NAME:
-        selected["ia_proxy_provider"] = "deepseek" if uses_deepseek else "grok"
-        selected["ia_proxy_model"] = proxy_model
-    return selected_text_model(selected)
 
 
 def save_settings(data: dict) -> dict:
@@ -9914,202 +9860,6 @@ class SigApp:
         except Exception as exc:
             self._queue("update_error", f"Não foi possível iniciar a sincronização: {exc}")
 
-    @staticmethod
-    def _update_script_text() -> str:
-        return r'''param(
-    [int]$ProcessId,
-    [string]$SourceDir,
-    [string]$TargetDir,
-    [string]$ExeName,
-    [string]$LogPath
-)
-$ErrorActionPreference = "Stop"
-$logParent = Split-Path -Parent $LogPath
-New-Item -ItemType Directory -Path $logParent -Force | Out-Null
-Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Atualizador iniciado."
-function Resolve-SigInstallDir([string]$Candidate) {
-    $original = [IO.Path]::GetFullPath($Candidate)
-    $current = $original
-    for ($level = 0; $level -lt 6; $level++) {
-        $hasRuntime = (
-            (Test-Path -LiteralPath (Join-Path $current "ffmpeg.exe") -PathType Leaf) -or
-            (Test-Path -LiteralPath (Join-Path $current "ffplay.exe") -PathType Leaf) -or
-            (Test-Path -LiteralPath (Join-Path $current "vad_deps") -PathType Container)
-        )
-        if ($hasRuntime) {
-            return $current
-        }
-        $parent = Split-Path -Parent $current
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ieq $current) {
-            break
-        }
-        $current = $parent
-    }
-    return $original
-}
-$receivedTargetDir = $TargetDir
-$TargetDir = Resolve-SigInstallDir $TargetDir
-Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Destino recebido=$receivedTargetDir; destino resolvido=$TargetDir; origem=$SourceDir"
-$targetExe = Join-Path $TargetDir $ExeName
-$deadline = [DateTime]::UtcNow.AddSeconds(120)
-while (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
-    if ([DateTime]::UtcNow -ge $deadline) {
-        Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Tempo esgotado aguardando o SIG fechar."
-        exit 2
-    }
-    Start-Sleep -Milliseconds 250
-}
-# A janela do onefile pode pertencer a um processo filho enquanto o bootloader
-# continua vivo. Aguarde todos os processos que executam este mesmo sig.exe.
-while ($true) {
-    $sameExecutable = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ExeName)) -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.Path -ieq $targetExe } catch { $false }
-    })
-    if ($sameExecutable.Count -eq 0) { break }
-    if ([DateTime]::UtcNow -ge $deadline) {
-        Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Tempo esgotado aguardando todos os processos do SIG fecharem."
-        exit 3
-    }
-    Start-Sleep -Milliseconds 250
-}
-Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Todos os processos do SIG encerrados; aplicando arquivos."
-Start-Sleep -Seconds 2
-$backupDir = Join-Path ([IO.Path]::GetTempPath()) ("sig_backup_" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-$copied = New-Object System.Collections.Generic.List[string]
-$replacedDirectories = New-Object System.Collections.Generic.List[string]
-function Start-SigDetached([string]$Executable, [string]$LogFile) {
-    $workDirectory = Split-Path -Parent $Executable
-    $process = Start-Process -FilePath $Executable -WorkingDirectory $workDirectory -WindowStyle Hidden -PassThru
-    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) SIG iniciado (PID $($process.Id))."
-    return $process
-}
-function Start-SigAndVerify([string]$Executable, [string]$LogFile) {
-    $workDirectory = Split-Path -Parent $Executable
-    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) Iniciando SIG atualizado diretamente."
-    $process = Start-Process -FilePath $Executable -WorkingDirectory $workDirectory -WindowStyle Hidden -PassThru
-    # O primeiro boot de um onefile pode precisar extrair o Python para %TEMP%.
-    # Aguarde essa etapa e confirme que o processo permaneceu vivo antes de
-    # apagar o backup que permite voltar à versão anterior.
-    Start-Sleep -Seconds 12
-    if ($process.HasExited) {
-        throw "O SIG atualizado encerrou durante a inicialização (código $($process.ExitCode))."
-    }
-    $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
-    if (-not $running) {
-        throw "O SIG atualizado não permaneceu em execução após a inicialização."
-    }
-    Add-Content -LiteralPath $LogFile -Value "$(Get-Date -Format s) SIG atualizado confirmado em execução (PID $($process.Id))."
-    return $process
-}
-function Install-FileWithRetry([string]$Source, [string]$Target) {
-    $lastError = $null
-    for ($attempt = 1; $attempt -le 20; $attempt++) {
-        try {
-            Copy-Item -LiteralPath $Source -Destination $Target -Force
-            Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
-            return
-        } catch {
-            $lastError = $_.Exception
-            Start-Sleep -Milliseconds 250
-        }
-    }
-    throw "Não foi possível substituir $Target após 20 tentativas: $($lastError.Message)"
-}
-function Write-TargetDiagnostics([string]$Label) {
-    $stamp = Get-Date -Format s
-    $target = Get-Item -LiteralPath $targetExe -ErrorAction SilentlyContinue
-    if ($target) {
-        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: executável=$($target.FullName), tamanho=$($target.Length) bytes"
-    } else {
-        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: executável ausente=$targetExe"
-    }
-    $internal = Join-Path $TargetDir "_internal"
-    if (Test-Path -LiteralPath $internal -PathType Container) {
-        $pythonDll = Join-Path $internal "python311.dll"
-        $vcDll = Join-Path $internal "vcruntime140.dll"
-        $vc1Dll = Join-Path $internal "vcruntime140_1.dll"
-        $fileCount = @(Get-ChildItem -LiteralPath $internal -Recurse -File -ErrorAction SilentlyContinue).Count
-        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: onedir=_internal presente, arquivos=$fileCount, python311.dll=$([bool](Test-Path -LiteralPath $pythonDll -PathType Leaf)), vcruntime140.dll=$([bool](Test-Path -LiteralPath $vcDll -PathType Leaf)), vcruntime140_1.dll=$([bool](Test-Path -LiteralPath $vc1Dll -PathType Leaf))"
-    } else {
-        Add-Content -LiteralPath $LogPath -Value "$stamp ${Label}: onedir=_internal ausente"
-    }
-}
-try {
-    $newProcess = $null
-    # Copy top-level directories as units. This avoids deriving relative paths
-    # from mixed Windows short/long names (JOOPAU~1 versus João Paulo).
-    foreach ($sourceDirectory in @(Get-ChildItem -LiteralPath $SourceDir -Directory -Force)) {
-        $relativeDir = $sourceDirectory.Name
-        $targetDirectory = Join-Path $TargetDir $relativeDir
-        if (Test-Path -LiteralPath $targetDirectory) {
-            $backupDirectory = Join-Path $backupDir $relativeDir
-            Copy-Item -LiteralPath $targetDirectory -Destination $backupDirectory -Recurse -Force
-            Remove-Item -LiteralPath $targetDirectory -Recurse -Force
-        }
-        $replacedDirectories.Add($relativeDir)
-        Copy-Item -LiteralPath $sourceDirectory.FullName -Destination $TargetDir -Recurse -Force
-    }
-    Get-ChildItem -LiteralPath $SourceDir -File -Force | ForEach-Object {
-        $relative = $_.Name
-        $target = Join-Path $TargetDir $relative
-        if (Test-Path -LiteralPath $target) {
-            $backup = Join-Path $backupDir $relative
-            Copy-Item -LiteralPath $target -Destination $backup -Force
-        }
-        $temporaryTarget = "$target.sig-new"
-        Copy-Item -LiteralPath $_.FullName -Destination $temporaryTarget -Force
-        Install-FileWithRetry $temporaryTarget $target
-        $copied.Add($relative)
-    }
-    if (-not (Test-Path -LiteralPath $targetExe -PathType Leaf)) {
-        throw "Executável atualizado não encontrado: $targetExe"
-    }
-    Write-TargetDiagnostics "Estrutura após a cópia"
-    $sourceInternal = Join-Path $SourceDir "_internal"
-    if (Test-Path -LiteralPath $sourceInternal -PathType Container) {
-        foreach ($requiredDll in @("python311.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
-            $requiredPath = Join-Path $TargetDir (Join-Path "_internal" $requiredDll)
-            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-                throw "Dependência onedir ausente após a cópia: $requiredPath"
-            }
-        }
-    }
-    $newProcess = Start-SigAndVerify $targetExe $LogPath
-    Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Atualização aplicada e validada."
-    Remove-Item -LiteralPath $SourceDir -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
-    exit 0
-} catch {
-    Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Falha na atualização: $($_.Exception.Message)"
-    Write-TargetDiagnostics "Estrutura no momento da falha"
-    if ($newProcess -and -not $newProcess.HasExited) {
-        Stop-Process -Id $newProcess.Id -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
-    }
-    foreach ($relativeDir in $replacedDirectories) {
-        $targetDirectory = Join-Path $TargetDir $relativeDir
-        $backupDirectory = Join-Path $backupDir $relativeDir
-        Remove-Item -LiteralPath $targetDirectory -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $backupDirectory) {
-            Copy-Item -LiteralPath $backupDirectory -Destination $targetDirectory -Recurse -Force
-        }
-    }
-    foreach ($relative in $copied) {
-        $backup = Join-Path $backupDir $relative
-        $target = Join-Path $TargetDir $relative
-        if (Test-Path -LiteralPath $backup) {
-            Install-FileWithRetry $backup $target
-        }
-    }
-    $targetExe = Join-Path $TargetDir $ExeName
-    if (Test-Path -LiteralPath $targetExe -PathType Leaf) {
-        Start-SigDetached $targetExe $LogPath
-        Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) SIG original/revertido será aberto."
-    }
-    exit 1
-}
-'''
 
     def _launch_prepared_update(self, zip_path: Path, version: str) -> None:
         log_path = settings_path().parent / "updater.log"
@@ -12188,63 +11938,6 @@ try {
             except Exception:
                 pass
 
-    def paste_live_text(self):
-        if self.live_state != "idle":
-            self.live_assistant_status_var.set("Pare a escuta antes de colar texto.")
-            return
-        try:
-            pasted = self.root.clipboard_get().strip()
-        except Exception:
-            self.live_assistant_status_var.set("A área de transferência não contém texto.")
-            return
-        if not pasted:
-            return
-        if self._live_text_value() and not messagebox.askyesno("sig", "Deseja sobrescrever o texto atual?"):
-            return
-        self._replace_live_text(pasted)
-        self.live_assistant_status_var.set("Texto colado.")
-
-    def copy_live_text(self):
-        text = self._live_text_value()
-        if not text:
-            self.live_assistant_status_var.set("Ainda não há texto para copiar.")
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.live_assistant_status_var.set("Texto copiado.")
-
-    def save_live_text(self):
-        text = self._live_text_value()
-        if not text:
-            self.live_assistant_status_var.set("Ainda não há texto para salvar.")
-            return
-        destination = filedialog.asksaveasfilename(
-            title="Salvar transcrição ao vivo",
-            defaultextension=".txt",
-            filetypes=[("Arquivo de texto", "*.txt"), ("Todos os arquivos", "*.*")],
-            initialfile="transcricao_ao_vivo.txt",
-        )
-        if not destination:
-            return
-        try:
-            Path(destination).write_text(text + "\n", encoding="utf-8")
-            self.live_assistant_status_var.set(f"Texto salvo em {destination}")
-        except Exception as exc:
-            messagebox.showerror("sig", f"Não foi possível salvar o texto:\n{exc}")
-
-    def clear_live_text(self):
-        if self.live_state != "idle":
-            self.live_assistant_status_var.set("Pare a escuta antes de limpar o texto.")
-            return
-        if self.assistant_busy:
-            self.live_assistant_status_var.set("Aguarde a tarefa atual terminar.")
-            return
-        if self._live_text_value() and not messagebox.askyesno("sig", "Deseja limpar o texto?"):
-            return
-        self._replace_live_text("")
-        self._set_live_assistant_names([])
-        self.live_assistant_progress_var.set("")
-        self.live_assistant_status_var.set("Caixa de texto limpa.")
 
     def paste_assistant_text(self):
         try:
@@ -12917,14 +12610,6 @@ try {
     def _position_live_parts_button(self):
         self._position_live_parts_buttons()
 
-    def _select_live_part(self, name: str):
-        self.live_assistant_part_var.set(name)
-        self.status_var.set(f"Parte selecionada: {name}.")
-
-    def detect_live_parts_from_history(self):
-        # A extração de partes está desativada temporariamente. O método é
-        # mantido apenas para que referências antigas não gerem exceção.
-        return
 
     def _set_assistant_names(self, names: list[str]):
         self.assistant_names = []
@@ -14949,41 +14634,10 @@ try {
             return f"{committed}\n{draft}"
         return committed or draft
 
-    def _queue_live_display(self):
-        with self.live_lock:
-            text = self._current_live_text_locked()
-        self._queue("live_display", text)
-
-    def _show_save_hint(self):
-        if self.last_html_path and self.last_html_path.exists():
-            self.status_var.set("Salvar uma cópia do HTML em outra pasta.")
-        else:
-            self.status_var.set("O botão de salvar ficará disponível ao final da transcrição.")
 
     def _refresh_server_label(self):
         self.server_var.set("")
 
-    def _show_multi_text_help(self):
-        messagebox.showinfo(
-            "Multi model - texto",
-            "Quando esta opção está ativa, o SIG envia o conteúdo da transcrição para os dois modelos "
-            "de texto definidos nas Configurações. As respostas são mantidas na mesma ordem: o Modelo "
-            "de texto 1 preenche a primeira caixa e o Modelo de texto 2 preenche a segunda. O mesmo "
-            "critério é usado na geração de Histórico e Oitiva.",
-            parent=self.root,
-        )
-
-    def _align_multi_controls(self):
-        # Mantido como ponto de compatibilidade com instalações antigas. O
-        # seletor de multi-modelo agora vive exclusivamente na aba Transcrição.
-        return
-
-    def _toggle_multi_text_model(self):
-        # Compatibilidade com layouts de versões antigas. A opção de
-        # multi-modelo agora existe apenas para transcrição de arquivos.
-        self.multi_text_model_var.set(False)
-        self.multi_text_secondary = ""
-        self._refresh_multi_text_layout()
 
     def _refresh_multi_text_visibility(self):
         self.multi_text_model_var.set(False)
@@ -15377,16 +15031,6 @@ try {
         self._show_folder_button(visible=False)
         self.status_var.set("Fila limpa.")
 
-    def _update_tree_size(self, tree_item, size_str: str):
-        """Atualiza a coluna de Tamanho (chamado da thread)."""
-        try:
-            if self.tree.exists(tree_item):
-                values = list(self.tree.item(tree_item, "values"))
-                if len(values) >= 2:
-                    values[1] = size_str
-                    self.tree.item(tree_item, values=values)
-        except Exception:
-            pass
 
     def _job_size_column_text(self, job) -> str:
         """Texto da coluna Tamanho após conversão/VAD.
@@ -15410,16 +15054,6 @@ try {
 
     # _compute_and_update_duration removida — coluna agora é Tamanho (KB), definida na inserção
 
-    def _format_duration(self, path: Path) -> str:
-        """Usa ffprobe preferencialmente (rápido e preciso)."""
-        try:
-            if hasattr(self, "ffmpeg_tools") and self.ffmpeg_tools is not None:
-                secs = int(round(self.ffmpeg_tools._get_duration_only(path) or 0))
-                if secs > 0:
-                    return f"{secs}s"
-            return "—"
-        except Exception:
-            return "—"
 
     def _refresh_tree_modes(self):
         # Modo não é mais exibido na lista (substituído por Duração).
@@ -15427,13 +15061,6 @@ try {
         # mas não atualizamos mais a coluna da árvore.
         pass
 
-    def _mode_label(self) -> str:
-        base = mode_label_from_value(self.mode_var.get())
-        if self.convert_only_var.get():
-            return f"{base} / apenas converter"
-        if self.send_zip_var.get():
-            return f"{base} / zip nível {self.zip_level_var.get()}"
-        return base
 
     def open_settings(self):
         if self.running or self.live_state != "idle" or self.assistant_busy or (getattr(self, "ffmpeg_tools", None) and self.ffmpeg_tools.running):
@@ -20276,10 +19903,6 @@ try {
                             self.tree.item(item, values=values)
 
 
-
-
-
-
                 elif kind == "status":
                     self.status_var.set(message[1])
                 elif kind == "status_silent":
@@ -20853,14 +20476,6 @@ try {
             self.root.after(500, self.root.destroy)
         else:
             self.root.destroy()
-
-
-class CanvasImage:
-    def __init__(self, path: Path):
-        import tkinter as tk
-
-        source = tk.PhotoImage(file=str(path))
-        self.image = source.subsample(2, 2)
 
 
 def main():

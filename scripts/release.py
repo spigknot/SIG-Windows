@@ -173,26 +173,6 @@ INCREMENTAL_EXCLUDED_TOP_LEVEL = {
 }
 
 
-def create_incremental_tree(source_root: Path, destination_root: Path) -> None:
-    """Copy only files that an existing onedir installation may replace.
-
-    Runtime assets are deliberately excluded: they are large, machine-local
-    dependencies and belong to the full GitHub package.  The updater keeps
-    every excluded asset already present at the destination.
-    """
-    if destination_root.exists():
-        raise ValidationError(f"diretório incremental já existe: {destination_root}")
-    destination_root.mkdir(parents=True)
-    for child in sorted(source_root.iterdir(), key=lambda path: path.name.casefold()):
-        if child.name in INCREMENTAL_EXCLUDED_TOP_LEVEL:
-            continue
-        destination = destination_root / child.name
-        if child.is_dir():
-            shutil.copytree(child, destination)
-        else:
-            shutil.copy2(child, destination)
-
-
 def _version_parts(version: str) -> tuple[int, ...]:
     match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})_(\d{3})", version or "")
     if not match:
@@ -237,18 +217,6 @@ def read_content_snapshots(root: Path) -> dict[str, dict]:
         if isinstance(files, dict):
             snapshots[str(version)] = files
     return snapshots
-
-
-def latest_snapshot_before(root: Path, version: str) -> tuple[str, dict] | None:
-    """Entrada mais recente do snapshot com versão menor que a atual."""
-    candidates = [
-        (snapshot_version, files)
-        for snapshot_version, files in read_content_snapshots(root).items()
-        if _version_parts(snapshot_version) < _version_parts(version) and files
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: _version_parts(item[0]))
 
 
 def find_iscc() -> Path | None:
@@ -347,53 +315,6 @@ def write_snapshot_entry(root: Path, version: str, files: dict[str, dict]) -> No
         + "\n",
         encoding="utf-8",
     )
-
-
-def create_incremental_diff_tree(
-    source_root: Path,
-    destination_root: Path,
-    previous_files: dict[str, dict],
-) -> tuple[int, int]:
-    """Monta a incremental por diff (hash por arquivo).
-
-    Inclui apenas arquivos novos/alterados em relação ao snapshot anterior e
-    escreve ``removidos.txt`` com os caminhos que sumiram. Retorna
-    ``(incluídos, removidos)``.
-    """
-    if destination_root.exists():
-        raise ValidationError(f"diretório incremental já existe: {destination_root}")
-    destination_root.mkdir(parents=True)
-    previous = {
-        str(name): str(entry.get("sha256") or "")
-        for name, entry in previous_files.items()
-    }
-    # Estes identificam o pacote instalado e sempre viajam (prompts/modelos
-    # são pequenos e mantêm os padrões editáveis em dia).
-    always_top_levels = {"sig.exe", "build-info.json", "prompts", "modelos"}
-    included = 0
-    current_names: set[str] = set()
-    for path in sorted(source_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(source_root).as_posix()
-        if relative.split("/", 1)[0] in INCREMENTAL_EXCLUDED_TOP_LEVEL:
-            continue
-        current_names.add(relative)
-        if relative.split("/", 1)[0] in always_top_levels or previous.get(relative) != sha256_file(path):
-            destination = destination_root / Path(*PurePosixPath(relative).parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, destination)
-            included += 1
-    removed = sorted(
-        name
-        for name in previous
-        if name not in current_names and name.split("/", 1)[0] not in INCREMENTAL_EXCLUDED_TOP_LEVEL
-    )
-    (destination_root / "removidos.txt").write_text(
-        "\n".join(removed) + ("\n" if removed else ""),
-        encoding="utf-8",
-    )
-    return included, len(removed)
 
 
 def verify_build_environment() -> None:

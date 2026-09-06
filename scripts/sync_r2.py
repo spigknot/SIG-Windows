@@ -122,14 +122,6 @@ def main() -> None:
         return digest.hexdigest()
 
 
-    def _remote_etag(key: str) -> str:
-        try:
-            head = s3.head_object(Bucket=bucket, Key=key)
-            return str(head.get("ETag") or "").strip('"')
-        except s3.exceptions.ClientError:
-            return ""
-
-
     # Diff por hash: uma única listagem (ETags) vs o MD5 local — sobe só o que mudou
     remote_etags: dict[str, str] = {}
     paginator = s3.get_paginator("list_objects_v2")
