@@ -52,6 +52,38 @@ GROK_CODES = {
     "uk", "ur", "vi", "zh", "zu",
 }
 
+# Meta Muse Voice: o seletor do app exibe a sigla, mas o parâmetro
+# `languageBias` leva o idioma por extenso entre colchetes.
+METAMUSE_LANGUAGE_NAMES = {
+    "ar": "Arabic",
+    "bn": "Bengali",
+    "nl": "Dutch",
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "kn": "Kannada",
+    "ko": "Korean",
+    "ms": "Malay",
+    "zh": "Mandarin Chinese",
+    "mr": "Marathi",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "es": "Spanish",
+    "tl": "Tagalog",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "th": "Thai",
+    "tr": "Turkish",
+    "vi": "Vietnamese",
+}
+
+METAMUSE_CODES = set(METAMUSE_LANGUAGE_NAMES)
+
 # ---------------- Settings keys ----------------
 
 KEY_LANGUAGE_MODE = {
@@ -59,24 +91,28 @@ KEY_LANGUAGE_MODE = {
     "assemblyai": "assemblyai_language_mode",
     "elevenlabs": "elevenlabs_language_mode",
     "grok": "grok_language_mode",
+    "metamuse": "metamuse_language_mode",
 }
 KEY_LANGUAGE_CUSTOM = {
     "deepgram": "deepgram_language_custom",
     "assemblyai": "assemblyai_language_custom",
     "elevenlabs": "elevenlabs_language_custom",
     "grok": "grok_language_custom",
+    "metamuse": "metamuse_language_custom",
 }
 DEFAULT_MODE = {
     "deepgram": "pt-BR",
     "assemblyai": "pt",
     "elevenlabs": "pt",
     "grok": "pt",
+    "metamuse": "pt",
 }
 MENU_OPTIONS = {
     "deepgram": ["multi", "pt-BR", "en", "es", "custom"],
     "assemblyai": ["multi", "pt", "es", "en", "custom"],
     "elevenlabs": ["multi", "pt", "es", "en", "custom"],
     "grok": ["multi", "pt", "en", "es", "custom"],
+    "metamuse": ["multi", "pt", "en", "es", "custom"],
 }
 
 # Labels de exibição (SOMENTE cosmético): o que o usuário vê nos menus e
@@ -108,6 +144,8 @@ def is_valid_code(provider: str, code: str) -> bool:
         return code in ELEVENLABS_CODES_2 or code in ELEVENLABS_CODES_3
     if provider == "grok":
         return code in GROK_CODES
+    if provider == "metamuse":
+        return code in METAMUSE_CODES
     return False
 
 
@@ -122,6 +160,8 @@ def codes_for_help(provider: str) -> str:
         return ", ".join(sorted(ASSEMBLYAI_CODES))
     if provider == "grok":
         return ", ".join(sorted(GROK_CODES))
+    if provider == "metamuse":
+        return ", ".join(sorted(METAMUSE_CODES))
     # ElevenLabs: a tela "?" mostra apenas os códigos de 2 letras.
     return ", ".join(sorted(ELEVENLABS_CODES_2))
 
@@ -193,10 +233,33 @@ def grok_language_param(settings: dict) -> str | None:
     return mode or None
 
 
+def metamuse_language_bias(settings: dict) -> list[str] | None:
+    """Meta Muse Voice: languageBias por extenso; multi omite (autodetecção).
+
+    pt/en/es diretos e cada sigla do custom viram o nome por extenso
+    (ex.: pt -> ["Portuguese"]). Siglas fora da tabela são ignoradas; se
+    nenhuma restar, retorna None (equivale a omitir o parâmetro).
+    """
+    mode = language_mode(settings, "metamuse")
+    if mode == "multi":
+        return None
+    if mode == "custom":
+        codes = parse_codes(language_custom(settings, "metamuse"))
+    else:
+        codes = [mode]
+    names = [METAMUSE_LANGUAGE_NAMES[code] for code in codes if code in METAMUSE_LANGUAGE_NAMES]
+    return names or None
+
+
+def metamuse_mode(diarize_checked: bool) -> str:
+    """Meta Muse Voice: a diarização é o próprio `mode` (sem flag booleana)."""
+    return "DIARIZATION" if diarize_checked else "ENDPOINTING"
+
+
 # ---------------- Diarização: parâmetros por provedor ----------------
 
 def supports_diarize(provider: str, is_live: bool) -> bool:
-    return provider in ("deepgram", "assemblyai", "elevenlabs", "grok")
+    return provider in ("deepgram", "assemblyai", "elevenlabs", "grok", "metamuse")
 
 
 def deepgram_diarize_query(checked: bool) -> str | None:

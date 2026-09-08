@@ -29,6 +29,11 @@ Endpoint REST: https://api.elevenlabs.io/v1/speech-to-text
 Endpoint WebSocket: wss://api.elevenlabs.io/v1/speech-to-text/realtime
 Porta: 443
 
+Nome exibido: Meta Muse Voice
+Endpoint REST: https://api.meta.ai/v1/asr/transcribe
+Endpoint WebSocket: wss://api.meta.ai/v1/asr/realtime
+Porta: 443
+
 
 TEXTO / IA
 ==========

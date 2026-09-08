@@ -48,6 +48,7 @@ class ModelApiKeyFallbackTests(unittest.TestCase):
             sig_app.DEEPGRAM_API_NAME,
             sig_app.ASSEMBLYAI_API_NAME,
             sig_app.ELEVENLABS_API_NAME,
+            sig_app.META_MUSE_API_NAME,
         )
         for server_name in api_servers:
             with self.subTest(server_name=server_name):

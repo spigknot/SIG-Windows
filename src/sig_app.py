@@ -70,6 +70,8 @@ from stt_provider_rules import (
     language_custom,
     language_mode,
     MENU_OPTIONS,
+    metamuse_language_bias,
+    metamuse_mode,
     parse_codes,
     supports_diarize,
 )
@@ -82,7 +84,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260906_001"
+APP_VERSION = "20260907_001"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -314,12 +316,15 @@ DEFAULT_SETTINGS = {
     "deepgram_keyterms": "",
     "assemblyai_api_key": "",
     "elevenlabs_api_key": "",
+    "metamuse_api_key": "",
     "deepgram_language_mode": "pt-BR",
     "deepgram_language_custom": "",
     "assemblyai_language_mode": "pt",
     "assemblyai_language_custom": "",
     "elevenlabs_language_mode": "pt",
     "elevenlabs_language_custom": "",
+    "metamuse_language_mode": "pt",
+    "metamuse_language_custom": "",
     "grok_language_mode": "pt",
     "grok_language_custom": "",
     "imei_api_key": IMEI_API_KEY,
@@ -336,6 +341,9 @@ API_KEY_IMPORT_FIELDS = {
     "deepseek": "deepseek_api_key",
     "xai": "grok_api_key",
     "imei check": "imei_api_key",
+    "meta muse voice": "metamuse_api_key",
+    "muse voice": "metamuse_api_key",
+    "metamuse": "metamuse_api_key",
 }
 GROK_API_NAME = "Grok STT"
 GROK_STT_URL = "https://api.x.ai/v1/stt"
@@ -349,6 +357,10 @@ ASSEMBLYAI_WEBSOCKET_URL = "wss://streaming.assemblyai.com/v3/ws"
 ELEVENLABS_API_NAME = "ElevenLabs Scribe v2 Realtime"
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 ELEVENLABS_WEBSOCKET_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
+META_MUSE_API_NAME = "Meta Muse Voice"
+META_MUSE_STT_URL = "https://api.meta.ai/v1/asr/transcribe"
+META_MUSE_STT_WEBSOCKET_URL = "wss://api.meta.ai/v1/asr/realtime"
+META_MUSE_MODEL = "muse-voice-transcribe-1.0"
 LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
 LIVE_QUALIFICATION_FIELD_IDS = (
     "nome",
@@ -435,6 +447,10 @@ LIVE_INTERVAL_VALUES_MS = (
     1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000,
     15000, 20000, 25000, 30000,
 )
+# Altura reservada na linha de cima de cada microfone da aba Ocorrência. O
+# slot da coluna vermelha abriga o botão de reenvio do áudio integral por
+# REST, sempre centralizado na mesma coluna do microfone vermelho.
+LIVE_RECOVERY_SLOT_HEIGHT = 26
 GROK_RECONNECT_MAX_ATTEMPTS = 8
 GROK_RECONNECT_BUFFER_MILLIS = 8000
 IMEI_HISTORY_FILE = "imei_history.txt"
@@ -6586,11 +6602,12 @@ def read_transcription_servers() -> list[dict]:
     deepgram_selected = any(server["name"] == DEEPGRAM_API_NAME for server in servers if server["selected"])
     assemblyai_selected = any(server["name"] == ASSEMBLYAI_API_NAME for server in servers if server["selected"])
     elevenlabs_selected = any(server["name"] == ELEVENLABS_API_NAME for server in servers if server["selected"])
-    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected
+    metamuse_selected = any(server["name"] == META_MUSE_API_NAME for server in servers if server["selected"])
+    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected or metamuse_selected
     plain_servers = [
         {**server, "selected": server["selected"] and not api_selected}
         for server in servers
-        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME)
+        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME, META_MUSE_API_NAME)
     ]
     return plain_servers + [
         {
@@ -6620,6 +6637,13 @@ def read_transcription_servers() -> list[dict]:
             "parameters": {"model": "scribe_v2_realtime"},
             "selected": elevenlabs_selected,
             "is_elevenlabs_api": True,
+        },
+        {
+            "name": META_MUSE_API_NAME,
+            "url": META_MUSE_STT_URL,
+            "parameters": {"model": META_MUSE_MODEL},
+            "selected": metamuse_selected,
+            "is_metamuse_api": True,
         },
     ]
 
@@ -6775,6 +6799,7 @@ def fallback_transcription_server_for_missing_api_key(
     deepgram_api_key: str,
     assemblyai_api_key: str,
     elevenlabs_api_key: str,
+    metamuse_api_key: str = "",
 ) -> str:
     """Retorna o Granite NAR quando um servidor STT perdeu sua chave."""
     candidate = str(server_name or "").strip()
@@ -6783,6 +6808,7 @@ def fallback_transcription_server_for_missing_api_key(
         DEEPGRAM_API_NAME: deepgram_api_key,
         ASSEMBLYAI_API_NAME: assemblyai_api_key,
         ELEVENLABS_API_NAME: elevenlabs_api_key,
+        META_MUSE_API_NAME: metamuse_api_key,
     }
     if candidate in api_keys and not str(api_keys[candidate] or "").strip():
         return DEFAULT_SETTINGS["transcription_server"]
@@ -6811,6 +6837,7 @@ def normalize_settings(data: dict) -> dict:
         "deepgram_language_mode": "pt-BR",
         "assemblyai_language_mode": "pt",
         "elevenlabs_language_mode": "pt",
+        "metamuse_language_mode": "pt",
         "grok_language_mode": "pt",
     }.items():
         value = str(data.get(language_key) or "").strip()
@@ -6819,6 +6846,7 @@ def normalize_settings(data: dict) -> dict:
         "deepgram_language_custom",
         "assemblyai_language_custom",
         "elevenlabs_language_custom",
+        "metamuse_language_custom",
         "grok_language_custom",
     ):
         clean[custom_key] = str(data.get(custom_key) or "").strip()
@@ -6832,6 +6860,7 @@ def normalize_settings(data: dict) -> dict:
     deepgram_api_key = str(data.get("deepgram_api_key") or "").strip()
     assemblyai_api_key = str(data.get("assemblyai_api_key") or "").strip()
     elevenlabs_api_key = str(data.get("elevenlabs_api_key") or "").strip()
+    metamuse_api_key = str(data.get("metamuse_api_key") or "").strip()
     deepseek_api_key = str(data.get("deepseek_api_key") or "").strip()
     server_names = {server["name"] for server in read_transcription_servers()}
     transcription_server = str(
@@ -6847,6 +6876,7 @@ def normalize_settings(data: dict) -> dict:
         deepgram_api_key,
         assemblyai_api_key,
         elevenlabs_api_key,
+        metamuse_api_key,
     )
     clean["transcription_server"] = (
         transcription_server
@@ -6864,6 +6894,7 @@ def normalize_settings(data: dict) -> dict:
             deepgram_api_key,
             assemblyai_api_key,
             elevenlabs_api_key,
+            metamuse_api_key,
         )
         if candidate in server_names and candidate != ELEVENLABS_API_NAME:
             normalized_multi_models.append(candidate)
@@ -6947,6 +6978,7 @@ def normalize_settings(data: dict) -> dict:
     )
     clean["assemblyai_api_key"] = assemblyai_api_key
     clean["elevenlabs_api_key"] = elevenlabs_api_key
+    clean["metamuse_api_key"] = metamuse_api_key
     clean["deepseek_api_key"] = deepseek_api_key
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
@@ -7194,6 +7226,10 @@ def is_elevenlabs_transcription(settings: dict) -> bool:
     return selected_transcription_server(settings).get("is_elevenlabs_api", False)
 
 
+def is_metamuse_transcription(settings: dict) -> bool:
+    return selected_transcription_server(settings).get("is_metamuse_api", False)
+
+
 def plausible_elevenlabs_api_key(value: str) -> bool:
     key = (value or "").strip()
     return 20 <= len(key) <= 64 and all(
@@ -7248,6 +7284,11 @@ def transcription_form_fields(settings: dict) -> dict:
         if stt_provider_rules.elevenlabs_rest_diarize(diarize_checked):
             fields["diarize"] = "true"
         return fields
+    if is_metamuse_transcription(settings):
+        # O Muse monta o corpo REST dedicado (parte JSON "request" + parte
+        # "audio"); não há campos de formulário — a assinatura fica vazia
+        # apenas para manter o contrato do uploader.
+        return {}
     return selected_transcription_server(settings)["parameters"].copy()
 
 
@@ -7296,7 +7337,152 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
             {"xi-api-key": api_key},
             "file",
         )
+    if is_metamuse_transcription(settings):
+        api_key = str(settings.get("metamuse_api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Insira a chave API do Meta Muse Voice nas configurações.")
+        # O REST do Muse usa corpo dedicado (ver metamuse_rest_transcribe);
+        # este uploader valida a chave e serve aos fluxos que só precisam
+        # de um uploader presente (cancelamento, multi-modelo).
+        return GraniteUploader(cancel_event, {}, {}, "file")
     return GraniteUploader(cancel_event, transcription_form_fields(settings))
+
+
+def metamuse_handshake_payload(api_key: str, diarize_checked: bool, settings: dict) -> dict:
+    """Primeiro frame textual do WebSocket do Muse (configuração da sessão).
+
+    A credencial viaja dentro do JSON em ``authorization.accessToken``
+    (o handshake não usa header Authorization). Sem diarização o modo é
+    ENDPOINTING; com diarização, DIARIZATION.
+    """
+    payload = {
+        "authorization": {"accessToken": api_key},
+        "audioEncoding": "PCM_16KHZ",
+        "model": META_MUSE_MODEL,
+        "mode": metamuse_mode(bool(diarize_checked)),
+        "partialMode": "CUMULATIVE",
+        "emitAudioProgress": False,
+    }
+    language_bias = metamuse_language_bias(settings)
+    if language_bias:
+        payload["languageBias"] = language_bias
+    return payload
+
+
+def metamuse_rest_request_body(diarize_checked: bool, settings: dict) -> dict:
+    """Parte JSON \"request\" do REST do Muse (multipart com a parte \"audio\")."""
+    body = {
+        "mode": metamuse_mode(bool(diarize_checked)),
+        "model": META_MUSE_MODEL,
+        "audioEncoding": "WAV",
+    }
+    language_bias = metamuse_language_bias(settings)
+    if language_bias:
+        body["languageBias"] = language_bias
+    return body
+
+
+def metamuse_format_rest_response(payload: dict, diarize_checked: bool) -> str:
+    """Texto final do REST do Muse: turnos diarizados ou transcript único.
+
+    Os rótulos de falante são letras ("A", "B", ...) — viram
+    "Interlocutor 1/2/..." na ordem de aparição, como no restante do app.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    if diarize_checked:
+        turns = payload.get("turns")
+        if isinstance(turns, list) and turns:
+            order: dict[str, int] = {}
+            lines = []
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    continue
+                text = str(turn.get("transcript") or "").strip()
+                if not text:
+                    continue
+                label = str(turn.get("speaker") or "").strip()
+                if label:
+                    if label not in order:
+                        order[label] = len(order) + 1
+                    lines.append(f"Interlocutor {order[label]}: {text}")
+                else:
+                    lines.append(text)
+            if lines:
+                return "\n".join(lines).strip()
+    return str(payload.get("transcript") or "").strip()
+
+
+def metamuse_rest_transcribe(
+    cancel_event: threading.Event,
+    settings: dict,
+    audio_path: Path,
+    raw_path: Path | None = None,
+) -> str:
+    """Transcreve um WAV pelo REST do Muse (POST multipart dedicado)."""
+    api_key = str(settings.get("metamuse_api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("Insira a chave API do Meta Muse Voice nas configurações.")
+    if cancel_event.is_set():
+        raise Cancelled()
+    size = audio_path.stat().st_size
+    if size > 32 * 1024 * 1024:
+        raise RuntimeError(
+            "O áudio passa de 32 MB; o endpoint REST do Muse aceita no máximo "
+            "32 MB (ou 10 minutos). Divida o áudio ou use o streaming ao vivo."
+        )
+    diarize_checked = bool(settings.get("diarize") or settings.get("grok_diarize"))
+    request_body = json.dumps(metamuse_rest_request_body(diarize_checked, settings), ensure_ascii=False)
+    boundary = f"----sigmuse-{uuid.uuid4().hex}"
+    crlf = chr(13) + chr(10)
+    preamble = (
+        f"--{boundary}" + crlf
+        + 'Content-Disposition: form-data; name="request"' + crlf
+        + "Content-Type: application/json" + crlf + crlf
+        + f"{request_body}" + crlf
+        + f"--{boundary}" + crlf
+        + f'Content-Disposition: form-data; name="audio"; filename="{audio_path.name}"' + crlf
+        + "Content-Type: audio/wav" + crlf + crlf
+    ).encode("utf-8")
+    ending = (crlf + f"--{boundary}--" + crlf).encode("utf-8")
+    parsed = urlparse(META_MUSE_STT_URL)
+    conn = http.client.HTTPSConnection(parsed.netloc, timeout=60 * 60)
+    try:
+        conn.putrequest("POST", parsed.path or "/")
+        conn.putheader("accept", "application/json")
+        conn.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+        conn.putheader("Content-Length", str(len(preamble) + size + len(ending)))
+        conn.putheader("Authorization", f"Bearer {api_key}")
+        conn.endheaders()
+        conn.send(preamble)
+        with audio_path.open("rb") as handle:
+            while True:
+                if cancel_event.is_set():
+                    raise Cancelled()
+                chunk = handle.read(1024 * 128)
+                if not chunk:
+                    break
+                conn.send(chunk)
+        conn.send(ending)
+        if cancel_event.is_set():
+            raise Cancelled()
+        response = conn.getresponse()
+        raw = response.read()
+        status = response.status
+    finally:
+        conn.close()
+    if raw_path is not None:
+        try:
+            raw_path.write_bytes(raw)
+        except OSError:
+            pass
+    if status != 200:
+        raise RuntimeError(f"HTTP {status}\n{raw.decode('utf-8', errors='replace')[:500]}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig", errors="replace") or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"resposta inválida do Muse: {exc}") from exc
+    return metamuse_format_rest_response(payload, diarize_checked)
 
 
 def safe_stems(paths: list[Path]) -> dict[Path, str]:
@@ -8822,6 +9008,7 @@ class SigApp:
         self.live_uses_deepgram_websocket = False
         self.live_uses_assemblyai_websocket = False
         self.live_uses_elevenlabs_websocket = False
+        self.live_uses_metamuse_websocket = False
         self.live_grok_settings: dict | None = None
         self.live_grok_language = "pt"
         self.live_grok_diarize = False
@@ -8849,6 +9036,12 @@ class SigApp:
         self.elevenlabs_ws_done_event = threading.Event()
         self.elevenlabs_ws_lost_event = threading.Event()
         self.elevenlabs_ws_intentional_close = False
+        self.metamuse_ws_app = None
+        self.metamuse_ws_thread: threading.Thread | None = None
+        self.metamuse_ws_ready_event = threading.Event()
+        self.metamuse_ws_done_event = threading.Event()
+        self.metamuse_ws_lost_event = threading.Event()
+        self.metamuse_ws_intentional_close = False
         self.live_was_grok_websocket = False
         self.live_audio_recovery_available = False
         self.live_recovery_thread: threading.Thread | None = None
@@ -10157,20 +10350,41 @@ class SigApp:
         self.live_grok_controls.pack(side=LEFT)
         self.live_top_spacer = ttk.Frame(live_top)
         self.live_top_spacer.pack(side=LEFT, fill=X, expand=True)
-        self.live_normal_mic_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
-        self.live_normal_mic_canvas.pack(side=LEFT, padx=(0, 8))
+        # Cada microfone fica numa coluna vertical com um slot superior de
+        # altura fixa, para os três círculos continuarem alinhados. O slot da
+        # coluna vermelha abriga o botão de reenvio do áudio integral por
+        # REST: ele aparece sempre na linha de cima do microfone vermelho,
+        # centralizado na mesma coluna (sem overlay nem place() flutuante).
+        self.live_normal_mic_column = ttk.Frame(live_top)
+        self.live_normal_mic_column.pack(side=LEFT, padx=(0, 8))
+        self.live_normal_mic_top_slot = ttk.Frame(
+            self.live_normal_mic_column, width=44, height=LIVE_RECOVERY_SLOT_HEIGHT
+        )
+        self.live_normal_mic_top_slot.pack(side=TOP)
+        self.live_normal_mic_top_slot.pack_propagate(False)
+        self.live_normal_mic_canvas = Canvas(self.live_normal_mic_column, width=44, height=44, highlightthickness=0, background="#f4f7f6")
+        self.live_normal_mic_canvas.pack(side=TOP)
         self.live_normal_mic_canvas.bind("<Button-1>", lambda _event: self.start_normal_live_recording())
         self._draw_normal_live_mic_button()
-        self.live_pause_canvas = Canvas(live_top, width=44, height=44, highlightthickness=0, background="#f4f7f6")
-        self.live_pause_canvas.pack(side=LEFT, padx=(0, 8))
+        self.live_pause_column = ttk.Frame(live_top)
+        self.live_pause_column.pack(side=LEFT, padx=(0, 8))
+        self.live_pause_top_slot = ttk.Frame(
+            self.live_pause_column, width=44, height=LIVE_RECOVERY_SLOT_HEIGHT
+        )
+        self.live_pause_top_slot.pack(side=TOP)
+        self.live_pause_top_slot.pack_propagate(False)
+        self.live_pause_canvas = Canvas(self.live_pause_column, width=44, height=44, highlightthickness=0, background="#f4f7f6")
+        self.live_pause_canvas.pack(side=TOP)
         self.live_pause_canvas.bind("<Button-1>", lambda _event: self.toggle_live_mic())
-        # Keep the red live microphone at its original row height. The optional
-        # integral-audio recovery button is overlaid at the far right below.
-        self.live_mic_stack = ttk.Frame(live_top, width=44, height=44)
-        self.live_mic_stack.pack(side=LEFT, padx=(0, 8))
-        self.live_mic_stack.pack_propagate(False)
+        self.live_mic_column = ttk.Frame(live_top)
+        self.live_mic_column.pack(side=LEFT, padx=(0, 8))
+        self.live_recover_audio_slot = ttk.Frame(
+            self.live_mic_column, width=44, height=LIVE_RECOVERY_SLOT_HEIGHT
+        )
+        self.live_recover_audio_slot.pack(side=TOP)
+        self.live_recover_audio_slot.pack_propagate(False)
         self.live_recover_audio_button = ttk.Button(
-            live_top,
+            self.live_recover_audio_slot,
             image=self.recover_audio_icon,
             style="Recover.TButton",
             command=self.recover_live_integral_audio,
@@ -10179,6 +10393,9 @@ class SigApp:
             self.live_recover_audio_button,
             "Reenviar o áudio integral ao Grok por REST",
         )
+        self.live_mic_stack = ttk.Frame(self.live_mic_column, width=44, height=44)
+        self.live_mic_stack.pack(side=TOP)
+        self.live_mic_stack.pack_propagate(False)
         self.live_mic_canvas = Canvas(
             self.live_mic_stack,
             width=44,
@@ -11640,44 +11857,11 @@ class SigApp:
             else:
                 top_padding = max(0, live_top_height - waveform_height)
             activity_box.pack_configure(pady=(top_padding, 0))
-            self._position_live_audio_recovery_button()
         except Exception:
             pass
 
     def _on_live_top_configure(self, _event=None):
         self._align_activity_log()
-        self._position_live_audio_recovery_button()
-
-    def _position_live_audio_recovery_button(self):
-        button = getattr(self, "live_recover_audio_button", None)
-        mic_stack = getattr(self, "live_mic_stack", None)
-        live_top = getattr(self, "live_top", None)
-        if not button or not mic_stack or not live_top:
-            return
-        try:
-            if not button.winfo_ismapped():
-                return
-            live_top.update_idletasks()
-            mic_stack.update_idletasks()
-            button.update_idletasks()
-            button_width = max(1, button.winfo_reqwidth())
-            button_height = max(1, button.winfo_reqheight())
-            # Centraliza o botão exatamente sobre o microfone vermelho
-            # (live_mic_stack 44x44), dentro das coordenadas do live_top.
-            stack_x = max(0, mic_stack.winfo_x())
-            stack_y = max(0, mic_stack.winfo_y())
-            mic_size = 44
-            center_x = stack_x + (mic_size - button_width) // 2
-            center_y = stack_y + (mic_size - button_height) // 2
-            max_x = max(0, live_top.winfo_width() - button_width)
-            max_y = max(0, live_top.winfo_height() - button_height)
-            button.place(
-                x=min(max(0, center_x), max_x),
-                y=min(max(0, center_y), max_y),
-                anchor="nw",
-            )
-        except Exception:
-            pass
 
     def select_main_tab(self, tab_name: str):
         active_bg = "#ffffff"
@@ -13216,12 +13400,11 @@ class SigApp:
         button = getattr(self, "live_recover_audio_button", None)
         if button is None or not button.winfo_exists():
             return
-        button.place_forget()
+        button.pack_forget()
         if visible and self.live_audio_recovery_available:
-            # This placement does not participate in geometry management, so
-            # showing the button cannot move the microphone row or timer.
-            button.place(x=0, y=0, anchor="nw")
-            self._position_live_audio_recovery_button()
+            # O slot acima do microfone vermelho tem tamanho fixo, então o
+            # botão aparece sempre centralizado na mesma coluna do microfone.
+            button.pack(expand=True)
 
     @staticmethod
     def _sounddevice_has_input_device(sounddevice_module) -> bool:
@@ -14340,6 +14523,8 @@ try {
             return "assemblyai"
         if is_elevenlabs_transcription(self.settings):
             return "elevenlabs"
+        if is_metamuse_transcription(self.settings):
+            return "metamuse"
         if is_grok_transcription(self.settings):
             return "grok"
         return None
@@ -14453,6 +14638,7 @@ try {
             or is_deepgram_transcription(self.settings)
             or is_assemblyai_transcription(self.settings)
             or is_elevenlabs_transcription(self.settings)
+            or is_metamuse_transcription(self.settings)
         )
         if diarize_supported:
             self.live_grok_controls.pack(side=LEFT, before=self.live_top_spacer)
@@ -14501,14 +14687,18 @@ try {
         if is_deepgram_transcription(self.settings) and not self.settings.get("deepgram_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Deepgram nas configurações antes de gravar.")
             return
+        if is_metamuse_transcription(self.settings) and not self.settings.get("metamuse_api_key"):
+            messagebox.showerror("sig", "Insira a chave API do Meta Muse Voice nas configurações antes de gravar.")
+            return
         self.normal_record_grok = is_grok_transcription(self.settings)
         self.normal_record_deepgram = is_deepgram_transcription(self.settings)
+        self.normal_record_metamuse = is_metamuse_transcription(self.settings)
         self.normal_record_language = (
             deepgram_language_param(self.settings)
             if is_deepgram_transcription(self.settings)
             else grok_language_param(self.settings) or "pt"
         )
-        self.normal_record_diarize = (self.normal_record_grok or self.normal_record_deepgram) and bool(
+        self.normal_record_diarize = (self.normal_record_grok or self.normal_record_deepgram or self.normal_record_metamuse) and bool(
             self.live_diarize_var.get()
         )
         self.normal_record_paused = False
@@ -14543,6 +14733,19 @@ try {
             wav_path = pcm_path.with_suffix(".wav")
             write_wav_from_pcm_file(wav_path, pcm_path)
             cancel = threading.Event()
+            if getattr(self, "normal_record_metamuse", False):
+                record_settings = self.settings.copy()
+                if self.normal_record_diarize:
+                    record_settings["diarize"] = True
+                text = metamuse_rest_transcribe(
+                    cancel, record_settings, wav_path, wav_path.with_suffix(".raw")
+                )
+                if not text.strip():
+                    self._queue("status", "Transcrição ao vivo finalizada sem conteúdo")
+                else:
+                    self._queue("live_payload", text, "", False)
+                    self._queue("status", "Transcrição concluída.")
+                return
             grok = self.normal_record_grok
             api_provider = (
                 getattr(self, "normal_record_deepgram", False)
@@ -14657,6 +14860,8 @@ try {
             if name == DEEPGRAM_API_NAME and not settings.get("deepgram_api_key", "").strip():
                 continue
             if name == ASSEMBLYAI_API_NAME and not plausible_assemblyai_api_key(settings.get("assemblyai_api_key", "")):
+                continue
+            if name == META_MUSE_API_NAME and not str(settings.get("metamuse_api_key") or "").strip():
                 continue
             available[transcription_server_label(server)] = name
         return available
@@ -15159,6 +15364,7 @@ try {
         deepgram_api_key_var = StringVar(value=self.settings.get("deepgram_api_key", ""))
         assemblyai_api_key_var = StringVar(value=self.settings.get("assemblyai_api_key", ""))
         elevenlabs_api_key_var = StringVar(value=self.settings.get("elevenlabs_api_key", ""))
+        metamuse_api_key_var = StringVar(value=self.settings.get("metamuse_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         police_name_var = StringVar(value=self.settings.get("police_name", ""))
         police_role_var = StringVar(value=self.settings.get("police_role", ""))
@@ -15241,7 +15447,7 @@ try {
             ttk.Label(section, text=label).grid(
                 row=row, column=0, sticky="w", pady=5, padx=(0, 12)
             )
-            entry = ttk.Entry(section, textvariable=variable, show="*", width=44)
+            entry = ttk.Entry(section, textvariable=variable, show="*", width=60)
             entry.grid(row=row, column=1, sticky="ew", pady=5)
             if help_text:
                 create_tooltip(entry, help_text)
@@ -15250,23 +15456,30 @@ try {
         add_api_field(
             api_transcription_frame,
             0,
-            "Chave API da ElevenLabs",
+            "ElevenLabs",
             elevenlabs_api_key_var,
             "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
         )
         add_api_field(
             api_transcription_frame,
             1,
-            "Chave API do Deepgram",
+            "Deepgram",
             deepgram_api_key_var,
             "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
         )
         add_api_field(
             api_transcription_frame,
             2,
-            "Chave API da AssemblyAI",
+            "AssemblyAI",
             assemblyai_api_key_var,
             "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
+        )
+        add_api_field(
+            api_transcription_frame,
+            3,
+            "Meta Muse Voice",
+            metamuse_api_key_var,
+            "Preencha para liberar o Meta Muse Voice na lista de transcrição.",
         )
         add_api_field(
             api_text_frame,
@@ -15290,6 +15503,7 @@ try {
             "deepgram_api_key": deepgram_api_key_var,
             "assemblyai_api_key": assemblyai_api_key_var,
             "elevenlabs_api_key": elevenlabs_api_key_var,
+            "metamuse_api_key": metamuse_api_key_var,
             "imei_api_key": imei_api_key_var,
         }
         api_key_import_labels = {
@@ -15298,6 +15512,7 @@ try {
             "deepgram_api_key": "Deepgram",
             "assemblyai_api_key": "AssemblyAI",
             "elevenlabs_api_key": "ElevenLabs",
+            "metamuse_api_key": "Meta Muse Voice",
             "imei_api_key": "Imei Check",
         }
 
@@ -15465,6 +15680,10 @@ try {
                 and (
                     server["name"] != ELEVENLABS_API_NAME
                     or plausible_elevenlabs_api_key(elevenlabs_api_key_var.get())
+                )
+                and (
+                    server["name"] != META_MUSE_API_NAME
+                    or bool(metamuse_api_key_var.get().strip())
                 )
             ]
             transcription_labels = {
@@ -16091,12 +16310,14 @@ try {
             deepgram_keyterms = str(self.settings.get("deepgram_keyterms") or "").strip()
             assemblyai_api_key = assemblyai_api_key_var.get().strip()
             elevenlabs_api_key = elevenlabs_api_key_var.get().strip()
+            metamuse_api_key = metamuse_api_key_var.get().strip()
             selected_transcription = fallback_transcription_server_for_missing_api_key(
                 selected_transcription,
                 api_key,
                 deepgram_api_key,
                 assemblyai_api_key,
                 elevenlabs_api_key,
+                metamuse_api_key,
             )
             selected_history = fallback_text_model_for_missing_api_key(
                 selected_history,
@@ -16249,6 +16470,7 @@ try {
                     "deepgram_keyterms": deepgram_keyterms,
                     "assemblyai_api_key": assemblyai_api_key,
                     "elevenlabs_api_key": elevenlabs_api_key,
+                    "metamuse_api_key": metamuse_api_key,
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -16621,6 +16843,12 @@ try {
         ) and not self.settings.get("elevenlabs_api_key"):
             messagebox.showerror("sig", "Insira a chave API da ElevenLabs nas configurações antes de iniciar.")
             return
+        if (
+            is_metamuse_transcription(self.settings)
+            or (secondary_settings is not None and is_metamuse_transcription(secondary_settings))
+        ) and not self.settings.get("metamuse_api_key"):
+            messagebox.showerror("sig", "Insira a chave API do Meta Muse Voice nas configurações antes de iniciar.")
+            return
         self.live_stop_event.clear()
         self.live_abort_event.clear()
         self.live_ws_finalize_pending = False
@@ -16635,6 +16863,9 @@ try {
             "grok_rest_requests", False
         )
         self.live_uses_elevenlabs_websocket = is_elevenlabs_transcription(self.settings) and not self.settings.get(
+            "grok_rest_requests", False
+        )
+        self.live_uses_metamuse_websocket = is_metamuse_transcription(self.settings) and not self.settings.get(
             "grok_rest_requests", False
         )
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
@@ -16660,11 +16891,17 @@ try {
         self.elevenlabs_ws_lost_event.clear()
         self.elevenlabs_ws_intentional_close = False
         self.elevenlabs_ws_app = None
+        self.metamuse_ws_ready_event.clear()
+        self.metamuse_ws_done_event.clear()
+        self.metamuse_ws_lost_event.clear()
+        self.metamuse_ws_intentional_close = False
+        self.metamuse_ws_app = None
         streaming_websocket = (
             self.live_uses_grok_websocket
             or self.live_uses_deepgram_websocket
             or self.live_uses_assemblyai_websocket
             or self.live_uses_elevenlabs_websocket
+            or self.live_uses_metamuse_websocket
         )
         self.live_uploader = None if streaming_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
         temp_live = app_base_dir() / "temp" / "live"
@@ -16709,6 +16946,7 @@ try {
                 or self.live_uses_deepgram_websocket
                 or self.live_uses_assemblyai_websocket
                 or self.live_uses_elevenlabs_websocket
+                or self.live_uses_metamuse_websocket
             )
             else concurrent.futures.ThreadPoolExecutor(max_workers=1)
         )
@@ -16725,11 +16963,14 @@ try {
             and not self.live_uses_deepgram_websocket
             and not self.live_uses_assemblyai_websocket
             and not self.live_uses_elevenlabs_websocket
+            and not self.live_uses_metamuse_websocket
         ):
             self.status_var.set("Ouvindo e transcrevendo ao vivo...")
         elif streaming_websocket:
             self.status_var.set("Gravando. Clique no botão verde para encerrar o websocket")
-        if self.live_uses_elevenlabs_websocket:
+        if self.live_uses_metamuse_websocket:
+            target = self._metamuse_live_capture_loop
+        elif self.live_uses_elevenlabs_websocket:
             target = self._elevenlabs_live_capture_loop
         elif self.live_uses_assemblyai_websocket:
             target = self._assemblyai_live_capture_loop
@@ -16781,6 +17022,26 @@ try {
             self.live_paused_total += time.time() - self.live_paused_at
             self.live_paused_at = 0.0
         self._set_live_state("finalizing")
+        if self.live_uses_metamuse_websocket:
+            self.metamuse_ws_intentional_close = True
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
+            self.live_stop_event.set()
+            app = self.metamuse_ws_app
+            if not app:
+                self._finish_ws_finalize_step()
+                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
+                self._finish_live_output()
+                return
+            try:
+                app.send(json.dumps({"type": "endStream"}))
+                threading.Thread(target=self._wait_for_metamuse_final_event, daemon=True).start()
+            except Exception:
+                self._finish_ws_finalize_step()
+                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
+                self._finish_live_output()
+            return
         if self.live_uses_elevenlabs_websocket:
             self.elevenlabs_ws_intentional_close = True
             self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
@@ -16888,6 +17149,24 @@ try {
         self.live_finalize_thread = threading.Thread(target=self._finish_live_transcription, daemon=True)
         self.live_finalize_thread.start()
 
+    def _wait_for_metamuse_final_event(self):
+        if self.metamuse_ws_done_event.wait(20):
+            return
+        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
+            self.metamuse_ws_intentional_close = True
+            app = self.metamuse_ws_app
+            if app:
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self._queue(
+                "status",
+                "O Muse não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
+            )
+            self._finish_ws_finalize_step()
+            self._finish_live_output()
+
     def _wait_for_elevenlabs_final_event(self):
         if self.elevenlabs_ws_done_event.wait(3):
             return
@@ -16975,6 +17254,7 @@ try {
         self.deepgram_ws_intentional_close = True
         self.assemblyai_ws_intentional_close = True
         self.elevenlabs_ws_intentional_close = True
+        self.metamuse_ws_intentional_close = True
         if self.live_uploader:
             self.live_uploader.cancel()
         if self.grok_ws_app:
@@ -17001,10 +17281,17 @@ try {
             except Exception:
                 pass
         self.elevenlabs_ws_app = None
+        if self.metamuse_ws_app:
+            try:
+                self.metamuse_ws_app.close(status=1000, reason="Cancelado")
+            except Exception:
+                pass
+        self.metamuse_ws_app = None
         self.live_uses_grok_websocket = False
         self.live_uses_deepgram_websocket = False
         self.live_uses_assemblyai_websocket = False
         self.live_uses_elevenlabs_websocket = False
+        self.live_uses_metamuse_websocket = False
         executor = self.live_upload_executor
         self.live_upload_executor = None
         if executor:
@@ -17202,10 +17489,15 @@ try {
         raw_path = raw_dir / f"{wav_path.stem}.json"
         try:
             write_wav_from_pcm_bytes(wav_path, pcm)
-            uploader = create_transcription_uploader(self.live_abort_event, settings)
-            status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
-            if status != 200:
-                raise RuntimeError(f"HTTP {status}")
+            if is_metamuse_transcription(settings):
+                transcript = metamuse_rest_transcribe(
+                    self.live_abort_event, settings, wav_path, raw_path
+                )
+            else:
+                uploader = create_transcription_uploader(self.live_abort_event, settings)
+                status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
+                if status != 200:
+                    raise RuntimeError(f"HTTP {status}")
             self._update_secondary_transcript(transcript, is_final, generation)
         except Cancelled:
             pass
@@ -17223,10 +17515,17 @@ try {
         raw_path = raw_dir / f"{wav_path.stem}.json"
         try:
             write_wav_from_pcm_bytes(wav_path, pcm)
-            uploader = create_transcription_uploader(self.live_abort_event, settings)
-            status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
-            if status != 200 or not transcript.strip():
-                raise RuntimeError(f"HTTP {status}" if status != 200 else "resposta vazia")
+            if is_metamuse_transcription(settings):
+                transcript = metamuse_rest_transcribe(
+                    self.live_abort_event, settings, wav_path, raw_path
+                )
+                if not transcript.strip():
+                    raise RuntimeError("resposta vazia")
+            else:
+                uploader = create_transcription_uploader(self.live_abort_event, settings)
+                status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
+                if status != 200 or not transcript.strip():
+                    raise RuntimeError(f"HTTP {status}" if status != 200 else "resposta vazia")
             self._set_secondary_definitive(transcript)
         except Cancelled:
             pass
@@ -17261,6 +17560,306 @@ try {
             self.live_secondary_committed_text = clean
             self.live_secondary_draft_text = ""
         self._queue("live_display_2", clean)
+
+    def _metamuse_live_capture_loop(self, settings: dict):
+        try:
+            import sounddevice as sd
+            import websocket
+        except Exception as exc:
+            self._queue("live_error", f"Streaming do Muse indisponível: {exc}")
+            return
+
+        api_key = str(settings.get("metamuse_api_key") or "").strip()
+        if not api_key:
+            self._queue("live_error", "Insira a chave API do Meta Muse Voice nas configurações.")
+            return
+
+        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
+        buffered_pcm: deque[bytes] = deque()
+        buffered_bytes = 0
+        buffer_limit = pcm_bytes_for_millis(GROK_RECONNECT_BUFFER_MILLIS)
+        buffer_lock = threading.Lock()
+        full_pcm_lock = threading.Lock()
+        full_pcm = None
+        speaker_order: dict[str, int] = {}
+        current_speaker: dict[str, str] = {"label": ""}
+
+        def speaker_number(label: str) -> int:
+            if label not in speaker_order:
+                speaker_order[label] = len(speaker_order) + 1
+            return speaker_order[label]
+
+        def remember(chunk: bytes) -> None:
+            nonlocal buffered_bytes
+            with buffer_lock:
+                buffered_pcm.append(chunk)
+                buffered_bytes += len(chunk)
+                while buffered_pcm and buffered_bytes > buffer_limit:
+                    buffered_bytes -= len(buffered_pcm.popleft())
+
+        def send_pcm(app, chunk: bytes) -> bool:
+            try:
+                app.send(chunk, opcode=websocket.ABNF.OPCODE_BINARY)
+            except Exception:
+                return False
+            return True
+
+        def prefixed(text: str, label: str) -> str:
+            clean = (text or "").strip()
+            if self.live_grok_diarize and label:
+                return f"Interlocutor {speaker_number(str(label))}: {clean}"
+            return clean
+
+        def commit_live_text(text: str) -> None:
+            clean = (text or "").strip()
+            if not clean or self.metamuse_ws_done_event.is_set():
+                return
+            with self.live_lock:
+                committed = self.live_committed_text.strip()
+                if not committed:
+                    self.live_committed_text = clean
+                elif clean not in committed:
+                    self.live_committed_text = f"{committed}\n{clean}"
+                self.live_draft_text = ""
+                display = self._current_live_text_locked()
+            self._queue("live_display", display)
+
+        def on_open(_app):
+            if _app is not self.metamuse_ws_app:
+                return
+            try:
+                _app.send(json.dumps(metamuse_handshake_payload(api_key, self.live_grok_diarize, self.settings)))
+            except Exception:
+                self.metamuse_ws_lost_event.set()
+                self._queue("status", "Reconectando: falha ao enviar o handshake do Muse.")
+
+        def on_message(_app, raw_event):
+            if _app is not self.metamuse_ws_app:
+                return
+            try:
+                event = json.loads(raw_event)
+            except Exception:
+                self.metamuse_ws_lost_event.set()
+                self._queue("status", "Reconectando: resposta inválida do Muse.")
+                return
+            if not isinstance(event, dict):
+                return
+            # A resposta do handshake é um struct sem "type" (só sessionId).
+            if "type" not in event and "sessionId" in event:
+                self.metamuse_ws_ready_event.set()
+                self._queue("status", "Conectado ao Muse. Ouvindo e transcrevendo ao vivo...")
+                return
+            event_type = str(event.get("type") or "")
+            if event_type == "transcript":
+                # Parciais são cumulativas: cada uma substitui a anterior.
+                text = str(event.get("transcript") or "").strip()
+                if not text or self.metamuse_ws_done_event.is_set():
+                    return
+                if event.get("final"):
+                    commit_live_text(prefixed(text, current_speaker["label"]))
+                else:
+                    with self.live_lock:
+                        self.live_draft_text = prefixed(text, current_speaker["label"])
+                        display = self._current_live_text_locked()
+                    self._queue("live_display", display)
+                return
+            if event_type == "speaker":
+                # Rotula o trecho ANTERIOR; letras (A, B, ...) viram
+                # Interlocutor 1, 2, ... na ordem de aparição.
+                label = str(event.get("label") or "").strip()
+                if label:
+                    current_speaker["label"] = label
+                    speaker_number(label)
+                return
+            if event_type in ("speechStart", "speechEnd", "audioProgress"):
+                return
+            if event_type == "speechComplete":
+                text = str(event.get("transcript") or "").strip()
+                label = str(event.get("speaker") or "").strip() or current_speaker["label"]
+                if text:
+                    commit_live_text(prefixed(text, label))
+                else:
+                    with self.live_lock:
+                        self.live_draft_text = ""
+                if self.metamuse_ws_intentional_close and not self.metamuse_ws_done_event.is_set():
+                    self._finish_metamuse_session()
+                return
+            if event_type == "error":
+                self.metamuse_ws_lost_event.set()
+                self._queue(
+                    "status",
+                    f"Reconectando: {str(event.get('message') or 'erro do Muse')}",
+                )
+                return
+
+        def _finish_metamuse_session():
+            with self.live_lock:
+                text = self.live_committed_text.strip() or self._current_live_text_locked().strip()
+                self.live_committed_text = text
+                self.live_draft_text = ""
+            self.metamuse_ws_done_event.set()
+            self.metamuse_ws_app = None
+            self.live_uses_metamuse_websocket = False
+            if not text:
+                self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
+            self._queue("live_display", text)
+            self._finish_ws_finalize_step()
+            self._finish_live_output()
+
+        def on_error(_app, _error):
+            if (
+                _app is self.metamuse_ws_app
+                and not self.metamuse_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.metamuse_ws_done_event.is_set()
+            ):
+                self._queue("status", f"Erro do Muse: {_error}")
+                self.metamuse_ws_lost_event.set()
+
+        def on_close(_app, _status_code, _message):
+            if _app is not self.metamuse_ws_app:
+                return
+            if self.metamuse_ws_intentional_close and not self.metamuse_ws_done_event.is_set():
+                self._finish_metamuse_session()
+                return
+            if (
+                not self.metamuse_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.metamuse_ws_done_event.is_set()
+            ):
+                self._queue("status", f"Muse fechou a conexão (código {_status_code}): {_message}")
+                self.metamuse_ws_lost_event.set()
+
+        def connect() -> bool:
+            previous = self.metamuse_ws_app
+            self.metamuse_ws_app = None
+            if previous:
+                try:
+                    previous.close()
+                except Exception:
+                    pass
+            self.metamuse_ws_ready_event.clear()
+            self.metamuse_ws_lost_event.clear()
+            preview = metamuse_handshake_payload("***", self.live_grok_diarize, self.settings)
+            preview.pop("authorization", None)
+            self._queue("status", f"Parâmetros Muse: {json.dumps(preview, ensure_ascii=False)}")
+            # Sem header de autenticação: a credencial vai no handshake JSON.
+            app = websocket.WebSocketApp(
+                META_MUSE_STT_WEBSOCKET_URL,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            self.metamuse_ws_app = app
+            self.metamuse_ws_thread = threading.Thread(
+                target=lambda: app.run_forever(ping_interval=30, ping_timeout=10),
+                daemon=True,
+            )
+            self.metamuse_ws_thread.start()
+            deadline = time.monotonic() + 15
+            while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                if self.metamuse_ws_ready_event.wait(0.1):
+                    return True
+                if self.metamuse_ws_lost_event.is_set() or time.monotonic() >= deadline:
+                    return False
+            return False
+
+        def reconnect(attempt: int) -> bool:
+            delay = min(8.0, 0.5 * (2 ** max(0, attempt - 1))) + random.uniform(0.0, 0.25)
+            self._queue("status", f"Reconectando ao Muse ({attempt}/{GROK_RECONNECT_MAX_ATTEMPTS}) em {delay:.1f}s...")
+            if self.live_abort_event.wait(delay) or self.live_stop_event.is_set():
+                return False
+            if not connect():
+                return False
+            # Sem reenvio do buffer: o servidor derruba a sessão com ~5s de
+            # backlog (código 1008), então o streaming recomeça do áudio atual.
+            self._queue("status", "Reconectou ao Muse; o áudio do intervalo foi descartado.")
+            return True
+
+        def audio_callback(indata, _frames, _time_info, _status):
+            if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            chunk = bytes(indata)
+            self._push_live_waveform_chunk(chunk)
+            self._queue_secondary_audio(chunk)
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.write(chunk)
+            remember(chunk)
+            try:
+                audio_queue.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    audio_queue.get_nowait()
+                    audio_queue.put_nowait(chunk)
+                    self._queue("status", "Parte do áudio ao vivo foi descartada por atraso local.")
+                except queue.Empty:
+                    pass
+
+        try:
+            pcm_path = self.live_full_pcm_path
+            if not pcm_path:
+                raise RuntimeError("não foi possível criar o áudio integral do streaming")
+            pcm_path.parent.mkdir(parents=True, exist_ok=True)
+            full_pcm = pcm_path.open("wb")
+            bytes_per_second = LIVE_SAMPLE_RATE * LIVE_SAMPLE_WIDTH * LIVE_CHANNELS
+            pace_started = time.monotonic()
+            paced_bytes = 0
+            with sd.RawInputStream(
+                samplerate=LIVE_SAMPLE_RATE,
+                channels=LIVE_CHANNELS,
+                dtype="int16",
+                blocksize=max(
+                    1,
+                    LIVE_SAMPLE_RATE * int(settings.get("grok_chunk_ms", 100)) // 1000,
+                ),
+                callback=audio_callback,
+            ):
+                attempts = 0
+                connected = False
+                while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                    if not connected or self.metamuse_ws_lost_event.is_set():
+                        reconnecting = connected or self.metamuse_ws_lost_event.is_set() or attempts > 0
+                        attempts += 1
+                        self._queue("status", "Reconectando ao streaming do Muse..." if reconnecting else "Conectando ao streaming do Muse...")
+                        connected = reconnect(attempts) if reconnecting else connect()
+                        if connected:
+                            attempts = 0
+                            pace_started = time.monotonic()
+                            paced_bytes = 0
+                            continue
+                        if attempts >= GROK_RECONNECT_MAX_ATTEMPTS:
+                            self._queue("live_error", "Falhou: reconexão do Muse esgotada após 8 tentativas.")
+                            return
+                        continue
+                    try:
+                        chunk = audio_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if self.live_state == "paused" or not chunk:
+                        continue
+                    try:
+                        if not send_pcm(self.metamuse_ws_app, chunk):
+                            raise RuntimeError("envio falhou")
+                        # Pacing em tempo real: rajadas (reconexão) derrubam
+                        # a sessão por backlog (1008); o microfone já é
+                        # realtime, então em regime isto é no-op.
+                        paced_bytes += len(chunk)
+                        behind = pace_started + paced_bytes / bytes_per_second - time.monotonic()
+                        if behind > 0:
+                            time.sleep(min(behind, 1.0))
+                    except Exception:
+                        self.metamuse_ws_lost_event.set()
+                        connected = False
+        except Exception as exc:
+            if not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                self._queue("live_error", f"Falhou: erro no microfone ao vivo: {exc}")
+        finally:
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.close()
+                    full_pcm = None
 
     def _elevenlabs_live_capture_loop(self, settings: dict):
         try:
@@ -18576,6 +19175,10 @@ try {
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Grok STT envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
+        if is_metamuse_transcription(self.settings) and self.send_zip_var.get():
+            self.send_zip_var.set(False)
+            self._refresh_zip_controls()
+            self.status_var.set("Meta Muse Voice envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
         if multi_transcription and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
@@ -19753,6 +20356,15 @@ try {
             and probe_duration_ms(job.upload_path) >= 120000
         ):
             result = self._assemblyai_async_transcribe(job, request_settings)
+            audio_job_set(job, "transcription", model_index, result)
+            txt_path.write_text(result, encoding="utf-8")
+            return
+        # Meta Muse Voice: REST dedicado (multipart "request" + "audio").
+        if is_metamuse_transcription(request_settings):
+            transcript = metamuse_rest_transcribe(
+                self.cancel_event, request_settings, job.upload_path, raw_path
+            )
+            result = transcript or "(sem transcrição)"
             audio_job_set(job, "transcription", model_index, result)
             txt_path.write_text(result, encoding="utf-8")
             return

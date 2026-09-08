@@ -34,7 +34,7 @@ bump da versão → preflight → release.py (build + harness completo) → sync
 2. O `--package` do `sync_r2.py` DEVE apontar para a pasta `package/` — nunca a raiz `release/generated/<v>` (corrompe o manifesto — seção 4).
 3. O sync é SOMENTE no Cloudflare R2. O Google Drive está APOSENTADO desde `20260821_013`.
 4. No GitHub: subir SOMENTE o `full.zip` + `setup_sig_<v>.exe` + `online_setup_sig<v>.exe`. NUNCA subir `sig.exe`/`SigUpdater.exe` avulsos (eles são servidos pelo R2).
-5. Deletar a release anterior (regra "só a versão atual"), EXCETO a versão-ponte `20260821_013` (seção 6).
+5. Manter o histórico de releases no GitHub: NUNCA deletar releases anteriores (regra vigente desde `20260907` — seção 6).
 6. NUNCA commitar: `release_*.log`, `sync_*.log`, `r2_config.json`, chaves privadas, `settings.json`. Remover os logs antes do `git add` (seção 5).
 7. O preflight e o harness devem terminar com código zero — QUALQUER `FAIL` impede a publicação. Em modo `--quiet`, cada comando produz um resumo curto; sem `--quiet`, o release mantém as linhas PASS detalhadas e os 9 cenários do harness. Consulte `docs/agents/validation-output.md` para o contrato de saída.
 8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
@@ -175,20 +175,21 @@ gh release view YYYYMMDD_NNN --repo spigknot/SIG-Windows --json tagName,url,asse
 - **NÃO** subir `sig.exe`/`SigUpdater.exe` como assets avulsos — eles são servidos pelo R2 (o `github_url` do manifesto aponta para o R2.dev).
 - A verificação final deve mostrar exatamente os três assets permitidos: o
   `full.zip` e os dois instaladores. Se um upload falhar, pare, preserve o
-  diagnóstico e não exclua a release anterior até corrigir a release atual.
+  diagnóstico e corrija a release atual (reenvie o asset faltante); nunca
+  delete releases anteriores.
 - Se a release ficar em draft (upload interrompido): `gh release edit YYYYMMDD_NNN --draft=false`.
-- **Regra "só a versão atual"**: deletar a release anterior EXCETO a versão-ponte
-  `20260821_013` (MANTER no GitHub — os PCs antigos, ainda no Drive/sync antigo,
-  baixam o `sig.exe`/`SigUpdater.exe` da `013` de lá durante a migração). A `013`
-  pode ser deletada só quando não houver mais PCs na `012` ou anterior.
-  ```bash
-  gh release delete <VERSAO_ANTERIOR> --repo spigknot/SIG-Windows --yes
-  ```
+- **Histórico de releases (regra vigente desde `20260907`)**: MANTER todas as
+  releases anteriores no GitHub — NUNCA deletar a release anterior. Isso inclui
+  a versão-ponte `20260821_013` (os PCs antigos, ainda no Drive/sync antigo,
+  baixam o `sig.exe`/`SigUpdater.exe` da `013` de lá durante a migração; ela
+  pode ser deletada só quando não houver mais PCs na `012` ou anterior).
+  A regra antiga "só a versão atual" (`gh release delete <VERSAO_ANTERIOR>`)
+  está REVOGADA e não deve mais ser executada.
 
 ## 7. Verificação final (antes de declarar pronto)
 
 1. O manifesto no R2 aponta a versão nova (o comando da seção 4).
-2. A release do GitHub tem o full.zip + os 2 instaladores; a anterior foi deletada.
+2. A release do GitHub tem o full.zip + os 2 instaladores; as releases anteriores foram mantidas.
 3. O `git status` limpo (sem logs, sem `r2_config.json`, sem chaves).
 4. Teste real: atualizar uma instalação antiga pelo app (deve baixar o diff do R2 e relançar na versão nova) — o log do updater deve ter `Atualização aplicada e validada`.
 

@@ -16,6 +16,7 @@ class ApiKeyImportTests(unittest.TestCase):
                 "Deepgram deepgram-test-key",
                 "Deepseek deepseek-test-key",
                 "xAI xai-test-key",
+                "Meta Muse Voice meta-test-key",
                 "Imei   Check imei-test-key",
             )
         )
@@ -28,6 +29,7 @@ class ApiKeyImportTests(unittest.TestCase):
                 "deepgram_api_key": "deepgram-test-key",
                 "deepseek_api_key": "deepseek-test-key",
                 "grok_api_key": "xai-test-key",
+                "metamuse_api_key": "meta-test-key",
                 "imei_api_key": "imei-test-key",
             },
         )
