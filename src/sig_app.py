@@ -10341,7 +10341,7 @@ class SigApp:
         ).pack(side=LEFT)
         self.live_diarize_help = ttk.Button(self.live_grok_controls, text="?", width=2, command=self.show_live_diarization_help)
         self.live_diarize_help.pack(side=LEFT, padx=(4, 8))
-        self.live_language_button = ttk.Menubutton(self.live_grok_controls, textvariable=self.live_language_label_var, width=17)
+        self.live_language_button = ttk.Menubutton(self.live_grok_controls, textvariable=self.live_language_label_var, width=11)
         self.live_language_menu = tk.Menu(self.live_language_button, tearoff=False)
         for code, label in LIVE_LANGUAGES:
             self.live_language_menu.add_command(label=label, command=lambda selected=code: self._set_live_language(selected))
@@ -14555,8 +14555,9 @@ try {
         self.settings[stt_provider_rules.KEY_LANGUAGE_MODE[provider]] = code
         save_settings(self.settings)
         self.live_language_var.set(code)
-        self.live_language_label_var.set(f"Idioma: {code}")
-        self._set_activity_status(f"Idioma selecionado: {code}.", log=False)
+        shown = stt_provider_rules.LANGUAGE_LABELS.get(code, code)
+        self.live_language_label_var.set(f"Idioma: {shown}")
+        self._set_activity_status(f"Idioma selecionado: {shown}.", log=False)
 
     def _show_custom_language_dialog(self, provider: str):
         win = tk.Toplevel(self.root)

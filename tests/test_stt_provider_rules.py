@@ -21,6 +21,8 @@ from stt_provider_rules import (  # noqa: E402
     grok_language_param,
     grok_rest_diarize,
     invalid_codes,
+    LANGUAGE_LABELS,
+    MENU_OPTIONS,
     parse_codes,
     supports_diarize,
 )
@@ -176,6 +178,20 @@ class LanguageRulesTest(unittest.TestCase):
     def test_invalid_codes_reported(self):
         self.assertEqual(invalid_codes("grok", ["pt", "xx", "en"]), ["xx"])
         self.assertEqual(invalid_codes("deepgram", ["pt-BR", "yy"]), ["yy"])
+
+
+class LanguageLabelCosmeticTest(unittest.TestCase):
+    # Vacina do bug "Idioma: multi": o rótulo exibido é "auto", mas o valor
+    # real (salvo e enviado nas requisições) continua "multi" em todos os
+    # provedores — nunca trocar os valores, só os labels.
+    def test_multi_displays_as_auto(self):
+        self.assertEqual(LANGUAGE_LABELS.get("multi"), "auto")
+
+    def test_menu_values_keep_raw_multi(self):
+        for provider, options in MENU_OPTIONS.items():
+            with self.subTest(provider=provider):
+                self.assertIn("multi", options)
+                self.assertNotIn("auto", options)
 
 
 if __name__ == "__main__":
