@@ -142,6 +142,19 @@ class MetaMuseLanguageRulesTests(unittest.TestCase):
 
 
 class MetaMusePayloadTests(unittest.TestCase):
+    def test_log_params_show_language(self):
+        params = sig_app.metamuse_ws_log_params(_muse_settings(), False)
+        self.assertEqual(params["mode"], "ENDPOINTING")
+        self.assertEqual(params["languageBias"], ["Portuguese"])
+
+    def test_log_params_auto_explicit(self):
+        params = sig_app.metamuse_ws_log_params(
+            _muse_settings(metamuse_language_mode="multi", metamuse_language_custom=""),
+            True,
+        )
+        self.assertEqual(params["mode"], "DIARIZATION")
+        self.assertEqual(params["languageBias"], "auto (omitido)")
+
     def test_finish_session_is_class_method(self):
         # Vacina: o Parar e os handlers chamam self._finish_metamuse_session();
         # se virar closure local de novo, o fechamento quebra com AttributeError.

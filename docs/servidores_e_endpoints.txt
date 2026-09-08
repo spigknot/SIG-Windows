@@ -34,6 +34,11 @@ Endpoint REST: https://api.meta.ai/v1/asr/transcribe
 Endpoint WebSocket: wss://api.meta.ai/v1/asr/realtime
 Porta: 443
 
+Nome exibido: Alibaba Fun ASR/Qwen
+Endpoint REST: https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+Endpoint WebSocket: wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference
+Porta: 443
+
 
 TEXTO / IA
 ==========

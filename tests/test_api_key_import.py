@@ -17,6 +17,7 @@ class ApiKeyImportTests(unittest.TestCase):
                 "Deepseek deepseek-test-key",
                 "xAI xai-test-key",
                 "Meta Muse Voice meta-test-key",
+                "Alibaba Fun ASR/Qwen alibaba-test-key",
                 "Imei   Check imei-test-key",
             )
         )
@@ -30,6 +31,7 @@ class ApiKeyImportTests(unittest.TestCase):
                 "deepseek_api_key": "deepseek-test-key",
                 "grok_api_key": "xai-test-key",
                 "metamuse_api_key": "meta-test-key",
+                "alibaba_api_key": "alibaba-test-key",
                 "imei_api_key": "imei-test-key",
             },
         )

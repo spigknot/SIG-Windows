@@ -52,6 +52,7 @@ import qr_encoder
 import smart_join_planner
 import stt_provider_rules
 from stt_provider_rules import (
+    alibaba_language_hints,
     assemblyai_rest_diarize,
     assemblyai_rest_language,
     assemblyai_ws_diarize_query,
@@ -84,7 +85,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260908_001"
+APP_VERSION = "20260908_002"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -317,6 +318,7 @@ DEFAULT_SETTINGS = {
     "assemblyai_api_key": "",
     "elevenlabs_api_key": "",
     "metamuse_api_key": "",
+    "alibaba_api_key": "",
     "deepgram_language_mode": "pt-BR",
     "deepgram_language_custom": "",
     "assemblyai_language_mode": "pt",
@@ -325,6 +327,8 @@ DEFAULT_SETTINGS = {
     "elevenlabs_language_custom": "",
     "metamuse_language_mode": "pt",
     "metamuse_language_custom": "",
+    "alibaba_language_mode": "pt",
+    "alibaba_language_custom": "",
     "grok_language_mode": "pt",
     "grok_language_custom": "",
     "imei_api_key": IMEI_API_KEY,
@@ -344,6 +348,9 @@ API_KEY_IMPORT_FIELDS = {
     "meta muse voice": "metamuse_api_key",
     "muse voice": "metamuse_api_key",
     "metamuse": "metamuse_api_key",
+    "alibaba fun asr/qwen": "alibaba_api_key",
+    "alibaba fun asr": "alibaba_api_key",
+    "alibaba": "alibaba_api_key",
 }
 GROK_API_NAME = "Grok STT"
 GROK_STT_URL = "https://api.x.ai/v1/stt"
@@ -361,6 +368,11 @@ META_MUSE_API_NAME = "Meta Muse Voice"
 META_MUSE_STT_URL = "https://api.meta.ai/v1/asr/transcribe"
 META_MUSE_STT_WEBSOCKET_URL = "wss://api.meta.ai/v1/asr/realtime"
 META_MUSE_MODEL = "muse-voice-transcribe-1.0"
+ALIBABA_API_NAME = "Alibaba Fun ASR/Qwen"
+ALIBABA_REST_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+ALIBABA_WEBSOCKET_URL = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference"
+ALIBABA_REST_MODEL = "fun-asr-flash-2026-06-15"
+ALIBABA_WS_MODEL = "qwen-audio-3.0-asr-flash-streaming"
 LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
 LIVE_QUALIFICATION_FIELD_IDS = (
     "nome",
@@ -6603,11 +6615,12 @@ def read_transcription_servers() -> list[dict]:
     assemblyai_selected = any(server["name"] == ASSEMBLYAI_API_NAME for server in servers if server["selected"])
     elevenlabs_selected = any(server["name"] == ELEVENLABS_API_NAME for server in servers if server["selected"])
     metamuse_selected = any(server["name"] == META_MUSE_API_NAME for server in servers if server["selected"])
-    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected or metamuse_selected
+    alibaba_selected = any(server["name"] == ALIBABA_API_NAME for server in servers if server["selected"])
+    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected or metamuse_selected or alibaba_selected
     plain_servers = [
         {**server, "selected": server["selected"] and not api_selected}
         for server in servers
-        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME, META_MUSE_API_NAME)
+        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME, META_MUSE_API_NAME, ALIBABA_API_NAME)
     ]
     return plain_servers + [
         {
@@ -6644,6 +6657,13 @@ def read_transcription_servers() -> list[dict]:
             "parameters": {"model": META_MUSE_MODEL},
             "selected": metamuse_selected,
             "is_metamuse_api": True,
+        },
+        {
+            "name": ALIBABA_API_NAME,
+            "url": ALIBABA_REST_URL,
+            "parameters": {"model": ALIBABA_REST_MODEL},
+            "selected": alibaba_selected,
+            "is_alibaba_api": True,
         },
     ]
 
@@ -6800,6 +6820,7 @@ def fallback_transcription_server_for_missing_api_key(
     assemblyai_api_key: str,
     elevenlabs_api_key: str,
     metamuse_api_key: str = "",
+    alibaba_api_key: str = "",
 ) -> str:
     """Retorna o Granite NAR quando um servidor STT perdeu sua chave."""
     candidate = str(server_name or "").strip()
@@ -6809,6 +6830,7 @@ def fallback_transcription_server_for_missing_api_key(
         ASSEMBLYAI_API_NAME: assemblyai_api_key,
         ELEVENLABS_API_NAME: elevenlabs_api_key,
         META_MUSE_API_NAME: metamuse_api_key,
+        ALIBABA_API_NAME: alibaba_api_key,
     }
     if candidate in api_keys and not str(api_keys[candidate] or "").strip():
         return DEFAULT_SETTINGS["transcription_server"]
@@ -6838,6 +6860,7 @@ def normalize_settings(data: dict) -> dict:
         "assemblyai_language_mode": "pt",
         "elevenlabs_language_mode": "pt",
         "metamuse_language_mode": "pt",
+        "alibaba_language_mode": "pt",
         "grok_language_mode": "pt",
     }.items():
         value = str(data.get(language_key) or "").strip()
@@ -6847,6 +6870,7 @@ def normalize_settings(data: dict) -> dict:
         "assemblyai_language_custom",
         "elevenlabs_language_custom",
         "metamuse_language_custom",
+        "alibaba_language_custom",
         "grok_language_custom",
     ):
         clean[custom_key] = str(data.get(custom_key) or "").strip()
@@ -6861,6 +6885,7 @@ def normalize_settings(data: dict) -> dict:
     assemblyai_api_key = str(data.get("assemblyai_api_key") or "").strip()
     elevenlabs_api_key = str(data.get("elevenlabs_api_key") or "").strip()
     metamuse_api_key = str(data.get("metamuse_api_key") or "").strip()
+    alibaba_api_key = str(data.get("alibaba_api_key") or "").strip()
     deepseek_api_key = str(data.get("deepseek_api_key") or "").strip()
     server_names = {server["name"] for server in read_transcription_servers()}
     transcription_server = str(
@@ -6877,6 +6902,7 @@ def normalize_settings(data: dict) -> dict:
         assemblyai_api_key,
         elevenlabs_api_key,
         metamuse_api_key,
+        alibaba_api_key,
     )
     clean["transcription_server"] = (
         transcription_server
@@ -6895,6 +6921,7 @@ def normalize_settings(data: dict) -> dict:
             assemblyai_api_key,
             elevenlabs_api_key,
             metamuse_api_key,
+            alibaba_api_key,
         )
         if candidate in server_names and candidate != ELEVENLABS_API_NAME:
             normalized_multi_models.append(candidate)
@@ -6979,6 +7006,7 @@ def normalize_settings(data: dict) -> dict:
     clean["assemblyai_api_key"] = assemblyai_api_key
     clean["elevenlabs_api_key"] = elevenlabs_api_key
     clean["metamuse_api_key"] = metamuse_api_key
+    clean["alibaba_api_key"] = alibaba_api_key
     clean["deepseek_api_key"] = deepseek_api_key
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
@@ -7230,6 +7258,10 @@ def is_metamuse_transcription(settings: dict) -> bool:
     return selected_transcription_server(settings).get("is_metamuse_api", False)
 
 
+def is_alibaba_transcription(settings: dict) -> bool:
+    return selected_transcription_server(settings).get("is_alibaba_api", False)
+
+
 def plausible_elevenlabs_api_key(value: str) -> bool:
     key = (value or "").strip()
     return 20 <= len(key) <= 64 and all(
@@ -7289,6 +7321,9 @@ def transcription_form_fields(settings: dict) -> dict:
         # "audio"); não há campos de formulário — a assinatura fica vazia
         # apenas para manter o contrato do uploader.
         return {}
+    if is_alibaba_transcription(settings):
+        # O Alibaba monta o JSON DashScope dedicado; sem form fields.
+        return {}
     return selected_transcription_server(settings)["parameters"].copy()
 
 
@@ -7344,6 +7379,13 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
         # O REST do Muse usa corpo dedicado (ver metamuse_rest_transcribe);
         # este uploader valida a chave e serve aos fluxos que só precisam
         # de um uploader presente (cancelamento, multi-modelo).
+        return GraniteUploader(cancel_event, {}, {}, "file")
+    if is_alibaba_transcription(settings):
+        api_key = str(settings.get("alibaba_api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Insira a chave API do Alibaba Cloud nas configurações.")
+        # O REST do Alibaba usa JSON DashScope dedicado (ver
+        # alibaba_rest_transcribe); este uploader só valida a chave.
         return GraniteUploader(cancel_event, {}, {}, "file")
     return GraniteUploader(cancel_event, transcription_form_fields(settings))
 
@@ -7483,6 +7525,233 @@ def metamuse_rest_transcribe(
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"resposta inválida do Muse: {exc}") from exc
     return metamuse_format_rest_response(payload, diarize_checked)
+
+
+ALIBABA_AUTH_ERROR = "API Key do Alibaba Cloud inválida ou incompatível com a região Singapore."
+
+PARAMS_BLOCK_TAG_PREFIX = "params_block:"
+
+
+def params_block_single_line(text: str) -> str:
+    """Junta um bloco de parâmetros do log em uma só linha (p/ clipboard).
+
+    Remove os timestamps de cada linha e ignora linhas em branco.
+    """
+    parts = []
+    for line in str(text or "").splitlines():
+        stripped = re.sub(r"^\d{2}:\d{2}:\d{2}\s+", "", line).strip()
+        if stripped:
+            parts.append(stripped)
+    return " ".join(parts)
+
+
+def alibaba_rest_body(audio_data_uri: str, settings: dict) -> dict:
+    """Corpo JSON do REST DashScope nativo (fun-asr-flash)."""
+    parameters: dict = {"format": "wav", "sample_rate": 16000}
+    hints = alibaba_language_hints(settings)
+    if hints:
+        parameters["language_hints"] = hints
+    return {
+        "model": ALIBABA_REST_MODEL,
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": audio_data_uri},
+                        }
+                    ],
+                }
+            ]
+        },
+        "parameters": parameters,
+    }
+
+
+def alibaba_format_rest_response(payload: dict) -> str:
+    """Extrai o texto do REST DashScope (output.text, choices ou genérico)."""
+    if not isinstance(payload, dict):
+        return ""
+    output = payload.get("output")
+    if isinstance(output, dict):
+        text = output.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        choices = output.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message") or {}
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            part_text = part.get("text")
+                            if isinstance(part_text, str) and part_text.strip():
+                                return part_text.strip()
+    return extract_text_from_response(json.dumps(payload).encode("utf-8"))
+
+
+def alibaba_rest_transcribe(
+    cancel_event: threading.Event,
+    settings: dict,
+    audio_path: Path,
+    raw_path: Path | None = None,
+) -> str:
+    """Transcreve um WAV pelo REST DashScope nativo (fun-asr-flash)."""
+    api_key = str(settings.get("alibaba_api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("Insira a chave API do Alibaba Cloud nas configurações.")
+    if cancel_event.is_set():
+        raise Cancelled()
+    wav_bytes = audio_path.read_bytes()
+    data_uri = "data:audio/wav;base64," + base64.b64encode(wav_bytes).decode("ascii")
+    body = json.dumps(alibaba_rest_body(data_uri, settings), ensure_ascii=False).encode("utf-8")
+    parsed = urlparse(ALIBABA_REST_URL)
+    conn = http.client.HTTPSConnection(parsed.netloc, timeout=60 * 60)
+    try:
+        conn.putrequest("POST", parsed.path or "/")
+        conn.putheader("accept", "application/json")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(len(body)))
+        conn.putheader("Authorization", f"Bearer {api_key}")
+        conn.putheader("X-DashScope-SSE", "disable")
+        conn.endheaders()
+        for offset in range(0, len(body), 1024 * 128):
+            if cancel_event.is_set():
+                raise Cancelled()
+            conn.send(body[offset:offset + 1024 * 128])
+        if cancel_event.is_set():
+            raise Cancelled()
+        response = conn.getresponse()
+        raw = response.read()
+        status = response.status
+    finally:
+        conn.close()
+    if raw_path is not None:
+        try:
+            raw_path.write_bytes(raw)
+        except OSError:
+            pass
+    if status in (401, 403):
+        raise RuntimeError(f"{ALIBABA_AUTH_ERROR} (HTTP {status})")
+    if status == 429:
+        raise RuntimeError("Alibaba Cloud: rate limit / limite de uso excedido (HTTP 429). Aguarde e tente novamente.")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig", errors="replace") or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    code = str(payload.get("code") or "") if isinstance(payload, dict) else ""
+    message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+    if code in ("InvalidApiKey", "Unauthorized", "Forbidden", "AccessDenied"):
+        raise RuntimeError(ALIBABA_AUTH_ERROR)
+    if code == "CLIENT_ERROR" and "NO_WORDS" in message:
+        # Áudio sem fala reconhecível: equivale a transcrição vazia.
+        return ""
+    if status != 200:
+        raise RuntimeError(f"HTTP {status}\n{raw.decode('utf-8', errors='replace')[:500]}")
+    if code:
+        raise RuntimeError(f"{code}: {message or 'erro desconhecido'}")
+    return alibaba_format_rest_response(payload)
+
+
+def alibaba_ws_run_task(task_id: str, settings: dict) -> dict:
+    """Evento run-task do WebSocket DashScope (qwen-audio-3.0-asr-flash-streaming)."""
+    parameters: dict = {"format": "pcm", "sample_rate": 16000, "heartbeat": True}
+    hints = alibaba_language_hints(settings)
+    if hints:
+        parameters["language_hints"] = hints
+    return {
+        "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
+        "payload": {
+            "task_group": "audio",
+            "task": "asr",
+            "function": "recognition",
+            "model": ALIBABA_WS_MODEL,
+            "parameters": parameters,
+            "input": {},
+        },
+    }
+
+
+def alibaba_ws_finish_task(task_id: str) -> dict:
+    """Evento finish-task do WebSocket DashScope (mesmo task_id do run-task)."""
+    return {
+        "header": {"action": "finish-task", "task_id": task_id, "streaming": "duplex"},
+        "payload": {"input": {}},
+    }
+
+
+def alibaba_ws_sentence_text(event: dict) -> tuple[str, bool]:
+    """(texto, é_final) de um evento result-generated.
+
+    Frase com `sentence_end: true` é segmento fechado (commit); o resto é
+    parcial (rascunho). Formatos desconhecidos viram rascunho.
+    """
+    if not isinstance(event, dict):
+        return "", False
+    try:
+        sentence = ((event.get("payload") or {}).get("output") or {}).get("sentence") or {}
+    except AttributeError:
+        return "", False
+    if not isinstance(sentence, dict):
+        return "", False
+    text = str(sentence.get("text") or "").strip()
+    if sentence.get("sentence_end") is True:
+        return text, True
+    return text, ("end_time" in sentence) and (sentence.get("end_time") is not None)
+
+
+def format_ws_params_block(title: str, params) -> str:
+    """Bloco de log com um parâmetro por linha (regra de visibilidade).
+
+    `params` aceita dict ou lista de pares (a lista preserva chaves
+    repetidas da query, ex.: secondary_languages).
+    """
+    items = params.items() if isinstance(params, dict) else params
+    lines = [f"{title}:"]
+    for key, value in items:
+        lines.append(f"  {key}: {value}")
+    return "\n".join(lines)
+
+
+def metamuse_ws_log_params(settings: dict, diarize_checked: bool) -> dict:
+    """Parâmetros efetivos do handshake do Muse para o log (sem segredo)."""
+    payload = metamuse_handshake_payload("***", diarize_checked, settings)
+    payload.pop("authorization", None)
+    bias = payload.pop("languageBias", None)
+    payload["languageBias"] = bias if bias else "auto (omitido)"
+    return payload
+
+
+def alibaba_ws_log_params(settings: dict) -> dict:
+    """Parâmetros efetivos do run-task do Alibaba para o log (sem segredo)."""
+    params: dict = {
+        "model": ALIBABA_WS_MODEL,
+        "format": "pcm",
+        "sample_rate": 16000,
+        "heartbeat": True,
+    }
+    hints = alibaba_language_hints(settings)
+    params["language_hints"] = hints if hints else "auto (omitido)"
+    return params
+
+
+def alibaba_rest_log_params(settings: dict) -> dict:
+    """Parâmetros do REST Alibaba para o log (sem o áudio base64)."""
+    params: dict = {
+        "model": ALIBABA_REST_MODEL,
+        "format": "wav",
+        "sample_rate": 16000,
+    }
+    hints = alibaba_language_hints(settings)
+    params["language_hints"] = hints if hints else "auto (omitido)"
+    return params
 
 
 def safe_stems(paths: list[Path]) -> dict[Path, str]:
@@ -9009,6 +9278,7 @@ class SigApp:
         self.live_uses_assemblyai_websocket = False
         self.live_uses_elevenlabs_websocket = False
         self.live_uses_metamuse_websocket = False
+        self.live_uses_alibaba_websocket = False
         self.live_grok_settings: dict | None = None
         self.live_grok_language = "pt"
         self.live_grok_diarize = False
@@ -9042,6 +9312,13 @@ class SigApp:
         self.metamuse_ws_done_event = threading.Event()
         self.metamuse_ws_lost_event = threading.Event()
         self.metamuse_ws_intentional_close = False
+        self.alibaba_ws_app = None
+        self.alibaba_ws_thread: threading.Thread | None = None
+        self.alibaba_ws_ready_event = threading.Event()
+        self.alibaba_ws_done_event = threading.Event()
+        self.alibaba_ws_lost_event = threading.Event()
+        self.alibaba_ws_intentional_close = False
+        self.alibaba_ws_task_id = ""
         self.live_was_grok_websocket = False
         self.live_audio_recovery_available = False
         self.live_recovery_thread: threading.Thread | None = None
@@ -9104,6 +9381,7 @@ class SigApp:
         self.live_language_var = StringVar(value="pt")
         self.live_language_label_var = StringVar(value="Idioma: Português")
         self.live_diarize_var = BooleanVar(value=False)
+        self.live_diarize_check = None
         self.live_timestamps_var = BooleanVar(value=False)
         self.assistant_cancel_event = threading.Event()
         self.assistant_client: TextModelClient | None = None
@@ -9842,6 +10120,39 @@ class SigApp:
         self.root.clipboard_append("\n".join(commands))
         return True
 
+    def _copy_params_block(self, box, block_tag: str) -> bool:
+        """Copia a requisição inteira do bloco de parâmetros em uma só linha."""
+        ranges = box.tag_ranges(block_tag)
+        if len(ranges) < 2:
+            return False
+        single = params_block_single_line(box.get(str(ranges[0]), str(ranges[-1])))
+        if not single:
+            return False
+        self.root.clipboard_clear()
+        self.root.clipboard_append(single)
+        return True
+
+    def _append_params_block(self, title: str, params) -> None:
+        """Insere bloco de parâmetros: tudo amarelo + tag única do bloco.
+
+        A tag única permite copiar a requisição inteira com um clique em
+        qualquer linha do bloco (ver _activity_log_click).
+        """
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        self._params_block_seq = int(getattr(self, "_params_block_seq", 0) or 0) + 1
+        block_tag = f"{PARAMS_BLOCK_TAG_PREFIX}{self._params_block_seq}"
+        if "warning" not in box.tag_names():
+            box.tag_configure("warning", foreground="#a65300")
+        text = format_ws_params_block(title, params)
+        box.configure(state="normal")
+        for part in text.splitlines():
+            line = f"{time.strftime('%H:%M:%S')}  {part}\n"
+            box.insert(END, line, ("warning", block_tag))
+        box.see(END)
+        box.configure(state="disabled")
+
     def _activity_log_click(self, event):
         """Clique em linha amarela/vermelha do log copia o texto da mensagem."""
         box = getattr(self, "activity_log", None)
@@ -9852,6 +10163,10 @@ class SigApp:
             tags = set(box.tag_names(index))
             # O bloco de comandos das ferramentas FFmpeg copia inteiro.
             if FFMPEG_COMMAND_BLOCK_TAG in tags and self._copy_ffmpeg_command_block(box):
+                return
+            # Bloco de parâmetros: qualquer linha copia a requisição inteira.
+            block_tags = [tag for tag in tags if tag.startswith(PARAMS_BLOCK_TAG_PREFIX)]
+            if block_tags and self._copy_params_block(box, block_tags[0]):
                 return
             # Amarelo: warning, activity_step_warning, ffmpeg_command.
             # Vermelho: error, activity_step_error.
@@ -10330,7 +10645,7 @@ class SigApp:
         )
         self.live_timestamps_check.pack(side=LEFT, padx=(0, 10))
         self.live_grok_controls = ttk.Frame(live_top)
-        ttk.Checkbutton(
+        self.live_diarize_check = ttk.Checkbutton(
             self.live_grok_controls,
             text="Diarização",
             variable=self.live_diarize_var,
@@ -10338,7 +10653,8 @@ class SigApp:
                 "Diarização ativada." if self.live_diarize_var.get() else "Diarização desativada.",
                 log=False,
             ),
-        ).pack(side=LEFT)
+        )
+        self.live_diarize_check.pack(side=LEFT)
         self.live_diarize_help = ttk.Button(self.live_grok_controls, text="?", width=2, command=self.show_live_diarization_help)
         self.live_diarize_help.pack(side=LEFT, padx=(4, 8))
         self.live_language_button = ttk.Menubutton(self.live_grok_controls, textvariable=self.live_language_label_var, width=11)
@@ -14514,7 +14830,10 @@ try {
         }[kind]
 
     def show_live_diarization_help(self):
-        messagebox.showinfo("Diarização", "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante.")
+        message = "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante."
+        if self._current_stt_provider() == "alibaba":
+            message += "\n\nDiarização não disponível para Alibaba Fun ASR/Qwen."
+        messagebox.showinfo("Diarização", message)
 
     def _current_stt_provider(self) -> str | None:
         if is_deepgram_transcription(self.settings):
@@ -14525,6 +14844,8 @@ try {
             return "elevenlabs"
         if is_metamuse_transcription(self.settings):
             return "metamuse"
+        if is_alibaba_transcription(self.settings):
+            return "alibaba"
         if is_grok_transcription(self.settings):
             return "grok"
         return None
@@ -14634,18 +14955,21 @@ try {
         return "".join(output).strip() or fallback
 
     def _refresh_live_grok_controls(self):
-        diarize_supported = (
-            is_grok_transcription(self.settings)
-            or is_deepgram_transcription(self.settings)
-            or is_assemblyai_transcription(self.settings)
-            or is_elevenlabs_transcription(self.settings)
-            or is_metamuse_transcription(self.settings)
-        )
-        if diarize_supported:
-            self.live_grok_controls.pack(side=LEFT, before=self.live_top_spacer)
-        else:
+        provider = self._current_stt_provider()
+        diarize_supported = provider is not None and supports_diarize(provider, True)
+        if provider is None:
             self.live_grok_controls.pack_forget()
             self.live_diarize_var.set(False)
+        else:
+            self.live_grok_controls.pack(side=LEFT, before=self.live_top_spacer)
+            if self.live_diarize_check is not None:
+                if diarize_supported:
+                    self.live_diarize_check.configure(state="normal")
+                else:
+                    # Ex.: Alibaba Fun ASR/Qwen não tem diarização: o seletor
+                    # de idioma continua visível, só o checkbox desliga.
+                    self.live_diarize_var.set(False)
+                    self.live_diarize_check.configure(state="disabled")
         self._rebuild_live_language_menu()
         interval_state = "disabled" if self.live_state != "idle" else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
@@ -14691,9 +15015,13 @@ try {
         if is_metamuse_transcription(self.settings) and not self.settings.get("metamuse_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Meta Muse Voice nas configurações antes de gravar.")
             return
+        if is_alibaba_transcription(self.settings) and not self.settings.get("alibaba_api_key"):
+            messagebox.showerror("sig", "Insira a chave API do Alibaba Cloud nas configurações antes de gravar.")
+            return
         self.normal_record_grok = is_grok_transcription(self.settings)
         self.normal_record_deepgram = is_deepgram_transcription(self.settings)
         self.normal_record_metamuse = is_metamuse_transcription(self.settings)
+        self.normal_record_alibaba = is_alibaba_transcription(self.settings)
         self.normal_record_language = (
             deepgram_language_param(self.settings)
             if is_deepgram_transcription(self.settings)
@@ -14738,8 +15066,30 @@ try {
                 record_settings = self.settings.copy()
                 if self.normal_record_diarize:
                     record_settings["diarize"] = True
+                self._queue(
+                    "params_block",
+                    "Parâmetros REST (Muse):",
+                    metamuse_rest_request_body(
+                        bool(record_settings.get("diarize")), record_settings
+                    ),
+                )
                 text = metamuse_rest_transcribe(
                     cancel, record_settings, wav_path, wav_path.with_suffix(".raw")
+                )
+                if not text.strip():
+                    self._queue("status", "Transcrição ao vivo finalizada sem conteúdo")
+                else:
+                    self._queue("live_payload", text, "", False)
+                    self._queue("status", "Transcrição concluída.")
+                return
+            if getattr(self, "normal_record_alibaba", False):
+                self._queue(
+                    "params_block",
+                    "Parâmetros REST (Alibaba):",
+                    alibaba_rest_log_params(self.settings),
+                )
+                text = alibaba_rest_transcribe(
+                    cancel, self.settings.copy(), wav_path, wav_path.with_suffix(".raw")
                 )
                 if not text.strip():
                     self._queue("status", "Transcrição ao vivo finalizada sem conteúdo")
@@ -14759,10 +15109,33 @@ try {
                     record_settings["diarize"] = True
                 uploader = create_transcription_uploader(cancel, record_settings)
                 url = transcribe_url(record_settings)
+                if getattr(self, "normal_record_deepgram", False):
+                    self._queue(
+                        "params_block",
+                        "Parâmetros REST (Deepgram):",
+                        urllib.parse.parse_qsl(
+                            deepgram_query_string(record_settings), keep_blank_values=True
+                        ),
+                    )
+                elif is_assemblyai_transcription(self.settings):
+                    self._queue(
+                        "params_block",
+                        "Parâmetros REST (AssemblyAI):",
+                        transcription_form_fields(record_settings),
+                    )
+                elif is_elevenlabs_transcription(self.settings):
+                    rest_fields = {"model_id": "scribe_v2"}
+                    rest_fields.update(transcription_form_fields(record_settings))
+                    self._queue("params_block", "Parâmetros REST (ElevenLabs):", rest_fields)
             else:
                 fields = {"language": self.normal_record_language, "format": "true", "filler_words": "false"}
                 if self.normal_record_diarize:
                     fields["diarize"] = "true"
+                self._queue(
+                    "params_block",
+                    "Parâmetros REST (Grok):" if grok else "Parâmetros REST (servidor):",
+                    dict(fields),
+                )
                 uploader = GraniteUploader(
                     cancel,
                     fields,
@@ -14863,6 +15236,8 @@ try {
             if name == ASSEMBLYAI_API_NAME and not plausible_assemblyai_api_key(settings.get("assemblyai_api_key", "")):
                 continue
             if name == META_MUSE_API_NAME and not str(settings.get("metamuse_api_key") or "").strip():
+                continue
+            if name == ALIBABA_API_NAME and not str(settings.get("alibaba_api_key") or "").strip():
                 continue
             available[transcription_server_label(server)] = name
         return available
@@ -15366,6 +15741,7 @@ try {
         assemblyai_api_key_var = StringVar(value=self.settings.get("assemblyai_api_key", ""))
         elevenlabs_api_key_var = StringVar(value=self.settings.get("elevenlabs_api_key", ""))
         metamuse_api_key_var = StringVar(value=self.settings.get("metamuse_api_key", ""))
+        alibaba_api_key_var = StringVar(value=self.settings.get("alibaba_api_key", ""))
         imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
         police_name_var = StringVar(value=self.settings.get("police_name", ""))
         police_role_var = StringVar(value=self.settings.get("police_role", ""))
@@ -15483,6 +15859,13 @@ try {
             "Preencha para liberar o Meta Muse Voice na lista de transcrição.",
         )
         add_api_field(
+            api_transcription_frame,
+            4,
+            "Alibaba Cloud API Key",
+            alibaba_api_key_var,
+            "Preencha para liberar o Alibaba Fun ASR/Qwen na lista de transcrição.",
+        )
+        add_api_field(
             api_text_frame,
             0,
             "Chave API da xAI",
@@ -15505,6 +15888,7 @@ try {
             "assemblyai_api_key": assemblyai_api_key_var,
             "elevenlabs_api_key": elevenlabs_api_key_var,
             "metamuse_api_key": metamuse_api_key_var,
+            "alibaba_api_key": alibaba_api_key_var,
             "imei_api_key": imei_api_key_var,
         }
         api_key_import_labels = {
@@ -15514,6 +15898,7 @@ try {
             "assemblyai_api_key": "AssemblyAI",
             "elevenlabs_api_key": "ElevenLabs",
             "metamuse_api_key": "Meta Muse Voice",
+            "alibaba_api_key": "Alibaba Fun ASR/Qwen",
             "imei_api_key": "Imei Check",
         }
 
@@ -15685,6 +16070,10 @@ try {
                 and (
                     server["name"] != META_MUSE_API_NAME
                     or bool(metamuse_api_key_var.get().strip())
+                )
+                and (
+                    server["name"] != ALIBABA_API_NAME
+                    or bool(alibaba_api_key_var.get().strip())
                 )
             ]
             transcription_labels = {
@@ -16312,6 +16701,7 @@ try {
             assemblyai_api_key = assemblyai_api_key_var.get().strip()
             elevenlabs_api_key = elevenlabs_api_key_var.get().strip()
             metamuse_api_key = metamuse_api_key_var.get().strip()
+            alibaba_api_key = alibaba_api_key_var.get().strip()
             selected_transcription = fallback_transcription_server_for_missing_api_key(
                 selected_transcription,
                 api_key,
@@ -16319,6 +16709,7 @@ try {
                 assemblyai_api_key,
                 elevenlabs_api_key,
                 metamuse_api_key,
+                alibaba_api_key,
             )
             selected_history = fallback_text_model_for_missing_api_key(
                 selected_history,
@@ -16472,6 +16863,7 @@ try {
                     "assemblyai_api_key": assemblyai_api_key,
                     "elevenlabs_api_key": elevenlabs_api_key,
                     "metamuse_api_key": metamuse_api_key,
+                    "alibaba_api_key": alibaba_api_key,
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -16850,6 +17242,12 @@ try {
         ) and not self.settings.get("metamuse_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Meta Muse Voice nas configurações antes de iniciar.")
             return
+        if (
+            is_alibaba_transcription(self.settings)
+            or (secondary_settings is not None and is_alibaba_transcription(secondary_settings))
+        ) and not self.settings.get("alibaba_api_key"):
+            messagebox.showerror("sig", "Insira a chave API do Alibaba Cloud nas configurações antes de iniciar.")
+            return
         self.live_stop_event.clear()
         self.live_abort_event.clear()
         self.live_ws_finalize_pending = False
@@ -16867,6 +17265,9 @@ try {
             "grok_rest_requests", False
         )
         self.live_uses_metamuse_websocket = is_metamuse_transcription(self.settings) and not self.settings.get(
+            "grok_rest_requests", False
+        )
+        self.live_uses_alibaba_websocket = is_alibaba_transcription(self.settings) and not self.settings.get(
             "grok_rest_requests", False
         )
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
@@ -16897,12 +17298,18 @@ try {
         self.metamuse_ws_lost_event.clear()
         self.metamuse_ws_intentional_close = False
         self.metamuse_ws_app = None
+        self.alibaba_ws_ready_event.clear()
+        self.alibaba_ws_done_event.clear()
+        self.alibaba_ws_lost_event.clear()
+        self.alibaba_ws_intentional_close = False
+        self.alibaba_ws_app = None
         streaming_websocket = (
             self.live_uses_grok_websocket
             or self.live_uses_deepgram_websocket
             or self.live_uses_assemblyai_websocket
             or self.live_uses_elevenlabs_websocket
             or self.live_uses_metamuse_websocket
+            or self.live_uses_alibaba_websocket
         )
         self.live_uploader = None if streaming_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
         temp_live = app_base_dir() / "temp" / "live"
@@ -16935,7 +17342,9 @@ try {
         self.last_live_transcript_text_2 = ""
         self.live_finish_waiting = False
         self._reset_live_waveform()
-        self.live_started_at = time.time()
+        # No streaming, o relógio e a gravação só começam ao conectar: o
+        # worker preenche live_started_at no primeiro connect com sucesso.
+        self.live_started_at = time.time() if not streaming_websocket else 0.0
         self.live_paused_at = 0.0
         self.live_paused_total = 0.0
         self._set_live_text("")
@@ -16948,6 +17357,7 @@ try {
                 or self.live_uses_assemblyai_websocket
                 or self.live_uses_elevenlabs_websocket
                 or self.live_uses_metamuse_websocket
+                or self.live_uses_alibaba_websocket
             )
             else concurrent.futures.ThreadPoolExecutor(max_workers=1)
         )
@@ -16965,11 +17375,14 @@ try {
             and not self.live_uses_assemblyai_websocket
             and not self.live_uses_elevenlabs_websocket
             and not self.live_uses_metamuse_websocket
+            and not self.live_uses_alibaba_websocket
         ):
             self.status_var.set("Ouvindo e transcrevendo ao vivo...")
         elif streaming_websocket:
             self.status_var.set("Gravando. Clique no botão verde para encerrar o websocket")
-        if self.live_uses_metamuse_websocket:
+        if self.live_uses_alibaba_websocket:
+            target = self._alibaba_live_capture_loop
+        elif self.live_uses_metamuse_websocket:
             target = self._metamuse_live_capture_loop
         elif self.live_uses_elevenlabs_websocket:
             target = self._elevenlabs_live_capture_loop
@@ -17023,6 +17436,28 @@ try {
             self.live_paused_total += time.time() - self.live_paused_at
             self.live_paused_at = 0.0
         self._set_live_state("finalizing")
+        if self.live_uses_alibaba_websocket:
+            # Parar é imediato: finish-task, fecha o socket e consolida
+            # o texto acumulado na hora — sem esperar o task-finished.
+            self.alibaba_ws_intentional_close = True
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado.")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
+            self.live_stop_event.set()
+            app = self.alibaba_ws_app
+            task_id = getattr(self, "alibaba_ws_task_id", "") or ""
+            if app and task_id:
+                try:
+                    app.send(json.dumps(alibaba_ws_finish_task(task_id)))
+                except Exception:
+                    pass
+            if app:
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self._finish_alibaba_session()
+            return
         if self.live_uses_metamuse_websocket:
             # Parar é imediato: avisa o servidor, fecha o socket e consolida
             # o texto acumulado na hora — sem esperar confirmação final.
@@ -17173,6 +17608,7 @@ try {
         self.assemblyai_ws_intentional_close = True
         self.elevenlabs_ws_intentional_close = True
         self.metamuse_ws_intentional_close = True
+        self.alibaba_ws_intentional_close = True
         if self.live_uploader:
             self.live_uploader.cancel()
         if self.grok_ws_app:
@@ -17205,11 +17641,18 @@ try {
             except Exception:
                 pass
         self.metamuse_ws_app = None
+        if self.alibaba_ws_app:
+            try:
+                self.alibaba_ws_app.close(status=1000, reason="Cancelado")
+            except Exception:
+                pass
+        self.alibaba_ws_app = None
         self.live_uses_grok_websocket = False
         self.live_uses_deepgram_websocket = False
         self.live_uses_assemblyai_websocket = False
         self.live_uses_elevenlabs_websocket = False
         self.live_uses_metamuse_websocket = False
+        self.live_uses_alibaba_websocket = False
         executor = self.live_upload_executor
         self.live_upload_executor = None
         if executor:
@@ -17220,6 +17663,11 @@ try {
     def _tick_live_timer(self):
         if self.live_state == "idle":
             self.live_timer_var.set("00:00.000")
+            return
+        if not self.live_started_at:
+            # Streaming ainda conectando: o relógio só dispara ao conectar.
+            self.live_timer_var.set("00:00.000")
+            self.root.after(200, self._tick_live_timer)
             return
         paused_now = 0.0
         if self.live_state == "paused" and self.live_paused_at:
@@ -17411,6 +17859,10 @@ try {
                 transcript = metamuse_rest_transcribe(
                     self.live_abort_event, settings, wav_path, raw_path
                 )
+            elif is_alibaba_transcription(settings):
+                transcript = alibaba_rest_transcribe(
+                    self.live_abort_event, settings, wav_path, raw_path
+                )
             else:
                 uploader = create_transcription_uploader(self.live_abort_event, settings)
                 status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
@@ -17435,6 +17887,12 @@ try {
             write_wav_from_pcm_bytes(wav_path, pcm)
             if is_metamuse_transcription(settings):
                 transcript = metamuse_rest_transcribe(
+                    self.live_abort_event, settings, wav_path, raw_path
+                )
+                if not transcript.strip():
+                    raise RuntimeError("resposta vazia")
+            elif is_alibaba_transcription(settings):
+                transcript = alibaba_rest_transcribe(
                     self.live_abort_event, settings, wav_path, raw_path
                 )
                 if not transcript.strip():
@@ -17504,6 +17962,274 @@ try {
         self.metamuse_ws_app = None
         self.live_uses_metamuse_websocket = False
         self._consolidate_live_text_now()
+
+    def _finish_alibaba_session(self):
+        self.alibaba_ws_done_event.set()
+        self.alibaba_ws_app = None
+        self.alibaba_ws_task_id = ""
+        self.live_uses_alibaba_websocket = False
+        self._consolidate_live_text_now()
+
+    def _alibaba_live_capture_loop(self, settings: dict):
+        try:
+            import sounddevice as sd
+            import websocket
+        except Exception as exc:
+            self._queue("live_error", f"Streaming do Alibaba indisponível: {exc}")
+            return
+
+        api_key = str(settings.get("alibaba_api_key") or "").strip()
+        if not api_key:
+            self._queue("live_error", "Insira a chave API do Alibaba Cloud nas configurações.")
+            return
+
+        task_id = uuid.uuid4().hex
+        self.alibaba_ws_task_id = task_id
+        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
+        full_pcm_lock = threading.Lock()
+        full_pcm = None
+
+        def send_pcm(app, chunk: bytes) -> bool:
+            try:
+                app.send(chunk, opcode=websocket.ABNF.OPCODE_BINARY)
+            except Exception:
+                return False
+            return True
+
+        def commit_live_text(text: str) -> None:
+            clean = (text or "").strip()
+            if not clean or self.alibaba_ws_done_event.is_set():
+                return
+            with self.live_lock:
+                committed = self.live_committed_text.strip()
+                if not committed:
+                    self.live_committed_text = clean
+                elif clean not in committed:
+                    self.live_committed_text = f"{committed}\n{clean}"
+                self.live_draft_text = ""
+                display = self._current_live_text_locked()
+            self._queue("live_display", display)
+
+        def describe_error(event: dict) -> str:
+            header = event.get("header") if isinstance(event, dict) else None
+            header = header if isinstance(header, dict) else {}
+            code = str(header.get("error_code") or "")
+            message = str(header.get("error_message") or header.get("message") or "").strip()
+            if code in ("InvalidApiKey", "Unauthorized", "Forbidden", "AccessDenied") or "401" in code or "403" in code:
+                return ALIBABA_AUTH_ERROR
+            if code == "Throttling" or "429" in code or "limit" in message.casefold():
+                return "Alibaba Cloud: rate limit / limite de uso excedido. Aguarde e tente novamente."
+            return message or f"erro {code or 'desconhecido'} do Alibaba"
+
+        def on_open(_app):
+            if _app is not self.alibaba_ws_app:
+                return
+            try:
+                _app.send(json.dumps(alibaba_ws_run_task(task_id, self.settings)))
+            except Exception:
+                self.alibaba_ws_lost_event.set()
+                self._queue("status", "Reconectando: falha ao enviar o run-task do Alibaba.")
+
+        def on_message(_app, raw_event):
+            if _app is not self.alibaba_ws_app:
+                return
+            try:
+                event = json.loads(raw_event)
+            except Exception:
+                self.alibaba_ws_lost_event.set()
+                self._queue("status", "Reconectando: resposta inválida do Alibaba.")
+                return
+            if not isinstance(event, dict):
+                return
+            header = event.get("header") or {}
+            event_type = str(header.get("event") or "") if isinstance(header, dict) else ""
+            if event_type == "task-started":
+                self.alibaba_ws_ready_event.set()
+                self._queue("status", "Conectado ao Alibaba. Ouvindo e transcrevendo ao vivo...")
+                return
+            if event_type == "result-generated":
+                # Segmentos: frase fechada (end_time) commita; parcial vira rascunho.
+                text, is_final = alibaba_ws_sentence_text(event)
+                if not text or self.alibaba_ws_done_event.is_set():
+                    return
+                if is_final:
+                    commit_live_text(text)
+                else:
+                    with self.live_lock:
+                        self.live_draft_text = text
+                        display = self._current_live_text_locked()
+                    self._queue("live_display", display)
+                return
+            if event_type == "task-finished":
+                if not self.alibaba_ws_done_event.is_set():
+                    self._finish_alibaba_session()
+                return
+            if event_type == "task-failed":
+                self.alibaba_ws_lost_event.set()
+                self._queue("status", f"Reconectando: {describe_error(event)}")
+                return
+
+        def on_error(_app, _error):
+            if (
+                _app is self.alibaba_ws_app
+                and not self.alibaba_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.alibaba_ws_done_event.is_set()
+            ):
+                self._queue("status", f"Erro do Alibaba: {_error}")
+                self.alibaba_ws_lost_event.set()
+
+        def on_close(_app, _status_code, _message):
+            if _app is not self.alibaba_ws_app:
+                return
+            if self.alibaba_ws_intentional_close and not self.alibaba_ws_done_event.is_set():
+                self._finish_alibaba_session()
+                return
+            if (
+                not self.alibaba_ws_intentional_close
+                and not self.live_abort_event.is_set()
+                and not self.alibaba_ws_done_event.is_set()
+            ):
+                self._queue("status", f"Alibaba fechou a conexão (código {_status_code}): {_message}")
+                self.alibaba_ws_lost_event.set()
+
+        def connect() -> bool:
+            previous = self.alibaba_ws_app
+            self.alibaba_ws_app = None
+            if previous:
+                try:
+                    previous.close()
+                except Exception:
+                    pass
+            self.alibaba_ws_ready_event.clear()
+            self.alibaba_ws_lost_event.clear()
+            self._queue("params_block", "Parâmetros Alibaba", alibaba_ws_log_params(self.settings))
+            hints = alibaba_language_hints(self.settings)
+            self._queue(
+                "status_silent",
+                f"Parâmetros Alibaba: {ALIBABA_WS_MODEL} pcm 16kHz {hints if hints else 'auto'}",
+            )
+            # A credencial vai no handshake (header), nunca no log.
+            app = websocket.WebSocketApp(
+                ALIBABA_WEBSOCKET_URL,
+                header=[f"Authorization: bearer {api_key}"],
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            self.alibaba_ws_app = app
+            self.alibaba_ws_thread = threading.Thread(
+                target=lambda: app.run_forever(ping_interval=30, ping_timeout=10),
+                daemon=True,
+            )
+            self.alibaba_ws_thread.start()
+            deadline = time.monotonic() + 15
+            while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                if self.alibaba_ws_ready_event.wait(0.1):
+                    if not self.live_started_at:
+                        self.live_started_at = time.time()
+                    return True
+                if self.alibaba_ws_lost_event.is_set() or time.monotonic() >= deadline:
+                    return False
+            return False
+
+        def reconnect(attempt: int) -> bool:
+            delay = min(8.0, 0.5 * (2 ** max(0, attempt - 1))) + random.uniform(0.0, 0.25)
+            self._queue("status", f"Reconectando ao Alibaba ({attempt}/{GROK_RECONNECT_MAX_ATTEMPTS}) em {delay:.1f}s...")
+            if self.live_abort_event.wait(delay) or self.live_stop_event.is_set():
+                return False
+            if not connect():
+                return False
+            self._queue("status", "Reconectou ao Alibaba; o áudio do intervalo foi descartado.")
+            return True
+
+        def audio_callback(indata, _frames, _time_info, _status):
+            if self.live_stop_event.is_set() or self.live_abort_event.is_set():
+                return
+            chunk = bytes(indata)
+            if not self.live_started_at:
+                # Ainda conectando: nada é gravado antes da conexão.
+                return
+            if self.live_state == "paused":
+                # Pausado: só silêncio para segurar a sessão; nada é registrado.
+                try:
+                    audio_queue.put_nowait(bytes(len(chunk)))
+                except queue.Full:
+                    pass
+                return
+            self._push_live_waveform_chunk(chunk)
+            self._queue_secondary_audio(chunk)
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.write(chunk)
+            try:
+                audio_queue.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    audio_queue.get_nowait()
+                    audio_queue.put_nowait(chunk)
+                    self._queue("status", "Parte do áudio ao vivo foi descartada por atraso local.")
+                except queue.Empty:
+                    pass
+
+        try:
+            pcm_path = self.live_full_pcm_path
+            if not pcm_path:
+                raise RuntimeError("não foi possível criar o áudio integral do streaming")
+            pcm_path.parent.mkdir(parents=True, exist_ok=True)
+            full_pcm = pcm_path.open("wb")
+            with sd.RawInputStream(
+                samplerate=LIVE_SAMPLE_RATE,
+                channels=LIVE_CHANNELS,
+                dtype="int16",
+                blocksize=max(
+                    1,
+                    LIVE_SAMPLE_RATE * int(settings.get("grok_chunk_ms", 100)) // 1000,
+                ),
+                callback=audio_callback,
+            ):
+                attempts = 0
+                connected = False
+                while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                    if not connected or self.alibaba_ws_lost_event.is_set():
+                        reconnecting = connected or self.alibaba_ws_lost_event.is_set() or attempts > 0
+                        attempts += 1
+                        self._queue("status", "Reconectando ao streaming do Alibaba..." if reconnecting else "Conectando ao streaming do Alibaba...")
+                        connected = reconnect(attempts) if reconnecting else connect()
+                        if connected:
+                            attempts = 0
+                            continue
+                        if attempts >= GROK_RECONNECT_MAX_ATTEMPTS:
+                            self._queue("live_error", "Falhou: reconexão do Alibaba esgotada após 8 tentativas.")
+                            return
+                        continue
+                    try:
+                        chunk = audio_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if not chunk:
+                        continue
+                    if self.live_state == "paused":
+                        # Padding de silêncio: segura a sessão sem registrar nada.
+                        if not send_pcm(self.alibaba_ws_app, chunk):
+                            self.alibaba_ws_lost_event.set()
+                            connected = False
+                        continue
+                    try:
+                        if not send_pcm(self.alibaba_ws_app, chunk):
+                            raise RuntimeError("envio falhou")
+                    except Exception:
+                        self.alibaba_ws_lost_event.set()
+                        connected = False
+        except Exception as exc:
+            if not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
+                self._queue("live_error", f"Falhou: erro no microfone ao vivo: {exc}")
+        finally:
+            with full_pcm_lock:
+                if full_pcm is not None:
+                    full_pcm.close()
+                    full_pcm = None
 
     def _metamuse_live_capture_loop(self, settings: dict):
         try:
@@ -17672,7 +18398,12 @@ try {
             self.metamuse_ws_lost_event.clear()
             preview = metamuse_handshake_payload("***", self.live_grok_diarize, self.settings)
             preview.pop("authorization", None)
-            self._queue("status", f"Parâmetros Muse: {json.dumps(preview, ensure_ascii=False)}")
+            self._queue("status_silent", f"Parâmetros Muse: {json.dumps(preview, ensure_ascii=False)}")
+            self._queue(
+                "params_block",
+                "Parâmetros Muse",
+                metamuse_ws_log_params(self.settings, self.live_grok_diarize),
+            )
             # Sem header de autenticação: a credencial vai no handshake JSON.
             app = websocket.WebSocketApp(
                 META_MUSE_STT_WEBSOCKET_URL,
@@ -17690,6 +18421,8 @@ try {
             deadline = time.monotonic() + 15
             while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
                 if self.metamuse_ws_ready_event.wait(0.1):
+                    if not self.live_started_at:
+                        self.live_started_at = time.time()
                     return True
                 if self.metamuse_ws_lost_event.is_set() or time.monotonic() >= deadline:
                     return False
@@ -17711,6 +18444,9 @@ try {
             if self.live_stop_event.is_set() or self.live_abort_event.is_set():
                 return
             chunk = bytes(indata)
+            if not self.live_started_at:
+                # Ainda conectando: nada é gravado antes da conexão.
+                return
             if self.live_state == "paused":
                 # Pausado: alimenta o socket só com silêncio para a sessão não
                 # cair por falta de ingresso; nada vai para a forma de onda,
@@ -17989,7 +18725,12 @@ try {
                 query += f"&secondary_languages={code}"
             query += "&commit_strategy=vad"
             query += "&vad_silence_threshold_secs=1.0"
-            self._queue("status", f"Parâmetros Scribe: {query}")
+            self._queue("status_silent", f"Parâmetros Scribe: {query}")
+            self._queue(
+                "params_block",
+                "Parâmetros Scribe",
+                urllib.parse.parse_qsl(query, keep_blank_values=True),
+            )
             app = websocket.WebSocketApp(
                 f"{ELEVENLABS_WEBSOCKET_URL}?{query}",
                 header=[f"xi-api-key: {api_key}"],
@@ -18007,6 +18748,8 @@ try {
             deadline = time.monotonic() + 15
             while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
                 if self.elevenlabs_ws_ready_event.wait(0.1):
+                    if not self.live_started_at:
+                        self.live_started_at = time.time()
                     return True
                 if self.elevenlabs_ws_lost_event.is_set() or time.monotonic() >= deadline:
                     return False
@@ -18031,6 +18774,9 @@ try {
 
         def audio_callback(indata, _frames, _time_info, _status):
             if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            if not self.live_started_at:
+                # Ainda conectando: nada é gravado antes da conexão.
                 return
             chunk = bytes(indata)
             self._push_live_waveform_chunk(chunk)
@@ -18262,7 +19008,12 @@ try {
             diarize_param = assemblyai_ws_diarize_query(bool(self.live_grok_diarize))
             if diarize_param:
                 query += f"&{diarize_param}"
-            self._queue("status", f"Parâmetros AssemblyAI: {query}")
+            self._queue("status_silent", f"Parâmetros AssemblyAI: {query}")
+            self._queue(
+                "params_block",
+                "Parâmetros AssemblyAI",
+                urllib.parse.parse_qsl(query, keep_blank_values=True),
+            )
             app = websocket.WebSocketApp(
                 f"{ASSEMBLYAI_WEBSOCKET_URL}?{query}",
                 header=[f"Authorization: {api_key}"],
@@ -18280,6 +19031,8 @@ try {
             deadline = time.monotonic() + 15
             while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
                 if self.assemblyai_ws_ready_event.wait(0.1):
+                    if not self.live_started_at:
+                        self.live_started_at = time.time()
                     return True
                 if self.assemblyai_ws_lost_event.is_set() or time.monotonic() >= deadline:
                     return False
@@ -18303,6 +19056,9 @@ try {
 
         def audio_callback(indata, _frames, _time_info, _status):
             if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            if not self.live_started_at:
+                # Ainda conectando: nada é gravado antes da conexão.
                 return
             chunk = bytes(indata)
             self._push_live_waveform_chunk(chunk)
@@ -18515,7 +19271,12 @@ try {
             )
             if self.live_diarize_var.get():
                 query += "&diarize=true"
-            self._queue("status", f"Parâmetros Deepgram: {query}")
+            self._queue("status_silent", f"Parâmetros Deepgram: {query}")
+            self._queue(
+                "params_block",
+                "Parâmetros Deepgram",
+                urllib.parse.parse_qsl(query, keep_blank_values=True),
+            )
             app = websocket.WebSocketApp(
                 f"{DEEPGRAM_STT_WEBSOCKET_URL}?{query}",
                 header=[f"Authorization: Token {api_key}"],
@@ -18533,6 +19294,8 @@ try {
             deadline = time.monotonic() + 15
             while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
                 if self.deepgram_ws_ready_event.wait(0.1):
+                    if not self.live_started_at:
+                        self.live_started_at = time.time()
                     return True
                 if self.deepgram_ws_lost_event.is_set() or time.monotonic() >= deadline:
                     return False
@@ -18556,6 +19319,9 @@ try {
 
         def audio_callback(indata, _frames, _time_info, _status):
             if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            if not self.live_started_at:
+                # Ainda conectando: nada é gravado antes da conexão.
                 return
             chunk = bytes(indata)
             self._push_live_waveform_chunk(chunk)
@@ -18728,7 +19494,12 @@ try {
             query += "&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
             if self.live_grok_diarize:
                 query += "&diarize=true"
-            self._queue("status", f"Parâmetros: {query}")
+            self._queue("status_silent", f"Parâmetros: {query}")
+            self._queue(
+                "params_block",
+                "Parâmetros",
+                urllib.parse.parse_qsl(query, keep_blank_values=True),
+            )
             app = websocket.WebSocketApp(
                 f"{GROK_STT_WEBSOCKET_URL}?{query}",
                 header=[f"Authorization: Bearer {api_key}"],
@@ -18745,6 +19516,8 @@ try {
             deadline = time.monotonic() + 15
             while not self.live_stop_event.is_set() and not self.live_abort_event.is_set():
                 if self.grok_ws_ready_event.wait(0.1):
+                    if not self.live_started_at:
+                        self.live_started_at = time.time()
                     return True
                 if self.grok_ws_lost_event.is_set() or time.monotonic() >= deadline:
                     return False
@@ -18768,6 +19541,9 @@ try {
 
         def audio_callback(indata, _frames, _time_info, _status):
             if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+                return
+            if not self.live_started_at:
+                # Ainda conectando: nada é gravado antes da conexão.
                 return
             chunk = bytes(indata)
             self._push_live_waveform_chunk(chunk)
@@ -19048,7 +19824,7 @@ try {
         if not self.live_ws_finalize_pending:
             # Encerramento fora do fluxo do botão Parar (ex.: transcript.done
             # espontâneo do servidor): registra o tempo do ciclo ao vivo.
-            elapsed = max(0.0, time.time() - getattr(self, "live_started_at", time.time()))
+            elapsed = max(0.0, time.time() - (getattr(self, "live_started_at", 0.0) or time.time()))
             self._queue("status", f"Transcrição ao vivo finalizada ({elapsed:.1f}s)")
 
     def _wait_for_live_capture(self):
@@ -19126,6 +19902,10 @@ try {
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Meta Muse Voice envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
+        if is_alibaba_transcription(self.settings) and self.send_zip_var.get():
+            self.send_zip_var.set(False)
+            self._refresh_zip_controls()
+            self.status_var.set("Alibaba Fun ASR/Qwen envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
         if multi_transcription and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
@@ -20315,6 +21095,15 @@ try {
             audio_job_set(job, "transcription", model_index, result)
             txt_path.write_text(result, encoding="utf-8")
             return
+        # Alibaba Fun ASR/Qwen: REST DashScope nativo (fun-asr-flash).
+        if is_alibaba_transcription(request_settings):
+            transcript = alibaba_rest_transcribe(
+                self.cancel_event, request_settings, job.upload_path, raw_path
+            )
+            result = transcript or "(sem transcrição)"
+            audio_job_set(job, "transcription", model_index, result)
+            txt_path.write_text(result, encoding="utf-8")
+            return
         status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
         if status != 200 and is_grok_transcription(request_settings):
             raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
@@ -20469,6 +21258,8 @@ try {
                 elif kind == "activity":
                     tag = message[2] if len(message) > 2 else None
                     self._append_activity_log(message[1], tag)
+                elif kind == "params_block":
+                    self._append_params_block(message[1], message[2])
                 elif kind == "ffmpeg_command":
                     self._append_activity_log(
                         message[1],

@@ -84,6 +84,15 @@ METAMUSE_LANGUAGE_NAMES = {
 
 METAMUSE_CODES = set(METAMUSE_LANGUAGE_NAMES)
 
+# Alibaba Fun ASR/Qwen: códigos cobertos pelos modelos fun-asr-flash (REST)
+# e qwen-audio-3.0-asr-flash-streaming (WS). O app exibe a sigla; o parâmetro
+# centralizado `language_hints` leva a sigla em array — ou é omitido (auto).
+ALIBABA_CODES = {
+    "zh", "en", "ja", "ko", "vi", "th", "id", "ms", "tl", "hi", "ar", "fr",
+    "de", "es", "pt", "ru", "it", "nl", "sv", "da", "fi", "no", "el", "pl",
+    "cs", "hu", "ro", "bg", "hr", "sk",
+}
+
 # ---------------- Settings keys ----------------
 
 KEY_LANGUAGE_MODE = {
@@ -92,6 +101,7 @@ KEY_LANGUAGE_MODE = {
     "elevenlabs": "elevenlabs_language_mode",
     "grok": "grok_language_mode",
     "metamuse": "metamuse_language_mode",
+    "alibaba": "alibaba_language_mode",
 }
 KEY_LANGUAGE_CUSTOM = {
     "deepgram": "deepgram_language_custom",
@@ -99,6 +109,7 @@ KEY_LANGUAGE_CUSTOM = {
     "elevenlabs": "elevenlabs_language_custom",
     "grok": "grok_language_custom",
     "metamuse": "metamuse_language_custom",
+    "alibaba": "alibaba_language_custom",
 }
 DEFAULT_MODE = {
     "deepgram": "pt-BR",
@@ -106,6 +117,7 @@ DEFAULT_MODE = {
     "elevenlabs": "pt",
     "grok": "pt",
     "metamuse": "pt",
+    "alibaba": "pt",
 }
 MENU_OPTIONS = {
     "deepgram": ["multi", "pt-BR", "en", "es", "custom"],
@@ -113,6 +125,7 @@ MENU_OPTIONS = {
     "elevenlabs": ["multi", "pt", "es", "en", "custom"],
     "grok": ["multi", "pt", "en", "es", "custom"],
     "metamuse": ["multi", "pt", "en", "es", "custom"],
+    "alibaba": ["multi", "pt", "en", "es", "custom"],
 }
 
 # Labels de exibição (SOMENTE cosmético): o que o usuário vê nos menus e
@@ -146,6 +159,8 @@ def is_valid_code(provider: str, code: str) -> bool:
         return code in GROK_CODES
     if provider == "metamuse":
         return code in METAMUSE_CODES
+    if provider == "alibaba":
+        return code in ALIBABA_CODES
     return False
 
 
@@ -162,6 +177,8 @@ def codes_for_help(provider: str) -> str:
         return ", ".join(sorted(GROK_CODES))
     if provider == "metamuse":
         return ", ".join(sorted(METAMUSE_CODES))
+    if provider == "alibaba":
+        return ", ".join(sorted(ALIBABA_CODES))
     # ElevenLabs: a tela "?" mostra apenas os códigos de 2 letras.
     return ", ".join(sorted(ELEVENLABS_CODES_2))
 
@@ -254,6 +271,24 @@ def metamuse_language_bias(settings: dict) -> list[str] | None:
 def metamuse_mode(diarize_checked: bool) -> str:
     """Meta Muse Voice: a diarização é o próprio `mode` (sem flag booleana)."""
     return "DIARIZATION" if diarize_checked else "ENDPOINTING"
+
+
+def alibaba_language_hints(settings: dict) -> list[str] | None:
+    """Alibaba Fun ASR/Qwen: função CENTRALIZADA de idioma (REST e WS).
+
+    Retorna a lista para `language_hints` ou None para omitir a propriedade
+    (detecção automática: nunca enviar lista vazia, "auto" ou "automatic").
+    Códigos fora da tabela são ignorados; se nenhum restar, retorna None.
+    """
+    mode = language_mode(settings, "alibaba")
+    if mode == "multi":
+        return None
+    if mode == "custom":
+        codes = parse_codes(language_custom(settings, "alibaba"))
+    else:
+        codes = [mode]
+    hints = [code for code in codes if code in ALIBABA_CODES]
+    return hints or None
 
 
 # ---------------- Diarização: parâmetros por provedor ----------------
