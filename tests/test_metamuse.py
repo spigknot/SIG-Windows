@@ -142,6 +142,27 @@ class MetaMuseLanguageRulesTests(unittest.TestCase):
 
 
 class MetaMusePayloadTests(unittest.TestCase):
+    def test_finish_session_is_class_method(self):
+        # Vacina: o Parar e os handlers chamam self._finish_metamuse_session();
+        # se virar closure local de novo, o fechamento quebra com AttributeError.
+        self.assertTrue(callable(getattr(sig_app.SigApp, "_finish_metamuse_session", None)))
+
+    def test_immediate_stop_helper_exists(self):
+        # Vacina da regra "Parar é imediato": todos os WS consolidam pelo
+        # helper, sem thread de espera por confirmação final.
+        self.assertTrue(callable(getattr(sig_app.SigApp, "_consolidate_live_text_now", None)))
+        for name in (
+            "_wait_for_elevenlabs_final_event",
+            "_wait_for_assemblyai_final_event",
+            "_wait_for_deepgram_final_event",
+            "_wait_for_grok_final_event",
+            "_wait_for_metamuse_final_event",
+        ):
+            self.assertFalse(
+                hasattr(sig_app.SigApp, name),
+                f"{name} ressuscitou: o Parar deve ser imediato",
+            )
+
     def test_handshake_carries_key_inside_authorization(self):
         payload = sig_app.metamuse_handshake_payload(
             "muse-key-123", False, _muse_settings()

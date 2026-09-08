@@ -84,7 +84,7 @@ from sync_common import (
 
 
 APP_NAME = "sig"
-APP_VERSION = "20260907_001"
+APP_VERSION = "20260907_002"
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
@@ -17023,116 +17023,123 @@ try {
             self.live_paused_at = 0.0
         self._set_live_state("finalizing")
         if self.live_uses_metamuse_websocket:
+            # Parar é imediato: avisa o servidor, fecha o socket e consolida
+            # o texto acumulado na hora — sem esperar confirmação final.
             self.metamuse_ws_intentional_close = True
-            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado.")
             self.live_ws_finalize_started = time.monotonic()
             self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.metamuse_ws_app
-            if not app:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
-                self._finish_live_output()
-                return
-            try:
-                app.send(json.dumps({"type": "endStream"}))
-                threading.Thread(target=self._wait_for_metamuse_final_event, daemon=True).start()
-            except Exception:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
-                self._finish_live_output()
+            if app:
+                try:
+                    app.send(json.dumps({"type": "endStream"}))
+                except Exception:
+                    pass
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self._finish_metamuse_session()
             return
         if self.live_uses_elevenlabs_websocket:
+            # Parar é imediato: força o commit, fecha o socket e consolida
+            # o texto acumulado na hora — sem esperar confirmação final.
             self.elevenlabs_ws_intentional_close = True
-            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado.")
             self.live_ws_finalize_started = time.monotonic()
             self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.elevenlabs_ws_app
-            if not app:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
-                self._finish_live_output()
-                return
-            try:
-                # Força a finalização com um chunk de silêncio commitado (a VAD
-                # fecharia sozinha, mas o commit garante o último segmento).
-                silence = base64.b64encode(bytes(3200)).decode("ascii")
-                app.send(json.dumps({
-                    "message_type": "input_audio_chunk",
-                    "audio_base_64": silence,
-                    "commit": True,
-                    "sample_rate": LIVE_SAMPLE_RATE,
-                }))
-                threading.Thread(target=self._wait_for_elevenlabs_final_event, daemon=True).start()
-            except Exception:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
-                self._finish_live_output()
+            if app:
+                try:
+                    # Força a finalização com um chunk de silêncio commitado.
+                    silence = base64.b64encode(bytes(3200)).decode("ascii")
+                    app.send(json.dumps({
+                        "message_type": "input_audio_chunk",
+                        "audio_base_64": silence,
+                        "commit": True,
+                        "sample_rate": LIVE_SAMPLE_RATE,
+                    }))
+                except Exception:
+                    pass
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self.elevenlabs_ws_done_event.set()
+            self.elevenlabs_ws_app = None
+            self.live_uses_elevenlabs_websocket = False
+            self._consolidate_live_text_now()
             return
         if self.live_uses_assemblyai_websocket:
+            # Parar é imediato: avisa o servidor, fecha o socket e consolida
+            # o texto acumulado na hora — sem esperar confirmação final.
             self.assemblyai_ws_intentional_close = True
-            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado.")
             self.live_ws_finalize_started = time.monotonic()
             self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.assemblyai_ws_app
-            if not app:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
-                self._finish_live_output()
-                return
-            try:
-                app.send(json.dumps({"type": "Terminate"}))
-                threading.Thread(target=self._wait_for_assemblyai_final_event, daemon=True).start()
-            except Exception:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
-                self._finish_live_output()
+            if app:
+                try:
+                    app.send(json.dumps({"type": "Terminate"}))
+                except Exception:
+                    pass
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self.assemblyai_ws_done_event.set()
+            self.assemblyai_ws_app = None
+            self.live_uses_assemblyai_websocket = False
+            self._consolidate_live_text_now()
             return
         if self.live_uses_deepgram_websocket:
+            # Parar é imediato: avisa o servidor, fecha o socket e consolida
+            # o texto acumulado na hora — sem esperar confirmação final.
             self.deepgram_ws_intentional_close = True
-            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado.")
             self.live_ws_finalize_started = time.monotonic()
             self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.deepgram_ws_app
-            if not app:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
-                self._finish_live_output()
-                return
-            try:
-                app.send(json.dumps({"type": "CloseStream"}))
-                threading.Thread(target=self._wait_for_deepgram_final_event, daemon=True).start()
-            except Exception:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
-                self._finish_live_output()
+            if app:
+                try:
+                    app.send(json.dumps({"type": "CloseStream"}))
+                except Exception:
+                    pass
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self.deepgram_ws_done_event.set()
+            self.deepgram_ws_app = None
+            self.live_uses_deepgram_websocket = False
+            self._consolidate_live_text_now()
             return
         if self.live_uses_grok_websocket:
+            # Parar é imediato: avisa o servidor, fecha o socket e consolida
+            # o texto acumulado na hora — sem esperar confirmação final.
             self.grok_ws_intentional_close = True
-            self._begin_activity_step("live:ws_finalize", "Websocket encerrado. Recebendo transcrição")
+            self._begin_activity_step("live:ws_finalize", "Websocket encerrado.")
             self.live_ws_finalize_started = time.monotonic()
             self.live_ws_finalize_pending = True
             self.live_stop_event.set()
             app = self.grok_ws_app
-            if not app:
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não havia conexão ativa para confirmar o áudio final.")
-                self._finish_live_output()
-                return
-            try:
-                # websocket-client returns the number of bytes sent, which may be 0/None
-                # depending on the transport. An exception, not that return value, means failure.
-                app.send(json.dumps({"type": "audio.done"}))
-                threading.Thread(target=self._wait_for_grok_final_event, daemon=True).start()
-            except Exception:
-                # The user deliberately stopped the stream. Keep the partial text and finish
-                # cleanly instead of routing this through the cancellation/error path.
-                self._finish_ws_finalize_step()
-                self._queue("status", "Streaming finalizado; não foi possível confirmar o áudio final no servidor.")
-                self._finish_live_output()
+            if app:
+                try:
+                    app.send(json.dumps({"type": "audio.done"}))
+                except Exception:
+                    pass
+                try:
+                    app.close()
+                except Exception:
+                    pass
+            self.grok_ws_done_event.set()
+            self.grok_ws_app = None
+            self.live_uses_grok_websocket = False
+            self._consolidate_live_text_now()
             return
         self._begin_activity_step("live:ws_finalize", "Encerrando. Consolidando transcrição")
         self.live_ws_finalize_started = time.monotonic()
@@ -17148,96 +17155,6 @@ try {
             executor.shutdown(wait=False, cancel_futures=True)
         self.live_finalize_thread = threading.Thread(target=self._finish_live_transcription, daemon=True)
         self.live_finalize_thread.start()
-
-    def _wait_for_metamuse_final_event(self):
-        if self.metamuse_ws_done_event.wait(20):
-            return
-        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
-            self.metamuse_ws_intentional_close = True
-            app = self.metamuse_ws_app
-            if app:
-                try:
-                    app.close()
-                except Exception:
-                    pass
-            self._queue(
-                "status",
-                "O Muse não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
-            )
-            self._finish_ws_finalize_step()
-            self._finish_live_output()
-
-    def _wait_for_elevenlabs_final_event(self):
-        if self.elevenlabs_ws_done_event.wait(3):
-            return
-        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
-            self.elevenlabs_ws_intentional_close = True
-            app = self.elevenlabs_ws_app
-            if app:
-                try:
-                    app.close()
-                except Exception:
-                    pass
-            self._queue(
-                "status",
-                "O Scribe não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
-            )
-            self._finish_ws_finalize_step()
-            self._finish_live_output()
-
-    def _wait_for_assemblyai_final_event(self):
-        if self.assemblyai_ws_done_event.wait(20):
-            return
-        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
-            self.assemblyai_ws_intentional_close = True
-            app = self.assemblyai_ws_app
-            if app:
-                try:
-                    app.close()
-                except Exception:
-                    pass
-            self._queue(
-                "status",
-                "A AssemblyAI não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
-            )
-            self._finish_ws_finalize_step()
-            self._finish_live_output()
-
-    def _wait_for_deepgram_final_event(self):
-        if self.deepgram_ws_done_event.wait(20):
-            return
-        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
-            self.deepgram_ws_intentional_close = True
-            app = self.deepgram_ws_app
-            if app:
-                try:
-                    app.close()
-                except Exception:
-                    pass
-            self._queue(
-                "status",
-                "O Deepgram não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
-            )
-            self._finish_ws_finalize_step()
-            self._finish_live_output()
-
-    def _wait_for_grok_final_event(self):
-        if self.grok_ws_done_event.wait(20):
-            return
-        if self.live_state == "finalizing" and not self.live_abort_event.is_set():
-            self.grok_ws_intentional_close = True
-            app = self.grok_ws_app
-            if app:
-                try:
-                    app.close()
-                except Exception:
-                    pass
-            self._queue(
-                "status",
-                "O Grok não enviou uma confirmação final; mantive a transcrição recebida durante o streaming.",
-            )
-            self._finish_ws_finalize_step()
-            self._finish_live_output()
 
     def cancel_live_mic(self):
         if self.live_state == "idle":
@@ -17561,6 +17478,32 @@ try {
             self.live_secondary_draft_text = ""
         self._queue("live_display_2", clean)
 
+    def _consolidate_live_text_now(self):
+        """Consolida o texto acumulado na hora (Parar imediato dos WS).
+
+        Usado por todos os provedores de streaming: o Parar só consolida o
+        que já chegou (inclui o payload de timestamps quando houver) — sem
+        esperar confirmação final do servidor e sem requisição REST extra.
+        """
+        with self.live_lock:
+            text = self.live_committed_text.strip() or self._current_live_text_locked().strip()
+            self.live_committed_text = text
+            self.live_draft_text = ""
+        timestamped = (self.live_timestamped_transcript_text or "").strip()
+        if not text:
+            self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
+        self._queue("live_display", text)
+        if timestamped:
+            self._queue("live_payload", text, timestamped, True)
+        self._finish_ws_finalize_step()
+        self._finish_live_output()
+
+    def _finish_metamuse_session(self):
+        self.metamuse_ws_done_event.set()
+        self.metamuse_ws_app = None
+        self.live_uses_metamuse_websocket = False
+        self._consolidate_live_text_now()
+
     def _metamuse_live_capture_loop(self, settings: dict):
         try:
             import sounddevice as sd
@@ -17692,20 +17635,6 @@ try {
                 )
                 return
 
-        def _finish_metamuse_session():
-            with self.live_lock:
-                text = self.live_committed_text.strip() or self._current_live_text_locked().strip()
-                self.live_committed_text = text
-                self.live_draft_text = ""
-            self.metamuse_ws_done_event.set()
-            self.metamuse_ws_app = None
-            self.live_uses_metamuse_websocket = False
-            if not text:
-                self._queue("status", "Transcrição ao vivo finalizada sem conteúdo.")
-            self._queue("live_display", text)
-            self._finish_ws_finalize_step()
-            self._finish_live_output()
-
         def on_error(_app, _error):
             if (
                 _app is self.metamuse_ws_app
@@ -17778,9 +17707,18 @@ try {
             return True
 
         def audio_callback(indata, _frames, _time_info, _status):
-            if self.live_stop_event.is_set() or self.live_abort_event.is_set() or self.live_state == "paused":
+            if self.live_stop_event.is_set() or self.live_abort_event.is_set():
                 return
             chunk = bytes(indata)
+            if self.live_state == "paused":
+                # Pausado: alimenta o socket só com silêncio para a sessão não
+                # cair por falta de ingresso; nada vai para a forma de onda,
+                # o áudio secundário ou o integral.
+                try:
+                    audio_queue.put_nowait(bytes(len(chunk)))
+                except queue.Full:
+                    pass
+                return
             self._push_live_waveform_chunk(chunk)
             self._queue_secondary_audio(chunk)
             with full_pcm_lock:
@@ -17837,7 +17775,15 @@ try {
                         chunk = audio_queue.get(timeout=0.2)
                     except queue.Empty:
                         continue
-                    if self.live_state == "paused" or not chunk:
+                    if not chunk:
+                        continue
+                    if self.live_state == "paused":
+                        # Padding de silêncio: segura a sessão sem registrar nada.
+                        if send_pcm(self.metamuse_ws_app, chunk):
+                            paced_bytes += len(chunk)
+                        else:
+                            self.metamuse_ws_lost_event.set()
+                            connected = False
                         continue
                     try:
                         if not send_pcm(self.metamuse_ws_app, chunk):
