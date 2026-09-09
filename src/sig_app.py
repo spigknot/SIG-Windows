@@ -85,6 +85,71 @@ from sync_common import (
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/stt_clients.py (codigo movido verbatim).
+from stt_clients import (  # noqa: F401
+    transcribe_url,
+    probe_duration_ms,
+    deepgram_keyterms_list,
+    deepgram_query_string,
+    is_grok_transcription,
+    is_deepgram_transcription,
+    is_assemblyai_transcription,
+    is_elevenlabs_transcription,
+    is_metamuse_transcription,
+    is_alibaba_transcription,
+    transcription_form_fields,
+    create_transcription_uploader,
+    metamuse_handshake_payload,
+    metamuse_rest_request_body,
+    metamuse_format_rest_response,
+    metamuse_rest_transcribe,
+    ALIBABA_AUTH_ERROR,
+    PARAMS_BLOCK_TAG_PREFIX,
+    alibaba_rest_body,
+    alibaba_format_rest_response,
+    alibaba_rest_transcribe,
+    alibaba_ws_run_task,
+    alibaba_ws_finish_task,
+    alibaba_ws_sentence_text,
+    metamuse_ws_log_params,
+    alibaba_ws_log_params,
+    alibaba_rest_log_params,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/http_clients.py (codigo movido verbatim).
+from http_clients import (  # noqa: F401
+    GraniteUploader,
+    TextModelClient,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/text_models.py (codigo movido verbatim).
+from text_models import (  # noqa: F401
+    selected_text_model,
+    selected_text_model_for,
+    assistant_request_model_label,
+    extract_text_model_output,
+    extract_content_text,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/transcription_parsing.py (codigo movido verbatim).
+from transcription_parsing import (  # noqa: F401
+    ParsedTranscription,
+    _format_transcription_timestamp,
+    _timed_entry,
+    _timed_word_entries,
+    _timestamped_text_from_json,
+    parse_transcription_response,
+    extract_text_from_response,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
 # Implementacao real em src/settings_store.py (codigo movido verbatim).
 from settings_store import (  # noqa: F401
     clamp_int,
@@ -6536,953 +6601,101 @@ def fetch_imei_info_record(imei: str, api_key: str) -> dict:
     }
 
 
-def transcribe_url(settings: dict) -> str:
-    url = selected_transcription_server(settings)["url"]
-    if is_deepgram_transcription(settings):
-        url = f"{url}?{deepgram_query_string(settings)}"
-    return url
-
-
-def probe_duration_ms(path: Path) -> int:
-    """Duração real do arquivo em ms via ffmpeg (0 se não for possível medir)."""
-    try:
-        ffmpeg = app_base_dir() / "ffmpeg.exe"
-        if not ffmpeg.exists():
-            return 0
-        result = subprocess.run(
-            [str(ffmpeg), "-hide_banner", "-i", str(path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr + result.stdout)
-        if not match:
-            return 0
-        seconds = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
-        return int(seconds * 1000)
-    except Exception:
-        return 0
-
-
-def deepgram_keyterms_list(settings: dict) -> list[str]:
-    """Termos de reforço do Deepgram (keyterm prompting), separados por vírgula."""
-    raw = str(settings.get("deepgram_keyterms") or "")
-    return [term.strip() for term in raw.replace("\n", ",").split(",") if term.strip()]
-
-
-def deepgram_query_string(settings: dict, language: str | None = None, diarize: bool = False) -> str:
-    """Parâmetros do Deepgram Nova 3 (REST e WS) — espelho do app Android."""
-    if language is None:
-        language = stt_provider_rules.deepgram_language_param(settings)
-    params = ["model=nova-3", f"language={language}", "smart_format=true", "punctuate=true"]
-    if diarize or settings.get("diarize") or settings.get("grok_diarize"):
-        diarize_param = stt_provider_rules.deepgram_diarize_query(True)
-        if diarize_param:
-            params.append(diarize_param)
-    for term in deepgram_keyterms_list(settings):
-        params.append(f"keyterm={urllib.parse.quote(term)}")
-    return "&".join(params)
-
-
-def is_grok_transcription(settings: dict) -> bool:
-    return selected_transcription_server(settings).get("is_grok_api", False)
-
-
-def is_deepgram_transcription(settings: dict) -> bool:
-    return selected_transcription_server(settings).get("is_deepgram_api", False)
-
-
-def is_assemblyai_transcription(settings: dict) -> bool:
-    return selected_transcription_server(settings).get("is_assemblyai_api", False)
-
-
-def is_elevenlabs_transcription(settings: dict) -> bool:
-    return selected_transcription_server(settings).get("is_elevenlabs_api", False)
-
-
-def is_metamuse_transcription(settings: dict) -> bool:
-    return selected_transcription_server(settings).get("is_metamuse_api", False)
-
-
-def is_alibaba_transcription(settings: dict) -> bool:
-    return selected_transcription_server(settings).get("is_alibaba_api", False)
-
-
-
-
-
-
-
-
-def transcription_form_fields(settings: dict) -> dict:
-    diarize_checked = bool(settings.get("diarize") or settings.get("grok_diarize"))
-    if is_grok_transcription(settings):
-        fields = {"format": "true", "filler_words": "false"}
-        language = stt_provider_rules.grok_language_param(settings)
-        if language:
-            fields["language"] = language
-        if stt_provider_rules.grok_rest_diarize(diarize_checked):
-            fields["diarize"] = "true"
-        return fields
-    if is_deepgram_transcription(settings):
-        # No fluxo Deepgram os parâmetros viajam na URL (raw body); o dict
-        # fica vazio apenas para manter a assinatura do uploader.
-        return {}
-    if is_assemblyai_transcription(settings):
-        fields: dict = {}
-        detection, code = stt_provider_rules.assemblyai_rest_language(settings)
-        if detection:
-            fields["language_detection"] = "true"
-        if code:
-            fields["language_code"] = code
-        speaker_labels, punctuate = stt_provider_rules.assemblyai_rest_diarize(diarize_checked)
-        if speaker_labels:
-            fields["speaker_labels"] = "true"
-            fields["punctuate"] = "true"
-        return fields
-    if is_elevenlabs_transcription(settings):
-        fields = {}
-        code = stt_provider_rules.elevenlabs_rest_language_code(settings)
-        if code:
-            fields["language_code"] = code
-        if stt_provider_rules.elevenlabs_rest_diarize(diarize_checked):
-            fields["diarize"] = "true"
-        return fields
-    if is_metamuse_transcription(settings):
-        # O Muse monta o corpo REST dedicado (parte JSON "request" + parte
-        # "audio"); não há campos de formulário — a assinatura fica vazia
-        # apenas para manter o contrato do uploader.
-        return {}
-    if is_alibaba_transcription(settings):
-        # O Alibaba monta o JSON DashScope dedicado; sem form fields.
-        return {}
-    return selected_transcription_server(settings)["parameters"].copy()
-
-
-def create_transcription_uploader(cancel_event: threading.Event, settings: dict) -> "GraniteUploader":
-    if is_grok_transcription(settings):
-        api_key = str(settings.get("grok_api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Insira a chave API do Grok nas configurações.")
-        return GraniteUploader(
-            cancel_event,
-            transcription_form_fields(settings),
-            {"Authorization": f"Bearer {api_key}"},
-            "file",
-        )
-    if is_deepgram_transcription(settings):
-        api_key = str(settings.get("deepgram_api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Insira a chave API do Deepgram nas configurações.")
-        return GraniteUploader(
-            cancel_event,
-            {},
-            {"Authorization": f"Token {api_key}"},
-            "file",
-            raw_body=True,
-        )
-    if is_assemblyai_transcription(settings):
-        api_key = str(settings.get("assemblyai_api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Insira a chave API da AssemblyAI nas configurações.")
-        return GraniteUploader(
-            cancel_event,
-            {},
-            {
-                "Authorization": api_key,
-                "X-AAI-Model": "u3-sync-pro",
-            },
-            "audio",
-        )
-    if is_elevenlabs_transcription(settings):
-        api_key = str(settings.get("elevenlabs_api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Insira a chave API da ElevenLabs nas configurações.")
-        return GraniteUploader(
-            cancel_event,
-            {"model_id": "scribe_v2"},
-            {"xi-api-key": api_key},
-            "file",
-        )
-    if is_metamuse_transcription(settings):
-        api_key = str(settings.get("metamuse_api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Insira a chave API do Meta Muse Voice nas configurações.")
-        # O REST do Muse usa corpo dedicado (ver metamuse_rest_transcribe);
-        # este uploader valida a chave e serve aos fluxos que só precisam
-        # de um uploader presente (cancelamento, multi-modelo).
-        return GraniteUploader(cancel_event, {}, {}, "file")
-    if is_alibaba_transcription(settings):
-        api_key = str(settings.get("alibaba_api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Insira a chave API do Alibaba Cloud nas configurações.")
-        # O REST do Alibaba usa JSON DashScope dedicado (ver
-        # alibaba_rest_transcribe); este uploader só valida a chave.
-        return GraniteUploader(cancel_event, {}, {}, "file")
-    return GraniteUploader(cancel_event, transcription_form_fields(settings))
-
-
-def metamuse_handshake_payload(api_key: str, diarize_checked: bool, settings: dict) -> dict:
-    """Primeiro frame textual do WebSocket do Muse (configuração da sessão).
-
-    A credencial viaja dentro do JSON em ``authorization.accessToken``
-    (o handshake não usa header Authorization). Sem diarização o modo é
-    ENDPOINTING; com diarização, DIARIZATION.
-    """
-    payload = {
-        "authorization": {"accessToken": api_key},
-        "audioEncoding": "PCM_16KHZ",
-        "model": META_MUSE_MODEL,
-        "mode": metamuse_mode(bool(diarize_checked)),
-        "partialMode": "CUMULATIVE",
-        "emitAudioProgress": False,
-    }
-    language_bias = metamuse_language_bias(settings)
-    if language_bias:
-        payload["languageBias"] = language_bias
-    return payload
-
-
-def metamuse_rest_request_body(diarize_checked: bool, settings: dict) -> dict:
-    """Parte JSON \"request\" do REST do Muse (multipart com a parte \"audio\")."""
-    body = {
-        "mode": metamuse_mode(bool(diarize_checked)),
-        "model": META_MUSE_MODEL,
-        "audioEncoding": "WAV",
-    }
-    language_bias = metamuse_language_bias(settings)
-    if language_bias:
-        body["languageBias"] = language_bias
-    return body
-
-
-def metamuse_format_rest_response(payload: dict, diarize_checked: bool) -> str:
-    """Texto final do REST do Muse: turnos diarizados ou transcript único.
-
-    Os rótulos de falante são letras ("A", "B", ...) — viram
-    "Interlocutor 1/2/..." na ordem de aparição, como no restante do app.
-    """
-    if not isinstance(payload, dict):
-        return ""
-    if diarize_checked:
-        turns = payload.get("turns")
-        if isinstance(turns, list) and turns:
-            order: dict[str, int] = {}
-            lines = []
-            for turn in turns:
-                if not isinstance(turn, dict):
-                    continue
-                text = str(turn.get("transcript") or "").strip()
-                if not text:
-                    continue
-                label = str(turn.get("speaker") or "").strip()
-                if label:
-                    if label not in order:
-                        order[label] = len(order) + 1
-                    lines.append(f"Interlocutor {order[label]}: {text}")
-                else:
-                    lines.append(text)
-            if lines:
-                return "\n".join(lines).strip()
-    return str(payload.get("transcript") or "").strip()
-
-
-def metamuse_rest_transcribe(
-    cancel_event: threading.Event,
-    settings: dict,
-    audio_path: Path,
-    raw_path: Path | None = None,
-) -> str:
-    """Transcreve um WAV pelo REST do Muse (POST multipart dedicado)."""
-    api_key = str(settings.get("metamuse_api_key") or "").strip()
-    if not api_key:
-        raise RuntimeError("Insira a chave API do Meta Muse Voice nas configurações.")
-    if cancel_event.is_set():
-        raise Cancelled()
-    size = audio_path.stat().st_size
-    if size > 32 * 1024 * 1024:
-        raise RuntimeError(
-            "O áudio passa de 32 MB; o endpoint REST do Muse aceita no máximo "
-            "32 MB (ou 10 minutos). Divida o áudio ou use o streaming ao vivo."
-        )
-    diarize_checked = bool(settings.get("diarize") or settings.get("grok_diarize"))
-    request_body = json.dumps(metamuse_rest_request_body(diarize_checked, settings), ensure_ascii=False)
-    boundary = f"----sigmuse-{uuid.uuid4().hex}"
-    crlf = chr(13) + chr(10)
-    preamble = (
-        f"--{boundary}" + crlf
-        + 'Content-Disposition: form-data; name="request"' + crlf
-        + "Content-Type: application/json" + crlf + crlf
-        + f"{request_body}" + crlf
-        + f"--{boundary}" + crlf
-        + f'Content-Disposition: form-data; name="audio"; filename="{audio_path.name}"' + crlf
-        + "Content-Type: audio/wav" + crlf + crlf
-    ).encode("utf-8")
-    ending = (crlf + f"--{boundary}--" + crlf).encode("utf-8")
-    parsed = urlparse(META_MUSE_STT_URL)
-    conn = http.client.HTTPSConnection(parsed.netloc, timeout=60 * 60)
-    try:
-        conn.putrequest("POST", parsed.path or "/")
-        conn.putheader("accept", "application/json")
-        conn.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
-        conn.putheader("Content-Length", str(len(preamble) + size + len(ending)))
-        conn.putheader("Authorization", f"Bearer {api_key}")
-        conn.endheaders()
-        conn.send(preamble)
-        with audio_path.open("rb") as handle:
-            while True:
-                if cancel_event.is_set():
-                    raise Cancelled()
-                chunk = handle.read(1024 * 128)
-                if not chunk:
-                    break
-                conn.send(chunk)
-        conn.send(ending)
-        if cancel_event.is_set():
-            raise Cancelled()
-        response = conn.getresponse()
-        raw = response.read()
-        status = response.status
-    finally:
-        conn.close()
-    if raw_path is not None:
-        try:
-            raw_path.write_bytes(raw)
-        except OSError:
-            pass
-    if status != 200:
-        raise RuntimeError(f"HTTP {status}\n{raw.decode('utf-8', errors='replace')[:500]}")
-    try:
-        payload = json.loads(raw.decode("utf-8-sig", errors="replace") or "{}")
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"resposta inválida do Muse: {exc}") from exc
-    return metamuse_format_rest_response(payload, diarize_checked)
-
-
-ALIBABA_AUTH_ERROR = "API Key do Alibaba Cloud inválida ou incompatível com a região Singapore."
-
-PARAMS_BLOCK_TAG_PREFIX = "params_block:"
-
-
-
-
-def alibaba_rest_body(audio_data_uri: str, settings: dict) -> dict:
-    """Corpo JSON do REST DashScope nativo (fun-asr-flash)."""
-    parameters: dict = {"format": "wav", "sample_rate": 16000}
-    hints = alibaba_language_hints(settings)
-    if hints:
-        parameters["language_hints"] = hints
-    return {
-        "model": ALIBABA_REST_MODEL,
-        "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": audio_data_uri},
-                        }
-                    ],
-                }
-            ]
-        },
-        "parameters": parameters,
-    }
-
-
-def alibaba_format_rest_response(payload: dict) -> str:
-    """Extrai o texto do REST DashScope (output.text, choices ou genérico)."""
-    if not isinstance(payload, dict):
-        return ""
-    output = payload.get("output")
-    if isinstance(output, dict):
-        text = output.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-        choices = output.get("choices")
-        if isinstance(choices, list):
-            for choice in choices:
-                if not isinstance(choice, dict):
-                    continue
-                message = choice.get("message") or {}
-                content = message.get("content") if isinstance(message, dict) else None
-                if isinstance(content, str) and content.strip():
-                    return content.strip()
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict):
-                            part_text = part.get("text")
-                            if isinstance(part_text, str) and part_text.strip():
-                                return part_text.strip()
-    return extract_text_from_response(json.dumps(payload).encode("utf-8"))
-
-
-def alibaba_rest_transcribe(
-    cancel_event: threading.Event,
-    settings: dict,
-    audio_path: Path,
-    raw_path: Path | None = None,
-) -> str:
-    """Transcreve um WAV pelo REST DashScope nativo (fun-asr-flash)."""
-    api_key = str(settings.get("alibaba_api_key") or "").strip()
-    if not api_key:
-        raise RuntimeError("Insira a chave API do Alibaba Cloud nas configurações.")
-    if cancel_event.is_set():
-        raise Cancelled()
-    wav_bytes = audio_path.read_bytes()
-    data_uri = "data:audio/wav;base64," + base64.b64encode(wav_bytes).decode("ascii")
-    body = json.dumps(alibaba_rest_body(data_uri, settings), ensure_ascii=False).encode("utf-8")
-    parsed = urlparse(ALIBABA_REST_URL)
-    conn = http.client.HTTPSConnection(parsed.netloc, timeout=60 * 60)
-    try:
-        conn.putrequest("POST", parsed.path or "/")
-        conn.putheader("accept", "application/json")
-        conn.putheader("Content-Type", "application/json")
-        conn.putheader("Content-Length", str(len(body)))
-        conn.putheader("Authorization", f"Bearer {api_key}")
-        conn.putheader("X-DashScope-SSE", "disable")
-        conn.endheaders()
-        for offset in range(0, len(body), 1024 * 128):
-            if cancel_event.is_set():
-                raise Cancelled()
-            conn.send(body[offset:offset + 1024 * 128])
-        if cancel_event.is_set():
-            raise Cancelled()
-        response = conn.getresponse()
-        raw = response.read()
-        status = response.status
-    finally:
-        conn.close()
-    if raw_path is not None:
-        try:
-            raw_path.write_bytes(raw)
-        except OSError:
-            pass
-    if status in (401, 403):
-        raise RuntimeError(f"{ALIBABA_AUTH_ERROR} (HTTP {status})")
-    if status == 429:
-        raise RuntimeError("Alibaba Cloud: rate limit / limite de uso excedido (HTTP 429). Aguarde e tente novamente.")
-    try:
-        payload = json.loads(raw.decode("utf-8-sig", errors="replace") or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    code = str(payload.get("code") or "") if isinstance(payload, dict) else ""
-    message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
-    if code in ("InvalidApiKey", "Unauthorized", "Forbidden", "AccessDenied"):
-        raise RuntimeError(ALIBABA_AUTH_ERROR)
-    if code == "CLIENT_ERROR" and "NO_WORDS" in message:
-        # Áudio sem fala reconhecível: equivale a transcrição vazia.
-        return ""
-    if status != 200:
-        raise RuntimeError(f"HTTP {status}\n{raw.decode('utf-8', errors='replace')[:500]}")
-    if code:
-        raise RuntimeError(f"{code}: {message or 'erro desconhecido'}")
-    return alibaba_format_rest_response(payload)
-
-
-def alibaba_ws_run_task(task_id: str, settings: dict) -> dict:
-    """Evento run-task do WebSocket DashScope (qwen-audio-3.0-asr-flash-streaming)."""
-    parameters: dict = {"format": "pcm", "sample_rate": 16000, "heartbeat": True}
-    hints = alibaba_language_hints(settings)
-    if hints:
-        parameters["language_hints"] = hints
-    return {
-        "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
-        "payload": {
-            "task_group": "audio",
-            "task": "asr",
-            "function": "recognition",
-            "model": ALIBABA_WS_MODEL,
-            "parameters": parameters,
-            "input": {},
-        },
-    }
-
-
-def alibaba_ws_finish_task(task_id: str) -> dict:
-    """Evento finish-task do WebSocket DashScope (mesmo task_id do run-task)."""
-    return {
-        "header": {"action": "finish-task", "task_id": task_id, "streaming": "duplex"},
-        "payload": {"input": {}},
-    }
-
-
-def alibaba_ws_sentence_text(event: dict) -> tuple[str, bool]:
-    """(texto, é_final) de um evento result-generated.
-
-    Frase com `sentence_end: true` é segmento fechado (commit); o resto é
-    parcial (rascunho). Formatos desconhecidos viram rascunho.
-    """
-    if not isinstance(event, dict):
-        return "", False
-    try:
-        sentence = ((event.get("payload") or {}).get("output") or {}).get("sentence") or {}
-    except AttributeError:
-        return "", False
-    if not isinstance(sentence, dict):
-        return "", False
-    text = str(sentence.get("text") or "").strip()
-    if sentence.get("sentence_end") is True:
-        return text, True
-    return text, ("end_time" in sentence) and (sentence.get("end_time") is not None)
-
-
-
-
-def metamuse_ws_log_params(settings: dict, diarize_checked: bool) -> dict:
-    """Parâmetros efetivos do handshake do Muse para o log (sem segredo)."""
-    payload = metamuse_handshake_payload("***", diarize_checked, settings)
-    payload.pop("authorization", None)
-    bias = payload.pop("languageBias", None)
-    payload["languageBias"] = bias if bias else "auto (omitido)"
-    return payload
-
-
-def alibaba_ws_log_params(settings: dict) -> dict:
-    """Parâmetros efetivos do run-task do Alibaba para o log (sem segredo)."""
-    params: dict = {
-        "model": ALIBABA_WS_MODEL,
-        "format": "pcm",
-        "sample_rate": 16000,
-        "heartbeat": True,
-    }
-    hints = alibaba_language_hints(settings)
-    params["language_hints"] = hints if hints else "auto (omitido)"
-    return params
-
-
-def alibaba_rest_log_params(settings: dict) -> dict:
-    """Parâmetros do REST Alibaba para o log (sem o áudio base64)."""
-    params: dict = {
-        "model": ALIBABA_REST_MODEL,
-        "format": "wav",
-        "sample_rate": 16000,
-    }
-    hints = alibaba_language_hints(settings)
-    params["language_hints"] = hints if hints else "auto (omitido)"
-    return params
-
-
-
-
-
-
-
-
-
-
-@dataclass(frozen=True)
-class ParsedTranscription:
-    text: str
-    timestamped_text: str = ""
-
-
-def _format_transcription_timestamp(seconds: float) -> str:
-    millis = max(0, int(round(seconds * 1000)))
-    hours, remainder = divmod(millis, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    secs, millis = divmod(remainder, 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
-
-
-def _timed_entry(value) -> tuple[str, float, float] | None:
-    if not isinstance(value, dict):
-        return None
-    text = next((str(value.get(key) or "").strip() for key in ("text", "word", "transcript") if str(value.get(key) or "").strip()), "")
-    if not text:
-        return None
-    timestamp = value.get("timestamp")
-    start = value.get("start", value.get("start_time"))
-    end = value.get("end", value.get("end_time"))
-    if isinstance(timestamp, list) and len(timestamp) >= 2:
-        start = timestamp[0] if start is None else start
-        end = timestamp[1] if end is None else end
-    try:
-        start_value = float(start)
-        if end is None and value.get("duration") is not None:
-            end = start_value + float(value["duration"])
-        end_value = float(end)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(start_value) or not math.isfinite(end_value) or start_value < 0 or end_value < start_value:
-        return None
-    return text, start_value, end_value
-
-
-def _timed_word_entries(items, total_duration=None) -> list[tuple[str, float, float]]:
-    """Normalize Grok word timestamps, whose final word often lacks ``end``."""
-    candidates = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        text = next(
-            (
-                str(item.get(key) or "").strip()
-                for key in ("text", "word", "transcript")
-                if str(item.get(key) or "").strip()
-            ),
-            "",
-        )
-        if not text:
-            continue
-        timestamp = item.get("timestamp")
-        start = item.get("start", item.get("start_time"))
-        end = item.get("end", item.get("end_time"))
-        if isinstance(timestamp, list) and timestamp:
-            start = timestamp[0] if start is None else start
-            if len(timestamp) >= 2:
-                end = timestamp[1] if end is None else end
-        try:
-            start_value = float(start)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(start_value) or start_value < 0:
-            continue
-        try:
-            end_value = float(end) if end is not None else None
-        except (TypeError, ValueError):
-            end_value = None
-        if end_value is not None and (
-            not math.isfinite(end_value) or end_value < start_value
-        ):
-            end_value = None
-        candidates.append([text, start_value, end_value])
-
-    try:
-        duration_value = float(total_duration)
-        if not math.isfinite(duration_value) or duration_value < 0:
-            duration_value = None
-    except (TypeError, ValueError):
-        duration_value = None
-
-    normalized = []
-    for index, (text, start_value, end_value) in enumerate(candidates):
-        if end_value is None and index + 1 < len(candidates):
-            next_start = candidates[index + 1][1]
-            if next_start > start_value:
-                end_value = next_start
-        if end_value is None and duration_value is not None and duration_value > start_value:
-            end_value = duration_value
-        if end_value is None:
-            end_value = start_value + max(0.08, min(0.6, len(text) * 0.08))
-        normalized.append((text, start_value, max(start_value, end_value)))
-    return normalized
-
-
-def _timestamped_text_from_json(value) -> str:
-    if isinstance(value, dict):
-        for key, group_words in (("segments", False), ("words", True)):
-            items = value.get(key)
-            if not isinstance(items, list):
-                continue
-            entries = (
-                _timed_word_entries(items, value.get("duration"))
-                if group_words
-                else [entry for item in items if (entry := _timed_entry(item))]
-            )
-            if not entries:
-                continue
-            if group_words:
-                phrases: list[tuple[str, float, float]] = []
-                words: list[str] = []
-                phrase_start = entries[0][1]
-                phrase_end = entries[0][2]
-                for index, (word, _start, end) in enumerate(entries):
-                    if words and not re.fullmatch(r"[,.;:!?]", word):
-                        words.append(" ")
-                    words.append(word)
-                    phrase_end = end
-                    if re.search(r"[.!?]$", word) or index == len(entries) - 1:
-                        phrases.append(("".join(words).strip(), phrase_start, phrase_end))
-                        words = []
-                        if index < len(entries) - 1:
-                            phrase_start = entries[index + 1][1]
-                entries = phrases
-            return "\n".join(
-                f"[{_format_transcription_timestamp(start)} -> {_format_transcription_timestamp(end)}] {text}"
-                for text, start, end in entries
-            )
-        direct = _timed_entry(value)
-        if direct:
-            text, start, end = direct
-            return f"[{_format_transcription_timestamp(start)} -> {_format_transcription_timestamp(end)}] {text}"
-        found = [_timestamped_text_from_json(item) for item in value.values()]
-        return "\n".join(item for item in found if item)
-    if isinstance(value, list):
-        found = [_timestamped_text_from_json(item) for item in value]
-        return "\n".join(item for item in found if item)
-    return ""
-
-
-def parse_transcription_response(raw: bytes) -> ParsedTranscription:
-    text = raw.decode("utf-8-sig", errors="replace")
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return ParsedTranscription(text.strip())
-
-    # O Deepgram marca "transaction_key": "deprecated" em TODA resposta
-    # (inclusive nas normais, com transcript). Então a regra certa é:
-    # 1) se existe transcript real -> usa (o aviso no metadata é ruído);
-    # 2) sem transcript, se a resposta é aviso/erro -> vazio (não vazar metadados);
-    # 3) sem transcript e sem aviso -> texto cru (compatibilidade antiga).
-    def _find_transcript(value):
-        """Primeiro conteúdo não vazio sob chaves de transcrição conhecidas."""
-        if isinstance(value, dict):
-            for key in ("text", "transcription", "transcript", "result", "output"):
-                if key in value:
-                    item = value[key]
-                    if isinstance(item, str) and item.strip():
-                        return item.strip()
-            for item in value.values():
-                found = _find_transcript(item)
-                if found:
-                    return found
-        elif isinstance(value, list):
-            for item in value:
-                found = _find_transcript(item)
-                if found:
-                    return found
-        return None
-
-    _WARNING_KEYS = ("deprecated", "error", "message", "detail", "warn", "warning", "status")
-    _WARNING_VALUE_MARKERS = ("deprecated", "unauthorized")
-
-    def _is_warning(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key in _WARNING_KEYS:
-                    return True
-                if isinstance(item, str) and any(marker in item.casefold() for marker in _WARNING_VALUE_MARKERS):
-                    return True
-            return any(_is_warning(item) for item in value.values())
-        if isinstance(value, list):
-            return any(_is_warning(item) for item in value)
-        return False
-
-    def collect(value):
-        if value is None:
-            return []
-        if isinstance(value, str):
-            stripped = value.strip()
-            return [stripped] if stripped else []
-        if isinstance(value, list):
-            found = []
-            for item in value:
-                found.extend(collect(item))
-            return found
-        if isinstance(value, dict):
-            for key in ("text", "transcription", "transcript", "result", "output"):
-                if key in value:
-                    direct = collect(value[key])
-                    if direct:
-                        return direct
-            for key in ("results", "files", "items", "data", "transcriptions"):
-                if key in value:
-                    nested = collect(value[key])
-                    if nested:
-                        return nested
-            if "segments" in value:
-                segments = collect(value["segments"])
-                if segments:
-                    return ["".join(segments)]
-            found = []
-            for item in value.values():
-                found.extend(collect(item))
-            return found
-        return []
-
-    pieces = collect(payload)
-    if pieces and _find_transcript(payload):
-        return ParsedTranscription(
-            "\n".join(pieces).strip(),
-            _timestamped_text_from_json(payload).strip(),
-        )
-    # Sem transcript real: aviso/erro do provedor -> vazio (não vazar metadados).
-    if _is_warning(payload):
-        return ParsedTranscription("")
-    return ParsedTranscription(text.strip(), _timestamped_text_from_json(payload).strip())
-
-
-def extract_text_from_response(raw: bytes) -> str:
-    return parse_transcription_response(raw).text
-
-
-def selected_text_model(
-    settings: dict,
-    *,
-    model_key: str = "text_model",
-    reasoning_key: str = "text_reasoning",
-    proxy_key: str = "ia_proxy_model",
-    model_fallback: str = "text_model",
-    reasoning_fallback: str = "text_reasoning",
-    proxy_fallback: str = "ia_proxy_model",
-) -> dict:
-    config = selected_text_model_config(settings, model_key)
-    is_proxy = config["name"] == IA_PROXY_NAME
-    request_model = (
-        str(settings.get(proxy_key) or settings.get(proxy_fallback) or GROK_TEXT_NAME)
-        if is_proxy
-        else config["name"]
-    )
-    if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME} | SERVER_GEMMA_NAMES:
-        request_model = GROK_TEXT_NAME
-    provider = "deepseek" if request_model == DEEPSEEK_TEXT_NAME else "xai"
-    if request_model in SERVER_GEMMA_NAMES:
-        request_model = SERVER_GEMMA_MODEL
-        provider = "servidor"
-    reasoning = str(settings.get(reasoning_key) or settings.get(reasoning_fallback) or "").casefold()
-    if is_proxy:
-        reasoning = "none" if request_model == DEEPSEEK_TEXT_NAME else "low"
-    if request_model == DEEPSEEK_TEXT_NAME:
-        reasoning = reasoning if reasoning in {"none", "low", "high", "max"} else "none"
-        parameters = {
-            "model": DEEPSEEK_TEXT_NAME,
-            "temperature": 0.0,
-            "max_tokens": 10000,
-            "reasoning_effort": reasoning,
-        }
-    elif request_model == GROK_NON_REASONING_TEXT_NAME:
-        parameters = {
-            "model": GROK_NON_REASONING_TEXT_NAME,
-            "temperature": 0.0,
-            "max_output_tokens": 10000,
-        }
-    elif provider == "servidor":
-        parameters = {
-            "model": SERVER_GEMMA_MODEL,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0.0,
-            "seed": 1,
-            "top_k": 1,
-            "top_p": 1,
-        }
-    else:
-        reasoning = reasoning if reasoning in {"low", "medium", "high", "xhigh"} else "low"
-        parameters = {
-            "model": GROK_TEXT_NAME,
-            "temperature": 0.0,
-            "max_output_tokens": 10000,
-            "reasoning": {"effort": reasoning},
-        }
-    is_grok_api = bool(config.get("is_grok_api", False)) and not is_proxy
-    is_deepseek_api = bool(config.get("is_deepseek_api", False)) and not is_proxy
-    return {
-        "name": config["name"],
-        "url": config["url"],
-        "fallback_url": config.get("fallback_url"),
-        "parameters": parameters,
-        "provider": provider,
-        "is_grok_api": is_grok_api,
-        "is_deepseek_api": is_deepseek_api,
-        "is_xai_proxy": is_proxy,
-        "request_model": request_model,
-        "api_key": str(
-            settings.get("deepseek_api_key" if is_deepseek_api else "grok_api_key") or ""
-        ).strip(),
-    }
-
-
-
-
-def selected_text_model_for(settings: dict, task: str, *, secondary: bool = False) -> dict:
-    """Resolve o modelo de uma tarefa específica (histórico, oitiva, qualificação).
-
-    As configurações específicas têm precedência; quando ausentes (settings
-    de versões anteriores), as configurações gerais de texto são usadas.
-    """
-    model_key, reasoning_key, proxy_key = TEXT_TASK_KEYS[task]
-    return selected_text_model(
-        settings,
-        model_key=model_key,
-        reasoning_key=reasoning_key,
-        proxy_key=proxy_key,
-        model_fallback="text_model",
-        reasoning_fallback="text_reasoning",
-        proxy_fallback="ia_proxy_model",
-    )
-
-
-def assistant_request_model_label(model_config: dict) -> str:
-    """Retorna o destino curto mostrado nas linhas de requisição de IA."""
-    request_model = str(
-        model_config.get("request_model")
-        or (model_config.get("parameters") or {}).get("model")
-        or model_config.get("name")
-        or "modelo"
-    ).strip()
-    provider = str(model_config.get("provider") or "").casefold()
-
-    if provider == "servidor" or request_model in SERVER_GEMMA_NAMES | {SERVER_GEMMA_MODEL}:
-        destination = "servidor"
-    else:
-        destination = {
-            GROK_TEXT_NAME: "Grok-4.6",
-            GROK_NON_REASONING_TEXT_NAME: "Grok-4.20",
-            GROK_NON_REASONING_LEGACY_NAME: "Grok-4.20",
-            DEEPSEEK_TEXT_NAME: DEEPSEEK_TEXT_NAME,
-        }.get(request_model, request_model)
-
-    if model_config.get("is_xai_proxy"):
-        return f"IA-Proxy/{destination}"
-    return destination
-
-
-def extract_text_model_output(raw: bytes) -> str:
-    body = raw.decode("utf-8-sig", errors="replace")
-    try:
-        root = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Resposta JSON inválida: {body[:400]}") from exc
-    for key in ("response", "output_text", "text"):
-        value = root.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    choices = root.get("choices")
-    if isinstance(choices, list):
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            message = choice.get("message")
-            if isinstance(message, dict):
-                content = message.get("content")
-                if isinstance(content, str) and content.strip():
-                    return content.strip()
-    output = root.get("output")
-    if isinstance(output, list):
-        preferred = list(reversed(output))
-        for item in preferred:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") != "message" and item.get("role") != "assistant":
-                continue
-            content = extract_content_text(item.get("content"))
-            if content:
-                return content
-        for item in output:
-            if isinstance(item, dict):
-                content = extract_content_text(item.get("content"))
-                if content:
-                    return content
-    raise RuntimeError("A resposta não contém output/content/text.")
-
-
-def extract_content_text(content) -> str:
-    if not isinstance(content, list):
-        return ""
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type and item_type not in ("output_text", "text"):
-            continue
-        text = item.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-    return ""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def parse_qualification_json(
@@ -8083,348 +7296,8 @@ def write_wav_from_pcm_file(path: Path, pcm_path: Path):
                 wav.writeframesraw(chunk)
 
 
-class GraniteUploader:
-    def __init__(
-        self,
-        cancel_event: threading.Event,
-        form_fields: dict | None = None,
-        extra_headers: dict[str, str] | None = None,
-        file_field: str = "files",
-        raw_body: bool = False,
-    ):
-        self.cancel_event = cancel_event
-        self.form_fields = dict(form_fields or {})
-        self.extra_headers = dict(extra_headers or {})
-        self.file_field = file_field
-        self.raw_body = bool(raw_body)
-        self._lock = threading.Lock()
-        self._connections: set[http.client.HTTPConnection] = set()
-
-    def cancel(self):
-        with self._lock:
-            connections = list(self._connections)
-        for conn in connections:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    def post_file(
-        self,
-        url: str,
-        file_path: Path,
-        mime_type: str,
-        raw_path: Path,
-        form_fields: dict | None = None,
-    ) -> tuple[int, str]:
-        status, raw, _headers = self.post_file_raw(url, file_path, mime_type, raw_path, form_fields)
-        return status, extract_text_from_response(raw)
-
-    def post_file_parsed(
-        self,
-        url: str,
-        file_path: Path,
-        mime_type: str,
-        raw_path: Path,
-        form_fields: dict | None = None,
-    ) -> tuple[int, ParsedTranscription]:
-        status, raw, _headers = self.post_file_raw(url, file_path, mime_type, raw_path, form_fields)
-        return status, parse_transcription_response(raw)
-
-    def post_file_raw(
-        self,
-        url: str,
-        file_path: Path,
-        mime_type: str,
-        raw_path: Path,
-        form_fields: dict | None = None,
-        accept: str = "application/json",
-    ) -> tuple[int, bytes, dict[str, str]]:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise RuntimeError("Servidor precisa começar com http:// ou https://")
-        boundary = f"----sig-{uuid.uuid4().hex}"
-        filename = file_path.name
-        parts = []
-        merged_fields = self.form_fields.copy()
-        merged_fields.update(form_fields or {})
-        if self.raw_body:
-            # Deepgram (e APIs de áudio cru): o arquivo vai como body direto,
-            # sem multipart; os parâmetros viajam na query da URL.
-            preamble = b""
-            ending = b""
-            content_type = mime_type
-            content_length = file_path.stat().st_size
-        else:
-            for key, value in merged_fields.items():
-                if key.lower() in ("file", "files") or value is None:
-                    continue
-                clean_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-                parts.append(
-                    (
-                        f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                        f"{clean_value}\r\n"
-                    ).encode("utf-8")
-                )
-            parts.append(
-                (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="{self.file_field}"; filename="{filename}"\r\n'
-                    f"Content-Type: {mime_type}\r\n\r\n"
-                ).encode("utf-8")
-            )
-            preamble = b"".join(parts)
-            ending = f"\r\n--{boundary}--\r\n".encode("utf-8")
-            content_type = f"multipart/form-data; boundary={boundary}"
-            content_length = len(preamble) + file_path.stat().st_size + len(ending)
-        path = parsed.path or "/"
-        if parsed.query:
-            path += f"?{parsed.query}"
-        connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-        conn = connection_cls(parsed.netloc, timeout=60 * 60)
-        with self._lock:
-            self._connections.add(conn)
-        try:
-            if self.cancel_event.is_set():
-                raise Cancelled()
-            conn.putrequest("POST", path)
-            conn.putheader("accept", accept)
-            conn.putheader("Content-Type", content_type)
-            conn.putheader("Content-Length", str(content_length))
-            for header, value in self.extra_headers.items():
-                conn.putheader(header, value)
-            conn.endheaders()
-            conn.send(preamble)
-            with file_path.open("rb") as handle:
-                while True:
-                    if self.cancel_event.is_set():
-                        raise Cancelled()
-                    chunk = handle.read(1024 * 128)
-                    if not chunk:
-                        break
-                    conn.send(chunk)
-            conn.send(ending)
-            if self.cancel_event.is_set():
-                raise Cancelled()
-            response = conn.getresponse()
-            chunks = []
-            while True:
-                if self.cancel_event.is_set():
-                    raise Cancelled()
-                chunk = response.read(1024 * 128)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            raw = b"".join(chunks)
-            raw_path.write_bytes(raw)
-            return response.status, raw, dict(response.getheaders())
-        except (OSError, socket.timeout) as exc:
-            if self.cancel_event.is_set():
-                raise Cancelled() from exc
-            raise
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            with self._lock:
-                self._connections.discard(conn)
 
 
-class TextModelClient:
-
-    def _count_input_tokens(self, url: str, fallback_url: str, model: str, system_prompt: str, material: str) -> int:
-        """max_tokens = tokens do input com a margem do template do chat.
-
-        O servidor é um llama.cpp (vLLM-like): o endpoint /tokenize conta o
-        texto CRU via {"content": <texto>} e a resposta traz {"tokens": [...]}.
-        O template do chat do modelo (turnos system/user) adiciona ~50% em
-        textos curtos, então aplicamos a margem 1.5 — no teste real isso bateu
-        exatamente com o usage.prompt_tokens da resposta. Sem o /tokenize,
-        estimativa local de 4 caracteres por token (também com a margem).
-        """
-        text = f"{system_prompt}\n{material}"
-        bases = []
-        for candidate in (url, fallback_url):
-            if not candidate:
-                continue
-            if "/v1/chat/completions" in candidate:
-                candidate = candidate.rsplit("/v1/chat/completions", 1)[0]
-            bases.append(candidate.rstrip("/") + "/tokenize")
-        for tokenize_url in bases:
-            try:
-                request = urllib.request.Request(
-                    tokenize_url,
-                    data=json.dumps({"content": text}, ensure_ascii=False).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(request, timeout=10) as response:
-                    root = json.loads(response.read().decode("utf-8", errors="replace"))
-                count = root.get("count") if isinstance(root, dict) else None
-                if not isinstance(count, int) or count <= 0:
-                    tokens = root.get("tokens") if isinstance(root, dict) else None
-                    count = len(tokens) if isinstance(tokens, list) else 0
-                if isinstance(count, int) and count > 0:
-                    return max(1, round(count * 1.5))
-            except Exception:
-                continue
-        return max(1, round((len(text) / 4) * 1.5))
-
-    def __init__(self, cancel_event: threading.Event):
-        self.cancel_event = cancel_event
-        self._lock = threading.Lock()
-        self._connections: set[http.client.HTTPConnection] = set()
-
-    def cancel(self):
-        with self._lock:
-            connections = list(self._connections)
-        for conn in connections:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    def post(self, model_config: dict, system_prompt: str, material: str) -> str:
-        system_prompt = str(system_prompt or "").strip()
-        material = str(material or "").strip()
-        if not system_prompt:
-            raise RuntimeError("Prompt de sistema vazio.")
-        if not material:
-            raise RuntimeError("Prompt de usuário vazio.")
-        url = model_config["url"]
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise RuntimeError("O endereço do modelo precisa começar com http:// ou https://")
-        payload = json.loads(json.dumps(model_config["parameters"], ensure_ascii=False))
-        is_grok_api = bool(model_config.get("is_grok_api"))
-        is_deepseek_api = bool(model_config.get("is_deepseek_api"))
-        is_xai_proxy = bool(model_config.get("is_xai_proxy"))
-        provider = str(model_config.get("provider") or "").casefold()
-        is_non_reasoning_grok = (
-            model_config.get("request_model") or payload.get("model")
-        ) == GROK_NON_REASONING_TEXT_NAME
-        is_xai_request = is_grok_api or (is_xai_proxy and provider == "xai")
-        is_deepseek_request = is_deepseek_api or (is_xai_proxy and provider == "deepseek")
-        if is_grok_api or is_deepseek_api:
-            api_key = str(model_config.get("api_key") or "").strip()
-            if not api_key:
-                provider = "DeepSeek" if is_deepseek_api else "xAI"
-                raise RuntimeError(f"Insira a chave API da {provider} nas configurações.")
-        if is_xai_request:
-            payload.setdefault("model", GROK_TEXT_NAME)
-            payload.setdefault("temperature", 0.0)
-            payload.setdefault("max_output_tokens", 10000)
-            if is_non_reasoning_grok:
-                payload["model"] = GROK_NON_REASONING_TEXT_NAME
-                payload.pop("reasoning", None)
-            else:
-                payload.setdefault("reasoning", {"effort": "low"})
-                if str((payload.get("reasoning") or {}).get("effort") or "").casefold() == "none":
-                    payload["reasoning"] = {**payload["reasoning"], "effort": "low"}
-            payload.pop("max_tokens", None)
-        if is_xai_proxy:
-            if is_deepseek_request:
-                payload["reasoning_effort"] = "none"
-                payload.pop("reasoning", None)
-            elif is_xai_request:
-                if is_non_reasoning_grok:
-                    payload.pop("reasoning", None)
-                else:
-                    payload["reasoning"] = {"effort": "low"}
-                payload.pop("reasoning_effort", None)
-        # O backend IA-Proxy expõe um contrato Chat Completions comum para
-        # ambos os modelos. As APIs diretas permanecem em seus formatos
-        # nativos: DeepSeek usa messages e xAI usa input.
-        if is_deepseek_request or is_xai_proxy:
-            payload["messages"] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": material},
-            ]
-            payload.pop("input", None)
-        elif provider == "servidor":
-            payload["messages"] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": material},
-            ]
-            payload.pop("input", None)
-            payload["max_tokens"] = self._count_input_tokens(
-                str(model_config.get("url") or ""),
-                str(model_config.get("fallback_url") or ""),
-                str(payload.get("model") or SERVER_GEMMA_MODEL),
-                system_prompt,
-                material,
-            )
-        elif "/api/generate" in parsed.path.lower():
-            payload["system"] = system_prompt
-            payload["prompt"] = material
-            payload.setdefault("stream", False)
-        else:
-            payload["input"] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": material},
-            ]
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        urls = [url]
-        fallback_url = str(model_config.get("fallback_url") or "").strip()
-        if fallback_url and fallback_url != url:
-            urls.append(fallback_url)
-        last_error = None
-        for attempt_url in urls:
-            attempt_parsed = urlparse(attempt_url)
-            if attempt_parsed.scheme not in ("http", "https"):
-                last_error = RuntimeError("O endereço do modelo precisa começar com http:// ou https://")
-                continue
-            path = attempt_parsed.path or "/"
-            if attempt_parsed.query:
-                path += f"?{attempt_parsed.query}"
-            connection_cls = http.client.HTTPSConnection if attempt_parsed.scheme == "https" else http.client.HTTPConnection
-            conn = connection_cls(attempt_parsed.netloc, timeout=60 * 60)
-            with self._lock:
-                self._connections.add(conn)
-            try:
-                if self.cancel_event.is_set():
-                    raise Cancelled()
-                headers = {
-                    "accept": "application/json",
-                    "Content-Type": "application/json; charset=utf-8",
-                    "Content-Length": str(len(body)),
-                }
-                if is_grok_api or is_deepseek_api:
-                    headers["Authorization"] = f"Bearer {api_key}"
-                conn.request("POST", path, body=body, headers=headers)
-                response = conn.getresponse()
-                chunks = []
-                while True:
-                    if self.cancel_event.is_set():
-                        raise Cancelled()
-                    chunk = response.read(1024 * 128)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                raw = b"".join(chunks)
-                if response.status < 200 or response.status >= 300:
-                    detail = raw.decode("utf-8", errors="replace")
-                    raise RuntimeError(f"Servidor respondeu HTTP {response.status}: {detail[:400]}")
-                output = extract_text_model_output(raw).strip()
-                if not output:
-                    raise RuntimeError("O servidor devolveu um texto vazio.")
-                return output
-            except Cancelled:
-                raise
-            except (OSError, socket.timeout, RuntimeError) as exc:
-                if self.cancel_event.is_set():
-                    raise Cancelled() from exc
-                last_error = exc
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                with self._lock:
-                    self._connections.discard(conn)
-        raise last_error or RuntimeError("Não foi possível consultar o modelo de texto.")
 
 
 def cpu_parallel_options(cpu_count: int) -> list[int]:
