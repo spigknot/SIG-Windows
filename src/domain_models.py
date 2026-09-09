@@ -11,6 +11,8 @@ from pathlib import Path, PurePosixPath
 
 class Cancelled(Exception):
     pass
+
+
 @dataclass
 class AudioJob:
     original_path: Path
@@ -40,11 +42,15 @@ class AudioJob:
     errors: list[str] = field(default_factory=list)
     txt_paths: list[Path] = field(default_factory=list)
     raw_paths: list[Path] = field(default_factory=list)
+
+
 def job_transcript_text(job: AudioJob) -> str:
     transcript = job.transcription
     if not transcript and job.txt_path and job.txt_path.exists():
         transcript = job.txt_path.read_text(encoding="utf-8", errors="replace")
     return transcript or ""
+
+
 def job_problem_reason(job: AudioJob, transcript: str) -> str:
     clean = transcript.strip()
     if job.error:
@@ -57,6 +63,8 @@ def job_problem_reason(job: AudioJob, transcript: str) -> str:
         if clean == sent_name or first_line == sent_name:
             return "Servidor retornou o nome do arquivo enviado"
     return ""
+
+
 _JOB_LIST_PLURALS = {
     "transcription": "transcripts",
     "error": "errors",
@@ -64,6 +72,8 @@ _JOB_LIST_PLURALS = {
     "raw_path": "raw_paths",
     "model_name": "model_names",
 }
+
+
 def audio_job_attr(job: AudioJob, base: str, index: int):
     """Lê um atributo por modelo: índice 1 = campo principal; 2+ = lista (índice 0 = modelo 2)."""
     if index == 1:
@@ -71,6 +81,8 @@ def audio_job_attr(job: AudioJob, base: str, index: int):
     values = getattr(job, _JOB_LIST_PLURALS.get(base, f"{base}s"))
     list_index = index - 2
     return values[list_index] if list_index < len(values) else None
+
+
 def audio_job_set(job: AudioJob, base: str, index: int, value):
     """Grava um atributo por modelo, estendendo a lista quando necessário."""
     if index == 1:
@@ -81,6 +93,8 @@ def audio_job_set(job: AudioJob, base: str, index: int, value):
     while len(values) <= list_index:
         values.append("" if base in ("transcription", "error") else None)
     values[list_index] = value
+
+
 def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
     if model_index == 1:
         return job_transcript_text(job)
@@ -89,6 +103,8 @@ def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
     if not transcript and path and path.exists():
         transcript = path.read_text(encoding="utf-8", errors="replace")
     return transcript or ""
+
+
 def job_problem_reason_for_model(job: AudioJob, transcript: str, model_index: int) -> str:
     clean = transcript.strip()
     error = audio_job_attr(job, "error", model_index) or ""

@@ -354,6 +354,7 @@ def metamuse_rest_transcribe(
 
 ALIBABA_AUTH_ERROR = "API Key do Alibaba Cloud inválida ou incompatível com a região Singapore."
 
+
 PARAMS_BLOCK_TAG_PREFIX = "params_block:"
 
 

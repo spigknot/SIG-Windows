@@ -370,6 +370,8 @@ PORTUGUESE_MONTHS = (
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
 )
+
+
 PORTUGUESE_CARDINALS = {
     0: "zero", 1: "um", 2: "dois", 3: "três", 4: "quatro",
     5: "cinco", 6: "seis", 7: "sete", 8: "oito", 9: "nove",
@@ -404,7 +406,11 @@ def portuguese_number_words(value: int) -> str:
 
 
 WORD_PARAGRAPH_RE = re.compile(r"<w:p(?:\s[^>]*)?>.*?</w:p>", re.DOTALL)
+
+
 WORD_TEXT_RE = re.compile(r"(<w:t(?:\s[^>]*)?>)(.*?)(</w:t>)", re.DOTALL)
+
+
 WORD_FLOW_BREAK_RE = re.compile(
     r"<w:(?:br|cr|tab|lastRenderedPageBreak)\b",
     re.IGNORECASE,

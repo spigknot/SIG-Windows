@@ -14,10 +14,14 @@ from pathlib import Path, PurePosixPath
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
 FFMPEG_COMMAND_BLOCK_TAG = "ffmpeg_command_block"
+
+
 def format_process_command(command: list[object]) -> str:
     """Renderiza a linha de comando exatamente como os argumentos do processo."""
     parts = [str(part) for part in command]
     return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
+
+
 def _log_path_basename(part: str) -> str:
     """Reduz um argumento que é caminho de arquivo ao nome base, apenas para a
     apresentação no log. Filtros/expressões (contêm ``=``) e valores simples
@@ -32,8 +36,14 @@ def _log_path_basename(part: str) -> str:
     ):
         return Path(part).name or part
     return part
+
+
 _NUMERIC_LOG_ARG_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
 _LOG_FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,5}$")
+
+
 def _log_generic_filename(part: str, generic_stem: str) -> str:
     """Reduz um argumento de arquivo ao nome genérico ``<generic_stem><ext>``,
     preservando a extensão original e descartando o nome real e o diretório.
@@ -51,6 +61,8 @@ def _log_generic_filename(part: str, generic_stem: str) -> str:
     if not _LOG_FILE_SUFFIX_RE.match(suffix) or not Path(base).stem:
         return base
     return f"{generic_stem}{suffix}"
+
+
 def _classify_ffmpeg_command_parts(command: list[object]) -> tuple[list[str], str, bool, int, set[int], int]:
     """Classifica um comando FFmpeg para exibição enxuta no log.
 
@@ -73,6 +85,8 @@ def _classify_ffmpeg_command_parts(command: list[object]) -> tuple[list[str], st
     if output_index < start or output_index in input_indices:
         output_index = -1
     return parts, name, is_ffmpeg, start, input_indices, output_index
+
+
 def _is_structural_probe(parts: list[str], output_index: int) -> bool:
     """Comando de colheita de informações não produz arquivo de saída: termina
     na própria entrada (``ffmpeg -hide_banner -i x``) ou em um sumidouro
@@ -82,6 +96,8 @@ def _is_structural_probe(parts: list[str], output_index: int) -> bool:
         return True
     last = parts[output_index]
     return last == "-" or last.startswith("pipe:")
+
+
 def format_ffmpeg_command_for_log(command: list[object]) -> str:
     """Renderiza o comando FFmpeg para o log de forma enxuta e objetiva: apenas
     ``ffmpeg`` + argumentos, com os arquivos de entrada reduzidos a
@@ -103,6 +119,8 @@ def format_ffmpeg_command_for_log(command: list[object]) -> str:
         else:
             display.append(_log_path_basename(parts[index]))
     return subprocess.list2cmdline(display) if os.name == "nt" else shlex.join(display)
+
+
 def _numbered_log_label(path_arg: str, category: str, labels: dict[str, str]) -> str:
     """Rótulo genérico com numeração POR ARQUIVO DISTINTO dentro da categoria.
 
@@ -126,6 +144,8 @@ def _numbered_log_label(path_arg: str, category: str, labels: dict[str, str]) ->
     label = f"{category}{'' if ordinal == 1 else ordinal}{suffix}"
     labels[path_arg] = label
     return label
+
+
 def format_ffmpeg_commands_for_log(
     commands: list[list[object]],
     probes: list[bool] | tuple[bool, ...] | None = None,
@@ -163,6 +183,8 @@ def format_ffmpeg_commands_for_log(
         flagged = bool(probes[index]) if probes else False
         entries.append((rendered, flagged or _is_structural_probe(parts, output_index)))
     return entries
+
+
 def params_block_single_line(text: str) -> str:
     """Junta um bloco de parâmetros do log em uma só linha (p/ clipboard).
 
@@ -174,6 +196,8 @@ def params_block_single_line(text: str) -> str:
         if stripped:
             parts.append(stripped)
     return " ".join(parts)
+
+
 def format_ws_params_block(title: str, params) -> str:
     """Bloco de log com um parâmetro por linha (regra de visibilidade).
 
@@ -185,6 +209,8 @@ def format_ws_params_block(title: str, params) -> str:
     for key, value in items:
         lines.append(f"  {key}: {value}")
     return "\n".join(lines)
+
+
 def safe_stems(paths: list[Path]) -> dict[Path, str]:
     used: dict[str, int] = {}
     result: dict[Path, str] = {}
@@ -194,6 +220,8 @@ def safe_stems(paths: list[Path]) -> dict[Path, str]:
         used[base.casefold()] = count
         result[path] = base if count == 1 else f"{base}_{count}"
     return result
+
+
 def format_bytes(size: int) -> str:
     value = float(max(0, size))
     units = ("B", "KB", "MB", "GB")
@@ -204,6 +232,8 @@ def format_bytes(size: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} GB"
+
+
 def format_duration(seconds: float) -> str:
     seconds = max(0.0, seconds)
     if seconds < 60:
@@ -213,6 +243,8 @@ def format_duration(seconds: float) -> str:
         return f"{int(minutes)}min {rest:.0f}s"
     hours, minutes = divmod(minutes, 60)
     return f"{int(hours)}h {int(minutes)}min"
+
+
 def mode_label_from_value(mode: str) -> str:
     labels = {
         "ready": "Enviar pronto",

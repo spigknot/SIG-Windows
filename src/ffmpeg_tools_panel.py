@@ -54,6 +54,8 @@ import smart_join_planner
 
 
 VIDEO_QUALITY_LEVELS = ("Máxima", "Muito alta", "Alta", "Média", "Econômica")
+
+
 VIDEO_QUALITY_MENU_LABELS = {
     "Máxima": "Máxima",
     "Muito alta": "Muito alta",

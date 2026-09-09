@@ -373,6 +373,8 @@ from app_env import (  # noqa: F401
     settings_path,
     hostname_online,
     imei_history_path,
+    cpu_parallel_options,
+    default_parallelism,
 )
 
 
@@ -738,24 +740,8 @@ IMEI_HISTORY_COLLAPSED_LIMIT = 10
 
 
 
-def cpu_parallel_options(cpu_count: int) -> list[int]:
-    """Opções de Conversões paralelas: n/2, n, 2n e 4n núcleos (exemplos do
-    usuário: 6 núcleos -> 3, 6, 12, 24; Xeon 18 -> 9, 18, 36, 72)."""
-    half = max(1, cpu_count // 2)
-    return sorted({half, cpu_count, cpu_count * 2, cpu_count * 4})
 
 
-def default_parallelism(cpu_count: int) -> int:
-    """Valor padrão das slidebars de paralelismo: metade dos núcleos (n/2).
-
-    Tratamento inteligente para número ímpar de núcleos (regra do usuário):
-    - arredonda n/2 para o inteiro mais próximo, sem nunca zerar;
-    - 1 núcleo  -> 1 (n/2 = 0.5 -> 1, nunca 0);
-    - 3 núcleos -> 2 (n/2 = 1.5 -> 2, não 1);
-    - 5 núcleos -> 3 (n/2 = 2.5 -> 3);
-    - 18 núcleos -> 9 (n/2 = 9).
-    """
-    return max(1, (cpu_count + 1) // 2)
 
 
 class SigApp:

@@ -5,9 +5,10 @@ Para adicionar um provedor STT: (1) constantes aqui, (2) DEFAULT_SETTINGS aqui,
 Sem Tkinter; sem I/O proprio (recebe dicts de settings de quem chamou)."""
 
 
-
 # API keys are supplied by the user in Settings and are never shipped in source.
 IMEI_API_KEY = ""
+
+
 DEFAULT_SETTINGS = {
     "convert_parallel": 8,
     "transcribe_parallel": 16,
@@ -60,6 +61,8 @@ DEFAULT_SETTINGS = {
     "police_delegate": "",
     "police_city": "",
 }
+
+
 API_KEY_IMPORT_FIELDS = {
     "assemblyai": "assemblyai_api_key",
     "elevenlabs": "elevenlabs_api_key",
@@ -74,43 +77,113 @@ API_KEY_IMPORT_FIELDS = {
     "alibaba fun asr": "alibaba_api_key",
     "alibaba": "alibaba_api_key",
 }
+
+
 GROK_API_NAME = "Grok STT"
+
+
 GROK_STT_URL = "https://api.x.ai/v1/stt"
+
+
 GROK_STT_WEBSOCKET_URL = "wss://api.x.ai/v1/stt"
+
+
 DEEPGRAM_API_NAME = "Deepgram Nova 3"
+
+
 DEEPGRAM_STT_URL = "https://api.deepgram.com/v1/listen"
+
+
 DEEPGRAM_STT_WEBSOCKET_URL = "wss://api.deepgram.com/v1/listen"
+
+
 ASSEMBLYAI_API_NAME = "AssemblyAI Universal-3.5 Pro"
+
+
 ASSEMBLYAI_SYNC_URL = "https://sync.assemblyai.com/transcribe"
+
+
 ASSEMBLYAI_WEBSOCKET_URL = "wss://streaming.assemblyai.com/v3/ws"
+
+
 ELEVENLABS_API_NAME = "ElevenLabs Scribe v2 Realtime"
+
+
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+
+
 ELEVENLABS_WEBSOCKET_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
+
+
 META_MUSE_API_NAME = "Meta Muse Voice"
+
+
 META_MUSE_STT_URL = "https://api.meta.ai/v1/asr/transcribe"
+
+
 META_MUSE_STT_WEBSOCKET_URL = "wss://api.meta.ai/v1/asr/realtime"
+
+
 META_MUSE_MODEL = "muse-voice-transcribe-1.0"
+
+
 ALIBABA_API_NAME = "Alibaba Fun ASR/Qwen"
+
+
 ALIBABA_REST_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+
+
 ALIBABA_WEBSOCKET_URL = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference"
+
+
 ALIBABA_REST_MODEL = "fun-asr-flash-2026-06-15"
+
+
 ALIBABA_WS_MODEL = "qwen-audio-3.0-asr-flash-streaming"
 
 
 GROK_TEXT_URL = "https://api.x.ai/v1/responses"
+
+
 DEEPSEEK_TEXT_URL = "https://api.deepseek.com/chat/completions"
+
+
 GROK_TEXT_NAME = "grok-4.6"
+
+
 GROK_NON_REASONING_TEXT_NAME = "grok-4.20-0309-non-reasoning"
+
+
 GROK_NON_REASONING_LEGACY_NAME = "grok-4.20-non-reasoning"
+
+
 DEEPSEEK_TEXT_NAME = "deepseek-v4-flash"
+
+
 IA_PROXY_NAME = "IA-Proxy"
+
+
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
+
+
 SERVER_GEMMA_NAME = "servidor (gemma-4-26B-A4B-abliterated)"
+
+
 SERVER_GEMMA_MODEL = "gemma4"
+
+
 SERVER_GEMMA_URL = "http://servidor:8400/v1/chat/completions"
+
+
 SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
+
+
 GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
+
+
 DEEPSEEK_API_NAMES = {DEEPSEEK_TEXT_NAME}
+
+
 PARTS_EXTRACTION_LABELS = {
     "uppercase": "Palavras em maiúsculas",
     "name_database": "Base de nomes",

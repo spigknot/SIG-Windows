@@ -21,7 +21,11 @@ SUPPORTED_EXTENSIONS = {
     ".avi",
     ".webm",
 }
+
+
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+
+
 AUDIO_EXTENSIONS = SUPPORTED_EXTENSIONS - VIDEO_EXTENSIONS
 
 

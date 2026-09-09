@@ -73,8 +73,14 @@ UPPERCASE_NAME_SEQUENCE = re.compile(
     r"(?:\s+[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’-]+)*"
     r"(?![A-Za-zÀ-ÖØ-öø-ÿ0-9])"
 )
+
+
 UPPERCASE_WORD = re.compile(r"[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’-]+")
+
+
 IGNORED_UPPERCASE_WORDS = {"BO", "CPF", "RG", "IMEI", "SP", "WHATSAPP"}
+
+
 NAME_CONNECTORS = {"DA", "DE", "DO", "DAS", "DOS", "E"}
 
 

@@ -7,7 +7,11 @@ from pathlib import Path
 
 
 LIVE_SAMPLE_RATE = 16000
+
+
 LIVE_CHANNELS = 1
+
+
 LIVE_SAMPLE_WIDTH = 2
 
 
