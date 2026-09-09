@@ -77,3 +77,10 @@ funcionando (testes e codigo historico). Sao verificados por:
 
 Ao extrair codigo novo de `sig_app.py`, repita o padrao: mover verbatim,
 adicionar re-export, rodar a suite completa.
+
+## Historico
+
+- **2026-09**: modularizacao conservadora — `sig_app.py` de 21.838 para 13.380
+  linhas; 18 modulos extraidos verbatim. Relatorio em linguagem simples (o que
+  mudou, vantagens, provas e pendencias):
+  `docs/maintenance/refatoracao-2026-09.md`.
