@@ -85,6 +85,77 @@ from sync_common import (
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/reporting.py (codigo movido verbatim).
+from reporting import (  # noqa: F401
+    html_document,
+    write_html_report,
+    build_live_html,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/qualification.py (codigo movido verbatim).
+from qualification import (  # noqa: F401
+    LIVE_QUALIFICATION_FIELD_IDS,
+    LIVE_QUALIFICATION_DEFAULT_SELECTED,
+    parse_qualification_json,
+    _qualification_age_in_years,
+    format_occurrence_qualification,
+    format_qualification_fields,
+    qualification_display_label,
+    history_completion_status,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/name_database.py (codigo movido verbatim).
+from name_database import (  # noqa: F401
+    parse_assistant_names,
+    add_assistant_name,
+    distinct_names,
+    UPPERCASE_NAME_SEQUENCE,
+    UPPERCASE_WORD,
+    IGNORED_UPPERCASE_WORDS,
+    NAME_CONNECTORS,
+    extract_uppercase_names,
+    normalize_name,
+    phonetic_name_key,
+    matching_name_keys,
+    load_name_database,
+    name_database_path,
+    add_name_to_database,
+    remove_name_from_database,
+    extract_names_from_database,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/imei_lookup.py (codigo movido verbatim).
+from imei_lookup import (  # noqa: F401
+    compute_imei_luhn_digit,
+    read_imei_history_records,
+    append_imei_history,
+    find_imei_history_record,
+    format_imei_model,
+    format_imei_time,
+    format_imei_history_item,
+    fetch_imei_info_record,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/audio_io.py (codigo movido verbatim).
+from audio_io import (  # noqa: F401
+    LIVE_SAMPLE_RATE,
+    LIVE_CHANNELS,
+    LIVE_SAMPLE_WIDTH,
+    pcm_bytes_for_millis,
+    write_wav_from_pcm_bytes,
+    write_wav_from_pcm_file,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
 # Implementacao real em src/stt_clients.py (codigo movido verbatim).
 from stt_clients import (  # noqa: F401
     transcribe_url,
@@ -318,20 +389,6 @@ VIDEO_QUALITY_MENU_LABELS = {
     "Econômica": "Econômica",
 }
 LIVE_LANGUAGES = (("pt", "Português"), ("en", "Inglês"), ("es", "Espanhol"))
-LIVE_QUALIFICATION_FIELD_IDS = (
-    "nome",
-    "rg",
-    "cpf",
-    "nascimento",
-    "naturalidade",
-    "profissao",
-    "pai",
-    "mae",
-    "endereco",
-    "bairro",
-    "cidade",
-    "telefone",
-)
 
 # Rótulos usados na janela de seleção de campos da qualificação (engrenagem).
 LIVE_QUALIFICATION_FIELD_LABELS = {
@@ -349,32 +406,12 @@ LIVE_QUALIFICATION_FIELD_LABELS = {
     "telefone": "Telefone",
 }
 
-# Campos marcados por padrão na janela da engrenagem: os que já eram usados
-# para preencher a caixa + RG (que passa a aparecer logo após o nome).
-LIVE_QUALIFICATION_DEFAULT_SELECTED = frozenset(
-    {
-        "nome",
-        "rg",
-        "nascimento",
-        "naturalidade",
-        "profissao",
-        "pai",
-        "mae",
-        "endereco",
-        "bairro",
-        "cidade",
-        "telefone",
-    }
-)
 
 # Janela de tempo (segundos) em que a qualificação é considerada "recém
 # organizada": dentro dela o botão 'Gerar documento' NÃO re-organiza — apenas
 # gera o documento com o texto atual. Após expirar, volta a organizar antes.
 QUALIFICATION_ORGANIZED_TIMEOUT_S = 60
 
-LIVE_SAMPLE_RATE = 16000
-LIVE_CHANNELS = 1
-LIVE_SAMPLE_WIDTH = 2
 LIVE_FINAL_CHUNK_MILLIS = 30000
 DEFAULT_LIVE_DRAFT_INTERVAL_MILLIS = 1000
 MIN_LIVE_DRAFT_INTERVAL_MILLIS = 100
@@ -6492,113 +6529,18 @@ class FfmpegToolsPanel:
 
 
 
-def compute_imei_luhn_digit(number_only_digits: str) -> int:
-    digits = [int(char) for char in number_only_digits if char.isdigit()]
-    total = 0
-    length = len(digits)
-    for index in range(length - 1, -1, -1):
-        digit = digits[index]
-        pos_from_right_if_check_appended = (length - index) + 1
-        if pos_from_right_if_check_appended % 2 == 0:
-            digit *= 2
-            if digit > 9:
-                digit -= 9
-        total += digit
-    return (10 - (total % 10)) % 10
-
-
-def read_imei_history_records() -> list[dict]:
-    path = imei_history_path()
-    if not path.exists() or path.stat().st_size == 0:
-        return []
-    records = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
 
 
-def append_imei_history(record: dict):
-    path = imei_history_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def find_imei_history_record(imei: str) -> dict | None:
-    for record in reversed(read_imei_history_records()):
-        if str(record.get("imei") or "") == imei:
-            return record
-    return None
 
 
-def format_imei_model(record: dict) -> str:
-    brand = str(record.get("brand") or "—")
-    model = str(record.get("model") or "—")
-    name = str(record.get("name") or "—")
-    return f"Marca: {brand}\nModelo: {model} ({name})"
 
 
-def format_imei_time(timestamp_ms) -> str:
-    try:
-        value = int(timestamp_ms)
-    except (TypeError, ValueError):
-        value = 0
-    if value <= 0:
-        return "Data indisponível"
-    return time.strftime("%d/%m/%Y %H:%M", time.localtime(value / 1000))
 
 
-def format_imei_history_item(record: dict) -> str:
-    return (
-        f"{format_imei_time(record.get('time', 0))}\n"
-        f"IMEI: {record.get('imei', '')}\n"
-        f"{format_imei_model(record)}"
-    )
 
 
-def fetch_imei_info_record(imei: str, api_key: str) -> dict:
-    url = (
-        "https://alpha.imeicheck.com/api/free_with_key/modelBrandName"
-        f"?key={quote(api_key)}&imei={quote(imei)}&format=json"
-    )
-    parsed = urlparse(url)
-    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    path = parsed.path or "/"
-    if parsed.query:
-        path += f"?{parsed.query}"
-    conn = connection_cls(parsed.netloc, timeout=30)
-    try:
-        conn.request("GET", path, headers={"accept": "application/json"})
-        response = conn.getresponse()
-        body = response.read()
-    except (OSError, socket.timeout) as exc:
-        raise ConnectionError("Cheque sua conexão") from exc
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    try:
-        payload = json.loads(body.decode("utf-8", errors="replace") or "{}")
-    except Exception as exc:
-        raise ValueError("Erro ao processar resposta") from exc
-    if not isinstance(payload, dict) or payload.get("status") != "succes":
-        raise LookupError("Modelo não encontrado")
-    obj = payload.get("object")
-    if not isinstance(obj, dict):
-        raise LookupError("Modelo não encontrado")
-    return {
-        "time": int(time.time() * 1000),
-        "imei": imei,
-        "brand": obj.get("brand") or "—",
-        "model": obj.get("model") or "—",
-        "name": obj.get("name") or "—",
-    }
 
 
 
@@ -6698,357 +6640,54 @@ def fetch_imei_info_record(imei: str, api_key: str) -> dict:
 
 
 
-def parse_qualification_json(
-    raw_text: str,
-    allowed_ids: list[str],
-    field_order: tuple[tuple[str, str], ...],
-) -> dict[str, str]:
-    """Extrai e normaliza o JSON da IA, sem exibir campos não solicitados."""
-    clean = str(raw_text or "").strip()
-    clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\s*```$", "", clean).strip()
-    start, end = clean.find("{"), clean.rfind("}")
-    if start < 0 or end <= start:
-        raise RuntimeError("A IA não devolveu um JSON válido.")
-    try:
-        payload = json.loads(clean[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"A IA devolveu um JSON inválido: {exc.msg}.") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("A IA não devolveu um objeto JSON.")
-    allowed = set(allowed_ids)
-    normalized = {}
-    for field_id, _label in field_order:
-        if field_id not in allowed or field_id not in payload:
-            continue
-        value = payload[field_id]
-        if value is None:
-            continue
-        if isinstance(value, (dict, list)):
-            value = json.dumps(value, ensure_ascii=False)
-        value = str(value).strip()
-        if value:
-            normalized[field_id] = value
-    known_ids = {field_id for field_id, _label in field_order}
-    for field_id in allowed_ids:
-        if field_id in known_ids or field_id not in payload:
-            continue
-        value = payload[field_id]
-        if value is None:
-            continue
-        if isinstance(value, (dict, list)):
-            value = json.dumps(value, ensure_ascii=False)
-        value = str(value).strip()
-        if value:
-            normalized[field_id] = value
-    return normalized
 
 
-def _qualification_age_in_years(value: str, today: date | None = None) -> int | None:
-    """Calcula a idade completa a partir das datas mais comuns devolvidas pela IA."""
-    raw = str(value or "").strip()
-    match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", raw)
-    if match:
-        day, month, year = (int(item) for item in match.groups())
-    else:
-        match = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", raw)
-        if not match:
-            return None
-        year, month, day = (int(item) for item in match.groups())
-    try:
-        born = date(year, month, day)
-    except ValueError:
-        return None
-    current = today or date.today()
-    if born > current:
-        return None
-    return current.year - born.year - ((current.month, current.day) < (born.month, born.day))
 
 
-def format_occurrence_qualification(
-    raw_text: str,
-    field_order: tuple[tuple[str, str], ...],
-    selected_ids: set[str] | None = None,
-) -> str:
-    """Converte o JSON fixo da Ocorrência no texto narrativo usado pelo policial.
 
-    ``selected_ids`` decide quais campos do JSON entram no texto; quando
-    None, usa os campos padrão (LIVE_QUALIFICATION_DEFAULT_SELECTED).
-    """
-    fields = parse_qualification_json(raw_text, list(LIVE_QUALIFICATION_FIELD_IDS), field_order)
-    absent_values = {
-        "nao informado",
-        "não informado",
-        "nao encontrada",
-        "não encontrada",
-        "nao encontrado",
-        "não encontrado",
-        "nao disponivel",
-        "não disponível",
-        "n/a",
-        "-",
-    }
-    fields = {
-        field_id: value
-        for field_id, value in fields.items()
-        if str(value).strip().casefold() not in absent_values
-    }
-    if selected_ids is None:
-        selected = LIVE_QUALIFICATION_DEFAULT_SELECTED
-    else:
-        selected = set(selected_ids)
 
-    def included(field_id: str) -> bool:
-        return field_id in selected and bool(str(fields.get(field_id, "")).strip())
 
-    parts: list[str] = []
 
-    name = fields.get("nome", "").strip()
-    if included("nome") and name:
-        parts.append(name.upper())
 
-    # RG e CPF aparecem logo após o nome, com a sigla em maiúsculas.
-    rg = fields.get("rg", "").strip()
-    if included("rg") and rg:
-        parts.append(f"RG: {rg}")
-    cpf = fields.get("cpf", "").strip()
-    if included("cpf") and cpf:
-        parts.append(f"CPF: {cpf}")
 
-    mother = fields.get("mae", "").strip() if included("mae") else ""
-    father = fields.get("pai", "").strip() if included("pai") else ""
-    if mother and father:
-        parts.append(f"filho(a) de {mother} e {father}")
-    elif mother:
-        parts.append(f"filho(a) de {mother}")
-    elif father:
-        parts.append(f"filho(a) de {father}")
 
-    if included("nascimento"):
-        age = _qualification_age_in_years(fields.get("nascimento", ""))
-        if age is not None:
-            parts.append(f"{age} anos")
 
-    # Nacionalidade Brasileira é parte fixa do modelo solicitado para esta tela.
-    parts.append("de nacionalidade Brasileira")
-    if included("naturalidade"):
-        parts.append(f"natural de {fields['naturalidade'].strip()}")
-    if included("profissao"):
-        parts.append(f"de profissão {fields['profissao'].strip()}")
-    if included("endereco"):
-        parts.append(f"residente e domiciliado(a) à {fields['endereco'].strip()}")
-    if included("bairro"):
-        parts.append(fields["bairro"].strip())
-    if included("cidade"):
-        parts.append(f"na cidade de {fields['cidade'].strip()}")
-    if included("telefone"):
-        parts.append(f"Telefone: {fields['telefone'].strip()}")
 
-    return f"{', '.join(parts)}." if parts else ""
 
 
-def format_qualification_fields(
-    payload: dict[str, str],
-    field_order: tuple[tuple[str, str], ...],
-    selected_ids: set[str] | None = None,
-) -> str:
-    """Exibe os campos como uma única linha filtrável pelas checkboxes."""
-    known_ids = {field_id for field_id, _label in field_order}
-    items = [
-        f"{label}: {payload[field_id]}"
-        for field_id, label in field_order
-        if field_id in payload
-        and (selected_ids is None or field_id in selected_ids)
-    ]
-    items.extend(
-        f"{qualification_display_label(field_id)}: {value}"
-        for field_id, value in payload.items()
-        if field_id not in known_ids
-    )
-    return f"{', '.join(items)}." if items else ""
 
 
-def qualification_display_label(field_id: str) -> str:
-    """Converte um ID personalizado em um rótulo legível para a saída."""
-    return " ".join(part.capitalize() for part in str(field_id).split("_") if part)
 
 
-def history_completion_status(
-    history_state: str,
-    names_state: str = "idle",
-    names_count: int = 0,
-) -> str:
-    # A extração de partes está temporariamente fora do fluxo. Os argumentos
-    # antigos permanecem opcionais para não quebrar consumidores legados, mas
-    # nunca mais influenciam o estado exibido após uma requisição de histórico.
-    del names_state, names_count
-    if history_state == "done":
-        return "Histórico concluído."
-    if history_state == "running":
-        return "Redigindo histórico..."
-    if history_state == "error":
-        return "Histórico com erro."
-    return ""
 
 
-def parse_assistant_names(raw_text: str) -> list[str]:
-    clean = raw_text.strip()
-    clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\s*```$", "", clean).strip()
-    names: list[str] = []
 
-    candidates = []
-    array_start, array_end = clean.find("["), clean.rfind("]")
-    object_start, object_end = clean.find("{"), clean.rfind("}")
-    if array_start >= 0 and array_end > array_start:
-        candidates.append(clean[array_start : array_end + 1])
-    if object_start >= 0 and object_end > object_start:
-        candidates.append(clean[object_start : object_end + 1])
 
-    def collect(value):
-        if isinstance(value, str):
-            add_assistant_name(names, value)
-        elif isinstance(value, list):
-            for item in value:
-                collect(item)
-        elif isinstance(value, dict):
-            for item in value.values():
-                collect(item)
 
-    for candidate in candidates:
-        try:
-            collect(json.loads(candidate))
-            if names:
-                break
-        except json.JSONDecodeError:
-            continue
-    if not names:
-        for match in re.finditer(r'"([^"\\]+)"', clean):
-            add_assistant_name(names, match.group(1))
-    if not names:
-        for value in re.split(r"[,;\n]", clean):
-            add_assistant_name(names, value)
-    return distinct_names(names)
 
 
-def add_assistant_name(names: list[str], value: str):
-    clean = value.strip().strip("\"'[]{}").strip()
-    if clean and len(clean) <= 80:
-        names.append(clean.upper())
 
 
-def distinct_names(names: list[str]) -> list[str]:
-    result = []
-    seen = set()
-    for name in names:
-        key = name.upper()
-        if key not in seen:
-            seen.add(key)
-            result.append(name)
-    return result
 
 
-UPPERCASE_NAME_SEQUENCE = re.compile(
-    r"(?<![A-Za-zÀ-ÖØ-öø-ÿ0-9])"
-    r"[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’-]+"
-    r"(?:\s+[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’-]+)*"
-    r"(?![A-Za-zÀ-ÖØ-öø-ÿ0-9])"
-)
-UPPERCASE_WORD = re.compile(r"[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’-]+")
-IGNORED_UPPERCASE_WORDS = {"BO", "CPF", "RG", "IMEI", "SP", "WHATSAPP"}
-NAME_CONNECTORS = {"DA", "DE", "DO", "DAS", "DOS", "E"}
 
 
-def extract_uppercase_names(text: str) -> list[str]:
-    names = []
-    for match in UPPERCASE_NAME_SEQUENCE.finditer(text):
-        candidate = re.sub(r"\s+", " ", match.group(0).strip())
-        if len(candidate) >= 2 and candidate not in IGNORED_UPPERCASE_WORDS:
-            names.append(candidate)
-    return distinct_names(names)
 
 
-def normalize_name(value: str) -> str:
-    normalized = unicodedata.normalize("NFD", value.strip().upper())
-    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
-    return re.sub(r"[^A-Z'’-]", "", normalized)
 
 
-def phonetic_name_key(normalized: str) -> str:
-    value = normalized
-    value = value.replace("PH", "F").replace("TH", "T").replace("Y", "I").replace("W", "V")
-    value = re.sub(r"^H", "", value)
-    value = value.replace("QU", "C").replace("K", "C").replace("Q", "C")
-    value = re.sub(r"C(?=[EI])", "S", value)
-    value = re.sub(r"G(?=[EI])", "J", value)
-    value = value.replace("Z", "S")
-    return re.sub(r"([A-Z])\1+", r"\1", value)
 
 
-def matching_name_keys(value: str) -> set[str]:
-    normalized = normalize_name(value)
-    if not normalized:
-        return set()
-    return {normalized, phonetic_name_key(normalized)}
 
 
-def load_name_database() -> set[str]:
-    path = name_database_path()
-    if not path.exists():
-        return set()
-    keys: set[str] = set()
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        keys.update(matching_name_keys(line))
-    return keys
 
 
-def name_database_path() -> Path:
-    path = settings_path().parent / "Nomes" / "nomes.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        default_path = resource_path("assets/default_nomes.txt")
-        path.write_text(
-            default_path.read_text(encoding="utf-8", errors="replace") if default_path.exists() else "",
-            encoding="utf-8",
-        )
-    return path
 
 
-def add_name_to_database(value: str) -> bool:
-    name = value.strip().upper()
-    if not name or any(char in name for char in "\t\r\n"):
-        return False
-    path = name_database_path()
-    current = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    if any(normalize_name(item) == normalize_name(name) for item in current):
-        return False
-    path.write_text("\n".join([*current, name]).strip() + "\n", encoding="utf-8")
-    return True
 
 
-def remove_name_from_database(value: str) -> bool:
-    target = normalize_name(value)
-    if not target:
-        return False
-    path = name_database_path()
-    current = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    remaining = [item for item in current if normalize_name(item) != target]
-    if len(remaining) == len(current):
-        return False
-    path.write_text("\n".join(remaining).strip() + "\n", encoding="utf-8")
-    return True
 
 
-def extract_names_from_database(text: str, name_database: set[str]) -> list[str]:
-    if not name_database:
-        return []
-    names = []
-    for match in UPPERCASE_NAME_SEQUENCE.finditer(text):
-        words = UPPERCASE_WORD.findall(match.group(0))
-        candidate_words = [word for word in words if normalize_name(word) not in NAME_CONNECTORS]
-        if candidate_words and all(matching_name_keys(word) & name_database for word in candidate_words):
-            names.append(" ".join(candidate_words))
-    return distinct_names(names)
 
 
 
@@ -7065,235 +6704,6 @@ def extract_names_from_database(text: str, name_database: set[str]) -> list[str]
 
 
 
-def html_document(title: str, rows: list[str], headers: tuple[str, ...], stats: list[tuple[str, str]] | None = None) -> str:
-    header_cells = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
-    stats_html = ""
-    if stats:
-        stats_html = (
-            '<div class="stats">'
-            + "".join(
-                f"<span><strong>{html.escape(label)}:</strong> {html.escape(value)}</span>"
-                for label, value in stats
-            )
-            + "</div>"
-        )
-    if not rows:
-        rows = [
-            "<tr>"
-            f"<td colspan=\"{len(headers)}\">Nenhum item nesta tabela.</td>"
-            "</tr>"
-        ]
-    # A 1ª coluna (nome do arquivo) reserva espaço fixo (20%); as demais
-    # colunas de transcrição/modelo dividem igualmente o restante (larguras idênticas).
-    n_content = max(1, len(headers) - 1)
-    filename_width = 20
-    content_width = (100.0 - filename_width) / n_content
-    colgroup = (
-        f'<colgroup><col style="width: {filename_width}%">'
-        + "".join(f'<col style="width: {content_width:.2f}%">' for _ in range(n_content))
-        + "</colgroup>"
-    )
-    return f"""<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
-<title>{html.escape(title)}</title>
-<style>
-body {{
-  font-family: Arial, sans-serif;
-  background: #101417;
-  color: #e8f4f2;
-  margin: 24px;
-}}
-h1 {{ font-size: 24px; margin: 0 0 18px; }}
-.stats {{
-  color: #9aa9ad;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 12px;
-  margin: -6px 0 14px;
-}}
-.stats span {{ white-space: nowrap; }}
-table {{ border-collapse: collapse; width: 100%; }}
-th, td {{
-  border: 1px solid #334047;
-  padding: 10px;
-  vertical-align: top;
-}}
-th {{ background: #182127; text-align: left; }}
-td:first-child {{
-  font-family: Consolas, monospace;
-  color: #9ee7ff;
-  word-break: break-word;
-}}
-td {{ white-space: pre-wrap; line-height: 1.45; }}
-</style>
-</head>
-<body>
-<h1>{html.escape(title)}</h1>
-{stats_html}
-<table>
-{colgroup}
-<thead><tr>{header_cells}</tr></thead>
-<tbody>
-{os.linesep.join(rows)}
-</tbody>
-</table>
-</body>
-</html>
-"""
-
-
-def write_html_report(jobs: list[AudioJob], html_path: Path, stats: list[tuple[str, str]] | None = None) -> Path:
-    valid_rows: list[str] = []
-    problem_rows: list[str] = []
-
-    # O número de colunas vem dos modelos efetivamente registrados nos jobs,
-    # e não de uma suposição fixa de dois modelos. Isso mantém o relatório
-    # compatível com lotes antigos e permite 2 ou 3 modelos novos.
-    model_names: list[str] = []
-    for job in jobs:
-        names = ([job.model_name] if job.model_name else []) + list(job.model_names)
-        for name in names:
-            name = str(name or "").strip()
-            if name and name not in model_names:
-                model_names.append(name)
-    multi_model = len(model_names) > 1
-
-    for job in jobs:
-        transcripts = [job_transcript_for_model(job, index) for index in range(1, len(model_names) + 1)]
-        problems = [
-            job_problem_reason_for_model(job, transcript, index)
-            for index, transcript in enumerate(transcripts, start=1)
-        ]
-        if multi_model:
-            # Uma linha continua útil quando ao menos um modelo respondeu;
-            # o retorno ausente fica marcado na coluna correspondente e é
-            # detalhado também no relatório separado de problemas.
-            if any(not problem for problem in problems):
-                cells = [f"<td>{html.escape(job.original_name)}</td>"]
-                cells.extend(
-                    f"<td>{html.escape(transcript) if not problem else '<em>Falhou</em>'}</td>"
-                    for transcript, problem in zip(transcripts, problems)
-                )
-                valid_rows.append("<tr>" + "".join(cells) + "</tr>")
-            for index, (problem, transcript) in enumerate(zip(problems, transcripts), start=1):
-                if not problem:
-                    continue
-                error = getattr(job, "error" if index == 1 else f"error_{index}", "")
-                problem_rows.append(
-                    "<tr>"
-                    f"<td>{html.escape(job.original_name)}</td>"
-                    f"<td>{html.escape(model_names[index - 1])}</td>"
-                    f"<td>{html.escape(problem)}</td>"
-                    f"<td>{html.escape(error or transcript or '(sem retorno)')}</td>"
-                    "</tr>"
-                )
-            continue
-
-        transcript = transcripts[0] if transcripts else ""
-        problem = problems[0] if problems else job_problem_reason(job, transcript)
-        if problem:
-            details = job.error or transcript or "(sem retorno)"
-            sent_name = job.upload_path.name if job.upload_path else "(não enviado)"
-            problem_rows.append(
-                "<tr>"
-                f"<td>{html.escape(job.original_name)}</td>"
-                f"<td>{html.escape(sent_name)}</td>"
-                f"<td>{html.escape(problem)}</td>"
-                f"<td>{html.escape(details)}</td>"
-                "</tr>"
-            )
-        else:
-            valid_rows.append(
-                "<tr>"
-                f"<td>{html.escape(job.original_name)}</td>"
-                f"<td>{html.escape(transcript)}</td>"
-                "</tr>"
-            )
-
-    headers = (
-        ("Arquivo original", *model_names)
-        if multi_model
-        else ("Arquivo original", "Transcrição")
-    )
-    html_path.write_text(
-        html_document("Transcrições", valid_rows, headers, stats),
-        encoding="utf-8",
-    )
-    problem_path = html_path.with_name("transcricoes_com_problemas.html")
-    problem_path.write_text(
-        html_document(
-            "Transcrições com problemas",
-            problem_rows,
-            (
-                ("Arquivo original", "Modelo", "Motivo", "Retorno")
-                if multi_model
-                else ("Arquivo original", "Arquivo enviado", "Motivo", "Retorno")
-            ),
-            stats,
-        ),
-        encoding="utf-8",
-    )
-    return problem_path
-
-
-def build_live_html(text: str) -> str:
-    return f"""<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
-<title>Transcrição ao vivo</title>
-<style>
-body {{
-  font-family: Arial, sans-serif;
-  background: #101417;
-  color: #e8f4f2;
-  margin: 24px;
-}}
-h1 {{ font-size: 24px; margin: 0 0 18px; }}
-.box {{
-  border: 1px solid #334047;
-  background: #182127;
-  padding: 16px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}}
-</style>
-</head>
-<body>
-<h1>Transcrição ao vivo</h1>
-<div class="box">{html.escape(text)}</div>
-</body>
-</html>
-"""
-
-
-def pcm_bytes_for_millis(millis: int) -> int:
-    return LIVE_SAMPLE_RATE * LIVE_CHANNELS * LIVE_SAMPLE_WIDTH * millis // 1000
-
-
-def write_wav_from_pcm_bytes(path: Path, pcm: bytes):
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(LIVE_CHANNELS)
-        wav.setsampwidth(LIVE_SAMPLE_WIDTH)
-        wav.setframerate(LIVE_SAMPLE_RATE)
-        wav.writeframes(pcm)
-
-
-def write_wav_from_pcm_file(path: Path, pcm_path: Path):
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(LIVE_CHANNELS)
-        wav.setsampwidth(LIVE_SAMPLE_WIDTH)
-        wav.setframerate(LIVE_SAMPLE_RATE)
-        with pcm_path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 128)
-                if not chunk:
-                    break
-                wav.writeframesraw(chunk)
 
 
 
