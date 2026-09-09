@@ -13,6 +13,7 @@ nao repete comandos, versoes, hashes, caminhos de maquina ou estado de release.
 | Tarefa | Fonte adicional | Regra |
 | --- | --- | --- |
 | Alterar codigo, UI, prompts ou testes | arquivos de fonte envolvidos e testes relacionados | Nao carregar o runbook de release sem necessidade |
+| Localizar onde uma funcionalidade vive, criar modulo ou mover codigo | `docs/agents/module-map.md` | Abrir antes de duplicar logica ou extrair codigo de `sig_app.py` |
 | Compilar, publicar, sincronizar, gerar instalador ou atualizar | `UPDATE.md` | Ler o runbook completo antes de executar comandos |
 | Auditar ou ajustar saída de testes, build e publicação | `docs/agents/validation-output.md` | Usar o contrato quiet e manter diagnóstico completo em log |
 | Diagnosticar migracao de instalacao antiga | `docs/maintenance/release-history.md` | Abrir somente quando o caso depender da transicao historica |
