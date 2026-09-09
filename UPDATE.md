@@ -192,6 +192,14 @@ gh release view YYYYMMDD_NNN --repo spigknot/SIG-Windows --json tagName,url,asse
 2. A release do GitHub tem o full.zip + os 2 instaladores; as releases anteriores foram mantidas.
 3. O `git status` limpo (sem logs, sem `r2_config.json`, sem chaves).
 4. Teste real: atualizar uma instalação antiga pelo app (deve baixar o diff do R2 e relançar na versão nova) — o log do updater deve ter `Atualização aplicada e validada`.
+   - Sem tocar na instalação do usuário: `python scripts/verify_real_update.py` copia
+     `C:\Program Files\SIG` para `%TEMP%\sig_real_update_test`, valida a assinatura do
+     manifesto do R2, baixa o diff pelo mesmo caminho do app (`validate_sync_manifest` +
+     `classify_sync_files` + `download_github_url`, com sha256 conferido), roda o
+     `SigUpdater.exe` real contra a cópia e confere `Atualização aplicada e validada.`,
+     a versão final e que a instalação de origem e o `settings.json` não mudaram;
+     termina com `RESULTADO: PASS` (exit 0). Requer o SIG fechado — o updater relança o
+     app da cópia e o script o encerra no fim.
 
 ## 8. Entrega (relatório final obrigatório)
 
