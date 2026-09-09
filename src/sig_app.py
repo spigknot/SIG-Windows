@@ -1,3 +1,38 @@
+"""SIG - janela principal (UI Tkinter) e orquestracao do fluxo de trabalho.
+
+O QUE VIVE AQUI (e so aqui):
+  - constantes de interface e defaults que apenas a UI usa;
+  - a classe SigApp (janelas, abas, dialogs, threads de conversao/transcricao);
+  - main() e o bootstrap (instancia unica, atualizacao, abertura de arquivos).
+
+O QUE NAO VIVE AQUI (implementacao real nos modulos vizinhos):
+  app_env ................ caminhos, identidade e capacidade da maquina
+  providers.py ........... catalogo de provedores STT/texto + DEFAULT_SETTINGS
+  settings_store.py ...... carregar/normalizar/salvar settings.json
+  domain_models.py ....... AudioJob, Cancelled e acessores do job
+  transcription_parsing .. parsing de respostas STT (JSON/texto/timestamps)
+  text_models.py ......... selecao/parse de modelos de texto (IA)
+  http_clients.py ........ GraniteUploader, TextModelClient
+  stt_clients.py ......... protocolo STT (REST/WS, form fields, provedores)
+  log_formatting.py ...... formatacao de comandos FFmpeg e de parametros
+  reporting.py ........... HTML de relatorio e de status ao vivo
+  documents.py ........... DOCX (modelos Word), PDF via Word, previa
+  media_files.py ......... extensoes/MIME e deteccao de tipo de arquivo
+  audio_io.py ............ PCM <-> WAV da captura ao vivo
+  imei_lookup.py ......... consulta/historico de IMEI
+  name_database.py ....... base de nomes (normalizacao/fonetica)
+  qualification.py ....... qualificacao de ocorrencias (JSON/labels)
+  ui_widgets.py .......... tooltip e botao de icone reutilizaveis
+  ffmpeg_tools_panel.py .. aba FFmpeg (conversao/corte/juncao/player)
+  qr_encoder / smart_join_planner / stt_provider_rules / assistant_prompts
+
+COMO USAR: os nomes extraidos continuam importaveis daqui (blocos
+"API historica" logo apos os imports locais), para nao quebrar testes e
+chamadas antigas. Ao alterar comportamento, edite o MODULO de origem -
+nunca duplique a implementacao neste arquivo.
+Mapa completo, camadas e receitas: docs/agents/module-map.md
+"""
+
 import base64
 import concurrent.futures
 import ctypes
