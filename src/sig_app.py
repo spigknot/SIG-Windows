@@ -436,7 +436,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260908_002"
+APP_VERSION = "20260909_001"
 
 
 
