@@ -85,6 +85,35 @@ from sync_common import (
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/domain_models.py (codigo movido verbatim).
+from domain_models import (  # noqa: F401
+    Cancelled,
+    AudioJob,
+    _JOB_LIST_PLURALS,
+    job_transcript_text,
+    job_problem_reason,
+    audio_job_attr,
+    audio_job_set,
+    job_transcript_for_model,
+    job_problem_reason_for_model,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
+# Implementacao real em src/app_env.py (codigo movido verbatim).
+from app_env import (  # noqa: F401
+    APP_NAME,
+    IMEI_HISTORY_FILE,
+    resource_path,
+    app_base_dir,
+    project_root,
+    settings_path,
+    hostname_online,
+    imei_history_path,
+)
+
+
+# --- API historica: nomes reexportados dos modulos extraidos ---------------
 # Implementacao real em src/log_formatting.py (codigo movido verbatim).
 from log_formatting import (  # noqa: F401
     FFMPEG_COMMAND_BLOCK_TAG,
@@ -107,7 +136,6 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_NAME = "sig"
 APP_VERSION = "20260908_002"
 
 
@@ -336,7 +364,6 @@ LIVE_INTERVAL_VALUES_MS = (
 LIVE_RECOVERY_SLOT_HEIGHT = 26
 GROK_RECONNECT_MAX_ATTEMPTS = 8
 GROK_RECONNECT_BUFFER_MILLIS = 8000
-IMEI_HISTORY_FILE = "imei_history.txt"
 IMEI_HISTORY_COLLAPSED_LIMIT = 10
 MIME_TYPES = {
     ".wav": "audio/wav",
@@ -401,59 +428,12 @@ def is_transcription_ready_wav(path: Path) -> bool:
         return False
 
 
-class Cancelled(Exception):
-    pass
 
 
-@dataclass
-class AudioJob:
-    original_path: Path
-    original_name: str
-    stem: str
-    mode: str
-    upload_path: Path | None = None
-    converted_path: Path | None = None
-    txt_path: Path | None = None
-    raw_path: Path | None = None
-    log_path: Path | None = None
-    vad_output_path: Path | None = None
-    vad_input_bytes: int = 0
-    vad_output_bytes: int = 0
-    vad_elapsed: float = 0.0
-    vad_speech_duration: float = 0.0
-    vad_total_duration: float = 0.0
-    vad_error: str = ""
-    conversion_elapsed: float = 0.0
-    status: str = "Aguardando"
-    transcription: str = ""
-    error: str = ""
-    model_name: str = "Modelo 1"
-    # Multi-modelo SEM limite: listas paralelas (índice 0 = modelo 2).
-    model_names: list[str] = field(default_factory=list)
-    transcripts: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    txt_paths: list[Path] = field(default_factory=list)
-    raw_paths: list[Path] = field(default_factory=list)
 
 
-def resource_path(relative: str) -> Path:
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS) / relative
-    return Path(__file__).resolve().parents[1] / relative
 
 
-def app_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        executable_dir = Path(sys.executable).resolve().parent
-        # Uma atualização antiga pode ter deixado o executável dentro de uma
-        # subpasta (por exemplo, dist/g). O diretório principal é identificado
-        # pelos recursos que o SIG precisa para funcionar.
-        runtime_markers = ("ffmpeg.exe", "ffplay.exe", "vad_deps")
-        for candidate in (executable_dir, *executable_dir.parents[:4]):
-            if any((candidate / marker).exists() for marker in runtime_markers):
-                return candidate
-        return executable_dir
-    return Path(__file__).resolve().parents[1]
 
 
 DOCUMENT_TEMPLATE_NAMES = {
@@ -1039,11 +1019,6 @@ def ensure_document_templates() -> dict[str, Path]:
     return resolved
 
 
-def project_root() -> Path:
-    """Raiz do projeto — contém assets/, dist/, src/, sig.spec."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent.parent
-    return Path(__file__).resolve().parents[1]
 
 
 def download_github_url(url: str, destination: Path, progress_callback=None) -> str:
@@ -6457,19 +6432,8 @@ class FfmpegToolsPanel:
         self._execute(command, "Limpando áudio", 1, 1, media.duration)
 
 
-def settings_path() -> Path:
-    base = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "settings.json"
 
 
-def hostname_online(hostname: str) -> bool:
-    """True se o hostname resolve na rede (ex.: o servidor local 'servidor')."""
-    try:
-        socket.gethostbyname(hostname)
-        return True
-    except OSError:
-        return False
 
 
 def read_transcription_servers() -> list[dict]:
@@ -6946,8 +6910,6 @@ def plausible_deepseek_api_key(value: str) -> bool:
     return len(key) == 35 and key.startswith("sk-")
 
 
-def imei_history_path() -> Path:
-    return settings_path().parent / IMEI_HISTORY_FILE
 
 
 def compute_imei_luhn_digit(number_only_digits: str) -> int:
@@ -8380,80 +8342,18 @@ def extract_names_from_database(text: str, name_database: set[str]) -> list[str]
     return distinct_names(names)
 
 
-def job_transcript_text(job: AudioJob) -> str:
-    transcript = job.transcription
-    if not transcript and job.txt_path and job.txt_path.exists():
-        transcript = job.txt_path.read_text(encoding="utf-8", errors="replace")
-    return transcript or ""
 
 
-def job_problem_reason(job: AudioJob, transcript: str) -> str:
-    clean = transcript.strip()
-    if job.error:
-        return "Erro na transcrição/conversão"
-    if not clean:
-        return "Transcrição vazia"
-    sent_name = job.upload_path.name if job.upload_path else ""
-    if sent_name:
-        first_line = next((line.strip() for line in clean.splitlines() if line.strip()), "")
-        if clean == sent_name or first_line == sent_name:
-            return "Servidor retornou o nome do arquivo enviado"
-    return ""
 
 
-_JOB_LIST_PLURALS = {
-    "transcription": "transcripts",
-    "error": "errors",
-    "txt_path": "txt_paths",
-    "raw_path": "raw_paths",
-    "model_name": "model_names",
-}
 
 
-def audio_job_attr(job: AudioJob, base: str, index: int):
-    """Lê um atributo por modelo: índice 1 = campo principal; 2+ = lista (índice 0 = modelo 2)."""
-    if index == 1:
-        return getattr(job, base)
-    values = getattr(job, _JOB_LIST_PLURALS.get(base, f"{base}s"))
-    list_index = index - 2
-    return values[list_index] if list_index < len(values) else None
 
 
-def audio_job_set(job: AudioJob, base: str, index: int, value):
-    """Grava um atributo por modelo, estendendo a lista quando necessário."""
-    if index == 1:
-        setattr(job, base, value)
-        return
-    values = getattr(job, _JOB_LIST_PLURALS.get(base, f"{base}s"))
-    list_index = index - 2
-    while len(values) <= list_index:
-        values.append("" if base in ("transcription", "error") else None)
-    values[list_index] = value
 
 
-def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
-    if model_index == 1:
-        return job_transcript_text(job)
-    transcript = audio_job_attr(job, "transcription", model_index) or ""
-    path = audio_job_attr(job, "txt_path", model_index)
-    if not transcript and path and path.exists():
-        transcript = path.read_text(encoding="utf-8", errors="replace")
-    return transcript or ""
 
 
-def job_problem_reason_for_model(job: AudioJob, transcript: str, model_index: int) -> str:
-    clean = transcript.strip()
-    error = audio_job_attr(job, "error", model_index) or ""
-    if error:
-        return "Erro na transcrição/conversão"
-    if not clean:
-        return "Transcrição vazia"
-    sent_name = job.upload_path.name if job.upload_path else ""
-    if sent_name:
-        first_line = next((line.strip() for line in clean.splitlines() if line.strip()), "")
-        if clean == sent_name or first_line == sent_name:
-            return "Servidor retornou o nome do arquivo enviado"
-    return ""
 
 
 def html_document(title: str, rows: list[str], headers: tuple[str, ...], stats: list[tuple[str, str]] | None = None) -> str:
