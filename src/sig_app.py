@@ -7815,7 +7815,10 @@ try {
             if len(term) > MAX_STT_KEYWORD_LENGTH:
                 messagebox.showinfo(
                     "Keywords",
-                    f"Cada keyword pode ter no máximo {MAX_STT_KEYWORD_LENGTH} caracteres.",
+                    f"Cada keyword pode ter no máximo {MAX_STT_KEYWORD_LENGTH} caracteres.\n\n"
+                    "Esse é o limite do WebSocket (ElevenLabs e Meta Muse Voice), que é "
+                    "menor que o do REST — usar o menor garante que o termo funcione "
+                    "também na Ocorrência.",
                     parent=win,
                 )
                 return
@@ -7877,7 +7880,10 @@ try {
         ).pack(side=LEFT)
         ttk.Label(
             keywords_actions,
-            text="Selecione um item e clique em \u2212 para excluir. Clique em Salvar para manter.",
+            text=(
+                f"Selecione um item e clique em \u2212 para excluir. Clique em Salvar para manter. "
+                f"Até {MAX_STT_KEYWORDS} termos, {MAX_STT_KEYWORD_LENGTH} caracteres cada."
+            ),
             style="Muted.TLabel",
         ).pack(side=LEFT, padx=(12, 0))
         refresh_keywords_table()

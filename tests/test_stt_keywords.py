@@ -262,33 +262,38 @@ class MultipartRepetidoTest(unittest.TestCase):
 
 
 class LimiteDeCaracteresTest(unittest.TestCase):
-    """Limite de 50 caracteres por keyword — MEDIDO nas APIs reais (10/09).
+    """Limite de 20 caracteres por keyword — MEDIDO nas APIs reais (10/09).
 
-    Motivo do teste: a lista de keywords é ÚNICA no app e vai para todos os
-    provedores, mas o LIMITE é de cada um. Um teste de ponta a ponta com uma
-    keyword de 200 caracteres devolveu, textualmente:
+    Motivo: a lista de keywords é ÚNICA no app e vai para o REST (Transcrição)
+    e para o WebSocket (Ocorrência), mas o limite é de cada provedor e é MENOR
+    no WebSocket. Erros textuais devolvidos pelos servidores com um termo longo:
 
-      xAI       -> HTTP 400 {"error":"Keyterm \"XXXX...\" too long (200 chars).
-                             Maximum is 50 chars"}
-      ElevenLabs-> HTTP 400 {"type":"validation_error","code":"invalid_parameters",
-                             "message":"All keywords must be less than 50 characters.",
-                             "status":"invalid_keyword_length"}
-      Meta Muse -> HTTP 503 backend_unavailable (determinístico, 3/3)
-      AssemblyAI-> HTTP 200 (aceita; o limite dele é ~1000 palavras)
-      Alibaba   -> HTTP 200
-      Deepgram  -> HTTP 200
+      ElevenLabs WS  -> {"message_type":"invalid_request","error":"Each keyterm
+                         must be at most 20 characters. 'X...' is 25 characters."}
+      Meta Muse WS   -> {"type":"error","message":"facebook::realtimeai::asr::
+                         BadRequestException: ASR keyword 0 exceeds the maximum
+                         length of 20 characters"}
+      ElevenLabs REST-> "All keywords must be less than 50 characters."
+      xAI REST/WS    -> "Keyterm \"X...\" too long (200 chars). Maximum is 50 chars"
+      AssemblyAI     -> aceitou 200 (limite ~1000 palavras)
+      Alibaba        -> aceitou 200
+      Deepgram       -> aceitou 200
 
-    Ou seja: 50 é o teto que TODOS aceitam, e é o valor usado na validação da
-    tela de Keywords. Baixar/levantar esse número sem checar os provedores
-    quebra a transcrição nos dois primeiros.
+    Como o cadastro é um só, o teto é o MENOR de todos (20): assim nenhum termo
+    cadastrado quebra a Ocorrência. Levantar esse número sem re-testar os WS
+    volta a quebrar ElevenLabs e Muse.
     """
 
-    def test_teto_global_e_50(self):
-        self.assertEqual(50, MAX_STT_KEYWORD_LENGTH)
+    def test_teto_global_e_20(self):
+        self.assertEqual(20, MAX_STT_KEYWORD_LENGTH)
 
     def test_a_ui_usa_o_teto_em_caracteres(self):
         fonte = (RAIZ / "src" / "sig_app.py").read_text(encoding="utf-8")
         self.assertIn("if len(term) > MAX_STT_KEYWORD_LENGTH:", fonte)
+
+    def test_a_dica_na_tela_cita_o_limite(self):
+        fonte = (RAIZ / "src" / "sig_app.py").read_text(encoding="utf-8")
+        self.assertIn("caracteres cada.", fonte)
 
     def test_normalize_nao_descarta_termo_longo_em_silencio(self):
         # Decisão explícita: o normalize NÃO trunca nem descarta keyword longa

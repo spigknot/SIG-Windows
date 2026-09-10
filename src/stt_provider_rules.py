@@ -403,8 +403,17 @@ KEY_STT_KEYWORDS = "stt_keywords"
 # (WS): desligada, NENHUMA requisição leva termos — a lista continua salva.
 KEY_STT_KEYWORDS_ENABLED = "stt_keywords_enabled"
 MAX_STT_KEYWORDS = 100
-# Limite por termo dos provedores que o declaram (xAI/ElevenLabs: 50).
-MAX_STT_KEYWORD_LENGTH = 50
+# Limite por termo: 20 caracteres = o MENOR limite real entre REST e WebSocket.
+# Medido nas APIs (10/09), com um termo longo:
+#   ElevenLabs WS (Scribe realtime) -> invalid_request: "Each keyterm must be at
+#       most 20 characters"
+#   Meta Muse Voice WS -> BadRequestException: "ASR keyword 0 exceeds the
+#       maximum length of 20 characters"
+#   ElevenLabs REST -> "All keywords must be less than 50 characters" (50)
+#   xAI (REST e WS) -> "too long (200 chars). Maximum is 50 chars" (50)
+# Como a lista é ÚNICA e alimenta REST e WS, o teto do cadastro é o menor de
+# todos: assim um termo cadastrado nunca quebra a Ocorrência (WebSocket).
+MAX_STT_KEYWORD_LENGTH = 20
 # Peso das hotwords do DashScope (os exemplos oficiais usam 4, 5 e 50).
 ALIBABA_KEYWORD_WEIGHT = 5
 
