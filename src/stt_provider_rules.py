@@ -142,7 +142,7 @@ LANGUAGE_LABELS = {"multi": "auto"}
 # formato que ele próprio entende (mesma regra da aba Ocorrência).
 KEY_TRANSCRIPTION_LANGUAGE = "transcription_language"
 TRANSCRIPTION_LANGUAGE_OPTIONS = ("auto", "pt", "en", "es")
-DEFAULT_TRANSCRIPTION_LANGUAGE = "auto"
+DEFAULT_TRANSCRIPTION_LANGUAGE = "pt"
 # Opção -> valor de modo do provedor. "auto" é o "multi" interno (detecção
 # nativa); "pt" usa "pt-BR" no Deepgram (único provedor que distingue a
 # variante); o servidor local (Granite NAR) não tem parâmetro de idioma e por

@@ -93,14 +93,16 @@ class OpcoesDoSeletorTest(unittest.TestCase):
         self.assertNotIn("custom", TRANSCRIPTION_LANGUAGE_OPTIONS)
         self.assertNotIn("custom", TRANSCRIPTION_OPTION_MODES["grok"])
 
-    def test_default_do_app_e_auto(self):
-        self.assertEqual("auto", DEFAULT_SETTINGS[KEY_TRANSCRIPTION_LANGUAGE])
-        self.assertEqual("auto", DEFAULT_TRANSCRIPTION_LANGUAGE)
-        self.assertEqual("auto", transcription_language_option({}))
+    def test_default_do_app_e_pt(self):
+        # Item 3 do pedido (10/09): no seletor da aba Transcrição o pt vem
+        # selecionado por padrão.
+        self.assertEqual("pt", DEFAULT_SETTINGS[KEY_TRANSCRIPTION_LANGUAGE])
+        self.assertEqual("pt", DEFAULT_TRANSCRIPTION_LANGUAGE)
+        self.assertEqual("pt", transcription_language_option({}))
 
-    def test_valor_invalido_cai_no_auto(self):
-        self.assertEqual("auto", transcription_language_option({KEY_TRANSCRIPTION_LANGUAGE: "xx"}))
-        self.assertEqual("auto", transcription_language_option({KEY_TRANSCRIPTION_LANGUAGE: ""}))
+    def test_valor_invalido_cai_no_pt(self):
+        self.assertEqual("pt", transcription_language_option({KEY_TRANSCRIPTION_LANGUAGE: "xx"}))
+        self.assertEqual("pt", transcription_language_option({KEY_TRANSCRIPTION_LANGUAGE: ""}))
 
     def test_label_auto_continua_sendo_multi_nos_valores_reais(self):
         # Regra cosmética já existente: "auto" é o "multi" interno.
@@ -234,11 +236,11 @@ class PersistenciaTest(unittest.TestCase):
 
     def test_normalize_descarta_valor_desconhecido(self):
         normalizado = normalize_settings({**DEFAULT_SETTINGS, KEY_TRANSCRIPTION_LANGUAGE: "custom"})
-        self.assertEqual("auto", normalizado[KEY_TRANSCRIPTION_LANGUAGE])
+        self.assertEqual("pt", normalizado[KEY_TRANSCRIPTION_LANGUAGE])
 
     def test_default_sobrevive_ao_round_trip(self):
         normalizado = normalize_settings(dict(DEFAULT_SETTINGS))
-        self.assertEqual("auto", normalizado[KEY_TRANSCRIPTION_LANGUAGE])
+        self.assertEqual("pt", normalizado[KEY_TRANSCRIPTION_LANGUAGE])
 
 
 class InterfaceTest(unittest.TestCase):

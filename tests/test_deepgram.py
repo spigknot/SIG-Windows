@@ -126,36 +126,31 @@ class DeepgramRestTests(unittest.TestCase):
         settings = _settings(transcription_server=sig_app.DEEPGRAM_API_NAME)
         self.assertEqual(sig_app.transcription_form_fields(settings), {})
 
-    def test_keyterms_in_query(self):
+    def test_query_has_no_keyterm(self):
+        # Vacina (10/09): o keyterm prompting do Deepgram foi REMOVIDO das
+        # requisições a pedido do usuário. Nem o query string nem o settings
+        # podem voltar a carregar keyterm sem uma decisão explícita.
         settings = _settings(
             transcription_server=sig_app.DEEPGRAM_API_NAME,
-            deepgram_keyterms="Taguaí, Fartura ,  Rua Monsenhor",
+            deepgram_keyterms="Taguaí, Fartura",
         )
         query = sig_app.deepgram_query_string(settings)
-        self.assertIn("keyterm=Tagua%C3%AD", query)
-        self.assertIn("keyterm=Fartura", query)
-        self.assertIn("keyterm=Rua%20Monsenhor", query)
+        self.assertNotIn("keyterm", query)
+        self.assertFalse(hasattr(sig_app, "deepgram_keyterms_list"))
 
-    def test_keyterms_list_normalizes(self):
-        settings = _settings(deepgram_keyterms="  Taguaí,, Fartura\nItaguaí ")
-        self.assertEqual(
-            sig_app.deepgram_keyterms_list(settings),
-            ["Taguaí", "Fartura", "Itaguaí"],
-        )
-
-    def test_keyterms_preserved_in_normalize(self):
-        cleaned = sig_app.normalize_settings({"deepgram_keyterms": "  Taguaí ,  Fartura  "})
-        self.assertEqual(cleaned["deepgram_keyterms"], "Taguaí, Fartura")
+    def test_keyterms_key_no_longer_exists(self):
+        self.assertNotIn("deepgram_keyterms", sig_app.DEFAULT_SETTINGS)
+        cleaned = sig_app.normalize_settings({"deepgram_keyterms": "Taguaí"})
+        self.assertNotIn("deepgram_keyterms", cleaned)
 
     def test_ws_query_has_no_duplicate_params(self):
         """Vacina: o WS já rejeitou 'Invalid query string' por language duplicado."""
-        settings = _settings(deepgram_keyterms="Taguaí")
+        settings = _settings(transcription_server=sig_app.DEEPGRAM_API_NAME)
         query = sig_app.deepgram_query_string(settings, "en")
         query += "&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=900"
         keys = [pair.split("=", 1)[0] for pair in query.split("&")]
         self.assertEqual(len(keys), len(set(keys)), f"parâmetros duplicados: {query}")
         self.assertIn("language=en", query)
-        self.assertIn("keyterm=Tagua%C3%AD", query)
 
 
 if __name__ == "__main__":

@@ -256,7 +256,6 @@ from audio_io import (  # noqa: F401
 from stt_clients import (  # noqa: F401
     transcribe_url,
     probe_duration_ms,
-    deepgram_keyterms_list,
     deepgram_query_string,
     is_grok_transcription,
     is_deepgram_transcription,
@@ -377,6 +376,7 @@ from providers import (  # noqa: F401
     parse_api_keys_text,
     fallback_text_model_for_missing_api_key,
     fallback_transcription_server_for_missing_api_key,
+    is_realtime_only_transcription_server,
     plausible_elevenlabs_api_key,
     plausible_assemblyai_api_key,
     plausible_xai_api_key,
@@ -983,7 +983,7 @@ class SigApp:
         self.transcribe_after_convert_var = BooleanVar(value=False)
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
-        self.files_language_label_var = StringVar(value="Idioma: auto")
+        self.files_language_label_var = StringVar(value="Idioma: pt")
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
@@ -6791,7 +6791,10 @@ try {
         available = {}
         for server in read_transcription_servers():
             name = server["name"]
-            if name == ELEVENLABS_API_NAME:
+            # Modelos exclusivos de WebSocket/ao vivo (ElevenLabs Scribe
+            # realtime e Meta Muse Voice) não aparecem na aba Transcrição:
+            # quem os usa é a aba Ocorrência (regra do usuário, 10/09).
+            if is_realtime_only_transcription_server(name):
                 continue
             if name in {"servidor", "taguai-speech"} and not hostname_online("servidor"):
                 continue
@@ -6800,8 +6803,6 @@ try {
             if name == DEEPGRAM_API_NAME and not settings.get("deepgram_api_key", "").strip():
                 continue
             if name == ASSEMBLYAI_API_NAME and not plausible_assemblyai_api_key(settings.get("assemblyai_api_key", "")):
-                continue
-            if name == META_MUSE_API_NAME and not str(settings.get("metamuse_api_key") or "").strip():
                 continue
             if name == ALIBABA_API_NAME and not str(settings.get("alibaba_api_key") or "").strip():
                 continue
@@ -6837,9 +6838,20 @@ try {
             return
         selected = set(self._selected_multi_transcription_model_names())
         if not selected:
-            default = str(self.settings.get("transcription_server") or "")
-            if default in available.values():
-                selected.add(default)
+            # Primeira montagem do menu desde a abertura do app: retoma a
+            # seleção salva da aba Transcrição (padrão: apenas "servidor", o
+            # Granite NAR local). Entram só os modelos disponíveis agora —
+            # modelos só de WebSocket já foram filtrados de `available`.
+            saved_settings = load_settings()
+            selected.update(
+                name
+                for name in (saved_settings.get("multi_transcription_models") or [])
+                if name in available.values()
+            )
+            if not selected:
+                default = self._default_transcription_model_name()
+                if default in available.values():
+                    selected.add(default)
         for label, name in available.items():
             variable = BooleanVar(value=name in selected)
             self.multi_transcription_model_vars[name] = variable
@@ -6848,6 +6860,20 @@ try {
                 variable=variable,
                 command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
             )
+
+    def _default_transcription_model_name(self) -> str:
+        """Modelo padrão da aba Transcrição quando o menu 'Modelos' está vazio.
+
+        Regra do usuário (10/09): o padrão é o `servidor` (Granite NAR local).
+        O `transcription_server` NÃO é consultado aqui — ele é compartilhado
+        com a aba Ocorrência (que pode estar num modelo exclusivo de WebSocket,
+        como o Meta Muse Voice) e não deve definir o que a Transcrição usa.
+        """
+        for name in self.settings.get("multi_transcription_models") or []:
+            candidate = str(name or "").strip()
+            if candidate and not is_realtime_only_transcription_server(candidate):
+                return candidate
+        return str(DEFAULT_SETTINGS["transcription_server"])
 
     def _refresh_files_language_label(self):
         self.files_language_label_var.set(f"Idioma: {transcription_language_option(self.settings)}")
@@ -6873,10 +6899,17 @@ try {
         (ex.: pt -> "pt-BR" no Deepgram e "pt" nos demais); o servidor local
         (Granite NAR) não recebe idioma nenhum. O settings.json e as
         preferências da aba Ocorrência não são tocados.
+
+        O `transcription_server` da cópia passa a ser o PRIMEIRO modelo marcado:
+        ele é compartilhado com a aba Ocorrência (e pode estar num modelo só de
+        WebSocket), então sem isto o lote de um único modelo usaria o modelo
+        da Ocorrência em vez do que está selecionado na Transcrição.
         """
         batch = self.settings.copy()
         batch["_multi_transcription"] = bool(model_names)
         batch["_multi_transcription_models"] = list(model_names)
+        if model_names:
+            batch["transcription_server"] = model_names[0]
         providers = transcription_providers_for_servers(
             [selected_transcription_server(batch)["name"], *model_names]
         )
@@ -8294,9 +8327,6 @@ try {
             api_key = grok_api_key_var.get().strip()
             deepseek_api_key = deepseek_api_key_var.get().strip()
             deepgram_api_key = deepgram_api_key_var.get().strip()
-            # O campo de palavras-chave foi removido da UI, mas o valor antigo
-            # continua preservado para não alterar o comportamento do Deepgram.
-            deepgram_keyterms = str(self.settings.get("deepgram_keyterms") or "").strip()
             assemblyai_api_key = assemblyai_api_key_var.get().strip()
             elevenlabs_api_key = elevenlabs_api_key_var.get().strip()
             metamuse_api_key = metamuse_api_key_var.get().strip()
@@ -8458,7 +8488,6 @@ try {
                     "grok_api_key": api_key,
                     "deepseek_api_key": deepseek_api_key,
                     "deepgram_api_key": deepgram_api_key,
-                    "deepgram_keyterms": deepgram_keyterms,
                     "assemblyai_api_key": assemblyai_api_key,
                     "elevenlabs_api_key": elevenlabs_api_key,
                     "metamuse_api_key": metamuse_api_key,
@@ -11477,10 +11506,11 @@ try {
         # essa seleção é local ao lote e não deve desaparecer no reload.
         multi_model_names = self._selected_multi_transcription_model_names()
         self.settings = load_settings()
-        # Se o usuário nunca abriu o menu "Modelos" (vars vazias), ele escolheu o
-        # modelo nas Configurações — usa o modelo único de lá em vez de bloquear.
+        # Se o usuário nunca abriu o menu "Modelos" (vars vazias), vale a
+        # seleção salva da Transcrição (padrão: servidor Granite NAR) — nunca
+        # o modelo da aba Ocorrência, que é compartilhado no settings.
         if not multi_model_names:
-            configured = str(self.settings.get("transcription_server") or "").strip()
+            configured = self._default_transcription_model_name()
             if configured:
                 multi_model_names = [configured]
         if not multi_model_names:
@@ -11489,19 +11519,22 @@ try {
                 "Selecione pelo menos um modelo de transcrição no botão 'Modelos' da aba Transcrição.",
             )
             return
-        multi_transcription = bool(multi_model_names)
-        if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
+        # Cópia do lote: é ELA que define o modelo e o idioma realmente usados
+        # (o `transcription_server` é compartilhado com a aba Ocorrência).
+        workflow_settings = self._transcription_batch_settings(multi_model_names)
+        multi_transcription = len(multi_model_names) >= 2
+        if is_grok_transcription(workflow_settings) and not workflow_settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de transcrever.")
             return
-        if is_grok_transcription(self.settings) and self.send_zip_var.get():
+        if is_grok_transcription(workflow_settings) and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Grok STT envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
-        if is_metamuse_transcription(self.settings) and self.send_zip_var.get():
+        if is_metamuse_transcription(workflow_settings) and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Meta Muse Voice envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
-        if is_alibaba_transcription(self.settings) and self.send_zip_var.get():
+        if is_alibaba_transcription(workflow_settings) and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Alibaba Fun ASR/Qwen envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
@@ -11510,9 +11543,6 @@ try {
             self._refresh_zip_controls()
             self.status_var.set("Multi model usa requisições individuais; o envio ZIP foi desativado.")
         self.cancel_event.clear()
-        # Idioma escolhido na aba Transcrição: entra só na cópia do lote, já
-        # traduzido para o valor próprio de CADA modelo selecionado.
-        workflow_settings = self._transcription_batch_settings(multi_model_names)
         self.uploader = create_transcription_uploader(self.cancel_event, workflow_settings)
         self.uploaders = [self.uploader]
         self.running = True

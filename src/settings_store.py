@@ -20,6 +20,7 @@ from providers import (
     SERVER_GEMMA_NAME,
     TEXT_TASK_KEYS,
     fallback_transcription_server_for_missing_api_key,
+    is_realtime_only_transcription_server,
     plausible_deepseek_api_key,
     plausible_xai_api_key,
     read_text_models,
@@ -128,7 +129,7 @@ def normalize_settings(data: dict) -> dict:
             metamuse_api_key,
             alibaba_api_key,
         )
-        if candidate in server_names and candidate != ELEVENLABS_API_NAME:
+        if candidate in server_names and not is_realtime_only_transcription_server(candidate):
             normalized_multi_models.append(candidate)
     clean["multi_transcription_models"] = list(dict.fromkeys(normalized_multi_models))[:3]
     text_model_names = {model["name"] for model in read_text_models()}
@@ -203,11 +204,6 @@ def normalize_settings(data: dict) -> dict:
     )
     clean["grok_api_key"] = grok_api_key
     clean["deepgram_api_key"] = deepgram_api_key
-    clean["deepgram_keyterms"] = ", ".join(
-        term.strip()
-        for term in str(data.get("deepgram_keyterms") or "").replace("\n", ",").split(",")
-        if term.strip()
-    )
     clean["assemblyai_api_key"] = assemblyai_api_key
     clean["elevenlabs_api_key"] = elevenlabs_api_key
     clean["metamuse_api_key"] = metamuse_api_key

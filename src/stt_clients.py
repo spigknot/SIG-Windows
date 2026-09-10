@@ -13,7 +13,6 @@ import os
 import re
 import subprocess
 import threading
-import urllib.request
 import uuid
 from app_env import app_base_dir
 from domain_models import Cancelled
@@ -63,14 +62,12 @@ def probe_duration_ms(path: Path) -> int:
         return 0
 
 
-def deepgram_keyterms_list(settings: dict) -> list[str]:
-    """Termos de reforço do Deepgram (keyterm prompting), separados por vírgula."""
-    raw = str(settings.get("deepgram_keyterms") or "")
-    return [term.strip() for term in raw.replace("\n", ",").split(",") if term.strip()]
-
-
 def deepgram_query_string(settings: dict, language: str | None = None, diarize: bool = False) -> str:
-    """Parâmetros do Deepgram Nova 3 (REST e WS) — espelho do app Android."""
+    """Parâmetros do Deepgram Nova 3 (REST e WS) — espelho do app Android.
+
+    Sem termos de reforço por enquanto (removido em 10/09 a pedido do
+    usuário); os demais parâmetros continuam idênticos.
+    """
     if language is None:
         language = stt_provider_rules.deepgram_language_param(settings)
     params = ["model=nova-3", f"language={language}", "smart_format=true", "punctuate=true"]
@@ -78,8 +75,6 @@ def deepgram_query_string(settings: dict, language: str | None = None, diarize: 
         diarize_param = stt_provider_rules.deepgram_diarize_query(True)
         if diarize_param:
             params.append(diarize_param)
-    for term in deepgram_keyterms_list(settings):
-        params.append(f"keyterm={urllib.parse.quote(term)}")
     return "&".join(params)
 
 

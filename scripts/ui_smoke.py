@@ -58,6 +58,31 @@ def _check_transcription_language_selector(app) -> None:
         raise RuntimeError("rotulo do seletor de idioma fora do padrao 'Idioma: ...'")
 
 
+def _check_transcription_models_menu(app) -> None:
+    """Menu "Modelos" da aba Transcrição (hermético: servidor local online).
+
+    Vacina do pedido de 10/09: nenhum modelo exclusivo de WebSocket (Meta Muse
+    Voice, ElevenLabs Scribe realtime) pode ser oferecido na Transcrição, e a
+    seleção padrão é apenas o `servidor` (Granite NAR local).
+    """
+    import sig_app
+
+    with patch.object(sig_app, "hostname_online", lambda _host: True), patch.object(
+        sig_app, "load_settings", lambda: dict(sig_app.DEFAULT_SETTINGS)
+    ):
+        app._populate_models_menu()
+
+    offered = dict(app.multi_transcription_model_vars)
+    if not offered:
+        raise RuntimeError("menu Modelos vazio no smoke test")
+    for name in offered:
+        if sig_app.is_realtime_only_transcription_server(name):
+            raise RuntimeError(f"modelo so-websocket oferecido na Transcricao: {name}")
+    checked = sorted(name for name, variable in offered.items() if variable.get())
+    if checked != ["servidor"]:
+        raise RuntimeError(f"selecao padrao do menu Modelos inesperada: {checked}")
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -77,6 +102,7 @@ def run(*, quiet: bool = False) -> int:
                 root.update_idletasks()
 
             _check_transcription_language_selector(app)
+            _check_transcription_models_menu(app)
 
             before = set(root.winfo_children())
             app.open_settings()

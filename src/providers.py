@@ -15,8 +15,8 @@ DEFAULT_SETTINGS = {
     "grok_chunk_ms": 100,
     "grok_rest_requests": False,
     "transcription_server": "servidor",
-    "multi_transcription_models": [],
-    "transcription_language": "auto",
+    "multi_transcription_models": ["servidor"],
+    "transcription_language": "pt",
     "text_model": "IA-Proxy",
     "text_reasoning": "low",
     "ia_proxy_model": "grok-4.6",
@@ -38,7 +38,6 @@ DEFAULT_SETTINGS = {
     "grok_api_key": "",
     "deepseek_api_key": "",
     "deepgram_api_key": "",
-    "deepgram_keyterms": "",
     "assemblyai_api_key": "",
     "elevenlabs_api_key": "",
     "metamuse_api_key": "",
@@ -456,6 +455,22 @@ def settings_for_transcription_server(settings: dict, server_name: str) -> dict:
     selected = settings.copy()
     selected["transcription_server"] = server_name
     return selected
+
+
+# Modelos que NÃO podem ser escolhidos na aba Transcrição (arquivos): são de
+# WebSocket/ao vivo — quem os usa é a aba Ocorrência (streaming). Regra do
+# usuário (10/09): o Meta Muse Voice é apenas websocket.
+REALTIME_ONLY_TRANSCRIPTION_SERVERS = frozenset(
+    {
+        ELEVENLABS_API_NAME,
+        META_MUSE_API_NAME,
+    }
+)
+
+
+def is_realtime_only_transcription_server(server_name: str) -> bool:
+    """True para modelo exclusivo de WebSocket/ao vivo (não aceito em lote)."""
+    return str(server_name or "").strip() in REALTIME_ONLY_TRANSCRIPTION_SERVERS
 
 
 # Nome do servidor STT -> provedor das regras de idioma/diarização
