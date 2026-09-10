@@ -53,11 +53,13 @@ from stt_provider_rules import (  # noqa: E402
     KEY_STT_KEYWORDS,
     KEY_STT_KEYWORDS_ENABLED,
     keywords_query_params,
+    MAX_STT_KEYWORD_LENGTH,
     MAX_STT_KEYWORDS,
     metamuse_keywords,
     normalize_stt_keywords,
     stt_keywords,
     stt_keywords_enabled,
+    supports_keywords,
 )
 
 TERMOS = ["Taguaí", "Furtura", "Rua Monsenhor"]
@@ -257,6 +259,68 @@ class MultipartRepetidoTest(unittest.TestCase):
         grok = settings_for_transcription_server(_settings(**{KEY_STT_KEYWORDS: []}), GROK_API_NAME)
         corpo = self._capturar(grok)
         self.assertNotIn('name="keyterm"', corpo)
+
+
+class LimiteDeCaracteresTest(unittest.TestCase):
+    """Limite de 50 caracteres por keyword — MEDIDO nas APIs reais (10/09).
+
+    Motivo do teste: a lista de keywords é ÚNICA no app e vai para todos os
+    provedores, mas o LIMITE é de cada um. Um teste de ponta a ponta com uma
+    keyword de 200 caracteres devolveu, textualmente:
+
+      xAI       -> HTTP 400 {"error":"Keyterm \"XXXX...\" too long (200 chars).
+                             Maximum is 50 chars"}
+      ElevenLabs-> HTTP 400 {"type":"validation_error","code":"invalid_parameters",
+                             "message":"All keywords must be less than 50 characters.",
+                             "status":"invalid_keyword_length"}
+      Meta Muse -> HTTP 503 backend_unavailable (determinístico, 3/3)
+      AssemblyAI-> HTTP 200 (aceita; o limite dele é ~1000 palavras)
+      Alibaba   -> HTTP 200
+      Deepgram  -> HTTP 200
+
+    Ou seja: 50 é o teto que TODOS aceitam, e é o valor usado na validação da
+    tela de Keywords. Baixar/levantar esse número sem checar os provedores
+    quebra a transcrição nos dois primeiros.
+    """
+
+    def test_teto_global_e_50(self):
+        self.assertEqual(50, MAX_STT_KEYWORD_LENGTH)
+
+    def test_a_ui_usa_o_teto_em_caracteres(self):
+        fonte = (RAIZ / "src" / "sig_app.py").read_text(encoding="utf-8")
+        self.assertIn("if len(term) > MAX_STT_KEYWORD_LENGTH:", fonte)
+
+    def test_normalize_nao_descarta_termo_longo_em_silencio(self):
+        # Decisão explícita: o normalize NÃO trunca nem descarta keyword longa
+        # (não perder dado do usuário por conta própria). Quem impede o envio é
+        # a validação da tela; se um settings.json editado à mão tiver um termo
+        # longo, a API responde com erro claro em vez do app mentir.
+        longo = "X" * 200
+        self.assertEqual([longo], normalize_stt_keywords([longo]))
+
+
+class AceitacaoPorProvedorTest(unittest.TestCase):
+    """O que cada provedor aceitou de verdade (mesmo áudio, mesmo termo)."""
+
+    def test_provedores_de_query_sem_keyword_nao_mandam_nada(self):
+        off = _settings(**{KEY_STT_KEYWORDS: []})
+        self.assertEqual([], keywords_query_params(off, "deepgram"))
+        self.assertEqual([], keywords_query_params(off, "grok"))
+        self.assertEqual([], keywords_query_params(off, "elevenlabs"))
+        self.assertEqual([], keywords_query_params(off, "assemblyai"))
+
+    def test_todos_os_provedores_de_api_recebem_termo(self):
+        on = _settings()
+        for provider in ("deepgram", "grok", "elevenlabs", "assemblyai"):
+            with self.subTest(provider=provider):
+                self.assertTrue(keywords_query_params(on, provider))
+        self.assertIsNotNone(metamuse_keywords(on))
+        self.assertIsNotNone(alibaba_vocabulary(on))
+
+    def test_provedor_sem_biasing_continua_vazio(self):
+        # servidor (Granite NAR): nenhum parâmetro de termo, em nenhum caminho.
+        self.assertEqual([], keywords_query_params(_settings(), "servidor"))
+        self.assertFalse(supports_keywords("servidor"))
 
 
 if __name__ == "__main__":
