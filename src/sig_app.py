@@ -88,6 +88,7 @@ import smart_join_planner
 import stt_provider_rules
 from stt_provider_rules import (
     alibaba_language_hints,
+    apply_transcription_language_option,
     assemblyai_rest_diarize,
     assemblyai_rest_language,
     assemblyai_ws_diarize_query,
@@ -110,6 +111,8 @@ from stt_provider_rules import (
     metamuse_mode,
     parse_codes,
     supports_diarize,
+    transcription_language_option,
+    TRANSCRIPTION_LANGUAGE_OPTIONS,
 )
 from sync_common import (
     R2_PUBLIC_HOST,
@@ -379,6 +382,7 @@ from providers import (  # noqa: F401
     plausible_xai_api_key,
     plausible_deepseek_api_key,
     settings_for_transcription_server,
+    transcription_providers_for_servers,
 )
 
 
@@ -436,7 +440,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260909_002"
+APP_VERSION = "20260910_001"
 
 
 
@@ -979,6 +983,7 @@ class SigApp:
         self.transcribe_after_convert_var = BooleanVar(value=False)
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
+        self.files_language_label_var = StringVar(value="Idioma: auto")
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
@@ -3054,6 +3059,25 @@ class SigApp:
         self.files_models_menu = tk.Menu(self.files_models_button, tearoff=0, postcommand=self._populate_models_menu)
         self.files_models_button.configure(menu=self.files_models_menu)
         self.files_models_button.pack(side=LEFT, padx=(16, 0))
+
+        # Idioma do lote, logo à direita do botão "Modelos" (mesmo padrão do
+        # seletor da aba Ocorrência). Aqui a opção é genérica (auto/pt/en/es):
+        # na hora da requisição ela é traduzida para o valor próprio de CADA
+        # modelo marcado — nunca um parâmetro único para todos.
+        self.files_language_button = ttk.Menubutton(
+            options2,
+            textvariable=self.files_language_label_var,
+            width=11,
+        )
+        self.files_language_menu = tk.Menu(self.files_language_button, tearoff=False)
+        for option in TRANSCRIPTION_LANGUAGE_OPTIONS:
+            self.files_language_menu.add_command(
+                label=option,
+                command=lambda selected=option: self._set_files_language(selected),
+            )
+        self.files_language_button.configure(menu=self.files_language_menu)
+        self.files_language_button.pack(side=LEFT, padx=(8, 0))
+        self._refresh_files_language_label()
 
         # VAD removido da tela principal (teste na aba própria)
         self.zip_level_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_tree_modes())
@@ -6824,6 +6848,39 @@ try {
                 variable=variable,
                 command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
             )
+
+    def _refresh_files_language_label(self):
+        self.files_language_label_var.set(f"Idioma: {transcription_language_option(self.settings)}")
+
+    def _set_files_language(self, option: str):
+        """Grava a opção do seletor de idioma da aba Transcrição.
+
+        Só a OPÇÃO genérica (auto/pt/en/es) é persistida: o parâmetro real de
+        cada modelo continua sendo montado pelo próprio provedor na hora da
+        requisição (mesma regra da aba Ocorrência).
+        """
+        if option not in TRANSCRIPTION_LANGUAGE_OPTIONS:
+            return
+        self.settings[stt_provider_rules.KEY_TRANSCRIPTION_LANGUAGE] = option
+        self.settings = save_settings(self.settings)
+        self.files_language_label_var.set(f"Idioma: {option}")
+        self._set_activity_status(f"Idioma selecionado: {option}.", log=False)
+
+    def _transcription_batch_settings(self, model_names: list[str]) -> dict:
+        """Cópia de settings do lote com o idioma traduzido por modelo.
+
+        O seletor guarda uma opção única, mas cada provedor recebe o SEU valor
+        (ex.: pt -> "pt-BR" no Deepgram e "pt" nos demais); o servidor local
+        (Granite NAR) não recebe idioma nenhum. O settings.json e as
+        preferências da aba Ocorrência não são tocados.
+        """
+        batch = self.settings.copy()
+        batch["_multi_transcription"] = bool(model_names)
+        batch["_multi_transcription_models"] = list(model_names)
+        providers = transcription_providers_for_servers(
+            [selected_transcription_server(batch)["name"], *model_names]
+        )
+        return apply_transcription_language_option(batch, providers)
 
     def _refresh_multi_text_layout(self):
         if not getattr(self, "live_history_primary_pane", None):
@@ -11453,7 +11510,10 @@ try {
             self._refresh_zip_controls()
             self.status_var.set("Multi model usa requisições individuais; o envio ZIP foi desativado.")
         self.cancel_event.clear()
-        self.uploader = create_transcription_uploader(self.cancel_event, self.settings)
+        # Idioma escolhido na aba Transcrição: entra só na cópia do lote, já
+        # traduzido para o valor próprio de CADA modelo selecionado.
+        workflow_settings = self._transcription_batch_settings(multi_model_names)
+        self.uploader = create_transcription_uploader(self.cancel_event, workflow_settings)
         self.uploaders = [self.uploader]
         self.running = True
         self.last_html_path = None
@@ -11472,9 +11532,6 @@ try {
         transcribe_after_convert = self.transcribe_after_convert_var.get()
         send_zip = self.send_zip_var.get() and not convert_only and not vad_only
         zip_level = self.zip_level_var.get()
-        workflow_settings = self.settings.copy()
-        workflow_settings["_multi_transcription"] = multi_transcription
-        workflow_settings["_multi_transcription_models"] = list(multi_model_names)
         self.worker_thread = threading.Thread(
             target=self._workflow,
             args=(paths, mode, convert_only, vad_only, vad_mode, transcribe_after_convert, send_zip, zip_level, workflow_settings),
@@ -12200,7 +12257,7 @@ try {
                         raise Cancelled()
                     job = item
                     try:
-                        self._transcribe_job(job, url)
+                        self._transcribe_job(job, url, None, settings)
                         self._queue("job", job.original_path, "Transcrito")
                     except Cancelled:
                         raise
@@ -12416,7 +12473,10 @@ try {
             if not group:
                 return
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, parallelism)) as executor:
-                future_map = {executor.submit(self._transcribe_job, job, url): job for job in group}
+                future_map = {
+                    executor.submit(self._transcribe_job, job, url, None, settings): job
+                    for job in group
+                }
                 for future in concurrent.futures.as_completed(future_map):
                     job = future_map[future]
                     if self.cancel_event.is_set():

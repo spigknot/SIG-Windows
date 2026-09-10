@@ -16,6 +16,7 @@ DEFAULT_SETTINGS = {
     "grok_rest_requests": False,
     "transcription_server": "servidor",
     "multi_transcription_models": [],
+    "transcription_language": "auto",
     "text_model": "IA-Proxy",
     "text_reasoning": "low",
     "ia_proxy_model": "grok-4.6",
@@ -455,6 +456,42 @@ def settings_for_transcription_server(settings: dict, server_name: str) -> dict:
     selected = settings.copy()
     selected["transcription_server"] = server_name
     return selected
+
+
+# Nome do servidor STT -> provedor das regras de idioma/diarização
+# (stt_provider_rules). O servidor local (Granite NAR) fica de fora: não tem
+# parâmetro de idioma (mesma regra da aba Ocorrência e do app Android).
+STT_PROVIDER_FLAGS = (
+    ("grok", "is_grok_api"),
+    ("deepgram", "is_deepgram_api"),
+    ("assemblyai", "is_assemblyai_api"),
+    ("elevenlabs", "is_elevenlabs_api"),
+    ("metamuse", "is_metamuse_api"),
+    ("alibaba", "is_alibaba_api"),
+)
+
+
+def transcription_provider_for_server(server_name: str) -> str | None:
+    """Provedor de idioma de um servidor STT (None = servidor local/sem idioma)."""
+    candidate = str(server_name or "").strip()
+    for server in read_transcription_servers():
+        if server["name"] != candidate:
+            continue
+        for provider, flag in STT_PROVIDER_FLAGS:
+            if server.get(flag):
+                return provider
+        return None
+    return None
+
+
+def transcription_providers_for_servers(server_names) -> list[str]:
+    """Provedores de idioma do lote, na ordem de entrada e sem repetição."""
+    providers: list[str] = []
+    for name in server_names or []:
+        provider = transcription_provider_for_server(name)
+        if provider and provider not in providers:
+            providers.append(provider)
+    return providers
 
 
 TEXT_TASK_KEYS = {

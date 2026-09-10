@@ -30,6 +30,34 @@ def _destroy_toplevels(root: tk.Tk) -> None:
             child.destroy()
 
 
+def _check_transcription_language_selector(app) -> None:
+    """Seletor de idioma da aba Transcrição (paridade com a aba Ocorrência).
+
+    Vacina da UI: o seletor precisa existir, oferecer exatamente
+    auto/pt/en/es (sem custom) e ficar À DIREITA do botão "Modelos".
+    """
+    button = getattr(app, "files_language_button", None)
+    if button is None:
+        raise RuntimeError("seletor de idioma da aba Transcricao ausente")
+    if button.winfo_manager() != "pack":
+        raise RuntimeError("seletor de idioma da aba Transcricao nao esta visivel")
+    models_button = getattr(app, "files_models_button", None)
+    if models_button is None or models_button.master is not button.master:
+        raise RuntimeError("seletor de idioma nao esta na mesma barra do botao Modelos")
+    irmaos = list(button.master.winfo_children())
+    if irmaos.index(button) < irmaos.index(models_button):
+        raise RuntimeError("seletor de idioma nao esta a direita do botao Modelos")
+    if button.pack_info().get("side") != "left":
+        raise RuntimeError("seletor de idioma nao usa o alinhamento padrao (side=left)")
+    menu = button.cget("menu")
+    labels = [button.nametowidget(menu).entrycget(index, "label")
+              for index in range(button.nametowidget(menu).index("end") + 1)]
+    if labels != ["auto", "pt", "en", "es"]:
+        raise RuntimeError(f"opcoes do seletor de idioma inesperadas: {labels}")
+    if not str(app.files_language_label_var.get()).startswith("Idioma:"):
+        raise RuntimeError("rotulo do seletor de idioma fora do padrao 'Idioma: ...'")
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -47,6 +75,8 @@ def run(*, quiet: bool = False) -> int:
             for tab_name in MAIN_TABS:
                 app.select_main_tab(tab_name)
                 root.update_idletasks()
+
+            _check_transcription_language_selector(app)
 
             before = set(root.winfo_children())
             app.open_settings()

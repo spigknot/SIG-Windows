@@ -133,6 +133,60 @@ MENU_OPTIONS = {
 # requisições — nunca mude os valores, apenas estas labels.
 LANGUAGE_LABELS = {"multi": "auto"}
 
+# ---------------- Seletor de idioma da aba Transcrição ----------------
+#
+# A aba Transcrição escolhe VÁRIOS modelos ao mesmo tempo, então o seletor
+# guarda uma opção genérica (auto/pt/en/es) e o valor REAL de cada provedor é
+# montado na hora da requisição. Regra permanente: NUNCA traduzir a opção em
+# um parâmetro único e enviá-lo a todos os modelos — cada provedor recebe o
+# formato que ele próprio entende (mesma regra da aba Ocorrência).
+KEY_TRANSCRIPTION_LANGUAGE = "transcription_language"
+TRANSCRIPTION_LANGUAGE_OPTIONS = ("auto", "pt", "en", "es")
+DEFAULT_TRANSCRIPTION_LANGUAGE = "auto"
+# Opção -> valor de modo do provedor. "auto" é o "multi" interno (detecção
+# nativa); "pt" usa "pt-BR" no Deepgram (único provedor que distingue a
+# variante); o servidor local (Granite NAR) não tem parâmetro de idioma e por
+# isso não aparece nesta tabela.
+TRANSCRIPTION_OPTION_MODES = {
+    "deepgram": {"auto": "multi", "pt": "pt-BR", "en": "en", "es": "es"},
+    "assemblyai": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
+    "elevenlabs": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
+    "grok": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
+    "metamuse": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
+    "alibaba": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
+}
+
+
+def transcription_language_option(settings: dict) -> str:
+    """Opção escolhida na aba Transcrição (auto/pt/en/es). Padrão: "auto"."""
+    value = str(settings.get(KEY_TRANSCRIPTION_LANGUAGE) or "").strip().casefold()
+    return value if value in TRANSCRIPTION_LANGUAGE_OPTIONS else DEFAULT_TRANSCRIPTION_LANGUAGE
+
+
+def language_mode_for_option(provider: str, option: str) -> str | None:
+    """Modo do provedor para a opcao do seletor. None = provedor sem idioma."""
+    modes = TRANSCRIPTION_OPTION_MODES.get(provider)
+    if not modes:
+        return None
+    return modes.get(str(option or "").strip().casefold(), modes["auto"])
+
+
+def apply_transcription_language_option(
+    settings: dict, providers, option: str | None = None
+) -> dict:
+    """Cópia de settings com a opção traduzida para o valor de CADA provedor.
+
+    Recebe a lista de provedores do lote e grava, só na cópia, a chave de modo
+    de cada um (o seletor nunca monta o parâmetro da requisição).
+    """
+    resolved = option or transcription_language_option(settings)
+    updated = settings.copy()
+    for provider in providers:
+        mode = language_mode_for_option(provider, resolved)
+        if mode:
+            updated[KEY_LANGUAGE_MODE[provider]] = mode
+    return updated
+
 
 def parse_codes(raw: str) -> list[str]:
     """Normaliza a entrada do usuário: ' en ,  es , pt ' -> ['en', 'es', 'pt']."""

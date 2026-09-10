@@ -27,6 +27,11 @@ from providers import (
     selected_text_model_config,
     selected_transcription_server,
 )
+from stt_provider_rules import (
+    DEFAULT_TRANSCRIPTION_LANGUAGE,
+    KEY_TRANSCRIPTION_LANGUAGE,
+    TRANSCRIPTION_LANGUAGE_OPTIONS,
+)
 
 
 def load_settings() -> dict:
@@ -66,6 +71,14 @@ def normalize_settings(data: dict) -> dict:
         "grok_language_custom",
     ):
         clean[custom_key] = str(data.get(custom_key) or "").strip()
+    # Idioma do seletor da aba Transcrição (auto/pt/en/es). Persistimos só a
+    # OPÇÃO genérica: cada provedor monta o próprio parâmetro na requisição.
+    language_option = str(data.get(KEY_TRANSCRIPTION_LANGUAGE) or "").strip().casefold()
+    clean[KEY_TRANSCRIPTION_LANGUAGE] = (
+        language_option
+        if language_option in TRANSCRIPTION_LANGUAGE_OPTIONS
+        else DEFAULT_TRANSCRIPTION_LANGUAGE
+    )
     rest_value = data.get("grok_rest_requests", DEFAULT_SETTINGS["grok_rest_requests"])
     clean["grok_rest_requests"] = (
         rest_value

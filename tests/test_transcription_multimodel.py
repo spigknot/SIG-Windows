@@ -62,6 +62,38 @@ class MultiTranscriptionTests(unittest.TestCase):
         self.assertIn('<colgroup><col style="width: 20%">', doc)
         self.assertEqual(doc.count('<col style="width: 26.67%">'), 3)
 
+    def test_two_models_split_the_remaining_width_equally(self):
+        from sig_app import html_document
+
+        doc = html_document(
+            "Teste",
+            ["<tr><td>a.wav</td><td>1</td><td>2</td></tr>"],
+            ("Arquivo original", "servidor", GROK_API_NAME),
+        )
+        self.assertEqual(doc.count('<col style="width: 40.00%">'), 2)
+
+    def test_table_uses_fixed_layout_so_the_colgroup_is_obeyed(self):
+        # Vacina do bug real (10/09): com `table-layout: auto` (padrão) o
+        # <colgroup> é apenas uma SUGESTÃO — o navegador alargava a coluna que
+        # tivesse um texto longo sem quebra (URL, número colado, string sem
+        # espaço) e encolhia as outras, então as colunas dos modelos saíam com
+        # larguras diferentes mesmo com as porcentagens corretas no colgroup.
+        # Medido no Chrome headless: 1 texto sem quebra dava colunas de
+        # 84px / 1318px / 99px num relatório de 3 modelos.
+        from sig_app import html_document
+
+        doc = html_document("Teste", ["<tr><td>a</td><td>b</td></tr>"], ("Arquivo", "M"))
+        self.assertIn("table-layout: fixed", doc)
+
+    def test_long_unbroken_text_wraps_inside_the_column(self):
+        # Com `table-layout: fixed` a coluna não cresce; o texto sem espaços
+        # precisa quebrar dentro dela em vez de estourar a célula/tabela.
+        from sig_app import html_document
+
+        doc = html_document("Teste", ["<tr><td>a</td><td>b</td></tr>"], ("Arquivo", "M"))
+        self.assertIn("overflow-wrap: anywhere", doc)
+        self.assertIn("word-break: break-word", doc)
+
     def test_report_single_transcript_column_fills_rest(self):
         from sig_app import html_document
 

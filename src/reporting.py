@@ -33,7 +33,11 @@ def html_document(title: str, rows: list[str], headers: tuple[str, ...], stats: 
             "</tr>"
         ]
     # A 1ª coluna (nome do arquivo) reserva espaço fixo (20%); as demais
-    # colunas de transcrição/modelo dividem igualmente o restante (larguras idênticas).
+    # colunas de transcrição/modelo dividem igualmente o restante (larguras
+    # idênticas). O <colgroup> só é obedecido À RISCA porque a tabela usa
+    # `table-layout: fixed`: com o layout automático o navegador alargava a
+    # coluna que tivesse um texto longo sem quebra (URL, número colado) e
+    # encolhia as demais — as colunas dos modelos saíam desiguais.
     n_content = max(1, len(headers) - 1)
     filename_width = 20
     content_width = (100.0 - filename_width) / n_content
@@ -64,11 +68,13 @@ h1 {{ font-size: 24px; margin: 0 0 18px; }}
   margin: -6px 0 14px;
 }}
 .stats span {{ white-space: nowrap; }}
-table {{ border-collapse: collapse; width: 100%; }}
+table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
 th, td {{
   border: 1px solid #334047;
   padding: 10px;
   vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }}
 th {{ background: #182127; text-align: left; }}
 td:first-child {{
