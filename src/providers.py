@@ -17,6 +17,12 @@ DEFAULT_SETTINGS = {
     "transcription_server": "servidor",
     "multi_transcription_models": ["servidor"],
     "transcription_language": "pt",
+    # Keywords (termos de reforço) do STT: lista única, montada por PROVIDER na
+    # hora da requisição (mesma regra do idioma). Ver stt_provider_rules.
+    "stt_keywords": [],
+    # Checkbox "Keywords" das telas de Transcrição e Ocorrência (liga/desliga o
+    # envio dos termos sem apagar a lista).
+    "stt_keywords_enabled": True,
     "text_model": "IA-Proxy",
     "text_reasoning": "low",
     "ia_proxy_model": "grok-4.6",
@@ -63,20 +69,30 @@ DEFAULT_SETTINGS = {
 }
 
 
+# Identificadores aceitos na PRIMEIRA palavra de cada linha do arquivo de
+# importação de chaves (as linhas podem vir em qualquer ordem). O restante da
+# linha é a chave. Regra do usuário (10/09): a primeira palavra é sempre o
+# identificador, então nomes com espaço das versões antigas ("Meta Muse Voice",
+# "Imei Check") deixam de existir como identificador.
 API_KEY_IMPORT_FIELDS = {
-    "assemblyai": "assemblyai_api_key",
-    "elevenlabs": "elevenlabs_api_key",
-    "deepgram": "deepgram_api_key",
     "deepseek": "deepseek_api_key",
     "xai": "grok_api_key",
-    "imei check": "imei_api_key",
-    "meta muse voice": "metamuse_api_key",
-    "muse voice": "metamuse_api_key",
+    "meta": "metamuse_api_key",
     "metamuse": "metamuse_api_key",
-    "alibaba fun asr/qwen": "alibaba_api_key",
-    "alibaba fun asr": "alibaba_api_key",
+    "elevenlabs": "elevenlabs_api_key",
+    "deepgram": "deepgram_api_key",
+    "assemblyai": "assemblyai_api_key",
     "alibaba": "alibaba_api_key",
+    "imeicheck": "imei_api_key",
 }
+
+# Palavras que denunciam sobra do NOME do serviço depois do identificador
+# (linha no formato antigo, com o nome em várias palavras). Sem esta guarda,
+# "Meta Muse Voice <chave>" seria lido como identificador "Meta" + chave
+# "Muse Voice <chave>" e gravaria uma chave errada em silêncio.
+API_KEY_IMPORT_LEFTOVER_WORDS = frozenset(
+    {"muse", "voice", "check", "fun", "asr", "qwen", "cloud", "api", "key", "chaves"}
+)
 
 
 GROK_API_NAME = "Grok STT"
@@ -157,7 +173,35 @@ GROK_NON_REASONING_TEXT_NAME = "grok-4.20-0309-non-reasoning"
 GROK_NON_REASONING_LEGACY_NAME = "grok-4.20-non-reasoning"
 
 
-DEEPSEEK_TEXT_NAME = "deepseek-v4-flash"
+# Nome do modelo DeepSeek usado nas requisições. O provedor recomenda o nome
+# "deepseek-flash" (10/09): os nomes legados "deepseek-v4-flash" e
+# "deepseek-v4-flash-vision-exp" ainda são ACEITOS, mas os modelos foram
+# aposentados — as requisições são servidas pelo DeepSeek-V4.1-Flash e cobradas
+# no preço do Flash. Usar o nome atual evita trocar o app a cada modelo novo.
+DEEPSEEK_TEXT_NAME = "deepseek-flash"
+
+
+DEEPSEEK_LEGACY_NAMES = {
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+    "deepseek v4 flash",
+    "deepseek v4-flash",
+}
+
+
+def migrate_text_model_name(value: str) -> str:
+    """Nome de modelo de texto com os legados do DeepSeek já convertidos.
+
+    Necessário antes de comparar com o catálogo (`read_text_models`): sem isto,
+    um `history_model` antigo = "deepseek-v4-flash" deixaria de casar com o
+    catálogo e cairia silenciosamente no `text_model` geral (IA-Proxy) —
+    trocando o provedor que o usuário tinha escolhido.
+    """
+    candidate = str(value or "").strip()
+    folded = candidate.casefold()
+    if folded in DEEPSEEK_LEGACY_NAMES or folded.startswith("deepseek-v4-") or folded.startswith("deepseek v4"):
+        return DEEPSEEK_TEXT_NAME
+    return candidate
 
 
 IA_PROXY_NAME = "IA-Proxy"
@@ -367,25 +411,38 @@ def transcription_server_label(server: dict) -> str:
 
 
 def parse_api_keys_text(text: str) -> dict[str, str]:
-    """Extrai chaves de linhas no formato ``serviço chave``.
+    """Extrai chaves de linhas no formato ``Identificador chave``.
 
-    O nome do serviço pode conter espaços; a última palavra da linha é sempre
-    tratada como a chave. Linhas vazias, incompletas ou de serviços não
-    reconhecidos são ignoradas. Quando um serviço aparece mais de uma vez, a
-    última chave informada prevalece.
+    A PRIMEIRA palavra é o identificador (Deepseek, xAI, Meta, ElevenLabs,
+    Deepgram, AssemblyAI, Alibaba, ImeiCheck) e o restante da linha é a chave —
+    as linhas podem vir em qualquer ordem. Espaços dentro da chave são ruído de
+    formatação e são removidos (a chave de um provedor nunca tem espaços).
+    Linhas vazias, sem chave, de identificador desconhecido ou que ainda tragam
+    o nome do serviço em várias palavras (formato antigo) são ignoradas. Quando
+    o identificador aparece mais de uma vez, a última chave informada prevalece.
     """
     imported: dict[str, str] = {}
     for raw_line in str(text).splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        service_name_and_key = line.rsplit(None, 1)
-        if len(service_name_and_key) != 2:
+        parts = line.split(None, 1)
+        if len(parts) != 2:
             continue
-        service_name, api_key = service_name_and_key
-        field_name = API_KEY_IMPORT_FIELDS.get(" ".join(service_name.casefold().split()))
-        if field_name and api_key:
-            imported[field_name] = api_key
+        identifier, remainder = parts
+        field_name = API_KEY_IMPORT_FIELDS.get(identifier.casefold())
+        if not field_name:
+            continue
+        words = remainder.split()
+        if not words:
+            continue
+        # Sobra do nome do serviço (formato antigo) não é chave.
+        if words[0].casefold() in API_KEY_IMPORT_LEFTOVER_WORDS:
+            continue
+        api_key = "".join(words)
+        if not api_key:
+            continue
+        imported[field_name] = api_key
     return imported
 
 

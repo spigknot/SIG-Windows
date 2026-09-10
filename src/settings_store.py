@@ -7,6 +7,7 @@ import json
 from app_env import settings_path
 from providers import (
     DEEPSEEK_API_NAMES,
+    DEEPSEEK_LEGACY_NAMES,
     DEEPSEEK_TEXT_NAME,
     DEFAULT_SETTINGS,
     ELEVENLABS_API_NAME,
@@ -21,6 +22,7 @@ from providers import (
     TEXT_TASK_KEYS,
     fallback_transcription_server_for_missing_api_key,
     is_realtime_only_transcription_server,
+    migrate_text_model_name,
     plausible_deepseek_api_key,
     plausible_xai_api_key,
     read_text_models,
@@ -30,7 +32,10 @@ from providers import (
 )
 from stt_provider_rules import (
     DEFAULT_TRANSCRIPTION_LANGUAGE,
+    KEY_STT_KEYWORDS,
     KEY_TRANSCRIPTION_LANGUAGE,
+    MAX_STT_KEYWORDS,
+    normalize_stt_keywords,
     TRANSCRIPTION_LANGUAGE_OPTIONS,
 )
 
@@ -79,6 +84,16 @@ def normalize_settings(data: dict) -> dict:
         language_option
         if language_option in TRANSCRIPTION_LANGUAGE_OPTIONS
         else DEFAULT_TRANSCRIPTION_LANGUAGE
+    )
+    # Keywords do STT: lista de termos única (o parâmetro real de cada
+    # provedor é montado na requisição). Deduplica sem diferenciar
+    # maiúsculas/minúsculas e preserva a ordem digitada.
+    clean[KEY_STT_KEYWORDS] = normalize_stt_keywords(data.get(KEY_STT_KEYWORDS))
+    keywords_enabled = data.get("stt_keywords_enabled", DEFAULT_SETTINGS["stt_keywords_enabled"])
+    clean["stt_keywords_enabled"] = (
+        keywords_enabled
+        if isinstance(keywords_enabled, bool)
+        else str(keywords_enabled).strip().casefold() in {"1", "true", "yes", "on"}
     )
     rest_value = data.get("grok_rest_requests", DEFAULT_SETTINGS["grok_rest_requests"])
     clean["grok_rest_requests"] = (
@@ -136,6 +151,10 @@ def normalize_settings(data: dict) -> dict:
 
     def proxy_model(value, provider):
         candidate = str(value or "").strip()
+        # Nome legado do DeepSeek identifica o provedor por si só (não depende
+        # do `provider` gravado): migra para o nome atual do modelo.
+        if candidate.casefold() in DEEPSEEK_LEGACY_NAMES:
+            return DEEPSEEK_TEXT_NAME
         if candidate in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME}:
             return candidate
         return DEEPSEEK_TEXT_NAME if str(provider or "").casefold() == "deepseek" else GROK_TEXT_NAME
@@ -160,8 +179,13 @@ def normalize_settings(data: dict) -> dict:
         text_model = GROK_NON_REASONING_TEXT_NAME
     elif legacy_text_model.startswith("grok-4."):
         text_model = GROK_TEXT_NAME
-    elif legacy_text_model.startswith("deepseek-v4-") or legacy_text_model.startswith("deepseek v4"):
+    elif (
+        legacy_text_model.startswith("deepseek-v4-")
+        or legacy_text_model.startswith("deepseek v4")
+        or legacy_text_model in DEEPSEEK_LEGACY_NAMES
+    ):
         text_model = DEEPSEEK_TEXT_NAME
+    text_model = migrate_text_model_name(text_model)
     clean["text_model"] = text_model if text_model in text_model_names else selected_text_model_config({})["name"]
 
     proxy_model_1 = proxy_model(
@@ -179,7 +203,7 @@ def normalize_settings(data: dict) -> dict:
     clean["parts_extraction"] = (
         extraction if extraction in PARTS_EXTRACTION_LABELS else DEFAULT_SETTINGS["parts_extraction"]
     )
-    parts_model = str(data.get("parts_model") or DEFAULT_SETTINGS["parts_model"])
+    parts_model = migrate_text_model_name(str(data.get("parts_model") or DEFAULT_SETTINGS["parts_model"]))
     clean["parts_model"] = (
         parts_model
         if parts_model in {
@@ -228,7 +252,7 @@ def normalize_settings(data: dict) -> dict:
     task_preserved: dict[str, object] = {}
     for task, keys in TEXT_TASK_KEYS.items():
         model_key, reasoning_key, proxy_key = keys
-        raw_model = str(data.get(model_key) or "")
+        raw_model = migrate_text_model_name(str(data.get(model_key) or ""))
         model_value = raw_model if raw_model in text_model_names else clean["text_model"]
         if model_value in GROK_TEXT_API_NAMES and not plausible_xai_api_key(grok_api_key):
             model_value = SERVER_GEMMA_NAME

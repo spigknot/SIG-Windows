@@ -8,6 +8,8 @@ provedor para outro. Mantém paridade com:
 """
 from __future__ import annotations
 
+import json
+
 # ---------------- Listas de códigos (idênticas ao Android) ----------------
 
 DEEPGRAM_CODES = {
@@ -380,3 +382,107 @@ def grok_diarize_query(checked: bool) -> str | None:
 
 def grok_rest_diarize(checked: bool) -> bool:
     return checked
+
+
+# ---------------- Keywords (termos de reforço) ----------------
+#
+# A lista é ÚNICA no app (tela "Keywords" das Configurações) e cada provedor
+# monta o SEU parâmetro na hora da requisição — nunca um valor único para
+# todos, porque nome e formato diferem entre eles (mesma regra do idioma):
+#
+#   Deepgram    keyterm=...             (repetido: query REST e WS)
+#   Grok STT    keyterm=...             (repetido: query WS / campo multipart)
+#   ElevenLabs  keyterms=...            (repetido: query WS / campo multipart)
+#   AssemblyAI  keyterms_prompt=[...]   (array JSON: query WS / campo REST)
+#   Meta Muse   keywords: [...]         (JSON do handshake WS / do corpo REST)
+#   Alibaba     vocabulary: {termo: peso}  (parâmetro DashScope REST e WS)
+#   servidor    (Granite NAR: não tem biasing — nenhum parâmetro)
+
+KEY_STT_KEYWORDS = "stt_keywords"
+# Chave da checkbox "Keywords" das telas de Transcrição (REST) e Ocorrência
+# (WS): desligada, NENHUMA requisição leva termos — a lista continua salva.
+KEY_STT_KEYWORDS_ENABLED = "stt_keywords_enabled"
+MAX_STT_KEYWORDS = 100
+# Limite por termo dos provedores que o declaram (xAI/ElevenLabs: 50).
+MAX_STT_KEYWORD_LENGTH = 50
+# Peso das hotwords do DashScope (os exemplos oficiais usam 4, 5 e 50).
+ALIBABA_KEYWORD_WEIGHT = 5
+
+# Provedores que aceitam algum tipo de termo de reforço (o servidor local não).
+KEYWORD_PROVIDERS = ("deepgram", "grok", "elevenlabs", "assemblyai", "metamuse", "alibaba")
+
+
+def normalize_stt_keywords(raw) -> list[str]:
+    """Lista de keywords normalizada: sem vazios, sem repetidas, ordem mantida."""
+    if isinstance(raw, str):
+        candidates = [part.strip() for part in raw.replace("\n", ",").split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = [str(part).strip() for part in raw]
+    else:
+        return []
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        keywords.append(candidate)
+        if len(keywords) >= MAX_STT_KEYWORDS:
+            break
+    return keywords
+
+
+def stt_keywords_enabled(settings: dict) -> bool:
+    """A checkbox "Keywords" está marcada? (ausente = ligada)."""
+    value = settings.get(KEY_STT_KEYWORDS_ENABLED, True)
+    if isinstance(value, str):
+        return value.strip().casefold() not in {"0", "false", "no", "off", ""}
+    return bool(value)
+
+
+def stt_keywords(settings: dict) -> list[str]:
+    """Keywords que devem ir na requisição (vazio se a checkbox estiver off)."""
+    if not stt_keywords_enabled(settings):
+        return []
+    return normalize_stt_keywords(settings.get(KEY_STT_KEYWORDS))
+
+
+def supports_keywords(provider: str) -> bool:
+    return provider in KEYWORD_PROVIDERS
+
+
+def keywords_query_params(settings: dict, provider: str) -> list[tuple[str, str]]:
+    """Pares (chave, valor) do query string/WS para o provedor.
+
+    Lista vazia = nada a anexar (provedor sem biasing por query: Muse e Alibaba
+    levam as keywords no JSON do corpo). O valor sai CRU — quem monta a URL
+    faz o quote.
+    """
+    terms = stt_keywords(settings)
+    if not terms:
+        return []
+    if provider in ("deepgram", "grok"):
+        return [("keyterm", term) for term in terms]
+    if provider == "elevenlabs":
+        return [("keyterms", term) for term in terms]
+    if provider == "assemblyai":
+        # A AssemblyAI espera UM parâmetro com o array em JSON.
+        return [("keyterms_prompt", json.dumps(terms, ensure_ascii=False))]
+    return []
+
+
+def metamuse_keywords(settings: dict) -> list[str] | None:
+    """Meta Muse Voice: `keywords` (lista); None = omitir o campo."""
+    terms = stt_keywords(settings)
+    return terms or None
+
+
+def alibaba_vocabulary(settings: dict) -> dict[str, int] | None:
+    """Alibaba (DashScope): `vocabulary` como {termo: peso}; None = omitir."""
+    terms = stt_keywords(settings)
+    if not terms:
+        return None
+    return {term: ALIBABA_KEYWORD_WEIGHT for term in terms}

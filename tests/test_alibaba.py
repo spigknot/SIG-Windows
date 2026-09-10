@@ -135,14 +135,13 @@ class AlibabaConfigTests(unittest.TestCase):
         )
 
     def test_import_aliases(self):
+        # Formato atual: a PRIMEIRA palavra é o identificador (10/09).
         self.assertEqual(
-            sig_app.parse_api_keys_text("Alibaba Fun ASR/Qwen alibaba-key-1"),
+            sig_app.parse_api_keys_text("Alibaba alibaba-key-1"),
             {"alibaba_api_key": "alibaba-key-1"},
         )
-        self.assertEqual(
-            sig_app.parse_api_keys_text("alibaba alibaba-key-2"),
-            {"alibaba_api_key": "alibaba-key-2"},
-        )
+        # A linha do formato antigo (nome em várias palavras) não vira chave.
+        self.assertEqual(sig_app.parse_api_keys_text("Alibaba Fun ASR/Qwen alibaba-key-2"), {})
 
 
 class AlibabaLanguageRulesTests(unittest.TestCase):

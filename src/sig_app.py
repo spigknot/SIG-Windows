@@ -104,12 +104,17 @@ from stt_provider_rules import (
     grok_language_param,
     grok_rest_diarize,
     invalid_codes,
+    KEY_STT_KEYWORDS,
     language_custom,
     language_mode,
+    MAX_STT_KEYWORD_LENGTH,
+    MAX_STT_KEYWORDS,
     MENU_OPTIONS,
     metamuse_language_bias,
     metamuse_mode,
+    normalize_stt_keywords,
     parse_codes,
+    stt_keywords_enabled,
     supports_diarize,
     transcription_language_option,
     TRANSCRIPTION_LANGUAGE_OPTIONS,
@@ -440,7 +445,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260910_001"
+APP_VERSION = "20260910_002"
 
 
 
@@ -984,6 +989,8 @@ class SigApp:
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
         self.files_language_label_var = StringVar(value="Idioma: pt")
+        self.files_keywords_var = BooleanVar(value=False)
+        self.live_keywords_var = BooleanVar(value=False)
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
@@ -1200,6 +1207,33 @@ class SigApp:
         style.map(
             "Update.TButton",
             background=[("active", "#116b30"), ("disabled", "#7ea98a")],
+            foreground=[("disabled", "#f1f4f2")],
+        )
+        # Botões da tela de Keywords: "+" verde e "−" vermelho.
+        style.configure(
+            "KeywordAdd.TButton",
+            foreground="#ffffff",
+            background="#16833a",
+            font=("Segoe UI Semibold", 13),
+            padding=(8, 0),
+            anchor="center",
+        )
+        style.map(
+            "KeywordAdd.TButton",
+            background=[("active", "#116b30"), ("disabled", "#7ea98a")],
+            foreground=[("disabled", "#f1f4f2")],
+        )
+        style.configure(
+            "KeywordRemove.TButton",
+            foreground="#ffffff",
+            background="#b3261e",
+            font=("Segoe UI Semibold", 13),
+            padding=(8, 0),
+            anchor="center",
+        )
+        style.map(
+            "KeywordRemove.TButton",
+            background=[("active", "#8d1d17"), ("disabled", "#c9a19d")],
             foreground=[("disabled", "#f1f4f2")],
         )
         style.configure("TRadiobutton", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
@@ -2210,6 +2244,15 @@ class SigApp:
             self.live_language_menu.add_command(label=label, command=lambda selected=code: self._set_live_language(selected))
         self.live_language_button.configure(menu=self.live_language_menu)
         self.live_language_button.pack(side=LEFT)
+        # Checkbox "Keywords" da tela de Ocorrência (WS): liga/desliga o envio
+        # dos termos — é a MESMA chave da checkbox da aba Transcrição.
+        self.live_keywords_check = ttk.Checkbutton(
+            self.live_grok_controls,
+            text="Keywords",
+            variable=self.live_keywords_var,
+            command=self._toggle_live_keywords,
+        )
+        self.live_keywords_check.pack(side=LEFT, padx=(10, 0))
         self.live_grok_controls.pack(side=LEFT)
         self.live_top_spacer = ttk.Frame(live_top)
         self.live_top_spacer.pack(side=LEFT, fill=X, expand=True)
@@ -3077,6 +3120,16 @@ class SigApp:
             )
         self.files_language_button.configure(menu=self.files_language_menu)
         self.files_language_button.pack(side=LEFT, padx=(8, 0))
+        # Checkbox "Keywords" da aba Transcrição (REST): liga/desliga o envio
+        # dos termos da lista — a lista continua salva nas Configurações.
+        self.files_keywords_var.set(stt_keywords_enabled(self.settings))
+        self.files_keywords_check = ttk.Checkbutton(
+            options2,
+            text="Keywords",
+            variable=self.files_keywords_var,
+            command=self._toggle_files_keywords,
+        )
+        self.files_keywords_check.pack(side=LEFT, padx=(10, 0))
         self._refresh_files_language_label()
 
         # VAD removido da tela principal (teste na aba própria)
@@ -6537,6 +6590,9 @@ try {
                     self.live_diarize_var.set(False)
                     self.live_diarize_check.configure(state="disabled")
         self._rebuild_live_language_menu()
+        # A checkbox Keywords das duas telas lê a MESMA chave: mantém a da
+        # Ocorrência em sincronia com o que está salvo.
+        self.live_keywords_var.set(stt_keywords_enabled(self.settings))
         interval_state = "disabled" if self.live_state != "idle" else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
             widget.configure(state=interval_state)
@@ -6874,6 +6930,27 @@ try {
             if candidate and not is_realtime_only_transcription_server(candidate):
                 return candidate
         return str(DEFAULT_SETTINGS["transcription_server"])
+
+    def _set_keywords_enabled(self, enabled: bool):
+        """Liga/desliga o envio das keywords (mesma chave nas duas telas).
+
+        A lista de keywords continua salva; só as requisições deixam de levar
+        os termos. Vale para REST (Transcrição) e WS (Ocorrência).
+        """
+        enabled = bool(enabled)
+        self.settings["stt_keywords_enabled"] = enabled
+        self.settings = save_settings(self.settings)
+        self.files_keywords_var.set(enabled)
+        self.live_keywords_var.set(enabled)
+        self._set_activity_status(
+            "Keywords " + ("ativadas." if enabled else "desativadas."), log=False
+        )
+
+    def _toggle_files_keywords(self):
+        self._set_keywords_enabled(self.files_keywords_var.get())
+
+    def _toggle_live_keywords(self):
+        self._set_keywords_enabled(self.live_keywords_var.get())
 
     def _refresh_files_language_label(self):
         self.files_language_label_var.set(f"Idioma: {transcription_language_option(self.settings)}")
@@ -7406,8 +7483,19 @@ try {
             section.columnconfigure(0, minsize=170)
             section.columnconfigure(1, weight=1)
             model_sections.append(section)
+        # Aba Avançado: a tela inicial (botão KEYWORDS + Paralelismo) e a tela
+        # de Keywords trocam entre si DENTRO da aba, sem mexer nas outras.
+        advanced_home = ttk.Frame(advanced_tab, style="Settings.TFrame")
+        advanced_home.pack(fill=BOTH, expand=True, anchor="n")
+        advanced_keywords_bar = ttk.Frame(advanced_home, style="Settings.Inner.TFrame")
+        advanced_keywords_bar.pack(anchor="e", pady=(0, 8))
+        ttk.Button(
+            advanced_keywords_bar,
+            text="KEYWORDS",
+            command=lambda: show_keywords_screen(),
+        ).pack(side=RIGHT)
         parallel_frame = ttk.LabelFrame(
-            advanced_tab,
+            advanced_home,
             text="Paralelismo",
             padding=(12, 8),
             style="Settings.TLabelframe",
@@ -7448,8 +7536,10 @@ try {
 
         api_import_frame = ttk.Frame(api_tab, style="Settings.Inner.TFrame")
         api_import_frame.pack(anchor="e", pady=(0, 8))
-        api_transcription_frame = make_api_section(api_tab, "Transcrição")
-        api_text_frame = make_api_section(api_tab, "Texto")
+        # Uma única seção para TODAS as chaves de modelo: transcrição e texto
+        # juntas, na ordem pedida pelo usuário (Deepseek, xAI, Meta, ElevenLabs,
+        # Deepgram, AssemblyAI, Alibaba). Labels exatas, sem alterações.
+        api_models_frame = make_api_section(api_tab, "Modelos")
         api_imei_frame = make_api_section(api_tab, "IMEI CHECK")
 
         def add_api_field(section, row: int, label: str, variable: StringVar, help_text: str = ""):
@@ -7463,53 +7553,53 @@ try {
             return entry
 
         add_api_field(
-            api_transcription_frame,
+            api_models_frame,
             0,
+            "Deepseek",
+            deepseek_api_key_var,
+            "Obrigatória para selecionar modelos DeepSeek V4.",
+        )
+        add_api_field(
+            api_models_frame,
+            1,
+            "xAI",
+            grok_api_key_var,
+            "Obrigatória para selecionar modelos da xAI em transcrição ou texto.",
+        )
+        add_api_field(
+            api_models_frame,
+            2,
+            "Meta",
+            metamuse_api_key_var,
+            "Preencha para liberar o Meta Muse Voice na lista de transcrição.",
+        )
+        add_api_field(
+            api_models_frame,
+            3,
             "ElevenLabs",
             elevenlabs_api_key_var,
             "Preencha para liberar o Scribe v2 Realtime da ElevenLabs na lista de transcrição.",
         )
         add_api_field(
-            api_transcription_frame,
-            1,
+            api_models_frame,
+            4,
             "Deepgram",
             deepgram_api_key_var,
             "Preencha para liberar o modelo Nova 3 do Deepgram na lista de transcrição.",
         )
         add_api_field(
-            api_transcription_frame,
-            2,
+            api_models_frame,
+            5,
             "AssemblyAI",
             assemblyai_api_key_var,
             "Preencha para liberar o modelo AssemblyAI Universal-3.5 Pro na lista de transcrição.",
         )
         add_api_field(
-            api_transcription_frame,
-            3,
-            "Meta Muse Voice",
-            metamuse_api_key_var,
-            "Preencha para liberar o Meta Muse Voice na lista de transcrição.",
-        )
-        add_api_field(
-            api_transcription_frame,
-            4,
-            "Alibaba Cloud API Key",
+            api_models_frame,
+            6,
+            "Alibaba",
             alibaba_api_key_var,
             "Preencha para liberar o Alibaba Fun ASR/Qwen na lista de transcrição.",
-        )
-        add_api_field(
-            api_text_frame,
-            0,
-            "Chave API da xAI",
-            grok_api_key_var,
-            "Obrigatória para selecionar modelos da xAI em transcrição ou texto.",
-        )
-        add_api_field(
-            api_text_frame,
-            1,
-            "Chave API do Deepseek",
-            deepseek_api_key_var,
-            "Obrigatória para selecionar modelos DeepSeek V4.",
         )
         add_api_field(api_imei_frame, 0, "Chave API do IMEI Check", imei_api_key_var)
 
@@ -7529,9 +7619,9 @@ try {
             "deepgram_api_key": "Deepgram",
             "assemblyai_api_key": "AssemblyAI",
             "elevenlabs_api_key": "ElevenLabs",
-            "metamuse_api_key": "Meta Muse Voice",
-            "alibaba_api_key": "Alibaba Fun ASR/Qwen",
-            "imei_api_key": "Imei Check",
+            "metamuse_api_key": "Meta",
+            "alibaba_api_key": "Alibaba",
+            "imei_api_key": "ImeiCheck",
         }
 
         def import_api_keys():
@@ -7661,6 +7751,145 @@ try {
             "entre velocidade e estabilidade."
         )
         parallel_scale(1, "Requisições paralelas", req_var, 16, req_help)
+
+        # ── Tela de Keywords (aba Avançado) ──────────────────────────────
+        # Uma lista ÚNICA de termos; cada modelo monta o próprio parâmetro na
+        # requisição (keyterm/keyterms/keyterms_prompt/keywords/vocabulary).
+        keywords_page = ttk.Frame(advanced_tab, style="Settings.TFrame")
+        keywords_items: list[str] = normalize_stt_keywords(
+            self.settings.get(KEY_STT_KEYWORDS)
+        )
+
+        keywords_top = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
+        keywords_top.pack(fill=X, pady=(0, 10))
+        ttk.Button(
+            keywords_top,
+            text="\u2190  Voltar",
+            command=lambda: show_advanced_home(),
+        ).pack(side=LEFT)
+        ttk.Label(
+            keywords_top,
+            text="Keywords — termos que os modelos devem reconhecer",
+            style="Settings.TLabel",
+        ).pack(side=LEFT, padx=(14, 0))
+
+        keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
+        keywords_entry_row.pack(fill=X, pady=(0, 10))
+        keyword_entry_var = StringVar()
+        keyword_entry = ttk.Entry(keywords_entry_row, textvariable=keyword_entry_var, width=42)
+        keyword_entry.pack(side=LEFT)
+
+        keywords_table_frame = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
+        keywords_table_frame.pack(fill=X, anchor="w")
+        keywords_tree = ttk.Treeview(
+            keywords_table_frame,
+            columns=("ordem", "palavra"),
+            show="headings",
+            height=8,
+            selectmode="browse",
+        )
+        keywords_tree.heading("ordem", text="N\u00ba")
+        keywords_tree.heading("palavra", text="Keyword")
+        keywords_tree.column("ordem", width=44, anchor="center", stretch=False)
+        keywords_tree.column("palavra", width=300, anchor="w")
+        keywords_scroll = ttk.Scrollbar(
+            keywords_table_frame, orient="vertical", command=keywords_tree.yview
+        )
+        keywords_tree.configure(yscrollcommand=keywords_scroll.set)
+        keywords_tree.pack(side=LEFT)
+        keywords_scroll.pack(side=LEFT, fill=Y)
+
+        def refresh_keywords_table(select_index: int | None = None):
+            keywords_tree.delete(*keywords_tree.get_children())
+            for index, term in enumerate(keywords_items, start=1):
+                keywords_tree.insert("", "end", iid=str(index), values=(index, term))
+            if select_index is not None and 1 <= select_index <= len(keywords_items):
+                keywords_tree.selection_set(str(select_index))
+                keywords_tree.see(str(select_index))
+
+        def add_keyword():
+            term = keyword_entry_var.get().strip()
+            if not term:
+                messagebox.showinfo("Keywords", "Digite a palavra antes de adicionar.", parent=win)
+                return
+            if len(term) > MAX_STT_KEYWORD_LENGTH:
+                messagebox.showinfo(
+                    "Keywords",
+                    f"Cada keyword pode ter no máximo {MAX_STT_KEYWORD_LENGTH} caracteres.",
+                    parent=win,
+                )
+                return
+            if any(existing.casefold() == term.casefold() for existing in keywords_items):
+                messagebox.showinfo("Keywords", f'"{term}" já está na lista.', parent=win)
+                return
+            if len(keywords_items) >= MAX_STT_KEYWORDS:
+                messagebox.showinfo(
+                    "Keywords",
+                    f"A lista já tem o máximo de {MAX_STT_KEYWORDS} keywords.",
+                    parent=win,
+                )
+                return
+            keywords_items.append(term)
+            keyword_entry_var.set("")
+            refresh_keywords_table(select_index=len(keywords_items))
+            keyword_entry.focus_set()
+
+        def remove_keyword():
+            selection = keywords_tree.selection()
+            if not selection:
+                messagebox.showinfo(
+                    "Keywords",
+                    "Selecione na tabela a keyword que deseja excluir.",
+                    parent=win,
+                )
+                return
+            index = int(str(selection[0])) - 1
+            if not (0 <= index < len(keywords_items)):
+                return
+            term = keywords_items[index]
+            if not messagebox.askyesno(
+                "Excluir keyword",
+                f'Excluir a keyword "{term}"?',
+                parent=win,
+            ):
+                return
+            del keywords_items[index]
+            refresh_keywords_table(select_index=min(index + 1, len(keywords_items)))
+
+        add_keyword_button = ttk.Button(
+            keywords_entry_row,
+            text="+",
+            width=3,
+            style="KeywordAdd.TButton",
+            command=add_keyword,
+        )
+        add_keyword_button.pack(side=LEFT, padx=(8, 0))
+        keyword_entry.bind("<Return>", lambda _event: add_keyword())
+
+        keywords_actions = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
+        keywords_actions.pack(fill=X, anchor="w", pady=(10, 0))
+        ttk.Button(
+            keywords_actions,
+            text="\u2212",
+            width=3,
+            style="KeywordRemove.TButton",
+            command=remove_keyword,
+        ).pack(side=LEFT)
+        ttk.Label(
+            keywords_actions,
+            text="Selecione um item e clique em \u2212 para excluir. Clique em Salvar para manter.",
+            style="Muted.TLabel",
+        ).pack(side=LEFT, padx=(12, 0))
+        refresh_keywords_table()
+
+        def show_keywords_screen():
+            advanced_home.pack_forget()
+            keywords_page.pack(fill=BOTH, expand=True, anchor="n")
+            keyword_entry.focus_set()
+
+        def show_advanced_home():
+            keywords_page.pack_forget()
+            advanced_home.pack(fill=BOTH, expand=True, anchor="n")
 
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
@@ -8492,6 +8721,7 @@ try {
                     "elevenlabs_api_key": elevenlabs_api_key,
                     "metamuse_api_key": metamuse_api_key,
                     "alibaba_api_key": alibaba_api_key,
+                    "stt_keywords": list(keywords_items),
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -8523,8 +8753,7 @@ try {
             for section in column_sections
         ] + [
             police_frame,
-            api_transcription_frame,
-            api_text_frame,
+            api_models_frame,
             api_imei_frame,
         ]
         for section in all_settings_sections:
@@ -9370,6 +9599,8 @@ try {
         if language:
             query += f"&language={language}"
         query += "&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
+        for key, term in stt_provider_rules.keywords_query_params(self.settings, "grok"):
+            query += f"&{key}={quote(term)}"
         if grok_diarize_query(bool(self.live_diarize_var.get())):
             query += "&diarize=true"
         app = websocket.WebSocketApp(
@@ -10353,6 +10584,8 @@ try {
                 query += f"&secondary_languages={code}"
             query += "&commit_strategy=vad"
             query += "&vad_silence_threshold_secs=1.0"
+            for key, term in stt_provider_rules.keywords_query_params(self.settings, "elevenlabs"):
+                query += f"&{key}={quote(term)}"
             self._queue("status_silent", f"Parâmetros Scribe: {query}")
             self._queue(
                 "params_block",
@@ -10633,6 +10866,9 @@ try {
             # language_codes como parâmetro REPETIDO (lista vazia = multi).
             for code in assemblyai_ws_language_codes(self.settings):
                 query += f"&language_codes={code}"
+            # Keywords: `keyterms_prompt` recebe o array em JSON (um parâmetro).
+            for key, value in stt_provider_rules.keywords_query_params(self.settings, "assemblyai"):
+                query += f"&{key}={quote(value)}"
             diarize_param = assemblyai_ws_diarize_query(bool(self.live_grok_diarize))
             if diarize_param:
                 query += f"&{diarize_param}"
@@ -11120,6 +11356,8 @@ try {
             if language:
                 query += f"&language={language}"
             query += "&format=true&smart_turn=0.65&endpointing=900&filler_words=false"
+            for key, term in stt_provider_rules.keywords_query_params(self.settings, "grok"):
+                query += f"&{key}={quote(term)}"
             if self.live_grok_diarize:
                 query += "&diarize=true"
             self._queue("status_silent", f"Parâmetros: {query}")

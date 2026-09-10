@@ -49,7 +49,7 @@ Porta: 8500
 Modelos encaminhados atualmente:
 - grok-4.6
 - grok-4.20-0309-non-reasoning
-- deepseek-v4-flash
+- deepseek-flash
 
 Nome exibido: servidor (gemma-4-26B-A4B-abliterated)
 Endpoint: http://servidor:8400/v1/chat/completions
@@ -64,14 +64,19 @@ Nome exibido: grok-4.20-0309-non-reasoning
 Endpoint: https://api.x.ai/v1/responses
 Porta: 443
 
-Nome exibido: deepseek-v4-flash
+Nome exibido: deepseek-flash
 Endpoint: https://api.deepseek.com/chat/completions
 Porta: 443
 
-
 OBSERVACOES
-==========
+===========
 
+- Nome do modelo DeepSeek: usar ``deepseek-flash`` (nome atual recomendado pelo
+  provedor). Os nomes legados ``deepseek-v4-flash`` e
+  ``deepseek-v4-flash-vision-exp`` continuam ACEITOS pela API, mas os modelos
+  foram aposentados: as requisicoes sao servidas pelo DeepSeek-V4.1-Flash e
+  cobradas no preco do Flash. O app migra automaticamente os nomes legados
+  gravados em settings antigos.
 - Os modelos diretos da xAI e da DeepSeek aparecem conforme a chave API
   correspondente esteja preenchida e seja considerada plausivel pelo app.
 - O IA-Proxy nao usa chave API no cliente e fixa o reasoning minimo conforme

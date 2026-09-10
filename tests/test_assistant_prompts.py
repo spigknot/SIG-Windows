@@ -104,7 +104,7 @@ class AssistantPromptTests(unittest.TestCase):
                     "is_xai_proxy": True,
                 }
             ),
-            "IA-Proxy/deepseek-v4-flash",
+            "IA-Proxy/deepseek-flash",
         )
 
     def test_history_user_prompt_inserts_the_transcription(self):
@@ -172,11 +172,11 @@ class AssistantPromptTests(unittest.TestCase):
         _FakeConnection.requests = []
         config = {
             "url": "https://api.deepseek.com/chat/completions",
-            "parameters": {"model": "deepseek-v4-flash", "max_tokens": 32},
+            "parameters": {"model": DEEPSEEK_TEXT_NAME, "max_tokens": 32},
             "provider": "deepseek",
             "is_deepseek_api": True,
             "api_key": "sk-test",
-            "request_model": "deepseek-v4-flash",
+            "request_model": DEEPSEEK_TEXT_NAME,
         }
         with patch("sig_app.http.client.HTTPSConnection", _FakeConnection):
             output = TextModelClient(threading.Event()).post(

@@ -98,14 +98,21 @@ class GraniteUploader:
             for key, value in merged_fields.items():
                 if key.lower() in ("file", "files") or value is None:
                     continue
-                clean_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-                parts.append(
-                    (
-                        f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                        f"{clean_value}\r\n"
-                    ).encode("utf-8")
-                )
+                # Valor em LISTA = campo REPETIDO no multipart (ex.: `keyterm`
+                # do xAI). Sem isto o parâmetro sairia como JSON, que nenhum
+                # provedor aceita para termos repetidos.
+                values = value if isinstance(value, (list, tuple)) else (value,)
+                for item in values:
+                    if item is None:
+                        continue
+                    clean_value = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+                    parts.append(
+                        (
+                            f"--{boundary}\r\n"
+                            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                            f"{clean_value}\r\n"
+                        ).encode("utf-8")
+                    )
             parts.append(
                 (
                     f"--{boundary}\r\n"

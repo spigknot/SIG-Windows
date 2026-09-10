@@ -83,6 +83,59 @@ def _check_transcription_models_menu(app) -> None:
         raise RuntimeError(f"selecao padrao do menu Modelos inesperada: {checked}")
 
 
+def _check_keywords_and_settings_tabs(app, settings_window) -> None:
+    """Checkbox Keywords (Transcrição/Ocorrência) + aba Modelos das chaves.
+
+    Vacinas do pedido de 10/09:
+    - as duas telas têm a checkbox "Keywords" (mesma chave de settings);
+    - a aba "Chaves API" tem UMA seção "Modelos" com os 7 provedores na ordem
+      Deepseek, xAI, Meta, ElevenLabs, Deepgram, AssemblyAI, Alibaba;
+    - a aba "Avançado" tem o botão KEYWORDS.
+    """
+    from tkinter import ttk
+
+    if getattr(app, "files_keywords_check", None) is None:
+        raise RuntimeError("checkbox Keywords da aba Transcricao ausente")
+    if app.files_keywords_check.winfo_manager() != "pack":
+        raise RuntimeError("checkbox Keywords da aba Transcricao nao esta visivel")
+    if getattr(app, "live_keywords_check", None) is None:
+        raise RuntimeError("checkbox Keywords da tela de Ocorrencia ausente")
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    def textos(tipo):
+        return [w.cget("text") for w in descendentes(settings_window) if isinstance(w, tipo)]
+
+    botoes = textos(ttk.Button)
+    if "KEYWORDS" not in botoes:
+        raise RuntimeError("botao KEYWORDS ausente na aba Avancado")
+
+    secoes = [w for w in descendentes(settings_window) if isinstance(w, ttk.LabelFrame)]
+    imei = next((w for w in secoes if w.cget("text") == "IMEI CHECK"), None)
+    if imei is None:
+        raise RuntimeError("secao 'IMEI CHECK' ausente na aba Chaves API")
+    # Escopo: a própria aba "Chaves API" (a aba Modelos também tem uma seção
+    # chamada "Transcrição" — não pode ser confundida com a das chaves).
+    api_tab = imei.master
+    secoes_da_aba = [w for w in descendentes(api_tab) if isinstance(w, ttk.LabelFrame)]
+    modelos = next((w for w in secoes_da_aba if w.cget("text") == "Modelos"), None)
+    if modelos is None:
+        raise RuntimeError("secao 'Modelos' ausente na aba Chaves API")
+    if any(w.cget("text") in {"Transcrição", "Texto"} for w in secoes_da_aba):
+        raise RuntimeError("secoes 'Transcricao'/'Texto' deveriam ter sido fundidas em 'Modelos'")
+    labels = [
+        rotulo.cget("text")
+        for rotulo in descendentes(modelos)
+        if isinstance(rotulo, ttk.Label)
+    ]
+    esperado = ["Deepseek", "xAI", "Meta", "ElevenLabs", "Deepgram", "AssemblyAI", "Alibaba"]
+    if labels != esperado:
+        raise RuntimeError(f"linhas da secao Modelos fora de ordem: {labels}")
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -114,7 +167,11 @@ def run(*, quiet: bool = False) -> int:
             ]
             if len(settings_windows) != 1:
                 raise RuntimeError(f"expected one settings window, got {len(settings_windows)}")
-            settings_windows[0].destroy()
+            # A janela de Configurações também é exercitada (seções, ordem das
+            # chaves e botão KEYWORDS) antes de ser destruída.
+            settings_window = settings_windows[0]
+            _check_keywords_and_settings_tabs(app, settings_window)
+            settings_window.destroy()
             root.update_idletasks()
 
         if not quiet:

@@ -91,14 +91,18 @@ class MetaMuseConfigTests(unittest.TestCase):
         )
 
     def test_import_aliases(self):
+        # Formato atual: a PRIMEIRA palavra é o identificador (10/09).
         self.assertEqual(
-            sig_app.parse_api_keys_text("Meta Muse Voice muse-key-1"),
+            sig_app.parse_api_keys_text("Meta muse-key-1"),
             {"metamuse_api_key": "muse-key-1"},
         )
         self.assertEqual(
-            sig_app.parse_api_keys_text("muse voice muse-key-2"),
+            sig_app.parse_api_keys_text("metamuse muse-key-2"),
             {"metamuse_api_key": "muse-key-2"},
         )
+        # Linhas do formato antigo (nome em várias palavras) não viram chave.
+        self.assertEqual(sig_app.parse_api_keys_text("Meta Muse Voice muse-key-3"), {})
+        self.assertEqual(sig_app.parse_api_keys_text("muse voice muse-key-4"), {})
 
 
 class MetaMuseLanguageRulesTests(unittest.TestCase):

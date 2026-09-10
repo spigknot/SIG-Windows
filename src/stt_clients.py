@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import threading
+import urllib.parse
 import uuid
 from app_env import app_base_dir
 from domain_models import Cancelled
@@ -65,8 +66,8 @@ def probe_duration_ms(path: Path) -> int:
 def deepgram_query_string(settings: dict, language: str | None = None, diarize: bool = False) -> str:
     """Parâmetros do Deepgram Nova 3 (REST e WS) — espelho do app Android.
 
-    Sem termos de reforço por enquanto (removido em 10/09 a pedido do
-    usuário); os demais parâmetros continuam idênticos.
+    As keywords voltam como `keyterm` REPETIDO (uma por termo), vindas da lista
+    da tela de Keywords — o provedor monta o próprio parâmetro aqui.
     """
     if language is None:
         language = stt_provider_rules.deepgram_language_param(settings)
@@ -75,6 +76,8 @@ def deepgram_query_string(settings: dict, language: str | None = None, diarize: 
         diarize_param = stt_provider_rules.deepgram_diarize_query(True)
         if diarize_param:
             params.append(diarize_param)
+    for key, term in stt_provider_rules.keywords_query_params(settings, "deepgram"):
+        params.append(f"{key}={urllib.parse.quote(term)}")
     return "&".join(params)
 
 
@@ -109,6 +112,10 @@ def transcription_form_fields(settings: dict) -> dict:
         language = stt_provider_rules.grok_language_param(settings)
         if language:
             fields["language"] = language
+        # xAI: `keyterm` REPETIDO (o uploader emite uma parte por item da lista).
+        terms = stt_provider_rules.stt_keywords(settings)
+        if terms:
+            fields["keyterm"] = list(terms)
         if stt_provider_rules.grok_rest_diarize(diarize_checked):
             fields["diarize"] = "true"
         return fields
@@ -123,6 +130,10 @@ def transcription_form_fields(settings: dict) -> dict:
             fields["language_detection"] = "true"
         if code:
             fields["language_code"] = code
+        # AssemblyAI: `keyterms_prompt` como array JSON em UM campo.
+        prompt_terms = stt_provider_rules.keywords_query_params(settings, "assemblyai")
+        if prompt_terms:
+            fields[prompt_terms[0][0]] = prompt_terms[0][1]
         speaker_labels, punctuate = stt_provider_rules.assemblyai_rest_diarize(diarize_checked)
         if speaker_labels:
             fields["speaker_labels"] = "true"
@@ -133,6 +144,10 @@ def transcription_form_fields(settings: dict) -> dict:
         code = stt_provider_rules.elevenlabs_rest_language_code(settings)
         if code:
             fields["language_code"] = code
+        # ElevenLabs: `keyterms` REPETIDO (uma parte por termo).
+        terms = stt_provider_rules.stt_keywords(settings)
+        if terms:
+            fields["keyterms"] = list(terms)
         if stt_provider_rules.elevenlabs_rest_diarize(diarize_checked):
             fields["diarize"] = "true"
         return fields
@@ -228,6 +243,9 @@ def metamuse_handshake_payload(api_key: str, diarize_checked: bool, settings: di
     language_bias = metamuse_language_bias(settings)
     if language_bias:
         payload["languageBias"] = language_bias
+    keywords = stt_provider_rules.metamuse_keywords(settings)
+    if keywords:
+        payload["keywords"] = keywords
     return payload
 
 
@@ -241,6 +259,9 @@ def metamuse_rest_request_body(diarize_checked: bool, settings: dict) -> dict:
     language_bias = metamuse_language_bias(settings)
     if language_bias:
         body["languageBias"] = language_bias
+    keywords = stt_provider_rules.metamuse_keywords(settings)
+    if keywords:
+        body["keywords"] = keywords
     return body
 
 
@@ -359,6 +380,10 @@ def alibaba_rest_body(audio_data_uri: str, settings: dict) -> dict:
     hints = alibaba_language_hints(settings)
     if hints:
         parameters["language_hints"] = hints
+    # DashScope: hotwords com peso em `vocabulary` (não há keyterm na query).
+    vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
+    if vocabulary:
+        parameters["vocabulary"] = vocabulary
     return {
         "model": ALIBABA_REST_MODEL,
         "input": {
@@ -474,6 +499,9 @@ def alibaba_ws_run_task(task_id: str, settings: dict) -> dict:
     hints = alibaba_language_hints(settings)
     if hints:
         parameters["language_hints"] = hints
+    vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
+    if vocabulary:
+        parameters["vocabulary"] = vocabulary
     return {
         "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
         "payload": {
@@ -521,6 +549,8 @@ def metamuse_ws_log_params(settings: dict, diarize_checked: bool) -> dict:
     payload.pop("authorization", None)
     bias = payload.pop("languageBias", None)
     payload["languageBias"] = bias if bias else "auto (omitido)"
+    keywords = payload.get("keywords") or stt_provider_rules.metamuse_keywords(settings)
+    payload["keywords"] = keywords if keywords else "nenhuma"
     return payload
 
 
@@ -534,6 +564,8 @@ def alibaba_ws_log_params(settings: dict) -> dict:
     }
     hints = alibaba_language_hints(settings)
     params["language_hints"] = hints if hints else "auto (omitido)"
+    vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
+    params["vocabulary"] = vocabulary if vocabulary else "nenhuma"
     return params
 
 
@@ -546,4 +578,6 @@ def alibaba_rest_log_params(settings: dict) -> dict:
     }
     hints = alibaba_language_hints(settings)
     params["language_hints"] = hints if hints else "auto (omitido)"
+    vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
+    params["vocabulary"] = vocabulary if vocabulary else "nenhuma"
     return params
