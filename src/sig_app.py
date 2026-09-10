@@ -2249,7 +2249,9 @@ class SigApp:
             ),
         )
         self.live_diarize_check.pack(side=LEFT)
-        self.live_diarize_help = ttk.Button(self.live_grok_controls, text="?", width=2, command=self.show_live_diarization_help)
+        self.live_diarize_help = self._make_help_marker(
+            self.live_grok_controls, self.show_live_diarization_help
+        )
         self.live_diarize_help.pack(side=LEFT, padx=(4, 8))
         self.live_language_button = ttk.Menubutton(self.live_grok_controls, textvariable=self.live_language_label_var, width=11)
         self.live_language_menu = tk.Menu(self.live_language_button, tearoff=False)
@@ -2268,11 +2270,8 @@ class SigApp:
         self.live_keywords_menu = tk.Menu(self.live_keywords_button, tearoff=False)
         self.live_keywords_button.configure(menu=self.live_keywords_menu)
         self.live_keywords_button.pack(side=LEFT, padx=(10, 0))
-        self.live_keywords_help = ttk.Button(
-            self.live_grok_controls,
-            text="?",
-            width=2,
-            command=lambda: self._open_keywords_help(),
+        self.live_keywords_help = self._make_help_marker(
+            self.live_grok_controls, lambda: self._open_keywords_help()
         )
         self.live_keywords_help.pack(side=LEFT, padx=(4, 0))
         self.live_grok_controls.pack(side=LEFT)
@@ -3154,11 +3153,8 @@ class SigApp:
         self.files_keywords_button.pack(side=LEFT, padx=(10, 0))
         # "?" ao lado: limites reais de termos/caracteres por modelo
         # e aviso de falso positivo (contexto forense).
-        self.files_keywords_help = ttk.Button(
-            options2,
-            text="?",
-            width=2,
-            command=lambda: self._open_keywords_help(),
+        self.files_keywords_help = self._make_help_marker(
+            options2, lambda: self._open_keywords_help()
         )
         self.files_keywords_help.pack(side=LEFT, padx=(4, 0))
         self._rebuild_keywords_menus()
@@ -6481,122 +6477,73 @@ try {
         }[kind]
 
     def _keywords_help_text(self) -> str:
-        """Texto da tela de ajuda das Keywords (limites REAIS medidos)."""
+        """Texto da ajuda das Keywords (limites REAIS medidos).
+
+        Formatado para o `messagebox` padrão (mesmo do VAD): parágrafos curtos
+        separados por linha em branco, sem depender de fonte monoespaçada.
+        """
         termos_deepgram = DEEPGRAM_KEYTERM_TOKEN_BUDGET // estimate_keyterm_tokens("X" * 20)
         return (
-            "KEYWORDS — LIMITES E CUIDADOS\n"
+            "As keywords aumentam a chance de o modelo escrever os termos "
+            "cadastrados. Cada modelo recebe os termos do seu próprio jeito, "
+            "então o app usa sempre o limite MAIS RESTRITO — assim o mesmo "
+            "termo funciona em todos.\n"
             "\n"
-            "A lista de keywords é única, mas cada modelo recebe os termos do\n"
-            "seu próprio jeito. Por isso o app usa sempre o limite MAIS\n"
-            "RESTRITO, para o mesmo termo funcionar em todos os modelos.\n"
+            f"• Até {MAX_STT_KEYWORD_LENGTH} caracteres por termo: o Realtime da "
+            "ElevenLabs e o Meta Muse Voice recusam termos maiores.\n"
+            f"• Até {MAX_STT_KEYWORDS} termos por perfil.\n"
+            "• SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS. A ordem da tabela é a ordem "
+            "de prioridade: mantenha os mais importantes no topo. O excedente "
+            "não é enviado (o texto do termo nunca é alterado).\n"
             "\n"
-            f"• Até {MAX_STT_KEYWORD_LENGTH} caracteres por termo.\n"
-            "  O Realtime da ElevenLabs e o Meta Muse Voice RECUSAM termos\n"
-            "  maiores (medido: \"Each keyterm must be at most 20 characters\").\n"
-            "  O xAI e o ElevenLabs por arquivo aceitariam 50 caracteres, mas o\n"
-            "  app limita em 20 para o termo valer também na Ocorrência.\n"
+            "LIMITES POR MODELO\n"
             "\n"
-            f"• Até {MAX_STT_KEYWORDS} termos na lista.\n"
+            f"• Deepgram Nova 3: teto de 500 tokens por requisição — na prática "
+            f"uns {termos_deepgram} termos de 20 caracteres (termos curtos vão "
+            "além de 100). Acima do teto a API devolve erro e a transcrição do "
+            "arquivo falha.\n"
+            "• xAI (Grok STT): 100 termos, 50 caracteres cada.\n"
+            "• ElevenLabs: 50 caracteres e 1000 termos por arquivo; 20 "
+            "caracteres por termo ao vivo (Realtime).\n"
+            "• AssemblyAI: cerca de 1000 palavras (cada palavra de uma frase "
+            "conta como uma).\n"
+            "• Meta Muse Voice: 20 caracteres por termo.\n"
+            "• Alibaba Fun ASR: funciona na Ocorrência (ao vivo), via lista "
+            "pré-compilada; na Transcrição (arquivo) enviamos a lista, mas a "
+            "medição não mostrou mudança no resultado.\n"
+            "• servidor (Granite): não usa keywords — nenhum parâmetro é enviado.\n"
             "\n"
-            "• SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS. A ordem da tabela é a ordem\n"
-            "  de prioridade: mantenha no topo os termos mais importantes. O que\n"
-            "  passa do limite é descartado no envio (nunca alteramos o texto do\n"
-            "  termo).\n"
+            "ATENÇÃO EM TRANSCRIÇÃO POLICIAL\n"
             "\n"
-            "LIMITES POR MODELO (medidos nos servidores)\n"
-            "\n"
-            f"Deepgram Nova 3 .... até 100 termos E um teto de 500 tokens por\n"
-            f"                    requisição. Um termo de 20 caracteres consome\n"
-            f"                    cerca de 11 tokens, então na prática entram os\n"
-            f"                    primeiros ~{termos_deepgram} termos desse tamanho (termos\n"
-            "                    curtos vão além de 100). O app envia só os\n"
-            "                    primeiros que couberem; acima do teto a API\n"
-            "                    devolve erro e a transcrição do arquivo falha.\n"
-            "xAI (Grok STT) .... até 100 termos, 50 caracteres cada.\n"
-            "ElevenLabs ........ por arquivo: 50 caracteres/1000 termos;\n"
-            "                    ao vivo (Realtime): 20 caracteres por termo.\n"
-            "AssemblyAI ........ até ~1000 palavras (cada palavra de uma frase\n"
-            "                    conta como uma).\n"
-            "Meta Muse Voice ... 20 caracteres por termo.\n"
-            "Alibaba Fun ASR ... NA OCORRÊNCIA (ao vivo) a lista pré-compilada\n"
-            "                    funciona (efeito medido); NA TRANSCRIÇÃO\n"
-            "                    (arquivo) enviamos a lista, mas não houve\n"
-            "                    mudança no resultado (ver abaixo).\n"
-            "servidor (Granite)  não usa keywords: nenhum parâmetro é enviado.\n"
-            "\n"
-            "ATENÇÃO EM TRANSCRIÇÃO POLICIAL — FALSO POSITIVO\n"
-            "\n"
-            "As keywords AUMENTAM a chance de o modelo escrever o termo,\n"
-            "inclusive quando ele NÃO foi dito. Em teste real, um áudio que dizia\n"
-            "outra frase saiu com o termo cadastrado no meio do texto.\n"
-            "Use poucos termos e bem específicos (nomes, ruas, apelidos) e SEMPRE\n"
-            "confira o áudio antes de tratar a transcrição como prova: o termo\n"
-            "pode ter sido inserido pelo viés do modelo, não pela fala.\n"
-            "\n"
-            "ALIBABA — O QUE FUNCIONA E O QUE NÃO\n"
-            "\n"
-            "• NA OCORRÊNCIA (ao vivo): as keywords funcionam. O app cria uma\n"
-            "  LISTA PRÉ-COMPILADA no Alibaba (vocabulary_id) com os seus termos e\n"
-            "  a usa na conexão. Medido no servidor: o mesmo áudio saiu \"Taguaã\"\n"
-            "  sem a lista e \"Taguaí\" com ela, igual nas duas tentativas.\n"
-            "  A lista é criada quando os termos mudam (criar vale na hora).\n"
-            "\n"
-            "• NA TRANSCRIÇÃO (arquivo): o app TAMBÉM envia a lista pré-compilada\n"
-            "  (é o parâmetro oficial desse modelo), mas a medição de 10/09 não\n"
-            "  mostrou mudança no resultado: 4 configurações testadas (2 modelos\n"
-            "  alvo, com e sem peso máximo) e o texto saiu idêntico ao sem lista.\n"
-            "  Ou seja: enviamos, mas conte com o Alibaba apenas para a Ocorrência.\n"
-            "  Para keywords em arquivo, os modelos com efeito comprovado são\n"
-            "  Deepgram, xAI, AssemblyAI e ElevenLabs."
+            "As keywords podem fazer o modelo escrever o termo mesmo quando ele "
+            "NÃO foi dito. Use poucos termos e bem específicos (nomes, ruas, "
+            "apelidos) e sempre confira o áudio antes de tratar a transcrição "
+            "como prova: o termo pode ter sido inserido pelo viés do modelo, "
+            "não pela fala."
         )
+
+    def _make_help_marker(self, parent, command):
+        """O "?" padrão do app — IDÊNTICO ao do VAD.
+
+        Mesmo rótulo, cor, fonte e cursor do marcador do VAD; o clique abre um
+        `messagebox` (sem janela própria, sem barra de rolagem, sem caixa de
+        texto). Use sempre este helper para novos "?" para a estética não
+        divergir entre as telas.
+        """
+        marcador = tk.Label(
+            parent,
+            text="?",
+            fg="#889493",
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            background="#f4f7f6",
+        )
+        marcador.bind("<Button-1>", lambda _event: command())
+        return marcador
 
     def _open_keywords_help(self, parent=None):
-        """Abre a tela de ajuda das Keywords (rolável, somente leitura)."""
-        janela = Toplevel(parent or self.root)
-        janela.title("Keywords — limites e cuidados")
-        janela.configure(background="#f4f7f6")
-        janela.resizable(True, True)
-        janela.transient(parent or self.root)
-        frame = ttk.Frame(janela, padding=12)
-        frame.pack(fill=BOTH, expand=True)
-        texto = tk.Text(
-            frame,
-            width=86,
-            height=30,
-            wrap="word",
-            background="#ffffff",
-            foreground="#10201f",
-            relief="solid",
-            borderwidth=1,
-            font=("Segoe UI", 10),
-        )
-        barra = ttk.Scrollbar(frame, orient="vertical", command=texto.yview)
-        texto.configure(yscrollcommand=barra.set)
-        texto.insert("1.0", self._keywords_help_text())
-        texto.configure(state="disabled")
-        texto.pack(side=LEFT, fill=BOTH, expand=True)
-        barra.pack(side=RIGHT, fill=Y)
-
-        def fechar():
-            janela.destroy()
-            # A janela de Configurações usa grab_set(); devolve a modalidade
-            # para ela em vez de deixar o app sem grab nenhum.
-            if parent is not None and parent.winfo_exists():
-                try:
-                    parent.grab_set()
-                except Exception:
-                    pass
-
-        botoes = ttk.Frame(janela, padding=(12, 0, 12, 12))
-        botoes.pack(fill=X)
-        ttk.Button(botoes, text="Fechar", command=fechar).pack(side=RIGHT)
-        janela.bind("<Escape>", lambda _event: fechar())
-        janela.protocol("WM_DELETE_WINDOW", fechar)
-        janela.update_idletasks()
-        janela.geometry("")           # tamanho justo ao conteúdo
-        janela.grab_set()             # modal SOBRE a tela que abriu
-        janela.focus_set()
-        return janela
+        """Ajuda das Keywords — mesmo padrão do "?" do VAD (messagebox)."""
+        messagebox.showinfo("Keywords", self._keywords_help_text(), parent=parent)
 
     def show_live_diarization_help(self):
         message = "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante."
@@ -7946,15 +7893,15 @@ try {
             """Resumo HONESTO do que cada modelo vai receber (sem truncar calado)."""
             if not keywords_profiles_edit:
                 return (
-                    "Nenhuma lista criada. Clique em \"Nova lista\" para cadastrar "
-                    "termos — sem lista os modelos transcrevem sem viés."
+                    "Nenhum perfil criado. Clique em \"+ Perfil\" para nomear e "
+                    "cadastrar termos — sem perfil ativo os modelos transcrevem sem viés."
                 )
             nome = current_profile_name()
             if not nome:
-                return "Nenhuma lista selecionada acima."
+                return "Nenhum perfil selecionado acima."
             termos = current_items()
             if not termos:
-                return f"A lista \"{nome}\" está vazia — os modelos transcrevem sem viés."
+                return f"O perfil \"{nome}\" está vazio — os modelos transcrevem sem viés."
             ativo = keywords_selector_label(self.settings)
             marca = " (EM USO nas telas)" if nome == ativo else ""
             base = {"stt_keyword_profiles": {nome: list(termos)}, "stt_keyword_profile": nome}
@@ -7962,12 +7909,12 @@ try {
             deepgram = len(keywords_for_provider(base, "deepgram"))
             if deepgram < total:
                 return (
-                    f"Lista \"{nome}\"{marca}: {total} termos. O Deepgram recebe só os "
+                    f"Perfil \"{nome}\"{marca}: {total} termos. O Deepgram recebe só os "
                     f"primeiros {deepgram} (teto de 500 tokens); os demais modelos recebem "
                     f"os {total}. Mantenha os principais no topo — clique em ? para os limites."
                 )
             return (
-                f"Lista \"{nome}\"{marca}: {total} de {MAX_STT_KEYWORDS} termos — todos os "
+                f"Perfil \"{nome}\"{marca}: {total} de {MAX_STT_KEYWORDS} termos — todos os "
                 f"modelos recebem os {total}, com até {MAX_STT_KEYWORD_LENGTH} caracteres "
                 "cada. Clique em ? para os limites de cada modelo."
             )
@@ -7984,16 +7931,13 @@ try {
             text="Keywords — termos que os modelos devem reconhecer",
             style="Settings.TLabel",
         ).pack(side=LEFT, padx=(14, 0))
-        ttk.Button(
-            keywords_top,
-            text="?",
-            width=2,
-            command=lambda: self._open_keywords_help(win),
+        self._make_help_marker(
+            keywords_top, lambda: self._open_keywords_help(win)
         ).pack(side=LEFT, padx=(8, 0))
 
         keywords_profile_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_profile_row.pack(fill=X, pady=(0, 8))
-        ttk.Label(keywords_profile_row, text="Lista:", style="Settings.TLabel").pack(side=LEFT)
+        ttk.Label(keywords_profile_row, text="Perfil:", style="Settings.TLabel").pack(side=LEFT)
         keywords_profile_combo = ttk.Combobox(
             keywords_profile_row,
             textvariable=keywords_profile_var,
@@ -8038,96 +7982,124 @@ try {
             keywords_profile_var.set(alvo)
             refresh_keywords_table()
 
-        def new_profile():
-            if len(keywords_profiles_edit) >= MAX_KEYWORD_PROFILES:
-                messagebox.showinfo(
-                    "Keywords",
-                    f"O máximo é {MAX_KEYWORD_PROFILES} listas.",
-                    parent=win,
-                )
-                return
+        def novo_perfil_nome_sugerido() -> str:
             base = DEFAULT_KEYWORD_PROFILE_NAME
-            numero = 1
             nome = base
+            numero = 1
             while nome in keywords_profiles_edit:
                 numero += 1
                 nome = f"Lista {numero}"
-            keywords_profiles_edit[nome] = []
-            refresh_profile_combo(selecionar=nome)
-            keyword_entry.focus_set()
+            return nome
 
-        def rename_profile():
-            nome = current_profile_name()
-            if not nome:
-                messagebox.showinfo("Keywords", "Crie ou selecione uma lista primeiro.", parent=win)
-                return
+        def abrir_dialogo_nome(titulo: str, inicial: str, rotulo_ok: str, ao_confirmar):
+            """Diálogo simples de nome (usado no '+ Perfil' e no Renomear)."""
             janela = Toplevel(win)
-            janela.title("Renomear lista")
+            janela.title(titulo)
             janela.configure(background="#f4f7f6")
             janela.resizable(False, False)
             janela.transient(win)
             quadro = ttk.Frame(janela, padding=12)
             quadro.pack(fill=BOTH, expand=True)
-            entrada = ttk.Entry(quadro, width=32)
-            entrada.insert(0, nome)
+            entrada = ttk.Entry(quadro, width=34)
+            entrada.insert(0, inicial)
             entrada.pack(fill=X, pady=(0, 8))
             ttk.Label(
                 quadro,
-                text="Novo nome da lista (as telas mostram este nome no seletor).",
+                text=(
+                    "O nome aparece no seletor \"Keywords:\" das telas de Transcrição "
+                    "e Ocorrência.\nO perfil é salvo com os termos que você adicionar."
+                ),
                 justify="left",
             ).pack(anchor="w", pady=(0, 8))
 
             def aplicar():
                 novo = entrada.get().strip()
                 if not novo:
-                    messagebox.showinfo("Keywords", "Digite um nome.", parent=janela)
+                    messagebox.showinfo("Keywords", "Digite um nome para o perfil.", parent=janela)
                     return
+                if ao_confirmar(novo):
+                    janela.destroy()
+
+            botoes_nome = ttk.Frame(quadro)
+            botoes_nome.pack(fill=X)
+            ttk.Button(botoes_nome, text="Cancelar", command=janela.destroy).pack(
+                side=LEFT, padx=(0, 8)
+            )
+            ttk.Button(botoes_nome, text=rotulo_ok, command=aplicar).pack(side=LEFT)
+            entrada.bind("<Return>", lambda _event: aplicar())
+            janela.grab_set()
+            entrada.focus_set()
+            entrada.select_range(0, "end")
+
+        def new_profile():
+            """+ Perfil: cria um perfil com o nome escolhido pelo usuário."""
+            if len(keywords_profiles_edit) >= MAX_KEYWORD_PROFILES:
+                messagebox.showinfo(
+                    "Keywords",
+                    f"O máximo é {MAX_KEYWORD_PROFILES} perfis.",
+                    parent=win,
+                )
+                return
+
+            def criar(novo: str) -> bool:
+                if novo in keywords_profiles_edit:
+                    messagebox.showinfo(
+                        "Keywords", f'Já existe o perfil "{novo}".', parent=win
+                    )
+                    return False
+                keywords_profiles_edit[novo] = []
+                refresh_profile_combo(selecionar=novo)
+                keyword_entry.focus_set()
+                return True
+
+            abrir_dialogo_nome("Novo perfil", novo_perfil_nome_sugerido(), "Criar", criar)
+
+        def rename_profile():
+            nome = current_profile_name()
+            if not nome:
+                messagebox.showinfo("Keywords", "Crie ou selecione um perfil primeiro.", parent=win)
+                return
+
+            def renomear(novo: str) -> bool:
                 if novo != nome and novo in keywords_profiles_edit:
-                    messagebox.showinfo("Keywords", f'Já existe a lista "{novo}".', parent=janela)
-                    return
+                    messagebox.showinfo(
+                        "Keywords", f'Já existe o perfil "{novo}".', parent=win
+                    )
+                    return False
+                if novo == nome:
+                    return True
                 termos = keywords_profiles_edit.pop(nome)
                 # Preserva a ordem da lista renomeada.
-                reordenado = {
-                    (novo if chave == nome else chave): valor
-                    for chave, valor in (
-                        (novo, termos),
-                        *[(k, v) for k, v in keywords_profiles_edit.items()],
-                    )
-                }
+                reordenado = {novo: termos}
+                reordenado.update(keywords_profiles_edit)
                 keywords_profiles_edit.clear()
                 keywords_profiles_edit.update(reordenado)
                 if str(self.settings.get("stt_keyword_profile") or "").strip() == nome:
                     self.settings["stt_keyword_profile"] = novo
-                janela.destroy()
                 refresh_profile_combo(selecionar=novo)
+                return True
 
-            botoes = ttk.Frame(quadro)
-            botoes.pack(fill=X)
-            ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side=LEFT, padx=(0, 8))
-            ttk.Button(botoes, text="Renomear", command=aplicar).pack(side=LEFT)
-            entrada.bind("<Return>", lambda _event: aplicar())
-            janela.grab_set()
-            entrada.focus_set()
+            abrir_dialogo_nome("Renomear perfil", nome, "Renomear", renomear)
 
         def delete_profile():
             nome = current_profile_name()
             if not nome:
-                messagebox.showinfo("Keywords", "Crie ou selecione uma lista primeiro.", parent=win)
+                messagebox.showinfo("Keywords", "Crie ou selecione um perfil primeiro.", parent=win)
                 return
             if not messagebox.askyesno(
-                "Excluir lista",
-                f'Excluir a lista "{nome}" com {len(keywords_profiles_edit.get(nome, []))} termo(s)?',
+                "Excluir perfil",
+                f'Excluir o perfil "{nome}" com {len(keywords_profiles_edit.get(nome, []))} termo(s)?',
                 parent=win,
             ):
                 return
             keywords_profiles_edit.pop(nome, None)
             if str(self.settings.get("stt_keyword_profile") or "").strip() == nome:
-                self.settings["stt_keyword_profile"] = ""     # era a ativa: desliga
+                self.settings["stt_keyword_profile"] = ""     # era o ativo: desliga
             refresh_profile_combo()
 
         ttk.Button(
             keywords_profile_row,
-            text="Nova lista",
+            text="+ Perfil",
             command=new_profile,
         ).pack(side=LEFT, padx=(8, 0))
         ttk.Button(
@@ -8155,7 +8127,7 @@ try {
             if not current_profile_name():
                 messagebox.showinfo(
                     "Keywords",
-                    "Crie uma lista primeiro (botão \"Nova lista\").",
+                    "Crie um perfil primeiro (botão \"+ Perfil\").",
                     parent=win,
                 )
                 return
@@ -8234,8 +8206,8 @@ try {
         ttk.Label(
             keywords_actions,
             text=(
-                "Selecione um item e clique em \u2212 para excluir. A lista em edição é a "
-                "escolhida em \"Lista\"; clique em Salvar para manter."
+                "Selecione um item e clique em \u2212 para excluir. O perfil em edição é o "
+                "escolhido em \"Perfil\"; clique em Salvar para manter."
             ),
             style="Muted.TLabel",
         ).pack(side=LEFT, padx=(12, 0))

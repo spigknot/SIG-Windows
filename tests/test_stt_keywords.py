@@ -431,7 +431,7 @@ class TelaDeAjudaTest(unittest.TestCase):
 
     def test_cita_limite_de_caracteres_e_de_termos(self):
         self.assertIn(f"Até {MAX_STT_KEYWORD_LENGTH} caracteres por termo", self.texto)
-        self.assertIn(f"Até {MAX_STT_KEYWORDS} termos na lista", self.texto)
+        self.assertIn(f"Até {MAX_STT_KEYWORDS} termos", self.texto)
 
     def test_explica_que_so_os_primeiros_sao_enviados(self):
         self.assertIn("SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS", self.texto)
@@ -446,14 +446,20 @@ class TelaDeAjudaTest(unittest.TestCase):
                 self.assertIn(modelo, self.texto)
 
     def test_avisa_do_falso_positivo(self):
-        self.assertIn("FALSO POSITIVO", self.texto)
+        self.assertIn("TRANSCRIÇÃO POLICIAL", self.texto)
         self.assertIn("NÃO foi dito", self.texto)
 
+    def test_texto_cabe_num_messagebox_comum(self):
+        # A ajuda usa o messagebox padrão (mesmo do VAD): sem caixa de texto e
+        # sem barra de rolagem. Por isso o texto é compacto — este teto evita
+        # que ele volte a crescer e estoure a janela.
+        self.assertLess(len(self.texto), 2200)
+        self.assertLess(self.texto.count("\n"), 40)
+
     def test_explica_a_limitacao_do_alibaba(self):
-        # O texto quebra linha no meio da expressão, então checamos os termos
-        # que não se partem.
-        self.assertIn("PRÉ-COMPILADA", self.texto)
-        self.assertIn("vocabulary_id", self.texto)
+        self.assertIn("Alibaba Fun ASR", self.texto)
+        self.assertIn("Ocorrência", self.texto)
+        self.assertIn("Transcrição", self.texto)
 
     def test_servidor_local_aparece_sem_keywords(self):
         self.assertIn("não usa keywords", self.texto)

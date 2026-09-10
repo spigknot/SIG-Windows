@@ -116,17 +116,19 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     opcoes = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)]
     if not opcoes or opcoes[0] != "Não":
         raise RuntimeError(f"seletor Keywords sem a opcao 'Nao' primeiro: {opcoes}")
-    # O "?" (limites por modelo + aviso de falso positivo) acompanha as duas
-    # checkboxes e a tela de Keywords.
+    # O "?" (limites por modelo + aviso de falso positivo) acompanha os dois
+    # seletores e a tela de Keywords — SEMPRE como o marcador padrão (tk.Label
+    # discreto, igual ao do VAD), nunca como botão.
     for atributo, onde in (
         ("files_keywords_help", "aba Transcricao"),
         ("live_keywords_help", "tela de Ocorrencia"),
+        ("live_diarize_help", "tela de Ocorrencia (diarizacao)"),
     ):
-        botao = getattr(app, atributo, None)
-        if botao is None:
-            raise RuntimeError(f"botao '?' das keywords ausente na {onde}")
-        if botao.cget("text") != "?":
-            raise RuntimeError(f"botao das keywords na {onde} nao e '?'")
+        marcador = getattr(app, atributo, None)
+        if marcador is None:
+            raise RuntimeError(f"marcador '?' ausente na {onde}")
+        if not isinstance(marcador, tk.Label) or marcador.cget("text") != "?":
+            raise RuntimeError(f"marcador '?' da {onde} nao segue o padrao do VAD (tk.Label)")
 
     def descendentes(widget):
         for filho in widget.winfo_children():
@@ -139,14 +141,24 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     botoes = textos(ttk.Button)
     if "KEYWORDS" not in botoes:
         raise RuntimeError("botao KEYWORDS ausente na aba Avancado")
-    if botoes.count("?") < 1:
-        raise RuntimeError("botao '?' das keywords ausente nas Configuracoes")
+    marcadores = [
+        w for w in descendentes(settings_window)
+        if isinstance(w, tk.Label) and w.cget("text") == "?"
+    ]
+    if not marcadores:
+        raise RuntimeError("marcador '?' ausente na tela de Keywords")
     # O texto de ajuda precisa citar os limites reais (para o usuario saber que
     # so os primeiros termos sao enviados e que ha risco de falso positivo).
     ajuda = app._keywords_help_text()
-    for trecho in ("SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS", "500 tokens", "FALSO POSITIVO"):
+    for trecho in ("SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS", "500 tokens", "TRANSCRIÇÃO POLICIAL"):
         if trecho not in ajuda:
             raise RuntimeError(f"texto de ajuda das keywords sem o trecho: {trecho}")
+    # Tela de keywords: botao "+ Perfil" (dialogo de nome) alem de Renomear/Excluir.
+    if "+ Perfil" not in botoes:
+        raise RuntimeError("botao '+ Perfil' ausente na tela de Keywords")
+    for rotulo in ("Renomear", "Excluir"):
+        if rotulo not in botoes:
+            raise RuntimeError(f"botao {rotulo!r} ausente na tela de Keywords")
 
     secoes = [w for w in descendentes(settings_window) if isinstance(w, ttk.LabelFrame)]
     imei = next((w for w in secoes if w.cget("text") == "IMEI CHECK"), None)
