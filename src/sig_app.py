@@ -288,6 +288,9 @@ from stt_clients import (  # noqa: F401
     metamuse_ws_log_params,
     alibaba_ws_log_params,
     alibaba_rest_log_params,
+    alibaba_ensure_vocabulary,
+    alibaba_create_vocabulary,
+    alibaba_delete_vocabulary,
 )
 
 
@@ -6505,8 +6508,9 @@ try {
             "AssemblyAI ........ até ~1000 palavras (cada palavra de uma frase\n"
             "                    conta como uma).\n"
             "Meta Muse Voice ... 20 caracteres por termo.\n"
-            "Alibaba Fun ASR ... aceita qualquer quantidade/tamanho, mas o\n"
-            "                    efeito real não é garantido (ver abaixo).\n"
+            "Alibaba Fun ASR ... NA OCORRÊNCIA (ao vivo) usa a lista\n"
+            "                    pré-compilada e funciona; NA TRANSCRIÇÃO\n"
+            "                    (arquivo) o modelo ignora (ver abaixo).\n"
             "servidor (Granite)  não usa keywords: nenhum parâmetro é enviado.\n"
             "\n"
             "ATENÇÃO EM TRANSCRIÇÃO POLICIAL — FALSO POSITIVO\n"
@@ -6518,15 +6522,19 @@ try {
             "confira o áudio antes de tratar a transcrição como prova: o termo\n"
             "pode ter sido inserido pelo viés do modelo, não pela fala.\n"
             "\n"
-            "ALIBABA — POR QUE PODE NÃO FAZER EFEITO\n"
+            "ALIBABA — O QUE FUNCIONA E O QUE NÃO\n"
             "\n"
-            "O app envia a \"hotword instantânea\" (vocabulary dentro da\n"
-            "requisição). A documentação da Alibaba apresenta esse mecanismo para\n"
-            "a família qwen-audio-3.0-asr-flash (usada ao vivo). Para o modelo de\n"
-            "arquivo (fun-asr-flash) o caminho documentado é a LISTA\n"
-            "PRÉ-COMPILADA (vocabulary_id), criada antes na conta do usuário.\n"
-            "O servidor chega a recusar formato inválido, mas não há garantia de\n"
-            "que o termo influencie o resultado no modo arquivo."
+            "• NA OCORRÊNCIA (ao vivo): as keywords funcionam. O app cria uma\n"
+            "  LISTA PRÉ-COMPILADA no Alibaba (vocabulary_id) com os seus termos e\n"
+            "  a usa na conexão. Medido no servidor: o mesmo áudio saiu \"Taguaã\"\n"
+            "  sem a lista e \"Taguaí\" com ela, igual nas duas tentativas.\n"
+            "  A lista é criada quando os termos mudam (criar vale na hora).\n"
+            "\n"
+            "• NA TRANSCRIÇÃO (arquivo): as keywords NÃO têm efeito. O modelo de\n"
+            "  arquivo (fun-asr-flash) IGNORA a lista — testado: com um id\n"
+            "  inexistente a API responde normal (sem erro) e o texto sai\n"
+            "  idêntico com uma lista válida. Se precisar de keywords em arquivo,\n"
+            "  use outro modelo (Deepgram, xAI, AssemblyAI ou ElevenLabs)."
         )
 
     def _open_keywords_help(self, parent=None):
@@ -10010,6 +10018,36 @@ try {
 
         task_id = uuid.uuid4().hex
         self.alibaba_ws_task_id = task_id
+        # Hotwords: a lista pré-compilada é criada/retomada UMA vez por sessão
+        # (antes de conectar), porque criar vale na hora, mas atualizar demora
+        # até 5 min. Sem termos/chave, segue sem lista (transcrição normal).
+        alibaba_terms = keywords_for_provider(settings, "alibaba")
+        alibaba_vocabulary_id = ""
+        if alibaba_terms:
+            try:
+                alibaba_vocabulary_id = alibaba_ensure_vocabulary(
+                    settings, ALIBABA_WS_MODEL, alibaba_terms
+                )
+            except Exception as exc:
+                self._queue("activity", f"Alibaba: falha ao preparar a lista de keywords ({exc}).", "warning")
+            if alibaba_vocabulary_id:
+                if (
+                    str(settings.get("alibaba_vocabulary_id") or "") != alibaba_vocabulary_id
+                    or [str(t) for t in (settings.get("alibaba_vocabulary_terms") or [])] != [str(t) for t in alibaba_terms]
+                ):
+                    self._queue("settings_key", "alibaba_vocabulary_id", alibaba_vocabulary_id)
+                    self._queue("settings_key", "alibaba_vocabulary_terms", [str(t) for t in alibaba_terms])
+                self._queue(
+                    "activity",
+                    f"Alibaba: lista de keywords pronta ({len(alibaba_terms)} termos).",
+                    "activity_step_done",
+                )
+            else:
+                self._queue(
+                    "activity",
+                    "Alibaba: não consegui preparar a lista de keywords; seguindo sem hotwords.",
+                    "warning",
+                )
         audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
         full_pcm_lock = threading.Lock()
         full_pcm = None
@@ -10050,7 +10088,7 @@ try {
             if _app is not self.alibaba_ws_app:
                 return
             try:
-                _app.send(json.dumps(alibaba_ws_run_task(task_id, self.settings)))
+                _app.send(json.dumps(alibaba_ws_run_task(task_id, self.settings, alibaba_vocabulary_id)))
             except Exception:
                 self.alibaba_ws_lost_event.set()
                 self._queue("status", "Reconectando: falha ao enviar o run-task do Alibaba.")
@@ -13296,6 +13334,12 @@ try {
                     self._append_activity_log(message[1], tag)
                 elif kind == "params_block":
                     self._append_params_block(message[1], message[2])
+                elif kind == "settings_key":
+                    # Persistência pedida por um worker (ex.: vocabulary_id da
+                    # Alibaba criado no loop ao vivo): grava na UI thread, que é
+                    # quem mexe no settings.json.
+                    self.settings[message[1]] = message[2]
+                    self.settings = save_settings(self.settings)
                 elif kind == "ffmpeg_command":
                     self._append_activity_log(
                         message[1],

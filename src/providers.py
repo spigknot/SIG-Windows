@@ -48,6 +48,10 @@ DEFAULT_SETTINGS = {
     "elevenlabs_api_key": "",
     "metamuse_api_key": "",
     "alibaba_api_key": "",
+    # Lista PRÉ-COMPILADA de hotwords da Alibaba (vocabulary_id) + os termos que
+    # ela representa. Só o WebSocket usa (o REST do arquivo ignora o campo).
+    "alibaba_vocabulary_id": "",
+    "alibaba_vocabulary_terms": [],
     "deepgram_language_mode": "pt-BR",
     "deepgram_language_custom": "",
     "assemblyai_language_mode": "pt",

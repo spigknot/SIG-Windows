@@ -493,8 +493,14 @@ def alibaba_rest_transcribe(
     return alibaba_format_rest_response(payload)
 
 
-def alibaba_ws_run_task(task_id: str, settings: dict) -> dict:
-    """Evento run-task do WebSocket DashScope (qwen-audio-3.0-asr-flash-streaming)."""
+def alibaba_ws_run_task(task_id: str, settings: dict, vocabulary_id: str = "") -> dict:
+    """Evento run-task do WebSocket DashScope (qwen-audio-3.0-asr-flash-streaming).
+
+    `vocabulary_id` é a LISTA PRÉ-COMPILADA de hotwords (ver
+    alibaba_ensure_vocabulary): é o único caminho com efeito comprovado na
+    Alibaba — medido em 10/09, o mesmo áudio saiu "Taguaã" sem a lista e
+    "Taguaí" com ela (2/2 rodadas idênticas de cada lado).
+    """
     parameters: dict = {"format": "pcm", "sample_rate": 16000, "heartbeat": True}
     hints = alibaba_language_hints(settings)
     if hints:
@@ -502,6 +508,8 @@ def alibaba_ws_run_task(task_id: str, settings: dict) -> dict:
     vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
     if vocabulary:
         parameters["vocabulary"] = vocabulary
+    if vocabulary_id:
+        parameters["vocabulary_id"] = vocabulary_id
     return {
         "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
         "payload": {
@@ -581,3 +589,106 @@ def alibaba_rest_log_params(settings: dict) -> dict:
     vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
     params["vocabulary"] = vocabulary if vocabulary else "nenhuma"
     return params
+
+
+# ---------------- Alibaba: lista pré-compilada de hotwords ----------------
+#
+# Só este caminho tem efeito COMPROVADO (medido em 10/09): o mesmo áudio saiu
+# "Taguaã" sem a lista e "Taguaí" com ela, estável em 2/2 rodadas de cada lado,
+# no WebSocket (qwen-audio-3.0-asr-flash-streaming). No REST do arquivo
+# (fun-asr-flash-2026-06-15) o `vocabulary_id` é IGNORADO: um id inexistente
+# devolve 200 sem reclamar e o texto sai IDÊNTICO com uma lista válida — por
+# isso o REST não envia esse campo.
+#
+# Ciclo de vida: a doc avisa que ATUALIZAR uma lista pode levar até 5 minutos
+# para valer; CRIAR vale na hora (confirmado no teste). Então, quando os termos
+# mudam, criamos uma lista NOVA e apagamos a anterior — nunca `update`.
+
+ALIBABA_CUSTOMIZATION_URL = (
+    "https://dashscope-intl.aliyuncs.com/api/v1/services/audio/asr/customization"
+)
+ALIBABA_VOCABULARY_MODEL = "speech-biasing"
+ALIBABA_VOCABULARY_PREFIX = "sig"
+ALIBABA_VOCABULARY_TIMEOUT = 30
+
+
+def alibaba_vocabulary_action(
+    api_key: str, campos: dict, timeout: int = ALIBABA_VOCABULARY_TIMEOUT
+) -> tuple[int, dict]:
+    """Chamada crua à API de vocabulário do DashScope (create/query/delete)."""
+    from urllib.parse import urlparse
+
+    corpo = {"model": ALIBABA_VOCABULARY_MODEL, "input": campos}
+    partes = urlparse(ALIBABA_CUSTOMIZATION_URL)
+    conn = http.client.HTTPSConnection(partes.netloc, timeout=timeout)
+    try:
+        conn.request(
+            "POST",
+            partes.path,
+            body=json.dumps(corpo, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "X-DashScope-SSE": "disable",
+            },
+        )
+        resposta = conn.getresponse()
+        texto = resposta.read().decode("utf-8", errors="replace")
+        try:
+            return resposta.status, json.loads(texto)
+        except Exception:
+            return resposta.status, {"raw": texto[:300]}
+    finally:
+        conn.close()
+
+
+def alibaba_create_vocabulary(api_key: str, target_model: str, terms: list[str]) -> str:
+    """Cria a lista pré-compilada e devolve o vocabulary_id ("" se falhar)."""
+    if not api_key or not terms:
+        return ""
+    status, dados = alibaba_vocabulary_action(api_key, {
+        "action": "create_vocabulary",
+        "target_model": target_model,
+        "prefix": ALIBABA_VOCABULARY_PREFIX,
+        "vocabulary": [
+            {"text": str(termo), "weight": stt_provider_rules.ALIBABA_KEYWORD_WEIGHT}
+            for termo in terms
+        ],
+    })
+    if status != 200:
+        return ""
+    return str(((dados or {}).get("output") or {}).get("vocabulary_id") or "")
+
+
+def alibaba_delete_vocabulary(api_key: str, vocabulary_id: str) -> bool:
+    """Apaga a lista (limpeza best-effort; nunca interrompe a transcrição)."""
+    if not api_key or not vocabulary_id:
+        return False
+    try:
+        status, _ = alibaba_vocabulary_action(api_key, {
+            "action": "delete_vocabulary",
+            "vocabulary_id": vocabulary_id,
+        })
+        return status == 200
+    except Exception:
+        return False
+
+
+def alibaba_ensure_vocabulary(settings: dict, target_model: str, terms: list[str]) -> str:
+    """Garante uma lista pré-compilada com EXATAMENTE estes termos.
+
+    Reaproveita a lista guardada quando os termos são os mesmos; quando mudam,
+    cria outra (vale na hora) e apaga a antiga. Devolve "" quando não há termos,
+    quando falta a chave ou quando a API falha — o chamador segue sem hotwords.
+    """
+    api_key = str(settings.get("alibaba_api_key") or "").strip()
+    if not api_key or not terms:
+        return ""
+    guardado = str(settings.get("alibaba_vocabulary_id") or "").strip()
+    termos_guardados = [str(t) for t in (settings.get("alibaba_vocabulary_terms") or [])]
+    if guardado and termos_guardados == [str(t) for t in terms]:
+        return guardado
+    novo = alibaba_create_vocabulary(api_key, target_model, terms)
+    if novo and guardado and guardado != novo:
+        alibaba_delete_vocabulary(api_key, guardado)
+    return novo or guardado

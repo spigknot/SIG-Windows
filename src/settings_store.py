@@ -232,6 +232,13 @@ def normalize_settings(data: dict) -> dict:
     clean["elevenlabs_api_key"] = elevenlabs_api_key
     clean["metamuse_api_key"] = metamuse_api_key
     clean["alibaba_api_key"] = alibaba_api_key
+    clean["alibaba_vocabulary_id"] = str(data.get("alibaba_vocabulary_id") or "").strip()
+    termos_alibaba = data.get("alibaba_vocabulary_terms")
+    if isinstance(termos_alibaba, str):
+        termos_alibaba = [p.strip() for p in termos_alibaba.split(",") if p.strip()]
+    if not isinstance(termos_alibaba, (list, tuple)):
+        termos_alibaba = []
+    clean["alibaba_vocabulary_terms"] = [str(t) for t in termos_alibaba][:MAX_STT_KEYWORDS]
     clean["deepseek_api_key"] = deepseek_api_key
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()
