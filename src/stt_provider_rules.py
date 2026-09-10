@@ -398,10 +398,17 @@ def grok_rest_diarize(checked: bool) -> bool:
 #   Alibaba     vocabulary: {termo: peso}  (parâmetro DashScope REST e WS)
 #   servidor    (Granite NAR: não tem biasing — nenhum parâmetro)
 
-KEY_STT_KEYWORDS = "stt_keywords"
-# Chave da checkbox "Keywords" das telas de Transcrição (REST) e Ocorrência
-# (WS): desligada, NENHUMA requisição leva termos — a lista continua salva.
-KEY_STT_KEYWORDS_ENABLED = "stt_keywords_enabled"
+KEY_STT_KEYWORDS = "stt_keywords"          # (LEGADO — migrado para perfis)
+KEY_STT_KEYWORDS_ENABLED = "stt_keywords_enabled"   # (LEGADO — idem)
+# Perfis de keywords: o usuário mantém VÁRIAS listas e escolhe uma na tela.
+#   stt_keyword_profiles = {"Lista 1": ["Taguaí", ...], "Armas": [...]}
+#   stt_keyword_profile  = "Lista 1"  (nome ativo) ou "" = DESLIGADO
+KEY_STT_KEYWORD_PROFILES = "stt_keyword_profiles"
+KEY_STT_KEYWORD_PROFILE = "stt_keyword_profile"
+KEYWORDS_OFF_VALUE = ""
+KEYWORDS_OFF_LABEL = "Não"
+DEFAULT_KEYWORD_PROFILE_NAME = "Lista 1"
+MAX_KEYWORD_PROFILES = 20
 MAX_STT_KEYWORDS = 100
 # Limite por termo: 20 caracteres = o MENOR limite real entre REST e WebSocket.
 # Medido nas APIs (10/09), com um termo longo:
@@ -530,19 +537,70 @@ def normalize_stt_keywords(raw) -> list[str]:
     return keywords
 
 
-def stt_keywords_enabled(settings: dict) -> bool:
-    """A checkbox "Keywords" está marcada? (ausente = ligada)."""
-    value = settings.get(KEY_STT_KEYWORDS_ENABLED, True)
-    if isinstance(value, str):
-        return value.strip().casefold() not in {"0", "false", "no", "off", ""}
-    return bool(value)
+def normalize_keyword_profiles(raw) -> dict[str, list[str]]:
+    """Perfis de keywords normalizados: nome → termos (limpos, sem repetidos).
+
+    Aceita o formato antigo (lista solta de termos) e devolve um perfil único,
+    para a migração de settings de versões anteriores não perder nada.
+    """
+    if isinstance(raw, str):
+        return {DEFAULT_KEYWORD_PROFILE_NAME: normalize_stt_keywords(raw)}
+    if isinstance(raw, (list, tuple, set)):
+        termos = normalize_stt_keywords(raw)
+        return {DEFAULT_KEYWORD_PROFILE_NAME: termos} if termos else {}
+    if not isinstance(raw, dict):
+        return {}
+    perfis: dict[str, list[str]] = {}
+    for nome, termos in raw.items():
+        chave = str(nome or "").strip()
+        if not chave:
+            continue
+        limpos = normalize_stt_keywords(termos)
+        if not limpos:
+            continue
+        perfis[chave] = limpos
+        if len(perfis) >= MAX_KEYWORD_PROFILES:
+            break
+    return perfis
+
+
+def keyword_profiles(settings: dict) -> dict[str, list[str]]:
+    """Todos os perfis cadastrados (nome → termos)."""
+    return normalize_keyword_profiles(settings.get(KEY_STT_KEYWORD_PROFILES))
+
+
+def active_keyword_profile(settings: dict) -> str:
+    """Nome do perfil ativo; "" = keywords DESLIGADAS."""
+    nome = str(settings.get(KEY_STT_KEYWORD_PROFILE) or "").strip()
+    if not nome:
+        return KEYWORDS_OFF_VALUE
+    return nome if nome in keyword_profiles(settings) else KEYWORDS_OFF_VALUE
 
 
 def stt_keywords(settings: dict) -> list[str]:
-    """Keywords que devem ir na requisição (vazio se a checkbox estiver off)."""
-    if not stt_keywords_enabled(settings):
-        return []
-    return normalize_stt_keywords(settings.get(KEY_STT_KEYWORDS))
+    """Termos do perfil ativo (lista vazia quando está desligado ou sem perfil)."""
+    perfis = keyword_profiles(settings)
+    return list(perfis.get(active_keyword_profile(settings), []))
+
+
+def keywords_selector_label(settings: dict) -> str:
+    """Rótulo do seletor nas telas: "Não" ou o nome do perfil ativo."""
+    return active_keyword_profile(settings) or KEYWORDS_OFF_LABEL
+
+
+def keywords_selector_options(settings: dict) -> list[str]:
+    """Opções do seletor: "Não" (desligado) seguido dos perfis, na ordem."""
+    return [KEYWORDS_OFF_LABEL] + list(keyword_profiles(settings))
+
+
+def keywords_profile_label_to_value(settings: dict, label: str) -> str:
+    """Converte o rótulo escolhido no seletor para o valor salvo ("" = off)."""
+    return "" if str(label).strip() == KEYWORDS_OFF_LABEL else str(label).strip()
+
+
+def stt_keywords_enabled(settings: dict) -> bool:
+    """Há um perfil ativo com termos? (usado pelo log e pelos rótulos)."""
+    return bool(active_keyword_profile(settings)) and bool(stt_keywords(settings))
 
 
 def supports_keywords(provider: str) -> bool:

@@ -35,14 +35,18 @@ from stt_clients import (  # noqa: E402
     alibaba_rest_log_params,
     alibaba_ws_run_task,
 )
-from stt_provider_rules import KEY_STT_KEYWORDS  # noqa: E402
+from stt_provider_rules import (  # noqa: E402
+    KEY_STT_KEYWORD_PROFILE,
+    KEY_STT_KEYWORD_PROFILES,
+)
 
 TERMOS = ["Taguaí", "Monsenhor"]
 
 
 def _settings(**overrides):
     base = dict(DEFAULT_SETTINGS)
-    base[KEY_STT_KEYWORDS] = list(TERMOS)
+    base[KEY_STT_KEYWORD_PROFILES] = {"Lista 1": list(TERMOS)}
+    base[KEY_STT_KEYWORD_PROFILE] = "Lista 1"
     base["alibaba_api_key"] = "chave-falsa"
     base.update(overrides)
     return base
@@ -69,33 +73,67 @@ class RunTaskTest(unittest.TestCase):
 
 
 class RestNaoEnviaTest(unittest.TestCase):
-    """O REST ignora o campo: não mandar (medido com id inválido)."""
+    """O REST aceita a lista (parâmetro oficial) — o app a envia.
 
-    def test_rest_body_sem_vocabulary_id(self):
+    Medição de 10/09: mesmo com a lista e o target_model casando, o texto saiu
+    IDÊNTICO ao sem lista (4 configurações × 3 rodadas). Enviamos porque é o
+    parâmetro documentado para este modelo; o efeito, porém, não se confirmou
+    no modo arquivo.
+    """
+
+    def test_rest_body_leva_o_vocabulary_id(self):
+        corpo = alibaba_rest_body("data:audio/wav;base64,AAA", _settings(), "vocab-sig-1")
+        self.assertEqual("vocab-sig-1", corpo["parameters"]["vocabulary_id"])
+
+    def test_sem_id_o_campo_nao_aparece(self):
         corpo = alibaba_rest_body("data:audio/wav;base64,AAA", _settings())
-        parametros = corpo["parameters"]
-        self.assertNotIn("vocabulary_id", parametros)
+        self.assertNotIn("vocabulary_id", corpo["parameters"])
 
-    def test_rest_log_params_nao_mostram_id(self):
-        params = alibaba_rest_log_params(_settings())
-        self.assertNotIn("vocabulary_id", params)
+    def test_rest_log_params_mostram_o_id(self):
+        params = alibaba_rest_log_params(_settings(alibaba_vocabulary_id="vocab-sig-1"))
+        self.assertEqual("vocab-sig-1", params["vocabulary_id"])
+
+    def test_transcribe_aceita_o_id(self):
+        import inspect
+
+        assinatura = inspect.signature(stt_clients.alibaba_rest_transcribe)
+        self.assertIn("vocabulary_id", assinatura.parameters)
 
 
 class CicloDeVidaTest(unittest.TestCase):
     def test_reaproveita_a_lista_quando_os_termos_sao_os_mesmos(self):
         settings = _settings(
-            alibaba_vocabulary_id="vocab-existente",
-            alibaba_vocabulary_terms=list(TERMOS),
+            alibaba_vocabulary_by_model={
+                ALIBABA_WS_MODEL: {"id": "vocab-existente", "terms": list(TERMOS)}
+            },
         )
         with patch.object(stt_clients, "alibaba_create_vocabulary") as criar:
             identificador = alibaba_ensure_vocabulary(settings, ALIBABA_WS_MODEL, TERMOS)
         self.assertEqual("vocab-existente", identificador)
         criar.assert_not_called()
 
+    def test_lista_de_outro_modelo_nao_e_reaproveitada(self):
+        # A lista do WebSocket NÃO vale para o arquivo: o target_model é do
+        # recurso, então o registro tem de ser por modelo.
+        settings = _settings(
+            alibaba_vocabulary_by_model={
+                ALIBABA_WS_MODEL: {"id": "vocab-do-ws", "terms": list(TERMOS)}
+            },
+        )
+        with patch.object(stt_clients, "alibaba_create_vocabulary",
+                          return_value="vocab-do-rest") as criar:
+            identificador = alibaba_ensure_vocabulary(settings, "fun-asr-flash-2026-06-15", TERMOS)
+        self.assertEqual("vocab-do-rest", identificador)
+        criar.assert_called_once()
+        # e o registro do WS continua intacto (não foi apagado nem sobrescrito)
+        registros = stt_clients.alibaba_vocabulary_records(settings)
+        self.assertEqual("vocab-do-ws", registros[ALIBABA_WS_MODEL]["id"])
+
     def test_cria_nova_lista_quando_os_termos_mudam(self):
         settings = _settings(
-            alibaba_vocabulary_id="vocab-antiga",
-            alibaba_vocabulary_terms=["Outro"],
+            alibaba_vocabulary_by_model={
+                ALIBABA_WS_MODEL: {"id": "vocab-antiga", "terms": ["Outro"]}
+            },
         )
         with patch.object(stt_clients, "alibaba_create_vocabulary",
                           return_value="vocab-nova") as criar, \
@@ -103,7 +141,7 @@ class CicloDeVidaTest(unittest.TestCase):
             identificador = alibaba_ensure_vocabulary(settings, ALIBABA_WS_MODEL, TERMOS)
         self.assertEqual("vocab-nova", identificador)
         criar.assert_called_once()
-        # a lista antiga é apagada (evita lixo na conta)
+        # a lista antiga DAQUELE modelo é apagada (evita lixo na conta)
         apagar.assert_called_once_with("chave-falsa", "vocab-antiga")
 
     def test_sem_termos_nao_chama_a_api(self):
@@ -126,8 +164,9 @@ class CicloDeVidaTest(unittest.TestCase):
     def test_falha_ao_criar_mantem_a_antiga(self):
         # Sem lista nova, seguir com a antiga é melhor que ficar sem nenhuma.
         settings = _settings(
-            alibaba_vocabulary_id="vocab-antiga",
-            alibaba_vocabulary_terms=["Outro"],
+            alibaba_vocabulary_by_model={
+                ALIBABA_WS_MODEL: {"id": "vocab-antiga", "terms": ["Outro"]}
+            },
         )
         with patch.object(stt_clients, "alibaba_create_vocabulary", return_value=""):
             self.assertEqual(
@@ -165,30 +204,42 @@ class CicloDeVidaTest(unittest.TestCase):
 
 
 class PersistenciaTest(unittest.TestCase):
-    def test_chaves_novas_tem_default(self):
-        self.assertEqual("", DEFAULT_SETTINGS["alibaba_vocabulary_id"])
-        self.assertEqual([], DEFAULT_SETTINGS["alibaba_vocabulary_terms"])
+    def test_chave_nova_tem_default(self):
+        self.assertEqual({}, DEFAULT_SETTINGS["alibaba_vocabulary_by_model"])
 
-    def test_normalize_preserva(self):
+    def test_normalize_preserva_o_registro(self):
         limpo = sig_app.normalize_settings({
             **DEFAULT_SETTINGS,
-            "alibaba_vocabulary_id": "  vocab-sig-1  ",
-            "alibaba_vocabulary_terms": ["Taguaí", "Monsenhor"],
+            "alibaba_vocabulary_by_model": {
+                ALIBABA_WS_MODEL: {"id": " vocab-sig-1 ", "terms": ["Taguaí"]},
+            },
         })
-        self.assertEqual("vocab-sig-1", limpo["alibaba_vocabulary_id"])
-        self.assertEqual(["Taguaí", "Monsenhor"], limpo["alibaba_vocabulary_terms"])
+        registros = limpo["alibaba_vocabulary_by_model"]
+        self.assertEqual("vocab-sig-1", registros[ALIBABA_WS_MODEL]["id"])
+        self.assertEqual(["Taguaí"], registros[ALIBABA_WS_MODEL]["terms"])
 
-    def test_normalize_aceita_texto_e_limita(self):
+    def test_normalize_descarta_registro_invalido(self):
         limpo = sig_app.normalize_settings({
             **DEFAULT_SETTINGS,
-            "alibaba_vocabulary_terms": "Taguaí, Monsenhor",
+            "alibaba_vocabulary_by_model": {
+                "modelo-x": {"id": "", "terms": ["Taguaí"]},   # sem id
+                "modelo-y": "texto-solto",                      # não é dict
+            },
         })
-        self.assertEqual(["Taguaí", "Monsenhor"], limpo["alibaba_vocabulary_terms"])
-        limpo = sig_app.normalize_settings({
+        self.assertEqual({}, limpo["alibaba_vocabulary_by_model"])
+
+    def test_update_nao_mexe_nos_outros_modelos(self):
+        settings = {
             **DEFAULT_SETTINGS,
-            "alibaba_vocabulary_terms": "nao-e-lista",
-        })
-        self.assertEqual(["nao-e-lista"], limpo["alibaba_vocabulary_terms"])
+            "alibaba_vocabulary_by_model": {
+                ALIBABA_WS_MODEL: {"id": "vocab-ws", "terms": ["Taguaí"]},
+            },
+        }
+        mapa = stt_clients.alibaba_vocabulary_record_update(
+            settings, "fun-asr-flash-2026-06-15", "vocab-rest", ["Taguaí"]
+        )
+        self.assertEqual("vocab-ws", mapa[ALIBABA_WS_MODEL]["id"])
+        self.assertEqual("vocab-rest", mapa["fun-asr-flash-2026-06-15"]["id"])
 
 
 class LogDoRunTaskTest(unittest.TestCase):

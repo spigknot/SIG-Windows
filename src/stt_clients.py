@@ -374,8 +374,15 @@ ALIBABA_AUTH_ERROR = "API Key do Alibaba Cloud inválida ou incompatível com a 
 PARAMS_BLOCK_TAG_PREFIX = "params_block:"
 
 
-def alibaba_rest_body(audio_data_uri: str, settings: dict) -> dict:
-    """Corpo JSON do REST DashScope nativo (fun-asr-flash)."""
+def alibaba_rest_body(audio_data_uri: str, settings: dict, vocabulary_id: str = "") -> dict:
+    """Corpo JSON do REST DashScope nativo (fun-asr-flash).
+
+    `vocabulary_id` é a lista PRÉ-COMPILADA de hotwords — o caminho que a
+    documentação deste mesmo endpoint descreve para o Fun-ASR-Flash (o
+    `vocabulary` inline só vale para `qwen-audio-3.0-asr-flash`). Enviamos a
+    lista também aqui por isso; a medição de 10/09 não mostrou efeito no modo
+    arquivo (ver a nota no stt_clients), mas é o parâmetro oficial.
+    """
     parameters: dict = {"format": "wav", "sample_rate": 16000}
     hints = alibaba_language_hints(settings)
     if hints:
@@ -384,6 +391,8 @@ def alibaba_rest_body(audio_data_uri: str, settings: dict) -> dict:
     vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
     if vocabulary:
         parameters["vocabulary"] = vocabulary
+    if vocabulary_id:
+        parameters["vocabulary_id"] = vocabulary_id
     return {
         "model": ALIBABA_REST_MODEL,
         "input": {
@@ -435,6 +444,7 @@ def alibaba_rest_transcribe(
     settings: dict,
     audio_path: Path,
     raw_path: Path | None = None,
+    vocabulary_id: str = "",
 ) -> str:
     """Transcreve um WAV pelo REST DashScope nativo (fun-asr-flash)."""
     api_key = str(settings.get("alibaba_api_key") or "").strip()
@@ -444,7 +454,9 @@ def alibaba_rest_transcribe(
         raise Cancelled()
     wav_bytes = audio_path.read_bytes()
     data_uri = "data:audio/wav;base64," + base64.b64encode(wav_bytes).decode("ascii")
-    body = json.dumps(alibaba_rest_body(data_uri, settings), ensure_ascii=False).encode("utf-8")
+    body = json.dumps(
+        alibaba_rest_body(data_uri, settings, vocabulary_id), ensure_ascii=False
+    ).encode("utf-8")
     parsed = urlparse(ALIBABA_REST_URL)
     conn = http.client.HTTPSConnection(parsed.netloc, timeout=60 * 60)
     try:
@@ -588,6 +600,7 @@ def alibaba_rest_log_params(settings: dict) -> dict:
     params["language_hints"] = hints if hints else "auto (omitido)"
     vocabulary = stt_provider_rules.alibaba_vocabulary(settings)
     params["vocabulary"] = vocabulary if vocabulary else "nenhuma"
+    params["vocabulary_id"] = str(settings.get("alibaba_vocabulary_id") or "") or "nenhuma"
     return params
 
 
@@ -677,18 +690,60 @@ def alibaba_delete_vocabulary(api_key: str, vocabulary_id: str) -> bool:
 def alibaba_ensure_vocabulary(settings: dict, target_model: str, terms: list[str]) -> str:
     """Garante uma lista pré-compilada com EXATAMENTE estes termos.
 
-    Reaproveita a lista guardada quando os termos são os mesmos; quando mudam,
-    cria outra (vale na hora) e apaga a antiga. Devolve "" quando não há termos,
-    quando falta a chave ou quando a API falha — o chamador segue sem hotwords.
+    A lista é POR MODELO alvo (`target_model`): a do WebSocket
+    (qwen-audio-3.0-asr-flash-streaming) não serve para o arquivo
+    (fun-asr-flash-2026-06-15) nem vice-versa. Por isso guardamos um registro
+    por modelo (id + termos) — assim alternar Ocorrência e Transcrição não fica
+    recriando/apagando a lista do outro.
+
+    Reaproveita o registro quando o modelo E os termos são os mesmos; quando
+    mudam, cria outra (vale na hora) e apaga a anterior daquele modelo. Devolve
+    "" quando não há termos, quando falta a chave ou quando a API falha — o
+    chamador segue sem hotwords.
     """
     api_key = str(settings.get("alibaba_api_key") or "").strip()
     if not api_key or not terms:
         return ""
-    guardado = str(settings.get("alibaba_vocabulary_id") or "").strip()
-    termos_guardados = [str(t) for t in (settings.get("alibaba_vocabulary_terms") or [])]
-    if guardado and termos_guardados == [str(t) for t in terms]:
-        return guardado
+    termos_normalizados = [str(t) for t in terms]
+    registros = alibaba_vocabulary_records(settings)
+    registro = registros.get(target_model) or {}
+    antigo_id = str(registro.get("id") or "").strip()
+    antigos_termos = [str(t) for t in (registro.get("terms") or [])]
+    if antigo_id and antigos_termos == termos_normalizados:
+        return antigo_id
     novo = alibaba_create_vocabulary(api_key, target_model, terms)
-    if novo and guardado and guardado != novo:
-        alibaba_delete_vocabulary(api_key, guardado)
-    return novo or guardado
+    if novo and antigo_id and antigo_id != novo:
+        alibaba_delete_vocabulary(api_key, antigo_id)
+    return novo or antigo_id
+
+
+def alibaba_vocabulary_records(settings: dict) -> dict:
+    """Registro por modelo alvo: {target_model: {"id": ..., "terms": [...]}}."""
+    registros = settings.get("alibaba_vocabulary_by_model")
+    if not isinstance(registros, dict):
+        return {}
+    limpos: dict = {}
+    for modelo, registro in registros.items():
+        if not isinstance(registro, dict):
+            continue
+        identificador = str(registro.get("id") or "").strip()
+        if not identificador:
+            continue
+        termos = registro.get("terms")
+        limpos[str(modelo)] = {
+            "id": identificador,
+            "terms": [str(t) for t in termos] if isinstance(termos, (list, tuple)) else [],
+        }
+    return limpos
+
+
+def alibaba_vocabulary_record_update(
+    settings: dict, target_model: str, vocabulary_id: str, terms: list[str]
+) -> dict:
+    """Novo mapa de registros com o modelo alvo atualizado (para persistir)."""
+    registros = alibaba_vocabulary_records(settings)
+    registros[str(target_model)] = {
+        "id": str(vocabulary_id),
+        "terms": [str(t) for t in terms],
+    }
+    return registros

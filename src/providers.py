@@ -17,12 +17,10 @@ DEFAULT_SETTINGS = {
     "transcription_server": "servidor",
     "multi_transcription_models": ["servidor"],
     "transcription_language": "pt",
-    # Keywords (termos de reforço) do STT: lista única, montada por PROVIDER na
-    # hora da requisição (mesma regra do idioma). Ver stt_provider_rules.
-    "stt_keywords": [],
-    # Checkbox "Keywords" das telas de Transcrição e Ocorrência (liga/desliga o
-    # envio dos termos sem apagar a lista).
-    "stt_keywords_enabled": True,
+    # Perfis de keywords do STT: várias listas nomeadas, uma ativa por vez.
+    # A montagem do parâmetro continua sendo POR PROVEDOR (ver stt_provider_rules).
+    "stt_keyword_profiles": {},
+    "stt_keyword_profile": "",
     "text_model": "IA-Proxy",
     "text_reasoning": "low",
     "ia_proxy_model": "grok-4.6",
@@ -48,10 +46,10 @@ DEFAULT_SETTINGS = {
     "elevenlabs_api_key": "",
     "metamuse_api_key": "",
     "alibaba_api_key": "",
-    # Lista PRÉ-COMPILADA de hotwords da Alibaba (vocabulary_id) + os termos que
-    # ela representa. Só o WebSocket usa (o REST do arquivo ignora o campo).
-    "alibaba_vocabulary_id": "",
-    "alibaba_vocabulary_terms": [],
+    # Lista PRÉ-COMPILADA de hotwords da Alibaba, POR MODELO alvo (a do
+    # WebSocket não vale para o arquivo e vice-versa):
+    # {"<target_model>": {"id": "vocab-sig-...", "terms": [...]}}.
+    "alibaba_vocabulary_by_model": {},
     "deepgram_language_mode": "pt-BR",
     "deepgram_language_custom": "",
     "assemblyai_language_mode": "pt",

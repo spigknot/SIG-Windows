@@ -30,15 +30,14 @@ from providers import (
     selected_text_model_config,
     selected_transcription_server,
 )
+from stt_clients import alibaba_vocabulary_records
 from stt_provider_rules import (
+    DEFAULT_KEYWORD_PROFILE_NAME,
     DEFAULT_TRANSCRIPTION_LANGUAGE,
-    KEY_STT_KEYWORDS,
     KEY_TRANSCRIPTION_LANGUAGE,
-    MAX_STT_KEYWORDS,
-    normalize_stt_keywords,
+    normalize_keyword_profiles,
     TRANSCRIPTION_LANGUAGE_OPTIONS,
 )
-
 
 def load_settings() -> dict:
     data = DEFAULT_SETTINGS.copy()
@@ -85,16 +84,26 @@ def normalize_settings(data: dict) -> dict:
         if language_option in TRANSCRIPTION_LANGUAGE_OPTIONS
         else DEFAULT_TRANSCRIPTION_LANGUAGE
     )
-    # Keywords do STT: lista de termos única (o parâmetro real de cada
-    # provedor é montado na requisição). Deduplica sem diferenciar
-    # maiúsculas/minúsculas e preserva a ordem digitada.
-    clean[KEY_STT_KEYWORDS] = normalize_stt_keywords(data.get(KEY_STT_KEYWORDS))
-    keywords_enabled = data.get("stt_keywords_enabled", DEFAULT_SETTINGS["stt_keywords_enabled"])
-    clean["stt_keywords_enabled"] = (
-        keywords_enabled
-        if isinstance(keywords_enabled, bool)
-        else str(keywords_enabled).strip().casefold() in {"1", "true", "yes", "on"}
-    )
+    # Perfis de keywords + o perfil ativo. MIGRAÇÃO: settings antigos guardavam
+    # uma lista única (`stt_keywords`) e um liga/desliga (`stt_keywords_enabled`)
+    # — viram o perfil "Lista 1" (ativo apenas se estava ligado), sem perder
+    # termos. Chaves legadas não são reescritas.
+    perfis = normalize_keyword_profiles(data.get("stt_keyword_profiles"))
+    perfil_ativo = str(data.get("stt_keyword_profile") or "").strip()
+    if not perfis:
+        perfis = normalize_keyword_profiles(data.get("stt_keywords"))
+        if perfis:
+            # Ligado -> ativa o perfil migrado; desligado -> segue desligado
+            # (os termos ficam salvos para o usuário religar depois).
+            perfil_ativo = (
+                DEFAULT_KEYWORD_PROFILE_NAME
+                if data.get("stt_keywords_enabled", True)
+                else ""
+            )
+    clean["stt_keyword_profiles"] = perfis
+    if perfil_ativo and perfil_ativo not in perfis:
+        perfil_ativo = ""      # perfil apagado/desconhecido = desligado
+    clean["stt_keyword_profile"] = perfil_ativo
     rest_value = data.get("grok_rest_requests", DEFAULT_SETTINGS["grok_rest_requests"])
     clean["grok_rest_requests"] = (
         rest_value
@@ -232,13 +241,7 @@ def normalize_settings(data: dict) -> dict:
     clean["elevenlabs_api_key"] = elevenlabs_api_key
     clean["metamuse_api_key"] = metamuse_api_key
     clean["alibaba_api_key"] = alibaba_api_key
-    clean["alibaba_vocabulary_id"] = str(data.get("alibaba_vocabulary_id") or "").strip()
-    termos_alibaba = data.get("alibaba_vocabulary_terms")
-    if isinstance(termos_alibaba, str):
-        termos_alibaba = [p.strip() for p in termos_alibaba.split(",") if p.strip()]
-    if not isinstance(termos_alibaba, (list, tuple)):
-        termos_alibaba = []
-    clean["alibaba_vocabulary_terms"] = [str(t) for t in termos_alibaba][:MAX_STT_KEYWORDS]
+    clean["alibaba_vocabulary_by_model"] = alibaba_vocabulary_records(data)
     clean["deepseek_api_key"] = deepseek_api_key
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()
     clean["police_name"] = str(data.get("police_name") or "").strip()

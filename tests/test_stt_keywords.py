@@ -49,14 +49,20 @@ from stt_clients import (  # noqa: E402
     metamuse_rest_request_body,
 )
 from stt_provider_rules import (  # noqa: E402
+    active_keyword_profile,
     alibaba_vocabulary,
     DEEPGRAM_KEYTERM_TOKEN_BUDGET,
     estimate_keyterm_tokens,
-    KEY_STT_KEYWORDS,
-    KEY_STT_KEYWORDS_ENABLED,
+    KEY_STT_KEYWORD_PROFILE,
+    KEY_STT_KEYWORD_PROFILES,
+    KEYWORDS_OFF_LABEL,
     keywords_for_provider,
+    keyword_profiles,
     keywords_query_params,
+    keywords_selector_label,
+    keywords_selector_options,
     MAX_STT_KEYWORD_LENGTH,
+    MAX_KEYWORD_PROFILES,
     MAX_STT_KEYWORDS,
     metamuse_keywords,
     normalize_stt_keywords,
@@ -68,9 +74,23 @@ from stt_provider_rules import (  # noqa: E402
 TERMOS = ["Taguaí", "Furtura", "Rua Monsenhor"]
 
 
+PERFIL = "Lista 1"
+
+
 def _settings(**overrides):
+    """Settings com um perfil ativo. `keywords=None` deixa DESLIGADO."""
+    keywords = overrides.pop("keywords", TERMOS)
     base = dict(DEFAULT_SETTINGS)
-    base[KEY_STT_KEYWORDS] = list(TERMOS)
+    if keywords is None:
+        # perfil existe, mas nenhum está ativo = keywords desligadas
+        base[KEY_STT_KEYWORD_PROFILES] = {PERFIL: list(TERMOS)}
+        base[KEY_STT_KEYWORD_PROFILE] = ""
+    elif keywords:
+        base[KEY_STT_KEYWORD_PROFILES] = {PERFIL: list(keywords)}
+        base[KEY_STT_KEYWORD_PROFILE] = PERFIL
+    else:
+        base[KEY_STT_KEYWORD_PROFILES] = {}
+        base[KEY_STT_KEYWORD_PROFILE] = ""
     base.update(overrides)
     return base
 
@@ -92,29 +112,28 @@ class ListaUnicaTest(unittest.TestCase):
         self.assertEqual([], normalize_stt_keywords(None))
         self.assertEqual([], normalize_stt_keywords(42))
 
-    def test_default_sem_keywords(self):
-        self.assertEqual([], DEFAULT_SETTINGS[KEY_STT_KEYWORDS])
-        self.assertTrue(DEFAULT_SETTINGS[KEY_STT_KEYWORDS_ENABLED])
+    def test_default_sem_perfis(self):
+        self.assertEqual({}, DEFAULT_SETTINGS[KEY_STT_KEYWORD_PROFILES])
+        self.assertEqual("", DEFAULT_SETTINGS[KEY_STT_KEYWORD_PROFILE])
 
-    def test_persiste_no_settings(self):
-        cleaned = normalize_settings({KEY_STT_KEYWORDS: [" Taguaí ", "taguaí", "Furtura"]})
-        self.assertEqual(["Taguaí", "Furtura"], cleaned[KEY_STT_KEYWORDS])
+    def test_persiste_perfis_no_settings(self):
+        cleaned = normalize_settings({
+            KEY_STT_KEYWORD_PROFILES: {"Lista 1": [" Taguaí ", "taguaí", "Furtura"]},
+            KEY_STT_KEYWORD_PROFILE: "Lista 1",
+        })
+        self.assertEqual({"Lista 1": ["Taguaí", "Furtura"]}, cleaned[KEY_STT_KEYWORD_PROFILES])
+        self.assertEqual("Lista 1", cleaned[KEY_STT_KEYWORD_PROFILE])
 
-    def test_checkbox_persiste_como_bool(self):
-        self.assertFalse(normalize_settings({KEY_STT_KEYWORDS_ENABLED: "false"})[KEY_STT_KEYWORDS_ENABLED])
-        self.assertTrue(normalize_settings({KEY_STT_KEYWORDS_ENABLED: True})[KEY_STT_KEYWORDS_ENABLED])
-        self.assertTrue(normalize_settings({KEY_STT_KEYWORDS_ENABLED: "on"})[KEY_STT_KEYWORDS_ENABLED])
 
+class PerfilAtivoGateTest(unittest.TestCase):
+    """Sem perfil ativo, NENHUM modelo recebe termos; os perfis continuam salvos."""
 
-class CheckboxGateTest(unittest.TestCase):
-    """Desligada, NENHUM modelo recebe termos; a lista continua salva."""
-
-    def test_ligada_por_padrao(self):
+    def test_perfil_ativo_por_padrao(self):
         self.assertTrue(stt_keywords_enabled(_settings()))
         self.assertEqual(TERMOS, stt_keywords(_settings()))
 
     def test_desligada_zera_todos_os_provedores(self):
-        off = _settings(**{KEY_STT_KEYWORDS_ENABLED: False})
+        off = _settings(keywords=None)
         self.assertEqual([], stt_keywords(off))
         self.assertEqual([], keywords_query_params(off, "deepgram"))
         self.assertEqual([], keywords_query_params(off, "grok"))
@@ -123,11 +142,12 @@ class CheckboxGateTest(unittest.TestCase):
         self.assertIsNone(metamuse_keywords(off))
         self.assertIsNone(alibaba_vocabulary(off))
         self.assertNotIn("keyterm", deepgram_query_string(off))
-        # a lista continua salva
-        self.assertEqual(TERMOS, off[KEY_STT_KEYWORDS])
+        # o perfil continua salvo (só não está ativo)
+        self.assertEqual(TERMOS, off[KEY_STT_KEYWORD_PROFILES][PERFIL])
+        self.assertEqual("", off[KEY_STT_KEYWORD_PROFILE])
 
     def test_desligada_nos_corpos_json(self):
-        off = _settings(**{KEY_STT_KEYWORDS_ENABLED: False})
+        off = _settings(keywords=None)
         self.assertNotIn("keywords", metamuse_handshake_payload("k", False, off))
         self.assertNotIn("keywords", metamuse_rest_request_body(False, off))
         self.assertNotIn("vocabulary", alibaba_rest_body("data:x", off)["parameters"])
@@ -137,7 +157,7 @@ class CheckboxGateTest(unittest.TestCase):
         for nome in (GROK_API_NAME, ELEVENLABS_API_NAME, ASSEMBLYAI_API_NAME):
             with self.subTest(modelo=nome):
                 off = settings_for_transcription_server(
-                    _settings(**{KEY_STT_KEYWORDS_ENABLED: False}), nome
+                    _settings(keywords=None), nome
                 )
                 campos = transcription_form_fields(off)
                 self.assertNotIn("keyterm", campos)
@@ -152,7 +172,7 @@ class ParametroPorProvedorTest(unittest.TestCase):
         self.assertIn("keyterm=Tagua%C3%AD", query)
         self.assertIn("keyterm=Rua%20Monsenhor", query)
         # sem keywords, nada muda na query
-        self.assertNotIn("keyterm", deepgram_query_string(_settings(**{KEY_STT_KEYWORDS: []})))
+        self.assertNotIn("keyterm", deepgram_query_string(_settings(keywords=[])))
 
     def test_grok_keyterm_repetido(self):
         grok = settings_for_transcription_server(_settings(), GROK_API_NAME)
@@ -259,7 +279,7 @@ class MultipartRepetidoTest(unittest.TestCase):
         self.assertEqual(3, corpo.count('name="keyterms"'))
 
     def test_sem_keywords_nao_ha_parte_de_termo(self):
-        grok = settings_for_transcription_server(_settings(**{KEY_STT_KEYWORDS: []}), GROK_API_NAME)
+        grok = settings_for_transcription_server(_settings(keywords=[]), GROK_API_NAME)
         corpo = self._capturar(grok)
         self.assertNotIn('name="keyterm"', corpo)
 
@@ -311,7 +331,7 @@ class AceitacaoPorProvedorTest(unittest.TestCase):
     """O que cada provedor aceitou de verdade (mesmo áudio, mesmo termo)."""
 
     def test_provedores_de_query_sem_keyword_nao_mandam_nada(self):
-        off = _settings(**{KEY_STT_KEYWORDS: []})
+        off = _settings(keywords=[])
         self.assertEqual([], keywords_query_params(off, "deepgram"))
         self.assertEqual([], keywords_query_params(off, "grok"))
         self.assertEqual([], keywords_query_params(off, "elevenlabs"))
@@ -343,7 +363,7 @@ class OrcamentoDeepgramTest(unittest.TestCase):
     """
 
     def test_poucos_termos_passam_inteiros(self):
-        poucos = _settings(**{KEY_STT_KEYWORDS: ["Taguaí", "Murtura", "Rua Monsenhor"]})
+        poucos = _settings(keywords=["Taguaí", "Murtura", "Rua Monsenhor"])
         self.assertEqual(
             ["Taguaí", "Murtura", "Rua Monsenhor"],
             keywords_for_provider(poucos, "deepgram"),
@@ -351,7 +371,7 @@ class OrcamentoDeepgramTest(unittest.TestCase):
 
     def test_termos_de_20_chars_cabem_no_orcamento_medido(self):
         termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
-        enviados = keywords_for_provider(_settings(**{KEY_STT_KEYWORDS: termos}), "deepgram")
+        enviados = keywords_for_provider(_settings(keywords=termos), "deepgram")
         # 40 passam de verdade na API; a estimativa é conservadora e não pode
         # mandar mais do que isso.
         self.assertLessEqual(len(enviados), 45)
@@ -359,12 +379,12 @@ class OrcamentoDeepgramTest(unittest.TestCase):
 
     def test_corte_e_sempre_pelos_primeiros(self):
         termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
-        enviados = keywords_for_provider(_settings(**{KEY_STT_KEYWORDS: termos}), "deepgram")
+        enviados = keywords_for_provider(_settings(keywords=termos), "deepgram")
         self.assertEqual(termos[: len(enviados)], enviados)
 
     def test_a_query_do_deepgram_respeita_o_orcamento(self):
         termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
-        query = deepgram_query_string(_settings(**{KEY_STT_KEYWORDS: termos}))
+        query = deepgram_query_string(_settings(keywords=termos))
         envios = query.count("keyterm=")
         self.assertLess(envios, 100)
         self.assertGreater(envios, 0)
@@ -385,7 +405,7 @@ class OrcamentoDeepgramTest(unittest.TestCase):
 
     def test_outros_provedores_nao_sofrem_corte_do_deepgram(self):
         termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
-        settings = _settings(**{KEY_STT_KEYWORDS: termos})
+        settings = _settings(keywords=termos)
         self.assertEqual(100, len(keywords_for_provider(settings, "grok")))
         self.assertEqual(100, len(keywords_for_provider(settings, "elevenlabs")))
         self.assertEqual(100, len(keywords_for_provider(settings, "assemblyai")))
@@ -396,7 +416,7 @@ class OrcamentoDeepgramTest(unittest.TestCase):
     def test_termo_nunca_e_alterado_no_corte(self):
         # O excedente é DESCARTADO, o termo enviado continua idêntico.
         termos = ["Taguaí", "Rua Monsenhor"] + [f"Extra{i:03d}" for i in range(90)]
-        enviados = keywords_for_provider(_settings(**{KEY_STT_KEYWORDS: termos}), "deepgram")
+        enviados = keywords_for_provider(_settings(keywords=termos), "deepgram")
         self.assertEqual(termos[: len(enviados)], enviados)
 
 
@@ -437,6 +457,112 @@ class TelaDeAjudaTest(unittest.TestCase):
 
     def test_servidor_local_aparece_sem_keywords(self):
         self.assertIn("não usa keywords", self.texto)
+
+
+class PerfisTest(unittest.TestCase):
+    """Perfis de keywords: várias listas, uma ativa por vez."""
+
+    def test_varios_perfis_e_so_o_ativo_vai_na_requisicao(self):
+        settings = _settings(
+            stt_keyword_profiles={
+                "Lista 1": ["Taguaí"],
+                "Armas": ["Glock", "38"],
+            },
+            stt_keyword_profile="Armas",
+        )
+        self.assertEqual(["Glock", "38"], stt_keywords(settings))
+        # um parâmetro por termo (o provedor repete a chave `keyterm`)
+        pares = keywords_query_params(settings, "grok")
+        self.assertEqual(["keyterm", "keyterm"], [p[0] for p in pares])
+        self.assertEqual(["Glock", "38"], [p[1] for p in pares])
+
+    def test_trocar_o_perfil_troca_os_termos_enviados(self):
+        settings = _settings(
+            stt_keyword_profiles={"Lista 1": ["Taguaí"], "Armas": ["Glock"]},
+            stt_keyword_profile="Lista 1",
+        )
+        self.assertEqual(["Taguaí"], stt_keywords(settings))
+        settings = {**settings, "stt_keyword_profile": "Armas"}
+        self.assertEqual(["Glock"], stt_keywords(settings))
+
+    def test_rotulo_do_seletor(self):
+        self.assertEqual(
+            "Armas",
+            keywords_selector_label(_settings(
+                stt_keyword_profiles={"Armas": ["Glock"]},
+                stt_keyword_profile="Armas",
+            )),
+        )
+        self.assertEqual("Não", keywords_selector_label(_settings(keywords=None)))
+
+    def test_opcoes_do_seletor_comecam_com_nao(self):
+        settings = _settings(
+            stt_keyword_profiles={"Armas": ["Glock"], "Ruas": ["Monsenhor"]},
+            stt_keyword_profile="Armas",
+        )
+        self.assertEqual(["Não", "Armas", "Ruas"], keywords_selector_options(settings))
+        # sem perfis, só a opção desligado
+        self.assertEqual(["Não"], keywords_selector_options(_settings(keywords=[])))
+
+    def test_perfil_inexistente_cai_em_desligado(self):
+        settings = _settings(
+            stt_keyword_profiles={"Armas": ["Glock"]},
+            stt_keyword_profile="Perfil Apagado",
+        )
+        self.assertEqual("", active_keyword_profile(settings))
+        self.assertEqual([], stt_keywords(settings))
+        self.assertEqual("Não", keywords_selector_label(settings))
+
+    def test_normalize_limpa_perfil_ativo_inexistente(self):
+        limpo = normalize_settings({
+            **DEFAULT_SETTINGS,
+            "stt_keyword_profiles": {"Armas": ["Glock"]},
+            "stt_keyword_profile": "Fantasma",
+        })
+        self.assertEqual("", limpo["stt_keyword_profile"])
+
+    def test_normalize_descarta_perfil_vazio_e_limita_quantidade(self):
+        limpo = normalize_settings({
+            **DEFAULT_SETTINGS,
+            "stt_keyword_profiles": {"Vazia": [], "Cheia": ["Taguaí"], "  ": ["x"]},
+        })
+        self.assertEqual({"Cheia": ["Taguaí"]}, limpo["stt_keyword_profiles"])
+        muitos = {f"p{i}": ["Taguaí"] for i in range(MAX_KEYWORD_PROFILES + 10)}
+        self.assertEqual(
+            MAX_KEYWORD_PROFILES,
+            len(normalize_settings({**DEFAULT_SETTINGS, "stt_keyword_profiles": muitos})["stt_keyword_profiles"]),
+        )
+
+    def test_migracao_do_modelo_antigo_lista_unica(self):
+        # Settings antigos: lista única ligada -> vira o perfil "Lista 1" ativo.
+        limpo = normalize_settings({
+            **DEFAULT_SETTINGS,
+            "stt_keywords": ["Taguaí", "Monsenhor"],
+            "stt_keywords_enabled": True,
+        })
+        self.assertEqual({"Lista 1": ["Taguaí", "Monsenhor"]}, limpo["stt_keyword_profiles"])
+        self.assertEqual("Lista 1", limpo["stt_keyword_profile"])
+        self.assertEqual(["Taguaí", "Monsenhor"], stt_keywords(limpo))
+
+    def test_migracao_do_modelo_antigo_desligado(self):
+        # Lista antiga DESLIGADA: migra os termos, mas segue desligada.
+        limpo = normalize_settings({
+            **DEFAULT_SETTINGS,
+            "stt_keywords": ["Taguaí"],
+            "stt_keywords_enabled": False,
+        })
+        self.assertEqual({"Lista 1": ["Taguaí"]}, limpo["stt_keyword_profiles"])
+        self.assertEqual("", limpo["stt_keyword_profile"])
+        self.assertEqual([], stt_keywords(limpo))
+
+    def test_perfis_atuais_tem_prioridade_sobre_o_modelo_antigo(self):
+        limpo = normalize_settings({
+            **DEFAULT_SETTINGS,
+            "stt_keyword_profiles": {"Armas": ["Glock"]},
+            "stt_keyword_profile": "Armas",
+            "stt_keywords": ["Legado"],
+        })
+        self.assertEqual({"Armas": ["Glock"]}, limpo["stt_keyword_profiles"])
 
 
 if __name__ == "__main__":

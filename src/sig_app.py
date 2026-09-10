@@ -106,8 +106,12 @@ from stt_provider_rules import (
     grok_language_param,
     grok_rest_diarize,
     invalid_codes,
-    KEY_STT_KEYWORDS,
+    KEYWORDS_OFF_LABEL,
+    keyword_profiles,
     keywords_for_provider,
+    keywords_profile_label_to_value,
+    keywords_selector_label,
+    keywords_selector_options,
     language_custom,
     language_mode,
     MAX_STT_KEYWORD_LENGTH,
@@ -116,6 +120,8 @@ from stt_provider_rules import (
     metamuse_language_bias,
     metamuse_mode,
     normalize_stt_keywords,
+    MAX_KEYWORD_PROFILES,
+    DEFAULT_KEYWORD_PROFILE_NAME,
     parse_codes,
     stt_keywords_enabled,
     supports_diarize,
@@ -291,6 +297,8 @@ from stt_clients import (  # noqa: F401
     alibaba_ensure_vocabulary,
     alibaba_create_vocabulary,
     alibaba_delete_vocabulary,
+    alibaba_vocabulary_records,
+    alibaba_vocabulary_record_update,
 )
 
 
@@ -995,8 +1003,7 @@ class SigApp:
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
         self.files_language_label_var = StringVar(value="Idioma: pt")
-        self.files_keywords_var = BooleanVar(value=False)
-        self.live_keywords_var = BooleanVar(value=False)
+        self.files_keywords_label_var = StringVar(value=f"Keywords: {KEYWORDS_OFF_LABEL}")
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
@@ -2250,15 +2257,17 @@ class SigApp:
             self.live_language_menu.add_command(label=label, command=lambda selected=code: self._set_live_language(selected))
         self.live_language_button.configure(menu=self.live_language_menu)
         self.live_language_button.pack(side=LEFT)
-        # Checkbox "Keywords" da tela de Ocorrência (WS): liga/desliga o envio
-        # dos termos — é a MESMA chave da checkbox da aba Transcrição.
-        self.live_keywords_check = ttk.Checkbutton(
+        # Seletor "Keywords" da tela de Ocorrência (WS): "Não" (desligado) ou um
+        # dos perfis cadastrados. Mesmo valor da aba Transcrição.
+        self.live_keywords_label_var = StringVar(value=f"Keywords: {KEYWORDS_OFF_LABEL}")
+        self.live_keywords_button = ttk.Menubutton(
             self.live_grok_controls,
-            text="Keywords",
-            variable=self.live_keywords_var,
-            command=self._toggle_live_keywords,
+            textvariable=self.live_keywords_label_var,
+            width=16,
         )
-        self.live_keywords_check.pack(side=LEFT, padx=(10, 0))
+        self.live_keywords_menu = tk.Menu(self.live_keywords_button, tearoff=False)
+        self.live_keywords_button.configure(menu=self.live_keywords_menu)
+        self.live_keywords_button.pack(side=LEFT, padx=(10, 0))
         self.live_keywords_help = ttk.Button(
             self.live_grok_controls,
             text="?",
@@ -3133,17 +3142,17 @@ class SigApp:
             )
         self.files_language_button.configure(menu=self.files_language_menu)
         self.files_language_button.pack(side=LEFT, padx=(8, 0))
-        # Checkbox "Keywords" da aba Transcrição (REST): liga/desliga o envio
-        # dos termos da lista — a lista continua salva nas Configurações.
-        self.files_keywords_var.set(stt_keywords_enabled(self.settings))
-        self.files_keywords_check = ttk.Checkbutton(
+        # Seletor "Keywords" da aba Transcrição (REST): "Não" (desligado) ou um
+        # dos perfis cadastrados nas Configurações.
+        self.files_keywords_button = ttk.Menubutton(
             options2,
-            text="Keywords",
-            variable=self.files_keywords_var,
-            command=self._toggle_files_keywords,
+            textvariable=self.files_keywords_label_var,
+            width=16,
         )
-        self.files_keywords_check.pack(side=LEFT, padx=(10, 0))
-        # "?" alinhado à checkbox: limites reais de termos/caracteres por modelo
+        self.files_keywords_menu = tk.Menu(self.files_keywords_button, tearoff=False)
+        self.files_keywords_button.configure(menu=self.files_keywords_menu)
+        self.files_keywords_button.pack(side=LEFT, padx=(10, 0))
+        # "?" ao lado: limites reais de termos/caracteres por modelo
         # e aviso de falso positivo (contexto forense).
         self.files_keywords_help = ttk.Button(
             options2,
@@ -3152,6 +3161,7 @@ class SigApp:
             command=lambda: self._open_keywords_help(),
         )
         self.files_keywords_help.pack(side=LEFT, padx=(4, 0))
+        self._rebuild_keywords_menus()
         self._refresh_files_language_label()
 
         # VAD removido da tela principal (teste na aba própria)
@@ -6508,9 +6518,10 @@ try {
             "AssemblyAI ........ até ~1000 palavras (cada palavra de uma frase\n"
             "                    conta como uma).\n"
             "Meta Muse Voice ... 20 caracteres por termo.\n"
-            "Alibaba Fun ASR ... NA OCORRÊNCIA (ao vivo) usa a lista\n"
-            "                    pré-compilada e funciona; NA TRANSCRIÇÃO\n"
-            "                    (arquivo) o modelo ignora (ver abaixo).\n"
+            "Alibaba Fun ASR ... NA OCORRÊNCIA (ao vivo) a lista pré-compilada\n"
+            "                    funciona (efeito medido); NA TRANSCRIÇÃO\n"
+            "                    (arquivo) enviamos a lista, mas não houve\n"
+            "                    mudança no resultado (ver abaixo).\n"
             "servidor (Granite)  não usa keywords: nenhum parâmetro é enviado.\n"
             "\n"
             "ATENÇÃO EM TRANSCRIÇÃO POLICIAL — FALSO POSITIVO\n"
@@ -6530,11 +6541,13 @@ try {
             "  sem a lista e \"Taguaí\" com ela, igual nas duas tentativas.\n"
             "  A lista é criada quando os termos mudam (criar vale na hora).\n"
             "\n"
-            "• NA TRANSCRIÇÃO (arquivo): as keywords NÃO têm efeito. O modelo de\n"
-            "  arquivo (fun-asr-flash) IGNORA a lista — testado: com um id\n"
-            "  inexistente a API responde normal (sem erro) e o texto sai\n"
-            "  idêntico com uma lista válida. Se precisar de keywords em arquivo,\n"
-            "  use outro modelo (Deepgram, xAI, AssemblyAI ou ElevenLabs)."
+            "• NA TRANSCRIÇÃO (arquivo): o app TAMBÉM envia a lista pré-compilada\n"
+            "  (é o parâmetro oficial desse modelo), mas a medição de 10/09 não\n"
+            "  mostrou mudança no resultado: 4 configurações testadas (2 modelos\n"
+            "  alvo, com e sem peso máximo) e o texto saiu idêntico ao sem lista.\n"
+            "  Ou seja: enviamos, mas conte com o Alibaba apenas para a Ocorrência.\n"
+            "  Para keywords em arquivo, os modelos com efeito comprovado são\n"
+            "  Deepgram, xAI, AssemblyAI e ElevenLabs."
         )
 
     def _open_keywords_help(self, parent=None):
@@ -6727,9 +6740,7 @@ try {
                     self.live_diarize_var.set(False)
                     self.live_diarize_check.configure(state="disabled")
         self._rebuild_live_language_menu()
-        # A checkbox Keywords das duas telas lê a MESMA chave: mantém a da
-        # Ocorrência em sincronia com o que está salvo.
-        self.live_keywords_var.set(stt_keywords_enabled(self.settings))
+        self._rebuild_keywords_menus()
         interval_state = "disabled" if self.live_state != "idle" else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
             widget.configure(state=interval_state)
@@ -6848,7 +6859,11 @@ try {
                     alibaba_rest_log_params(self.settings),
                 )
                 text = alibaba_rest_transcribe(
-                    cancel, self.settings.copy(), wav_path, wav_path.with_suffix(".raw")
+                    cancel,
+                    self.settings.copy(),
+                    wav_path,
+                    wav_path.with_suffix(".raw"),
+                    self._alibaba_vocabulary_for(self.settings, ALIBABA_REST_MODEL),
                 )
                 if not text.strip():
                     self._queue("status", "Transcrição ao vivo finalizada sem conteúdo")
@@ -7068,26 +7083,40 @@ try {
                 return candidate
         return str(DEFAULT_SETTINGS["transcription_server"])
 
-    def _set_keywords_enabled(self, enabled: bool):
-        """Liga/desliga o envio das keywords (mesma chave nas duas telas).
+    def _apply_keywords_selector(self, label: str):
+        """Aplica a escolha do seletor "Keywords" (perfil ou desligado).
 
-        A lista de keywords continua salva; só as requisições deixam de levar
-        os termos. Vale para REST (Transcrição) e WS (Ocorrência).
+        O perfil ativo vale para as DUAS telas (REST e WS), como a lista única
+        valia antes; a lista de cada perfil continua salva nas Configurações.
         """
-        enabled = bool(enabled)
-        self.settings["stt_keywords_enabled"] = enabled
+        perfil = keywords_profile_label_to_value(self.settings, label)
+        self.settings["stt_keyword_profile"] = perfil
         self.settings = save_settings(self.settings)
-        self.files_keywords_var.set(enabled)
-        self.live_keywords_var.set(enabled)
+        self._rebuild_keywords_menus()
         self._set_activity_status(
-            "Keywords " + ("ativadas." if enabled else "desativadas."), log=False
+            "Keywords: " + (perfil or KEYWORDS_OFF_LABEL + " (desligadas)"), log=False
         )
 
-    def _toggle_files_keywords(self):
-        self._set_keywords_enabled(self.files_keywords_var.get())
-
-    def _toggle_live_keywords(self):
-        self._set_keywords_enabled(self.live_keywords_var.get())
+    def _rebuild_keywords_menus(self):
+        """Reconstrói os menus dos dois seletores (perfis cadastrados)."""
+        opcoes = keywords_selector_options(self.settings)
+        atual = keywords_selector_label(self.settings)
+        for botao, menu in (
+            (getattr(self, "files_keywords_button", None), getattr(self, "files_keywords_menu", None)),
+            (getattr(self, "live_keywords_button", None), getattr(self, "live_keywords_menu", None)),
+        ):
+            if botao is None or menu is None:
+                continue
+            menu.delete(0, "end")
+            for opcao in opcoes:
+                menu.add_command(
+                    label=opcao,
+                    command=lambda escolhido=opcao: self._apply_keywords_selector(escolhido),
+                )
+            botao.configure(menu=menu)
+        self.files_keywords_label_var.set(f"Keywords: {atual}")
+        if hasattr(self, "live_keywords_label_var"):
+            self.live_keywords_label_var.set(f"Keywords: {atual}")
 
     def _refresh_files_language_label(self):
         self.files_language_label_var.set(f"Idioma: {transcription_language_option(self.settings)}")
@@ -7890,31 +7919,57 @@ try {
         parallel_scale(1, "Requisições paralelas", req_var, 16, req_help)
 
         # ── Tela de Keywords (aba Avançado) ──────────────────────────────
-        # Uma lista ÚNICA de termos; cada modelo monta o próprio parâmetro na
-        # requisição (keyterm/keyterms/keyterms_prompt/keywords/vocabulary).
+        # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
+        # seletores "Keywords" das telas de Transcrição e Ocorrência. Cada
+        # modelo continua montando o próprio parâmetro na requisição.
         keywords_page = ttk.Frame(advanced_tab, style="Settings.TFrame")
-        keywords_items: list[str] = normalize_stt_keywords(
-            self.settings.get(KEY_STT_KEYWORDS)
-        )
+        keywords_profiles_edit: dict[str, list[str]] = {
+            nome: list(termos)
+            for nome, termos in keyword_profiles(self.settings).items()
+        }
         keywords_hint_var = StringVar()
+        keywords_profile_var = StringVar()
+        keywords_profile_combo: ttk.Combobox | None = None
+
+        def current_profile_name() -> str:
+            return keywords_profile_var.get().strip()
+
+        def current_items() -> list[str]:
+            return keywords_profiles_edit.get(current_profile_name(), [])
+
+        def set_current_items(termos: list[str]) -> None:
+            nome = current_profile_name()
+            if nome:
+                keywords_profiles_edit[nome] = termos
 
         def keywords_hint() -> str:
             """Resumo HONESTO do que cada modelo vai receber (sem truncar calado)."""
-            if not keywords_items:
-                return "Nenhum termo cadastrado — os modelos transcrevem sem viés."
-            base = {KEY_STT_KEYWORDS: list(keywords_items), "stt_keywords_enabled": True}
-            total = len(keywords_items)
+            if not keywords_profiles_edit:
+                return (
+                    "Nenhuma lista criada. Clique em \"Nova lista\" para cadastrar "
+                    "termos — sem lista os modelos transcrevem sem viés."
+                )
+            nome = current_profile_name()
+            if not nome:
+                return "Nenhuma lista selecionada acima."
+            termos = current_items()
+            if not termos:
+                return f"A lista \"{nome}\" está vazia — os modelos transcrevem sem viés."
+            ativo = keywords_selector_label(self.settings)
+            marca = " (EM USO nas telas)" if nome == ativo else ""
+            base = {"stt_keyword_profiles": {nome: list(termos)}, "stt_keyword_profile": nome}
+            total = len(termos)
             deepgram = len(keywords_for_provider(base, "deepgram"))
             if deepgram < total:
                 return (
-                    f"{total} termos na lista. O Deepgram recebe só os primeiros {deepgram} "
-                    f"(teto de 500 tokens); os demais modelos recebem os {total}. "
-                    "Mantenha os principais no topo — clique em ? para os limites."
+                    f"Lista \"{nome}\"{marca}: {total} termos. O Deepgram recebe só os "
+                    f"primeiros {deepgram} (teto de 500 tokens); os demais modelos recebem "
+                    f"os {total}. Mantenha os principais no topo — clique em ? para os limites."
                 )
             return (
-                f"{total} de {MAX_STT_KEYWORDS} termos — todos os modelos recebem os {total}, "
-                f"com até {MAX_STT_KEYWORD_LENGTH} caracteres cada. "
-                "Clique em ? para os limites de cada modelo."
+                f"Lista \"{nome}\"{marca}: {total} de {MAX_STT_KEYWORDS} termos — todos os "
+                f"modelos recebem os {total}, com até {MAX_STT_KEYWORD_LENGTH} caracteres "
+                "cada. Clique em ? para os limites de cada modelo."
             )
 
         keywords_top = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
@@ -7935,6 +7990,17 @@ try {
             width=2,
             command=lambda: self._open_keywords_help(win),
         ).pack(side=LEFT, padx=(8, 0))
+
+        keywords_profile_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
+        keywords_profile_row.pack(fill=X, pady=(0, 8))
+        ttk.Label(keywords_profile_row, text="Lista:", style="Settings.TLabel").pack(side=LEFT)
+        keywords_profile_combo = ttk.Combobox(
+            keywords_profile_row,
+            textvariable=keywords_profile_var,
+            state="readonly",
+            width=28,
+        )
+        keywords_profile_combo.pack(side=LEFT, padx=(6, 0))
 
         keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_entry_row.pack(fill=X, pady=(0, 10))
@@ -7962,16 +8028,137 @@ try {
         keywords_tree.pack(side=LEFT)
         keywords_scroll.pack(side=LEFT, fill=Y)
 
+        def refresh_profile_combo(selecionar: str | None = None):
+            nomes = list(keywords_profiles_edit)
+            if keywords_profile_combo is not None:
+                keywords_profile_combo.configure(values=nomes)
+            alvo = selecionar if selecionar is not None else current_profile_name()
+            if alvo not in nomes:
+                alvo = nomes[0] if nomes else ""
+            keywords_profile_var.set(alvo)
+            refresh_keywords_table()
+
+        def new_profile():
+            if len(keywords_profiles_edit) >= MAX_KEYWORD_PROFILES:
+                messagebox.showinfo(
+                    "Keywords",
+                    f"O máximo é {MAX_KEYWORD_PROFILES} listas.",
+                    parent=win,
+                )
+                return
+            base = DEFAULT_KEYWORD_PROFILE_NAME
+            numero = 1
+            nome = base
+            while nome in keywords_profiles_edit:
+                numero += 1
+                nome = f"Lista {numero}"
+            keywords_profiles_edit[nome] = []
+            refresh_profile_combo(selecionar=nome)
+            keyword_entry.focus_set()
+
+        def rename_profile():
+            nome = current_profile_name()
+            if not nome:
+                messagebox.showinfo("Keywords", "Crie ou selecione uma lista primeiro.", parent=win)
+                return
+            janela = Toplevel(win)
+            janela.title("Renomear lista")
+            janela.configure(background="#f4f7f6")
+            janela.resizable(False, False)
+            janela.transient(win)
+            quadro = ttk.Frame(janela, padding=12)
+            quadro.pack(fill=BOTH, expand=True)
+            entrada = ttk.Entry(quadro, width=32)
+            entrada.insert(0, nome)
+            entrada.pack(fill=X, pady=(0, 8))
+            ttk.Label(
+                quadro,
+                text="Novo nome da lista (as telas mostram este nome no seletor).",
+                justify="left",
+            ).pack(anchor="w", pady=(0, 8))
+
+            def aplicar():
+                novo = entrada.get().strip()
+                if not novo:
+                    messagebox.showinfo("Keywords", "Digite um nome.", parent=janela)
+                    return
+                if novo != nome and novo in keywords_profiles_edit:
+                    messagebox.showinfo("Keywords", f'Já existe a lista "{novo}".', parent=janela)
+                    return
+                termos = keywords_profiles_edit.pop(nome)
+                # Preserva a ordem da lista renomeada.
+                reordenado = {
+                    (novo if chave == nome else chave): valor
+                    for chave, valor in (
+                        (novo, termos),
+                        *[(k, v) for k, v in keywords_profiles_edit.items()],
+                    )
+                }
+                keywords_profiles_edit.clear()
+                keywords_profiles_edit.update(reordenado)
+                if str(self.settings.get("stt_keyword_profile") or "").strip() == nome:
+                    self.settings["stt_keyword_profile"] = novo
+                janela.destroy()
+                refresh_profile_combo(selecionar=novo)
+
+            botoes = ttk.Frame(quadro)
+            botoes.pack(fill=X)
+            ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side=LEFT, padx=(0, 8))
+            ttk.Button(botoes, text="Renomear", command=aplicar).pack(side=LEFT)
+            entrada.bind("<Return>", lambda _event: aplicar())
+            janela.grab_set()
+            entrada.focus_set()
+
+        def delete_profile():
+            nome = current_profile_name()
+            if not nome:
+                messagebox.showinfo("Keywords", "Crie ou selecione uma lista primeiro.", parent=win)
+                return
+            if not messagebox.askyesno(
+                "Excluir lista",
+                f'Excluir a lista "{nome}" com {len(keywords_profiles_edit.get(nome, []))} termo(s)?',
+                parent=win,
+            ):
+                return
+            keywords_profiles_edit.pop(nome, None)
+            if str(self.settings.get("stt_keyword_profile") or "").strip() == nome:
+                self.settings["stt_keyword_profile"] = ""     # era a ativa: desliga
+            refresh_profile_combo()
+
+        ttk.Button(
+            keywords_profile_row,
+            text="Nova lista",
+            command=new_profile,
+        ).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(
+            keywords_profile_row,
+            text="Renomear",
+            command=rename_profile,
+        ).pack(side=LEFT, padx=(6, 0))
+        ttk.Button(
+            keywords_profile_row,
+            text="Excluir",
+            command=delete_profile,
+        ).pack(side=LEFT, padx=(6, 0))
+
         def refresh_keywords_table(select_index: int | None = None):
             keywords_tree.delete(*keywords_tree.get_children())
-            for index, term in enumerate(keywords_items, start=1):
+            termos = current_items()
+            for index, term in enumerate(termos, start=1):
                 keywords_tree.insert("", "end", iid=str(index), values=(index, term))
-            if select_index is not None and 1 <= select_index <= len(keywords_items):
+            if select_index is not None and 1 <= select_index <= len(termos):
                 keywords_tree.selection_set(str(select_index))
                 keywords_tree.see(str(select_index))
             keywords_hint_var.set(keywords_hint())
 
         def add_keyword():
+            if not current_profile_name():
+                messagebox.showinfo(
+                    "Keywords",
+                    "Crie uma lista primeiro (botão \"Nova lista\").",
+                    parent=win,
+                )
+                return
             term = keyword_entry_var.get().strip()
             if not term:
                 messagebox.showinfo("Keywords", "Digite a palavra antes de adicionar.", parent=win)
@@ -7986,19 +8173,20 @@ try {
                     parent=win,
                 )
                 return
-            if any(existing.casefold() == term.casefold() for existing in keywords_items):
-                messagebox.showinfo("Keywords", f'"{term}" já está na lista.', parent=win)
+            termos = current_items()
+            if any(existing.casefold() == term.casefold() for existing in termos):
+                messagebox.showinfo("Keywords", f'"{term}" já está nesta lista.', parent=win)
                 return
-            if len(keywords_items) >= MAX_STT_KEYWORDS:
+            if len(termos) >= MAX_STT_KEYWORDS:
                 messagebox.showinfo(
                     "Keywords",
                     f"A lista já tem o máximo de {MAX_STT_KEYWORDS} keywords.",
                     parent=win,
                 )
                 return
-            keywords_items.append(term)
+            set_current_items(termos + [term])
             keyword_entry_var.set("")
-            refresh_keywords_table(select_index=len(keywords_items))
+            refresh_keywords_table(select_index=len(termos) + 1)
             keyword_entry.focus_set()
 
         def remove_keyword():
@@ -8011,17 +8199,18 @@ try {
                 )
                 return
             index = int(str(selection[0])) - 1
-            if not (0 <= index < len(keywords_items)):
+            termos = current_items()
+            if not (0 <= index < len(termos)):
                 return
-            term = keywords_items[index]
+            term = termos[index]
             if not messagebox.askyesno(
                 "Excluir keyword",
                 f'Excluir a keyword "{term}"?',
                 parent=win,
             ):
                 return
-            del keywords_items[index]
-            refresh_keywords_table(select_index=min(index + 1, len(keywords_items)))
+            set_current_items([t for pos, t in enumerate(termos) if pos != index])
+            refresh_keywords_table(select_index=min(index + 1, len(termos) - 1))
 
         add_keyword_button = ttk.Button(
             keywords_entry_row,
@@ -8044,7 +8233,10 @@ try {
         ).pack(side=LEFT)
         ttk.Label(
             keywords_actions,
-            text="Selecione um item e clique em \u2212 para excluir. Clique em Salvar para manter.",
+            text=(
+                "Selecione um item e clique em \u2212 para excluir. A lista em edição é a "
+                "escolhida em \"Lista\"; clique em Salvar para manter."
+            ),
             style="Muted.TLabel",
         ).pack(side=LEFT, padx=(12, 0))
         ttk.Label(
@@ -8054,7 +8246,7 @@ try {
             wraplength=560,
             justify="left",
         ).pack(anchor="w", pady=(8, 0))
-        refresh_keywords_table()
+        refresh_profile_combo()
 
         def show_keywords_screen():
             advanced_home.pack_forget()
@@ -8895,7 +9087,13 @@ try {
                     "elevenlabs_api_key": elevenlabs_api_key,
                     "metamuse_api_key": metamuse_api_key,
                     "alibaba_api_key": alibaba_api_key,
-                    "stt_keywords": list(keywords_items),
+                    "stt_keyword_profiles": {
+                        nome: list(termos) for nome, termos in keywords_profiles_edit.items()
+                    },
+                    # Perfil ativo (escolhido no seletor das telas): entra no
+                    # save porque o normalize parte dos defaults — sem esta
+                    # linha, salvar as Configurações desligaria as keywords.
+                    "stt_keyword_profile": str(self.settings.get("stt_keyword_profile") or ""),
                     "imei_api_key": imei_api_key,
                     "police_name": police_name,
                     "police_role": police_role,
@@ -9926,7 +10124,11 @@ try {
                     raise RuntimeError("resposta vazia")
             elif is_alibaba_transcription(settings):
                 transcript = alibaba_rest_transcribe(
-                    self.live_abort_event, settings, wav_path, raw_path
+                    self.live_abort_event,
+                    settings,
+                    wav_path,
+                    raw_path,
+                    self._alibaba_vocabulary_for(settings, ALIBABA_REST_MODEL),
                 )
                 if not transcript.strip():
                     raise RuntimeError("resposta vazia")
@@ -10021,33 +10223,13 @@ try {
         # Hotwords: a lista pré-compilada é criada/retomada UMA vez por sessão
         # (antes de conectar), porque criar vale na hora, mas atualizar demora
         # até 5 min. Sem termos/chave, segue sem lista (transcrição normal).
-        alibaba_terms = keywords_for_provider(settings, "alibaba")
-        alibaba_vocabulary_id = ""
-        if alibaba_terms:
-            try:
-                alibaba_vocabulary_id = alibaba_ensure_vocabulary(
-                    settings, ALIBABA_WS_MODEL, alibaba_terms
-                )
-            except Exception as exc:
-                self._queue("activity", f"Alibaba: falha ao preparar a lista de keywords ({exc}).", "warning")
-            if alibaba_vocabulary_id:
-                if (
-                    str(settings.get("alibaba_vocabulary_id") or "") != alibaba_vocabulary_id
-                    or [str(t) for t in (settings.get("alibaba_vocabulary_terms") or [])] != [str(t) for t in alibaba_terms]
-                ):
-                    self._queue("settings_key", "alibaba_vocabulary_id", alibaba_vocabulary_id)
-                    self._queue("settings_key", "alibaba_vocabulary_terms", [str(t) for t in alibaba_terms])
-                self._queue(
-                    "activity",
-                    f"Alibaba: lista de keywords pronta ({len(alibaba_terms)} termos).",
-                    "activity_step_done",
-                )
-            else:
-                self._queue(
-                    "activity",
-                    "Alibaba: não consegui preparar a lista de keywords; seguindo sem hotwords.",
-                    "warning",
-                )
+        alibaba_vocabulary_id = self._alibaba_vocabulary_for(settings, ALIBABA_WS_MODEL)
+        if alibaba_vocabulary_id:
+            self._queue(
+                "activity",
+                f"Alibaba: lista de keywords pronta ({len(keywords_for_provider(settings, 'alibaba'))} termos).",
+                "activity_step_done",
+            )
         audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
         full_pcm_lock = threading.Lock()
         full_pcm = None
@@ -13126,6 +13308,41 @@ try {
             else:
                 self._queue("job", job.original_path, f"Transcrito nos {len(model_settings)} modelos")
 
+    def _alibaba_vocabulary_for(self, settings: dict, target_model: str) -> str:
+        """Lista pré-compilada de hotwords pronta para ESTE modelo ("" = sem).
+
+        Usada tanto pelo arquivo (REST, Transcrição) quanto pelo WebSocket
+        (Ocorrência) — cada modelo alvo tem o seu registro. Reaproveita a lista
+        quando o modelo e os termos são os mesmos; cria outra quando mudam.
+        Nunca derruba a transcrição: em erro devolve "" (o chamador segue sem
+        hotwords) e o registro novo é persistido pela fila `settings_key`,
+        gravada na UI thread.
+        """
+        termos = keywords_for_provider(settings, "alibaba")
+        if not termos:
+            return ""
+        try:
+            vocabulary_id = alibaba_ensure_vocabulary(settings, target_model, termos)
+        except Exception as exc:
+            self._queue("activity", f"Alibaba: falha ao preparar a lista de keywords ({exc}).", "warning")
+            return ""
+        if not vocabulary_id:
+            self._queue(
+                "activity",
+                "Alibaba: não consegui preparar a lista de keywords; seguindo sem hotwords.",
+                "warning",
+            )
+            return ""
+        registros = alibaba_vocabulary_records(settings)
+        atual = registros.get(target_model) or {}
+        if atual.get("id") != vocabulary_id or atual.get("terms") != [str(t) for t in termos]:
+            self._queue(
+                "settings_key",
+                "alibaba_vocabulary_by_model",
+                alibaba_vocabulary_record_update(settings, target_model, vocabulary_id, termos),
+            )
+        return vocabulary_id
+
     def _transcribe_job(
         self,
         job: AudioJob,
@@ -13172,7 +13389,11 @@ try {
         # Alibaba Fun ASR/Qwen: REST DashScope nativo (fun-asr-flash).
         if is_alibaba_transcription(request_settings):
             transcript = alibaba_rest_transcribe(
-                self.cancel_event, request_settings, job.upload_path, raw_path
+                self.cancel_event,
+                request_settings,
+                job.upload_path,
+                raw_path,
+                self._alibaba_vocabulary_for(request_settings, ALIBABA_REST_MODEL),
             )
             result = transcript or "(sem transcrição)"
             audio_job_set(job, "transcription", model_index, result)

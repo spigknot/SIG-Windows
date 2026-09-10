@@ -94,12 +94,28 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     """
     from tkinter import ttk
 
-    if getattr(app, "files_keywords_check", None) is None:
-        raise RuntimeError("checkbox Keywords da aba Transcricao ausente")
-    if app.files_keywords_check.winfo_manager() != "pack":
-        raise RuntimeError("checkbox Keywords da aba Transcricao nao esta visivel")
-    if getattr(app, "live_keywords_check", None) is None:
-        raise RuntimeError("checkbox Keywords da tela de Ocorrencia ausente")
+    # Os seletores "Keywords" (perfis) ficam nas duas telas, com o "?" ao lado.
+    for atributo, onde in (
+        ("files_keywords_button", "aba Transcricao"),
+        ("live_keywords_button", "tela de Ocorrencia"),
+    ):
+        botao = getattr(app, atributo, None)
+        if botao is None:
+            raise RuntimeError(f"seletor Keywords ausente na {onde}")
+        if botao.winfo_manager() != "pack":
+            raise RuntimeError(f"seletor Keywords nao esta visivel na {onde}")
+        rotulo = str(botao.cget("textvariable"))
+        if rotulo:
+            texto = str(app.root.getvar(rotulo))
+            if not texto.startswith("Keywords: "):
+                raise RuntimeError(f"rotulo do seletor Keywords fora do padrao: {texto!r}")
+    if not str(app.files_keywords_label_var.get()).startswith("Keywords: "):
+        raise RuntimeError("rotulo do seletor Keywords da Transcricao fora do padrao")
+    # O menu do seletor precisa ter sempre a opcao "desligado" ("Nao").
+    menu = app.files_keywords_button.nametowidget(app.files_keywords_button.cget("menu"))
+    opcoes = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)]
+    if not opcoes or opcoes[0] != "Não":
+        raise RuntimeError(f"seletor Keywords sem a opcao 'Nao' primeiro: {opcoes}")
     # O "?" (limites por modelo + aviso de falso positivo) acompanha as duas
     # checkboxes e a tela de Keywords.
     for atributo, onde in (
