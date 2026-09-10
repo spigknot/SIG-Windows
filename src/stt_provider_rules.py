@@ -416,6 +416,92 @@ MAX_STT_KEYWORDS = 100
 MAX_STT_KEYWORD_LENGTH = 20
 # Peso das hotwords do DashScope (os exemplos oficiais usam 4, 5 e 50).
 ALIBABA_KEYWORD_WEIGHT = 5
+# Orçamento de tokens dos keyterms do Deepgram. A doc diz 500 tokens por
+# requisição e devolve ERRO acima disso — medido ao vivo (10/09):
+#   40 termos de 20 chars  -> OK
+#   60 termos de 20 chars  -> HTTP 400 "Keyterm limit exceeded. The maximum
+#                             number of tokens across all keyterms is 500."
+#   50 termos de 15 chars  -> OK
+#  100 termos de 15 chars  -> HTTP 400
+#  200 termos de  8 chars  -> OK
+# Ou seja: o teto é por TOKENS, não por quantidade (termos curtos passam de
+# 100). O app usa margem de segurança e envia só os primeiros que couberem.
+DEEPGRAM_KEYTERM_TOKEN_BUDGET = 450
+
+
+def estimate_keyterm_tokens(term: str) -> int:
+    """Estimativa CONSERVADORA dos tokens de um keyterm (BPE do Deepgram).
+
+    Não há tokenizador local confiável: a estimativa erra PARA CIMA de
+    propósito, porque subestimar significa HTTP 400 e a transcrição do arquivo
+    perdida. Calibração com as medições acima (termos de 20 caracteres com
+    letras → 11 tokens; 450/11 = 40, que é exatamente o que a API aceitou).
+    """
+    nucleo = max(1, (len(term) + 2) // 2)
+    # Dígito/símbolo costuma virar token próprio em vez de se juntar à palavra.
+    nao_alfabeticos = sum(1 for c in term if not c.isalpha())
+    return nucleo + nao_alfabeticos
+
+
+def keywords_for_provider(settings: dict, provider: str) -> list[str]:
+    """Termos que REALMENTE vão para o provedor: os PRIMEIROS que cabem.
+
+    A ordem da lista é a prioridade. Para o Deepgram o corte é pelo orçamento
+    de tokens; nos demais, pelo teto de quantidade. Nada é alterado no termo
+    (nunca truncar texto do usuário sem avisar) — o excedente é apenas não
+    enviado, e a tela de ajuda explica isso.
+    """
+    terms = stt_keywords(settings)
+    if not terms:
+        return []
+    # Provedor sem biasing (servidor/Granite NAR): nunca manda nada.
+    if not supports_keywords(provider):
+        return []
+    if provider != "deepgram":
+        return terms[:MAX_STT_KEYWORDS]
+    usados: list[str] = []
+    gasto = 0
+    for term in terms:
+        custo = estimate_keyterm_tokens(term)
+        if gasto + custo > DEEPGRAM_KEYTERM_TOKEN_BUDGET:
+            break
+        usados.append(term)
+        gasto += custo
+    return usados
+
+
+def keywords_query_params(settings: dict, provider: str) -> list[tuple[str, str]]:
+    """Pares (chave, valor) do query string/WS para o provedor.
+
+    Lista vazia = nada a anexar (provedor sem biasing por query: Muse e Alibaba
+    levam as keywords no JSON do corpo). O valor sai CRU — quem monta a URL
+    faz o quote. Os termos já vêm cortados pelo limite do provedor.
+    """
+    terms = keywords_for_provider(settings, provider)
+    if not terms:
+        return []
+    if provider in ("deepgram", "grok"):
+        return [("keyterm", term) for term in terms]
+    if provider == "elevenlabs":
+        return [("keyterms", term) for term in terms]
+    if provider == "assemblyai":
+        # A AssemblyAI espera UM parâmetro com o array em JSON.
+        return [("keyterms_prompt", json.dumps(terms, ensure_ascii=False))]
+    return []
+
+
+def metamuse_keywords(settings: dict) -> list[str] | None:
+    """Meta Muse Voice: `keywords` (lista); None = omitir o campo."""
+    terms = keywords_for_provider(settings, "metamuse")
+    return terms or None
+
+
+def alibaba_vocabulary(settings: dict) -> dict[str, int] | None:
+    """Alibaba (DashScope): `vocabulary` como {termo: peso}; None = omitir."""
+    terms = keywords_for_provider(settings, "alibaba")
+    if not terms:
+        return None
+    return {term: ALIBABA_KEYWORD_WEIGHT for term in terms}
 
 # Provedores que aceitam algum tipo de termo de reforço (o servidor local não).
 KEYWORD_PROVIDERS = ("deepgram", "grok", "elevenlabs", "assemblyai", "metamuse", "alibaba")
@@ -461,37 +547,3 @@ def stt_keywords(settings: dict) -> list[str]:
 
 def supports_keywords(provider: str) -> bool:
     return provider in KEYWORD_PROVIDERS
-
-
-def keywords_query_params(settings: dict, provider: str) -> list[tuple[str, str]]:
-    """Pares (chave, valor) do query string/WS para o provedor.
-
-    Lista vazia = nada a anexar (provedor sem biasing por query: Muse e Alibaba
-    levam as keywords no JSON do corpo). O valor sai CRU — quem monta a URL
-    faz o quote.
-    """
-    terms = stt_keywords(settings)
-    if not terms:
-        return []
-    if provider in ("deepgram", "grok"):
-        return [("keyterm", term) for term in terms]
-    if provider == "elevenlabs":
-        return [("keyterms", term) for term in terms]
-    if provider == "assemblyai":
-        # A AssemblyAI espera UM parâmetro com o array em JSON.
-        return [("keyterms_prompt", json.dumps(terms, ensure_ascii=False))]
-    return []
-
-
-def metamuse_keywords(settings: dict) -> list[str] | None:
-    """Meta Muse Voice: `keywords` (lista); None = omitir o campo."""
-    terms = stt_keywords(settings)
-    return terms or None
-
-
-def alibaba_vocabulary(settings: dict) -> dict[str, int] | None:
-    """Alibaba (DashScope): `vocabulary` como {termo: peso}; None = omitir."""
-    terms = stt_keywords(settings)
-    if not terms:
-        return None
-    return {term: ALIBABA_KEYWORD_WEIGHT for term in terms}

@@ -50,8 +50,11 @@ from stt_clients import (  # noqa: E402
 )
 from stt_provider_rules import (  # noqa: E402
     alibaba_vocabulary,
+    DEEPGRAM_KEYTERM_TOKEN_BUDGET,
+    estimate_keyterm_tokens,
     KEY_STT_KEYWORDS,
     KEY_STT_KEYWORDS_ENABLED,
+    keywords_for_provider,
     keywords_query_params,
     MAX_STT_KEYWORD_LENGTH,
     MAX_STT_KEYWORDS,
@@ -326,6 +329,114 @@ class AceitacaoPorProvedorTest(unittest.TestCase):
         # servidor (Granite NAR): nenhum parâmetro de termo, em nenhum caminho.
         self.assertEqual([], keywords_query_params(_settings(), "servidor"))
         self.assertFalse(supports_keywords("servidor"))
+
+
+class OrcamentoDeepgramTest(unittest.TestCase):
+    """Teto de 500 tokens do Deepgram — medido ao vivo (10/09).
+
+    Erro real acima do teto (HTTP 400):
+      "Keyterm limit exceeded. The maximum number of tokens across all
+       keyterms is 500."
+
+    Medições que calibram o corte: 40 termos de 20 chars OK / 60 falha;
+    50 termos de 15 chars OK / 100 falha; 200 termos de 8 chars OK.
+    """
+
+    def test_poucos_termos_passam_inteiros(self):
+        poucos = _settings(**{KEY_STT_KEYWORDS: ["Taguaí", "Murtura", "Rua Monsenhor"]})
+        self.assertEqual(
+            ["Taguaí", "Murtura", "Rua Monsenhor"],
+            keywords_for_provider(poucos, "deepgram"),
+        )
+
+    def test_termos_de_20_chars_cabem_no_orcamento_medido(self):
+        termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
+        enviados = keywords_for_provider(_settings(**{KEY_STT_KEYWORDS: termos}), "deepgram")
+        # 40 passam de verdade na API; a estimativa é conservadora e não pode
+        # mandar mais do que isso.
+        self.assertLessEqual(len(enviados), 45)
+        self.assertGreaterEqual(len(enviados), 20)
+
+    def test_corte_e_sempre_pelos_primeiros(self):
+        termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
+        enviados = keywords_for_provider(_settings(**{KEY_STT_KEYWORDS: termos}), "deepgram")
+        self.assertEqual(termos[: len(enviados)], enviados)
+
+    def test_a_query_do_deepgram_respeita_o_orcamento(self):
+        termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
+        query = deepgram_query_string(_settings(**{KEY_STT_KEYWORDS: termos}))
+        envios = query.count("keyterm=")
+        self.assertLess(envios, 100)
+        self.assertGreater(envios, 0)
+        self.assertLess(envios, query.count("keyterm=") + 1)  # sanidade
+
+    def test_estimativa_e_conservadora_para_termo_de_20_chars(self):
+        # 11 tokens por termo de 20 letras: 450/11 = 40 (o que a API aceitou).
+        self.assertEqual(11, estimate_keyterm_tokens("X" * 20))
+        self.assertEqual(450 // 11, DEEPGRAM_KEYTERM_TOKEN_BUDGET // estimate_keyterm_tokens("X" * 20))
+
+    def test_estimativa_cresce_com_digitos(self):
+        # Dígito vira token próprio: a estimativa (conservadora) não pode ser
+        # menor do que a de um termo só de letras do mesmo tamanho.
+        self.assertGreater(
+            estimate_keyterm_tokens("Rua12345"),
+            estimate_keyterm_tokens("RuaMonte"),
+        )
+
+    def test_outros_provedores_nao_sofrem_corte_do_deepgram(self):
+        termos = [f"PalavraDeTeste{i:04d}"[:20] for i in range(100)]
+        settings = _settings(**{KEY_STT_KEYWORDS: termos})
+        self.assertEqual(100, len(keywords_for_provider(settings, "grok")))
+        self.assertEqual(100, len(keywords_for_provider(settings, "elevenlabs")))
+        self.assertEqual(100, len(keywords_for_provider(settings, "assemblyai")))
+        self.assertEqual(100, len(keywords_for_provider(settings, "metamuse")))
+        self.assertEqual(100, len(keywords_for_provider(settings, "alibaba")))
+        self.assertEqual([], keywords_for_provider(settings, "servidor"))
+
+    def test_termo_nunca_e_alterado_no_corte(self):
+        # O excedente é DESCARTADO, o termo enviado continua idêntico.
+        termos = ["Taguaí", "Rua Monsenhor"] + [f"Extra{i:03d}" for i in range(90)]
+        enviados = keywords_for_provider(_settings(**{KEY_STT_KEYWORDS: termos}), "deepgram")
+        self.assertEqual(termos[: len(enviados)], enviados)
+
+
+class TelaDeAjudaTest(unittest.TestCase):
+    """O texto de ajuda precisa dizer os limites reais e o risco forense."""
+
+    @classmethod
+    def setUpClass(cls):
+        from sig_app import SigApp
+
+        cls.texto = SigApp._keywords_help_text(SigApp.__new__(SigApp))
+
+    def test_cita_limite_de_caracteres_e_de_termos(self):
+        self.assertIn(f"Até {MAX_STT_KEYWORD_LENGTH} caracteres por termo", self.texto)
+        self.assertIn(f"Até {MAX_STT_KEYWORDS} termos na lista", self.texto)
+
+    def test_explica_que_so_os_primeiros_sao_enviados(self):
+        self.assertIn("SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS", self.texto)
+
+    def test_cita_o_teto_de_500_tokens_do_deepgram(self):
+        self.assertIn("500 tokens", self.texto)
+        self.assertIn("Deepgram Nova 3", self.texto)
+
+    def test_cita_o_limite_por_modelo(self):
+        for modelo in ("xAI", "ElevenLabs", "AssemblyAI", "Meta Muse Voice", "Alibaba"):
+            with self.subTest(modelo=modelo):
+                self.assertIn(modelo, self.texto)
+
+    def test_avisa_do_falso_positivo(self):
+        self.assertIn("FALSO POSITIVO", self.texto)
+        self.assertIn("NÃO foi dito", self.texto)
+
+    def test_explica_a_limitacao_do_alibaba(self):
+        # O texto quebra linha no meio da expressão, então checamos os termos
+        # que não se partem.
+        self.assertIn("PRÉ-COMPILADA", self.texto)
+        self.assertIn("vocabulary_id", self.texto)
+
+    def test_servidor_local_aparece_sem_keywords(self):
+        self.assertIn("não usa keywords", self.texto)
 
 
 if __name__ == "__main__":

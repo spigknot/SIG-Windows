@@ -100,6 +100,17 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
         raise RuntimeError("checkbox Keywords da aba Transcricao nao esta visivel")
     if getattr(app, "live_keywords_check", None) is None:
         raise RuntimeError("checkbox Keywords da tela de Ocorrencia ausente")
+    # O "?" (limites por modelo + aviso de falso positivo) acompanha as duas
+    # checkboxes e a tela de Keywords.
+    for atributo, onde in (
+        ("files_keywords_help", "aba Transcricao"),
+        ("live_keywords_help", "tela de Ocorrencia"),
+    ):
+        botao = getattr(app, atributo, None)
+        if botao is None:
+            raise RuntimeError(f"botao '?' das keywords ausente na {onde}")
+        if botao.cget("text") != "?":
+            raise RuntimeError(f"botao das keywords na {onde} nao e '?'")
 
     def descendentes(widget):
         for filho in widget.winfo_children():
@@ -112,6 +123,14 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     botoes = textos(ttk.Button)
     if "KEYWORDS" not in botoes:
         raise RuntimeError("botao KEYWORDS ausente na aba Avancado")
+    if botoes.count("?") < 1:
+        raise RuntimeError("botao '?' das keywords ausente nas Configuracoes")
+    # O texto de ajuda precisa citar os limites reais (para o usuario saber que
+    # so os primeiros termos sao enviados e que ha risco de falso positivo).
+    ajuda = app._keywords_help_text()
+    for trecho in ("SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS", "500 tokens", "FALSO POSITIVO"):
+        if trecho not in ajuda:
+            raise RuntimeError(f"texto de ajuda das keywords sem o trecho: {trecho}")
 
     secoes = [w for w in descendentes(settings_window) if isinstance(w, ttk.LabelFrame)]
     imei = next((w for w in secoes if w.cget("text") == "IMEI CHECK"), None)

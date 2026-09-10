@@ -96,15 +96,18 @@ from stt_provider_rules import (
     codes_for_help,
     deepgram_diarize_query,
     deepgram_language_param,
+    DEEPGRAM_KEYTERM_TOKEN_BUDGET,
     elevenlabs_rest_diarize,
     elevenlabs_rest_language_code,
     elevenlabs_ws_diarize_query,
     elevenlabs_ws_language,
+    estimate_keyterm_tokens,
     grok_diarize_query,
     grok_language_param,
     grok_rest_diarize,
     invalid_codes,
     KEY_STT_KEYWORDS,
+    keywords_for_provider,
     language_custom,
     language_mode,
     MAX_STT_KEYWORD_LENGTH,
@@ -2253,6 +2256,13 @@ class SigApp:
             command=self._toggle_live_keywords,
         )
         self.live_keywords_check.pack(side=LEFT, padx=(10, 0))
+        self.live_keywords_help = ttk.Button(
+            self.live_grok_controls,
+            text="?",
+            width=2,
+            command=lambda: self._open_keywords_help(),
+        )
+        self.live_keywords_help.pack(side=LEFT, padx=(4, 0))
         self.live_grok_controls.pack(side=LEFT)
         self.live_top_spacer = ttk.Frame(live_top)
         self.live_top_spacer.pack(side=LEFT, fill=X, expand=True)
@@ -3130,6 +3140,15 @@ class SigApp:
             command=self._toggle_files_keywords,
         )
         self.files_keywords_check.pack(side=LEFT, padx=(10, 0))
+        # "?" alinhado à checkbox: limites reais de termos/caracteres por modelo
+        # e aviso de falso positivo (contexto forense).
+        self.files_keywords_help = ttk.Button(
+            options2,
+            text="?",
+            width=2,
+            command=lambda: self._open_keywords_help(),
+        )
+        self.files_keywords_help.pack(side=LEFT, padx=(4, 0))
         self._refresh_files_language_label()
 
         # VAD removido da tela principal (teste na aba própria)
@@ -6448,6 +6467,116 @@ try {
             "qualification": "qualificação",
         }[kind]
 
+    def _keywords_help_text(self) -> str:
+        """Texto da tela de ajuda das Keywords (limites REAIS medidos)."""
+        termos_deepgram = DEEPGRAM_KEYTERM_TOKEN_BUDGET // estimate_keyterm_tokens("X" * 20)
+        return (
+            "KEYWORDS — LIMITES E CUIDADOS\n"
+            "\n"
+            "A lista de keywords é única, mas cada modelo recebe os termos do\n"
+            "seu próprio jeito. Por isso o app usa sempre o limite MAIS\n"
+            "RESTRITO, para o mesmo termo funcionar em todos os modelos.\n"
+            "\n"
+            f"• Até {MAX_STT_KEYWORD_LENGTH} caracteres por termo.\n"
+            "  O Realtime da ElevenLabs e o Meta Muse Voice RECUSAM termos\n"
+            "  maiores (medido: \"Each keyterm must be at most 20 characters\").\n"
+            "  O xAI e o ElevenLabs por arquivo aceitariam 50 caracteres, mas o\n"
+            "  app limita em 20 para o termo valer também na Ocorrência.\n"
+            "\n"
+            f"• Até {MAX_STT_KEYWORDS} termos na lista.\n"
+            "\n"
+            "• SÓ OS PRIMEIROS TERMOS SÃO ENVIADOS. A ordem da tabela é a ordem\n"
+            "  de prioridade: mantenha no topo os termos mais importantes. O que\n"
+            "  passa do limite é descartado no envio (nunca alteramos o texto do\n"
+            "  termo).\n"
+            "\n"
+            "LIMITES POR MODELO (medidos nos servidores)\n"
+            "\n"
+            f"Deepgram Nova 3 .... até 100 termos E um teto de 500 tokens por\n"
+            f"                    requisição. Um termo de 20 caracteres consome\n"
+            f"                    cerca de 11 tokens, então na prática entram os\n"
+            f"                    primeiros ~{termos_deepgram} termos desse tamanho (termos\n"
+            "                    curtos vão além de 100). O app envia só os\n"
+            "                    primeiros que couberem; acima do teto a API\n"
+            "                    devolve erro e a transcrição do arquivo falha.\n"
+            "xAI (Grok STT) .... até 100 termos, 50 caracteres cada.\n"
+            "ElevenLabs ........ por arquivo: 50 caracteres/1000 termos;\n"
+            "                    ao vivo (Realtime): 20 caracteres por termo.\n"
+            "AssemblyAI ........ até ~1000 palavras (cada palavra de uma frase\n"
+            "                    conta como uma).\n"
+            "Meta Muse Voice ... 20 caracteres por termo.\n"
+            "Alibaba Fun ASR ... aceita qualquer quantidade/tamanho, mas o\n"
+            "                    efeito real não é garantido (ver abaixo).\n"
+            "servidor (Granite)  não usa keywords: nenhum parâmetro é enviado.\n"
+            "\n"
+            "ATENÇÃO EM TRANSCRIÇÃO POLICIAL — FALSO POSITIVO\n"
+            "\n"
+            "As keywords AUMENTAM a chance de o modelo escrever o termo,\n"
+            "inclusive quando ele NÃO foi dito. Em teste real, um áudio que dizia\n"
+            "outra frase saiu com o termo cadastrado no meio do texto.\n"
+            "Use poucos termos e bem específicos (nomes, ruas, apelidos) e SEMPRE\n"
+            "confira o áudio antes de tratar a transcrição como prova: o termo\n"
+            "pode ter sido inserido pelo viés do modelo, não pela fala.\n"
+            "\n"
+            "ALIBABA — POR QUE PODE NÃO FAZER EFEITO\n"
+            "\n"
+            "O app envia a \"hotword instantânea\" (vocabulary dentro da\n"
+            "requisição). A documentação da Alibaba apresenta esse mecanismo para\n"
+            "a família qwen-audio-3.0-asr-flash (usada ao vivo). Para o modelo de\n"
+            "arquivo (fun-asr-flash) o caminho documentado é a LISTA\n"
+            "PRÉ-COMPILADA (vocabulary_id), criada antes na conta do usuário.\n"
+            "O servidor chega a recusar formato inválido, mas não há garantia de\n"
+            "que o termo influencie o resultado no modo arquivo."
+        )
+
+    def _open_keywords_help(self, parent=None):
+        """Abre a tela de ajuda das Keywords (rolável, somente leitura)."""
+        janela = Toplevel(parent or self.root)
+        janela.title("Keywords — limites e cuidados")
+        janela.configure(background="#f4f7f6")
+        janela.resizable(True, True)
+        janela.transient(parent or self.root)
+        frame = ttk.Frame(janela, padding=12)
+        frame.pack(fill=BOTH, expand=True)
+        texto = tk.Text(
+            frame,
+            width=86,
+            height=30,
+            wrap="word",
+            background="#ffffff",
+            foreground="#10201f",
+            relief="solid",
+            borderwidth=1,
+            font=("Segoe UI", 10),
+        )
+        barra = ttk.Scrollbar(frame, orient="vertical", command=texto.yview)
+        texto.configure(yscrollcommand=barra.set)
+        texto.insert("1.0", self._keywords_help_text())
+        texto.configure(state="disabled")
+        texto.pack(side=LEFT, fill=BOTH, expand=True)
+        barra.pack(side=RIGHT, fill=Y)
+
+        def fechar():
+            janela.destroy()
+            # A janela de Configurações usa grab_set(); devolve a modalidade
+            # para ela em vez de deixar o app sem grab nenhum.
+            if parent is not None and parent.winfo_exists():
+                try:
+                    parent.grab_set()
+                except Exception:
+                    pass
+
+        botoes = ttk.Frame(janela, padding=(12, 0, 12, 12))
+        botoes.pack(fill=X)
+        ttk.Button(botoes, text="Fechar", command=fechar).pack(side=RIGHT)
+        janela.bind("<Escape>", lambda _event: fechar())
+        janela.protocol("WM_DELETE_WINDOW", fechar)
+        janela.update_idletasks()
+        janela.geometry("")           # tamanho justo ao conteúdo
+        janela.grab_set()             # modal SOBRE a tela que abriu
+        janela.focus_set()
+        return janela
+
     def show_live_diarization_help(self):
         message = "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante."
         if self._current_stt_provider() == "alibaba":
@@ -7759,6 +7888,26 @@ try {
         keywords_items: list[str] = normalize_stt_keywords(
             self.settings.get(KEY_STT_KEYWORDS)
         )
+        keywords_hint_var = StringVar()
+
+        def keywords_hint() -> str:
+            """Resumo HONESTO do que cada modelo vai receber (sem truncar calado)."""
+            if not keywords_items:
+                return "Nenhum termo cadastrado — os modelos transcrevem sem viés."
+            base = {KEY_STT_KEYWORDS: list(keywords_items), "stt_keywords_enabled": True}
+            total = len(keywords_items)
+            deepgram = len(keywords_for_provider(base, "deepgram"))
+            if deepgram < total:
+                return (
+                    f"{total} termos na lista. O Deepgram recebe só os primeiros {deepgram} "
+                    f"(teto de 500 tokens); os demais modelos recebem os {total}. "
+                    "Mantenha os principais no topo — clique em ? para os limites."
+                )
+            return (
+                f"{total} de {MAX_STT_KEYWORDS} termos — todos os modelos recebem os {total}, "
+                f"com até {MAX_STT_KEYWORD_LENGTH} caracteres cada. "
+                "Clique em ? para os limites de cada modelo."
+            )
 
         keywords_top = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_top.pack(fill=X, pady=(0, 10))
@@ -7772,6 +7921,12 @@ try {
             text="Keywords — termos que os modelos devem reconhecer",
             style="Settings.TLabel",
         ).pack(side=LEFT, padx=(14, 0))
+        ttk.Button(
+            keywords_top,
+            text="?",
+            width=2,
+            command=lambda: self._open_keywords_help(win),
+        ).pack(side=LEFT, padx=(8, 0))
 
         keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_entry_row.pack(fill=X, pady=(0, 10))
@@ -7806,6 +7961,7 @@ try {
             if select_index is not None and 1 <= select_index <= len(keywords_items):
                 keywords_tree.selection_set(str(select_index))
                 keywords_tree.see(str(select_index))
+            keywords_hint_var.set(keywords_hint())
 
         def add_keyword():
             term = keyword_entry_var.get().strip()
@@ -7880,12 +8036,16 @@ try {
         ).pack(side=LEFT)
         ttk.Label(
             keywords_actions,
-            text=(
-                f"Selecione um item e clique em \u2212 para excluir. Clique em Salvar para manter. "
-                f"Até {MAX_STT_KEYWORDS} termos, {MAX_STT_KEYWORD_LENGTH} caracteres cada."
-            ),
+            text="Selecione um item e clique em \u2212 para excluir. Clique em Salvar para manter.",
             style="Muted.TLabel",
         ).pack(side=LEFT, padx=(12, 0))
+        ttk.Label(
+            keywords_page,
+            textvariable=keywords_hint_var,
+            style="Muted.TLabel",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
         refresh_keywords_table()
 
         def show_keywords_screen():
