@@ -91,15 +91,12 @@ def normalize_settings(data: dict) -> dict:
     perfis = normalize_keyword_profiles(data.get("stt_keyword_profiles"))
     perfil_ativo = str(data.get("stt_keyword_profile") or "").strip()
     if not perfis:
+        # Migração do modelo antigo (lista única): os TERMOS viram o perfil
+        # "Lista 1". O perfil NÃO nasce ativo — as keywords são sempre
+        # desligadas por padrão e o usuário ativa manualmente a cada uso.
         perfis = normalize_keyword_profiles(data.get("stt_keywords"))
         if perfis:
-            # Ligado -> ativa o perfil migrado; desligado -> segue desligado
-            # (os termos ficam salvos para o usuário religar depois).
-            perfil_ativo = (
-                DEFAULT_KEYWORD_PROFILE_NAME
-                if data.get("stt_keywords_enabled", True)
-                else ""
-            )
+            perfil_ativo = ""
     clean["stt_keyword_profiles"] = perfis
     if perfil_ativo and perfil_ativo not in perfis:
         perfil_ativo = ""      # perfil apagado/desconhecido = desligado

@@ -540,15 +540,28 @@ class PerfisTest(unittest.TestCase):
         )
 
     def test_migracao_do_modelo_antigo_lista_unica(self):
-        # Settings antigos: lista única ligada -> vira o perfil "Lista 1" ativo.
+        # Settings antigos: a lista única vira o perfil "Lista 1", mas o perfil
+        # NÃO nasce ativo — keywords são sempre desligadas por padrão e o
+        # usuário ativa manualmente (regra de 10/09).
         limpo = normalize_settings({
             **DEFAULT_SETTINGS,
             "stt_keywords": ["Taguaí", "Monsenhor"],
             "stt_keywords_enabled": True,
         })
         self.assertEqual({"Lista 1": ["Taguaí", "Monsenhor"]}, limpo["stt_keyword_profiles"])
-        self.assertEqual("Lista 1", limpo["stt_keyword_profile"])
-        self.assertEqual(["Taguaí", "Monsenhor"], stt_keywords(limpo))
+        self.assertEqual("", limpo["stt_keyword_profile"])
+        self.assertEqual([], stt_keywords(limpo))
+
+    def test_perfil_ativo_da_sessao_sobrevive_ao_normalize(self):
+        # Dentro da sessão a escolha precisa persistir (o start_run recarrega as
+        # settings no meio do lote); quem desliga é o reset na abertura do app.
+        limpo = normalize_settings({
+            **DEFAULT_SETTINGS,
+            "stt_keyword_profiles": {"Armas": ["Glock"]},
+            "stt_keyword_profile": "Armas",
+        })
+        self.assertEqual("Armas", limpo["stt_keyword_profile"])
+        self.assertEqual(["Glock"], stt_keywords(limpo))
 
     def test_migracao_do_modelo_antigo_desligado(self):
         # Lista antiga DESLIGADA: migra os termos, mas segue desligada.

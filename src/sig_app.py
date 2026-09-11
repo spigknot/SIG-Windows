@@ -812,6 +812,7 @@ class SigApp:
         if os.name == "nt":
             self.root.state("zoomed")
         self.settings = load_settings()
+        self._reset_keywords_off_on_start()
         try:
             self.document_templates = ensure_document_templates()
         except Exception:
@@ -7029,6 +7030,22 @@ try {
             if candidate and not is_realtime_only_transcription_server(candidate):
                 return candidate
         return str(DEFAULT_SETTINGS["transcription_server"])
+
+    def _reset_keywords_off_on_start(self) -> None:
+        """Keywords SEMPRE desligadas ao abrir o app (regra do usuário).
+
+        A escolha feita DENTRO da sessão continua sendo persistida — ela precisa
+        sobreviver aos recarregamentos de settings que acontecem no meio de um
+        lote (`start_run` chama `load_settings`). Mas ao abrir o app o perfil
+        ativo volta para "Não": o usuário ativa manualmente a cada uso.
+
+        Motivo (contexto forense): keyword esquecida ligada enviesa a
+        transcrição e pode inserir termos que não foram ditos.
+        """
+        if not str(self.settings.get("stt_keyword_profile") or "").strip():
+            return
+        self.settings["stt_keyword_profile"] = ""
+        self.settings = save_settings(self.settings)
 
     def _apply_keywords_selector(self, label: str):
         """Aplica a escolha do seletor "Keywords" (perfil ou desligado).
@@ -13445,6 +13462,12 @@ try {
             "audio_url": upload_url,
             "speech_models": ["universal-3-5-pro", "universal-2"],
         }
+        # Keywords: este fluxo monta o JSON na mão (v2/transcript), então precisa
+        # incluir o `keyterms_prompt` explicitamente — sem isto, as keywords não
+        # chegavam nos áudios de 2 minutos ou mais.
+        termos = stt_provider_rules.keywords_for_provider(request_settings, "assemblyai")
+        if termos:
+            params["keyterms_prompt"] = list(termos)
         if detection:
             params["language_detection"] = True
         if code:
