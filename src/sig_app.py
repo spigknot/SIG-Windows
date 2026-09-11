@@ -468,7 +468,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260911_002"
+APP_VERSION = "20260911_003"
 
 
 
@@ -809,6 +809,63 @@ IMEI_HISTORY_COLLAPSED_LIMIT = 10
 
 
 
+
+
+API_KEY_VISIBILITY_ICON_SIZE = 22
+# Tamanho mínimo do desenho ao encolher o ícone para casar a altura do botão.
+API_KEY_VISIBILITY_ICON_MIN_SIZE = 14
+# Respiro entre o botão do olho e o botão IMPORTAR (não podem ficar encostados).
+API_KEY_EYE_GAP = 10
+# Cinza dos outros ícones desenhados pelo app (paste/copiar/gear).
+API_KEY_VISIBILITY_ICON_COLOR = "#263735"
+
+
+def api_key_visibility_image(crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE) -> "Image.Image":
+    """Ícone do botão de revelar/esconder as chaves API (aba Chaves API).
+
+    `crossed=False` = olho aberto, que é o estado INICIAL (chaves mascaradas) e
+    representa a ação "revelar"; `crossed=True` = olho cortado, exibido depois de
+    revelar, quando a ação do botão passa a ser "esconder". Desenhado em 4x e
+    reduzido (mesma técnica dos demais ícones) para as bordas ficarem limpas.
+    """
+    escala = 4
+    # Desenho de referência em 22px; `proporcao` mantém a forma em outro tamanho.
+    proporcao = size / API_KEY_VISIBILITY_ICON_SIZE
+    image = Image.new("RGBA", (size * escala, size * escala), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    color = API_KEY_VISIBILITY_ICON_COLOR
+    width = 2 * escala
+    centro_x = centro_y = size / 2
+    # As duas pálpebras são arcos da MESMA elipse: 200..340 desenha a de cima e
+    # 20..160 a de baixo (ângulos do PIL crescem no sentido horário).
+    palpebras = (
+        (centro_x - 9 * proporcao) * escala,
+        (centro_y - 7 * proporcao) * escala,
+        (centro_x + 9 * proporcao) * escala,
+        (centro_y + 7 * proporcao) * escala,
+    )
+    draw.arc(palpebras, start=200, end=340, fill=color, width=width)
+    draw.arc(palpebras, start=20, end=160, fill=color, width=width)
+    raio = 2.5 * proporcao
+    draw.ellipse(
+        (
+            (centro_x - raio) * escala,
+            (centro_y - raio) * escala,
+            (centro_x + raio) * escala,
+            (centro_y + raio) * escala,
+        ),
+        outline=color,
+        width=width,
+    )
+    if crossed:
+        # A diagonal de canto a canto é o que diferencia o "olho cortado".
+        recuo = 3 * proporcao
+        draw.line(
+            (recuo * escala, recuo * escala, (size - recuo) * escala, (size - recuo) * escala),
+            fill=color,
+            width=width,
+        )
+    return image.resize((size, size), Image.Resampling.LANCZOS)
 
 
 class SigApp:
@@ -1368,6 +1425,10 @@ class SigApp:
         draw.arc((2, 2, 15, 15), start=45, end=315, fill=color, width=2)
         draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
         return ImageTk.PhotoImage(image, master=self.root)
+
+    def _make_api_key_visibility_icon(self, crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE):
+        """PhotoImage do olho aberto (`crossed=False`) / cortado (`True`)."""
+        return ImageTk.PhotoImage(api_key_visibility_image(crossed, size), master=self.root)
 
     def _make_document_action_icon(self, kind: str):
         scale = 4
@@ -7711,6 +7772,10 @@ try {
         api_models_frame = make_api_section(api_tab, "Modelos")
         api_imei_frame = make_api_section(api_tab, "IMEI CHECK")
 
+        # Campos de chave da aba inteira (Modelos + IMEI CHECK): o botão de olho
+        # mostra/esconde todos de uma vez.
+        api_key_entries: list[ttk.Entry] = []
+
         def add_api_field(section, row: int, label: str, variable: StringVar, help_text: str = ""):
             ttk.Label(section, text=label).grid(
                 row=row, column=0, sticky="w", pady=5, padx=(0, 12)
@@ -7719,6 +7784,7 @@ try {
             entry.grid(row=row, column=1, sticky="ew", pady=5)
             if help_text:
                 create_tooltip(entry, help_text)
+            api_key_entries.append(entry)
             return entry
 
         add_api_field(
@@ -7771,6 +7837,28 @@ try {
             "Preencha para liberar o Alibaba Fun ASR/Qwen na lista de transcrição.",
         )
         add_api_field(api_imei_frame, 0, "Chave API do IMEI Check", imei_api_key_var)
+
+        # Botão de olho da aba (fica no topo, ao lado do IMPORTAR): revela as
+        # chaves dos campos e, já reveladas, vira o olho cortado com a função de
+        # esconder. A criação do botão em si fica logo depois do IMPORTAR, porque
+        # a altura dele é a referência.
+        api_keys_visible = False
+
+        def build_api_key_icons(tamanho: int):
+            return (
+                self._make_api_key_visibility_icon(crossed=False, size=tamanho),
+                self._make_api_key_visibility_icon(crossed=True, size=tamanho),
+            )
+
+        reveal_icon, hide_icon = build_api_key_icons(API_KEY_VISIBILITY_ICON_SIZE)
+
+        def toggle_api_key_visibility():
+            nonlocal api_keys_visible
+            api_keys_visible = not api_keys_visible
+            # `show=""` desliga a máscara do ttk.Entry (nunca `show=None`).
+            for entry in api_key_entries:
+                entry.configure(show="" if api_keys_visible else "*")
+            eye_button.configure(image=hide_icon if api_keys_visible else reveal_icon)
 
         api_key_variables = {
             "grok_api_key": grok_api_key_var,
@@ -7840,11 +7928,35 @@ try {
                 parent=win,
             )
 
-        ttk.Button(
+        import_button = ttk.Button(
             api_import_frame,
             text="IMPORTAR",
             command=import_api_keys,
-        ).pack(side=RIGHT)
+        )
+        import_button.pack(side=RIGHT)
+
+        # Botão do olho à ESQUERDA do IMPORTAR, com um respiro entre os dois e com
+        # a MESMA ALTURA do botão de texto (pedido do usuário).
+        eye_button = ttk.Button(
+            api_import_frame,
+            image=reveal_icon,
+            width=3,
+            command=toggle_api_key_visibility,
+        )
+        eye_button.pack(side=RIGHT, padx=(0, API_KEY_EYE_GAP))
+        # O ícone é o único componente deste botão, então a diferença de altura
+        # para o IMPORTAR se corrige encolhendo o desenho. É medido na hora (e não
+        # fixado) porque o padding do tema `clam` muda com o DPI da tela.
+        win.update_idletasks()
+        sobra = eye_button.winfo_reqheight() - import_button.winfo_reqheight()
+        if sobra > 0:
+            ajustado = max(API_KEY_VISIBILITY_ICON_MIN_SIZE, API_KEY_VISIBILITY_ICON_SIZE - sobra)
+            reveal_icon, hide_icon = build_api_key_icons(ajustado)
+            eye_button.configure(image=hide_icon if api_keys_visible else reveal_icon)
+        # O Tk não segura o PhotoImage sozinho: o atributo no botão mantém as
+        # duas imagens vivas enquanto a janela existir (o toggle também as usa).
+        eye_button.api_key_visibility_icons = (reveal_icon, hide_icon)
+        create_tooltip(eye_button, "Mostrar ou esconder as chaves API.")
 
         # NÚCLEOS físicos (não threads): num Xeon 18c/36t o `os.cpu_count()`
         # devolve 36 e a escala 1..n sairia 1..36 — o usuário define a escala

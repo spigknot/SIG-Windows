@@ -436,6 +436,62 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
         raise RuntimeError(f"linhas da secao Modelos fora de ordem: {labels}")
 
 
+def _check_api_key_visibility_toggle(app, settings_window) -> None:
+    """Botão de olho da aba Chaves API (revelar/esconder as chaves).
+
+    Vacina da UI: existe UM botão com ícone na aba, os campos nascem mascarados
+    (são chaves de API), o clique revela TODOS os campos da aba e troca o ícone
+    pelo olho cortado; o segundo clique volta a esconder e ao ícone original.
+    """
+    from tkinter import ttk
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    secoes = [w for w in descendentes(settings_window) if isinstance(w, ttk.LabelFrame)]
+    imei = next((w for w in secoes if w.cget("text") == "IMEI CHECK"), None)
+    if imei is None:
+        raise RuntimeError("secao 'IMEI CHECK' ausente na aba Chaves API")
+    api_tab = imei.master
+    # 7 provedores da secao "Modelos" + a chave do IMEI CHECK.
+    campos = [w for w in descendentes(api_tab) if isinstance(w, ttk.Entry)]
+    if len(campos) != 8:
+        raise RuntimeError(
+            f"aba Chaves API deveria ter 8 campos de chave, achou {len(campos)}"
+        )
+    if {w.cget("show") for w in campos} != {"*"}:
+        raise RuntimeError("as chaves API deveriam nascer mascaradas")
+    olhos = [
+        w
+        for w in descendentes(api_tab)
+        if isinstance(w, ttk.Button) and str(w.cget("image"))
+    ]
+    if len(olhos) != 1:
+        raise RuntimeError(
+            f"botao de olho das chaves API ausente ou duplicado: {len(olhos)}"
+        )
+    olho = olhos[0]
+    if olho.winfo_manager() != "pack":
+        raise RuntimeError("botao de olho das chaves API nao esta visivel")
+    icone_revelar = str(olho.cget("image"))
+    olho.invoke()
+    settings_window.update_idletasks()
+    revelados = {w.cget("show") for w in campos}
+    if revelados != {""}:
+        raise RuntimeError(f"o botao de olho nao revelou os campos: {revelados}")
+    icone_ocultar = str(olho.cget("image"))
+    if icone_ocultar == icone_revelar:
+        raise RuntimeError("o icone do botao nao mudou ao revelar as chaves")
+    olho.invoke()
+    settings_window.update_idletasks()
+    if {w.cget("show") for w in campos} != {"*"}:
+        raise RuntimeError("o botao de olho nao voltou a esconder as chaves")
+    if str(olho.cget("image")) != icone_revelar:
+        raise RuntimeError("o icone do botao nao voltou ao olho aberto")
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -471,6 +527,7 @@ def run(*, quiet: bool = False) -> int:
             # chaves e botão KEYWORDS) antes de ser destruída.
             settings_window = settings_windows[0]
             _check_keywords_and_settings_tabs(app, settings_window)
+            _check_api_key_visibility_toggle(app, settings_window)
             _check_parallel_sliders(app, settings_window)
             settings_window.destroy()
             root.update_idletasks()
