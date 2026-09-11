@@ -95,20 +95,23 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     from tkinter import ttk
 
     # Os seletores "Keywords" (perfis) ficam nas duas telas, com o "?" ao lado.
-    for atributo, onde in (
-        ("files_keywords_button", "aba Transcricao"),
-        ("live_keywords_button", "tela de Ocorrencia"),
+    # Lê o rótulo pelo objeto Python (não por `root.getvar`): no preflight a
+    # suíte anterior deixa o `_default_root` do Tkinter apontando para outro
+    # interpretador, e o nome Tcl do var não existe no root do smoke (o objeto
+    # Python continua válido — é ele que o app usa).
+    for atributo, var_atributo, onde in (
+        ("files_keywords_button", "files_keywords_label_var", "aba Transcricao"),
+        ("live_keywords_button", "live_keywords_label_var", "tela de Ocorrencia"),
     ):
         botao = getattr(app, atributo, None)
         if botao is None:
             raise RuntimeError(f"seletor Keywords ausente na {onde}")
         if botao.winfo_manager() != "pack":
             raise RuntimeError(f"seletor Keywords nao esta visivel na {onde}")
-        rotulo = str(botao.cget("textvariable"))
-        if rotulo:
-            texto = str(app.root.getvar(rotulo))
-            if not texto.startswith("Keywords: "):
-                raise RuntimeError(f"rotulo do seletor Keywords fora do padrao: {texto!r}")
+        variavel = getattr(app, var_atributo, None)
+        if variavel is None or not str(variavel.get()).startswith("Keywords: "):
+            valor = variavel.get() if variavel is not None else "-"
+            raise RuntimeError(f"rotulo do seletor Keywords fora do padrao: {valor!r}")
     if not str(app.files_keywords_label_var.get()).startswith("Keywords: "):
         raise RuntimeError("rotulo do seletor Keywords da Transcricao fora do padrao")
     # O menu do seletor precisa ter sempre a opcao "desligado" ("Nao").

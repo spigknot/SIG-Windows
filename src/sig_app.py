@@ -459,7 +459,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260910_002"
+APP_VERSION = "20260910_003"
 
 
 
@@ -1004,7 +1004,7 @@ class SigApp:
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
         self.files_language_label_var = StringVar(value="Idioma: pt")
-        self.files_keywords_label_var = StringVar(value=f"Keywords: {KEYWORDS_OFF_LABEL}")
+        self.files_keywords_label_var = StringVar(master=self.root, value=f"Keywords: {KEYWORDS_OFF_LABEL}")
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
@@ -2262,7 +2262,7 @@ class SigApp:
         self.live_language_button.pack(side=LEFT)
         # Seletor "Keywords" da tela de Ocorrência (WS): "Não" (desligado) ou um
         # dos perfis cadastrados. Mesmo valor da aba Transcrição.
-        self.live_keywords_label_var = StringVar(value=f"Keywords: {KEYWORDS_OFF_LABEL}")
+        self.live_keywords_label_var = StringVar(master=self.root, value=f"Keywords: {KEYWORDS_OFF_LABEL}")
         self.live_keywords_button = ttk.Menubutton(
             self.live_grok_controls,
             textvariable=self.live_keywords_label_var,
