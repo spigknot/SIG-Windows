@@ -9,6 +9,8 @@ atracao magnetica. Mantido igual para as duas aplicacoes terem o mesmo visual.
 
 from tkinter import Canvas, Toplevel, ttk
 
+import math
+
 
 # ---------------- Slider de nós (visual do TurboCore) ----------------
 
@@ -72,6 +74,72 @@ def nearest_value(value, values: list[int]) -> int:
     except (TypeError, ValueError):
         return values[0]
     return min(values, key=lambda candidato: (abs(candidato - alvo), candidato))
+
+
+def parallel_values(cpu_count: int) -> list[int]:
+    """Opções do slider de paralelismo para uma máquina de `cpu_count` núcleos.
+
+    Regra do usuário (11/09): 1, 2, 3, ..., n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n —
+    ou seja, n + 6 opções. Conta que não dá exato aproxima para o inteiro mais
+    próximo, com o empate subindo (4.5 -> 5, 7.5 -> 8, 12.5 -> 13); a lista é
+    sempre crescente e sem repetições (com n = 1 as seis frações caem em
+    1/2/3/4 e sobram 4 opções — não existem 7 inteiros distintos até 4n).
+
+    Vantagem sobre a lista antiga (só múltiplos do passo): o valor recomendado
+    n/2 passa a existir como nó — antes, num 4 núcleos, o recomendado 2 era
+    encaixado à força em 4.
+    """
+    nucleos = max(1, int(cpu_count))
+    valores = list(range(1, nucleos + 1))
+    for fator in (3, 4, 5, 6, 7, 8):        # 3n/2, 2n, 5n/2, 3n, 7n/2, 4n
+        valores.append(int(math.floor(nucleos * fator / 2 + 0.5)))
+    return sorted(set(valores))
+
+
+def describe_parallel_values(values: list[int], cpu_count: int) -> str:
+    """Frase de ajuda com TODAS as opções da máquina (sem índice por posição)."""
+    if not values:
+        return "Sem valores disponíveis nesta máquina."
+    opcoes = ", ".join(str(valor) for valor in values)
+    return f"Opções desta máquina (n = {cpu_count} núcleos): {opcoes}."
+
+
+def workable_step(preferred_step: int, maximum: int, minimum_nodes: int = 2) -> int:
+    """Passo utilizável pelo slider: o preferido, quando ele dá nós suficientes.
+
+    O usuário definiu o passo preferido (4 em 4 nas Conversões e 2 em 2 nas
+    Requisições). Em máquinas com poucos núcleos esse passo deixa o slider com
+    um nó só — 2 núcleos => 2n = 4 => `[4]` com passo 4 — e não há o que
+    escolher. Nesse caso o passo cai pela metade (4 -> 2 -> 1) até render
+    `minimum_nodes` valores. Máquina com núcleos de sobra continua exatamente
+    no passo preferido.
+    """
+    passo = max(1, int(preferred_step))
+    alvo = max(1, int(minimum_nodes))
+    while passo > 1:
+        if len(step_values(passo, maximum)) >= alvo:
+            return passo
+        passo = max(1, passo // 2)
+    return 1
+
+
+def describe_step_values(values: list[int], step: int) -> str:
+    """Frase de ajuda do slider de nós — segura para QUALQUER tamanho de lista.
+
+    A frase antiga era montada com `values[0]`, `values[1]` e `values[2]`
+    fixos. Em máquinas com poucos núcleos a lista tem 1 ou 2 valores: o
+    `values[2]` estourava `IndexError` NO MEIO da construção da janela de
+    Configurações, e tudo o que era construído depois ficava vazio (a janela
+    abria só com a barra de abas). Nunca indexar por posição fixa aqui.
+    """
+    if not values:
+        return "Sem valores disponíveis nesta máquina."
+    if len(values) == 1:
+        return f"Esta máquina tem um único valor disponível: {values[0]}."
+    amostra = ", ".join(str(valor) for valor in values[:3])
+    if len(values) == 2:
+        return f"O slider sobe de {step} em {step}: {amostra}."
+    return f"O slider sobe de {step} em {step}: {amostra}... até {values[-1]}."
 
 
 class NodeSlider(Canvas):

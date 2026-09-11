@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from sig_app import (  # noqa: E402
     generate_docx_from_template,
     portuguese_number_words,
 )
+import documents  # noqa: E402
 
 
 REPLACEMENTS = {
@@ -207,6 +209,57 @@ class DocumentTemplateTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(user_nodes), 1)
                 self.assertEqual(user_nodes[0].text, "Gustavo Silva Almeida")
+
+
+@unittest.skipUnless(os.name == "nt", "a cópia formatada existe somente no Windows")
+class DocumentClipboardTests(unittest.TestCase):
+    """O caminho do botão "Copiar" da aba Ocorrência depende de ctypes.
+
+    Regressão vacinada: `documents.py` usava ctypes sem importá-lo (o import
+    ficou no topo do monólito) e a cópia formatada morria com
+    `name 'ctypes' is not defined`. Aqui o ctypes é substituído por um mock,
+    então os formatos entregues ao clipboard são exercitados de verdade, sem
+    mexer no clipboard do Windows durante a suíte.
+    """
+
+    HTML = (
+        '<html><head><meta charset="windows-1252"></head><body>'
+        "<!--StartFragment--><p>DECLARAÇÃO de João</p><!--EndFragment-->"
+        "</body></html>"
+    )
+    RTF = b"{\\rtf1\\ansi\\deff0 DECLARACAO de Joao}"
+    TEXT = "DECLARAÇÃO de João"
+
+    def test_documents_importa_ctypes_no_topo(self):
+        self.assertIn("ctypes", vars(documents), "documents.py precisa importar ctypes")
+
+    def test_copia_grava_rtf_html_e_texto_simples(self):
+        from unittest import mock
+
+        fake_ctypes = mock.MagicMock()
+        with mock.patch.object(documents, "ctypes", fake_ctypes):
+            documents.set_windows_document_clipboard(self.RTF, self.HTML, self.TEXT)
+
+        user32 = fake_ctypes.WinDLL.return_value
+        registrados = [
+            chamada.args[0] for chamada in user32.RegisterClipboardFormatW.call_args_list
+        ]
+        self.assertEqual(["Rich Text Format", "HTML Format"], registrados)
+
+        # Os três conteúdos entregues ao clipboard, na ordem: RTF, CF_HTML e
+        # CF_UNICODETEXT.
+        conteudos = [chamada.args[1] for chamada in fake_ctypes.memmove.call_args_list]
+        self.assertEqual(3, len(conteudos))
+        self.assertTrue(conteudos[0].startswith(b"{\\rtf1"))
+        self.assertIn(b"Version:1.0", conteudos[1][:64])
+        self.assertIn(self.TEXT.encode("utf-8"), conteudos[1])
+        self.assertEqual(self.TEXT.encode("utf-16-le") + b"\0\0", conteudos[2])
+
+        formatos = [chamada.args[0] for chamada in user32.SetClipboardData.call_args_list]
+        self.assertEqual(3, len(formatos))
+        # CF_UNICODETEXT = 13: é o formato que preserva acentuação ao colar em
+        # qualquer destino (Word, WhatsApp, bloco de notas).
+        self.assertEqual(13, formatos[-1])
 
 
 if __name__ == "__main__":

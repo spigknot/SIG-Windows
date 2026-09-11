@@ -23,10 +23,14 @@ from ui_widgets import (  # noqa: E402
     NodeSlider,
     SLIDER_HEIGHT,
     THUMB_RADIUS,
+    describe_parallel_values,
+    describe_step_values,
     nearest_index,
     nearest_value,
     node_positions,
+    parallel_values,
     step_values,
+    workable_step,
 )
 
 try:
@@ -93,6 +97,151 @@ class NearestValueTest(unittest.TestCase):
     def test_empate_escolhe_o_menor(self):
         # 9 está a 1 de 8 e a 1 de 10 -> escolhe 8 (determinístico).
         self.assertEqual(8, nearest_value(9, step_values(2, 16)))
+
+
+class ParallelValuesTest(unittest.TestCase):
+    """Opções do slider de Conversões: 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n.
+
+    Regra do usuário (11/09): n + 6 opções, aproximando a conta quebrada.
+    """
+
+    def test_maquina_de_4_nucleos(self):
+        # O caso real dos PCs que mostraram o problema.
+        self.assertEqual(
+            [1, 2, 3, 4, 6, 8, 10, 12, 14, 16], parallel_values(4)
+        )
+
+    def test_maquina_de_2_nucleos(self):
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], parallel_values(2))
+
+    def test_contas_quebradas_aproximam_para_cima_no_empate(self):
+        # 3n/2 = 4.5 -> 5; 5n/2 = 7.5 -> 8; 7n/2 = 10.5 -> 11.
+        self.assertEqual(
+            [1, 2, 3, 5, 6, 8, 9, 11, 12], parallel_values(3)
+        )
+        # 5 núcleos: 7.5 -> 8, 12.5 -> 13, 17.5 -> 18.
+        self.assertEqual(
+            [1, 2, 3, 4, 5, 8, 10, 13, 15, 18, 20], parallel_values(5)
+        )
+
+    def test_maquina_de_18_nucleos(self):
+        self.assertEqual(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+             27, 36, 45, 54, 63, 72],
+            parallel_values(18),
+        )
+
+    def test_tem_n_mais_6_opcoes_e_termina_em_4n(self):
+        for nucleos in range(2, 129):
+            valores = parallel_values(nucleos)
+            self.assertEqual(nucleos + 6, len(valores), f"n={nucleos}")
+            self.assertEqual(4 * nucleos, valores[-1], f"n={nucleos}")
+
+    def test_lista_crescente_e_sem_repeticao(self):
+        for nucleos in range(1, 129):
+            valores = parallel_values(nucleos)
+            self.assertEqual(sorted(set(valores)), valores, f"n={nucleos}")
+
+    def test_nunca_comeca_em_zero(self):
+        # Paralelismo 0 quebraria o ThreadPoolExecutor.
+        self.assertEqual(1, parallel_values(4)[0])
+        self.assertEqual(1, parallel_values(1)[0])
+
+    def test_o_recomendado_n_2_e_sempre_uma_opcao(self):
+        # Antes (passo 4) o recomendado 2 de uma máquina de 4 núcleos caía em 4.
+        for nucleos in range(1, 129):
+            recomendado = max(1, (nucleos + 1) // 2)
+            self.assertIn(recomendado, parallel_values(nucleos), f"n={nucleos}")
+
+    def test_um_nucleo_nao_tem_como_ter_n_mais_6(self):
+        # Não existem 7 inteiros distintos até 4n = 4.
+        self.assertEqual([1, 2, 3, 4], parallel_values(1))
+
+
+class DescribeParallelValuesTest(unittest.TestCase):
+    """Frase de ajuda das Conversões — lista inteira, sem índice por posição."""
+
+    def test_lista_a_maquina_de_4_nucleos(self):
+        self.assertEqual(
+            "Opções desta máquina (n = 4 núcleos): 1, 2, 3, 4, 6, 8, 10, 12, 14, 16.",
+            describe_parallel_values(parallel_values(4), 4),
+        )
+
+    def test_lista_vazia(self):
+        self.assertEqual(
+            "Sem valores disponíveis nesta máquina.",
+            describe_parallel_values([], 4),
+        )
+
+
+class WorkableStepTest(unittest.TestCase):
+    """Passo do slider nas máquinas com poucos núcleos.
+
+    Vacina do bug de 11/09: com passo fixo de 4, uma máquina de 2 núcleos
+    (2n = 4) ficava com um único nó — slider inútil.
+    """
+
+    def test_passo_preferido_e_mantido_quando_cabe(self):
+        self.assertEqual(4, workable_step(4, 18 * 2))      # 18 núcleos: 9 nós
+        self.assertEqual(4, workable_step(4, 8))           # 4 núcleos: [4, 8]
+        self.assertEqual(2, workable_step(2, 16))          # Requisições: [2..16]
+
+    def test_passo_cai_em_maquinas_com_poucos_nucleos(self):
+        self.assertEqual(2, workable_step(4, 6))           # 3 núcleos: [2, 4, 6]
+        self.assertEqual(2, workable_step(4, 4))           # 2 núcleos: [2, 4]
+        self.assertEqual(1, workable_step(4, 2))           # 1 núcleo:  [1, 2]
+
+    def test_nunca_fica_com_um_no_unico(self):
+        for cpu in range(1, 65):
+            for passo_preferido, maximo in ((4, cpu * 2), (2, 16), (4, 16)):
+                passo = workable_step(passo_preferido, maximo)
+                self.assertGreaterEqual(
+                    len(step_values(passo, maximo)),
+                    2,
+                    f"cpu={cpu} passo={passo} maximo={maximo}",
+                )
+
+
+class DescribeStepValuesTest(unittest.TestCase):
+    """Frase de ajuda do slider — não pode depender do tamanho da lista.
+
+    Vacina do bug de 11/09 (menu de Configurações colapsado em outros PCs): a
+    frase antiga indexava `values[2]` fixo e estourava `IndexError` com listas
+    de 1 ou 2 valores, abortando `open_settings` no meio da construção.
+    """
+
+    def test_lista_longa_mostra_os_tres_primeiros_e_o_ultimo(self):
+        self.assertEqual(
+            "O slider sobe de 4 em 4: 4, 8, 12... até 36.",
+            describe_step_values(step_values(4, 36), 4),
+        )
+
+    def test_lista_de_dois_valores(self):
+        self.assertEqual(
+            "O slider sobe de 4 em 4: 4, 8.",
+            describe_step_values(step_values(4, 8), 4),
+        )
+
+    def test_lista_de_um_valor(self):
+        self.assertEqual(
+            "Esta máquina tem um único valor disponível: 4.",
+            describe_step_values(step_values(4, 3), 4),
+        )
+
+    def test_lista_vazia(self):
+        self.assertEqual(
+            "Sem valores disponíveis nesta máquina.", describe_step_values([], 4)
+        )
+
+    def test_nenhuma_contagem_de_nucleos_estoura(self):
+        # O caminho exato do `open_settings`: passo utilizável -> lista ->
+        # frase. Antes o `values[2]` fixo derrubava tudo com cpu <= 5.
+        for cpu in range(1, 129):
+            for passo_preferido, maximo in ((4, cpu * 2), (2, 16)):
+                passo = workable_step(passo_preferido, maximo)
+                valores = step_values(passo, maximo)
+                self.assertTrue(describe_step_values(valores, passo))
+                self.assertGreaterEqual(len(valores), 1)
 
 
 class NodeGeometryTest(unittest.TestCase):

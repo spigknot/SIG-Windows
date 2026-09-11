@@ -12,6 +12,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from app_env import physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
+
 MAIN_TABS = ("live", "files", "qualification", "imei", "ffmpeg", "diarias", "qrcode")
 TAB_BUTTONS = (
     "live_tab_button",
@@ -83,6 +85,21 @@ def _check_transcription_models_menu(app) -> None:
         raise RuntimeError(f"selecao padrao do menu Modelos inesperada: {checked}")
 
 
+def _expected_conversion_values(nucleos: int) -> list[int]:
+    """Opções do slider de Conversões conforme a especificação.
+
+    Regra do usuário (11/09): 1, 2, 3, ..., n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n,
+    aproximando a conta quebrada para cima no empate (4.5 -> 5). Derivado da
+    especificação de propósito: repetir a função do app daria falso positivo.
+    """
+    import math
+
+    valores = list(range(1, nucleos + 1))
+    for fator in (3, 4, 5, 6, 7, 8):
+        valores.append(int(math.floor(nucleos * fator / 2 + 0.5)))
+    return sorted(set(valores))
+
+
 def _check_parallel_sliders(app, settings_window) -> None:
     """Sliders de nós da aba Avançado (visual do TurboCore e passos).
 
@@ -118,14 +135,17 @@ def _check_parallel_sliders(app, settings_window) -> None:
     sliders = [w for w in descendentes(painel) if isinstance(w, NodeSlider)]
     if len(sliders) != 2:
         raise RuntimeError(f"esperava 2 sliders de nos, achei {len(sliders)}")
-    esperado = [4, 2]
-    for slider, passo in zip(sliders, esperado):
-        if slider.values[1] - slider.values[0] != passo:
+    # Opções do slider conforme a ESPECIFICAÇÃO (não a função do app): as
+    # Conversões seguem 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n com n = NÚCLEOS
+    # físicos; as Requisições continuam de 2 em 2 até 16 (regra de 31/08 — o
+    # gargalo é a rede).
+    nucleos = max(1, physical_cpu_count())
+    esperado = [_expected_conversion_values(nucleos), list(range(2, 17, 2))]
+    for slider, valores in zip(sliders, esperado):
+        if list(slider.values) != valores:
             raise RuntimeError(
-                f"passo do slider {slider.values[:3]}... diferente de {passo}"
+                f"opcoes do slider {list(slider.values)[:6]}... diferentes de {valores[:6]}..."
             )
-        if slider.values[0] != passo:
-            raise RuntimeError(f"o slider deveria comecar em {passo}: {slider.values[0]}")
     # O slider precisa comecar logo depois do rótulo (pedido do usuário).
     for slider in sliders:
         irmaos = [w for w in descendentes(painel) if isinstance(w, ttk.Label)]
@@ -138,6 +158,145 @@ def _check_parallel_sliders(app, settings_window) -> None:
             vao = slider.winfo_x() - (rotulo.winfo_x() + rotulo.winfo_width())
             if vao > 40:
                 raise RuntimeError(f"slaider longe do rotulo ({vao}px de vao)")
+
+
+def _settings_tab_pages(settings_window):
+    """(botoes das abas, pagina ativa) da janela de Configurações."""
+    from tkinter import ttk
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    abas = (
+        w for w in descendentes(settings_window)
+        if isinstance(w, tk.Label)
+        and w.cget("text") in {"Modelos", "Policial", "Chaves API", "Avançado"}
+        and isinstance(w.master, tk.Frame)
+    )
+    botoes = {w.cget("text"): w for w in abas}
+    if len(botoes) != 4:
+        raise RuntimeError(f"esperava 4 abas de Configuracoes, achei {list(botoes)}")
+    barra = next(iter(botoes.values())).master
+    conteudo = next(
+        (w for w in barra.master.winfo_children()
+         if w is not barra and len(w.winfo_children()) >= 4),
+        None,
+    )
+    if conteudo is None:
+        raise RuntimeError("area de conteudo das Configuracoes nao encontrada")
+    return botoes, conteudo
+
+
+def _check_settings_window_on_low_core_machines(app, root) -> None:
+    """As Configurações nascem INTEIRAS em máquinas com poucos núcleos.
+
+    Vacina do bug de 11/09 (relatado pelo usuário como "o menu de
+    Configurações aparece todo colapsado em outros PCs, só a aba Chaves API
+    funciona"): a ajuda do slider de Conversões montava a frase indexando
+    `conv_valores[2]` fixo, e `step_values(4, nucleos * 2)` devolve menos de 3
+    valores em máquinas com até 5 CPUs lógicas. O `IndexError` abortava
+    `open_settings` NO MEIO da construção: a janela abria só com a barra de
+    abas e tudo o que é construído depois (as seções da aba Modelos, a aba
+    Policial, os sliders) ficava vazio — a aba Chaves API, construída antes,
+    era a única que aparecia. O bug passou batido aqui porque a máquina de
+    build tem 36 CPUs; por isso este check varre contagens pequenas.
+    """
+    from tkinter import ttk
+
+    import sig_app
+
+    from ui_widgets import NodeSlider
+
+    # Altura mínima da aba MAIS BAIXA com conteúdo (Policial, ~194px com o
+    # layout atual). Construção abortada deixa a página com 1px a 45px.
+    altura_minima = 120
+    secoes_modelos = ("Transcrição", "Histórico", "Oitiva", "Qualificação", "Extração de partes")
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    for nucleos in (1, 2, 3, 4, 5, 6, 8, 18, 36):
+        antes = set(root.winfo_children())
+        # Imita NÚCLEOS FÍSICOS e, de propósito, threads DIFERENTES (2×), como
+        # num processador com SMT: se o app consultasse `os.cpu_count()` a
+        # escala sairia 1..2n e a comparação abaixo falharia.
+        with patch.object(sig_app.os, "cpu_count", lambda valor=nucleos: valor * 2), \
+                patch.object(sig_app, "physical_cpu_count", lambda valor=nucleos: valor):
+            app.open_settings()          # qualquer exceção derruba o gate
+        root.update_idletasks()
+        janelas = [
+            filho for filho in root.winfo_children()
+            if isinstance(filho, tk.Toplevel) and filho not in antes
+        ]
+        if len(janelas) != 1:
+            raise RuntimeError(f"esperava uma janela de Configuracoes com {nucleos} nucleos")
+        janela = janelas[0]
+        try:
+            root.update_idletasks()
+            botoes, conteudo = _settings_tab_pages(janela)
+            larguras = {}
+            for nome, botao in botoes.items():
+                botao.event_generate("<Button-1>", x=1, y=1)
+                janela.update_idletasks()
+                pagina = next(
+                    (w for w in conteudo.winfo_children() if w.winfo_manager() == "pack"),
+                    None,
+                )
+                if pagina is None:
+                    raise RuntimeError(f"aba {nome} sem pagina ativa com {nucleos} nucleos")
+                if pagina.winfo_reqheight() < altura_minima:
+                    raise RuntimeError(
+                        f"aba {nome} vazia com {nucleos} nucleos "
+                        f"({pagina.winfo_reqheight()}px): a construcao das "
+                        "Configuracoes foi interrompida no meio"
+                    )
+                larguras[nome] = pagina.winfo_reqwidth()
+            # A janela é `resizable(False, False)`: ela assume o tamanho
+            # requisitado da aba ATIVA. A aba Avançado não pode ficar mais larga
+            # que a aba Modelos (quem dita o tamanho é a maior), senão a janela
+            # estica quando o usuário clica em Avançado — e é o slider de nós
+            # (comprimento adaptativo ao nº de opções) que empurra a largura.
+            if larguras["Avançado"] > larguras["Modelos"]:
+                raise RuntimeError(
+                    f"aba Avancado mais larga que Modelos com {nucleos} nucleos "
+                    f"({larguras['Avançado']} vs {larguras['Modelos']}px): "
+                    "a janela de Configuracoes vai esticar ao trocar de aba"
+                )
+            # As seções da aba Modelos não podem ficar colapsadas (foi
+            # exatamente esse o sintoma: LabelFrame vazio pede 1x1 px).
+            for secao in descendentes(janela):
+                if isinstance(secao, ttk.LabelFrame) and secao.cget("text") in secoes_modelos:
+                    if secao.winfo_reqheight() < 40:
+                        raise RuntimeError(
+                            f"secao {secao.cget('text')!r} colapsada "
+                            f"({secao.winfo_reqheight()}px) com {nucleos} nucleos"
+                        )
+            # As Conversões precisam oferecer as opções da especificação nesta
+            # máquina (1..n, 3n/2 ... 4n) — e não só um nó, como acontecia com
+            # o passo fixo de 4 numa máquina de 2 núcleos.
+            valores = _expected_conversion_values(nucleos)
+            sliders = [w for w in descendentes(janela) if isinstance(w, NodeSlider)]
+            if not sliders:
+                raise RuntimeError(f"sliders ausentes com {nucleos} nucleos")
+            if list(sliders[0].values) != valores:
+                raise RuntimeError(
+                    f"opcoes de Conversoes com {nucleos} nucleos diferentes do "
+                    f"esperado: {list(sliders[0].values)[:6]}..."
+                )
+            # O valor mostrado precisa ser um nó real (nada de valor encaixado
+            # à força em outro número).
+            if sliders[0].get() not in valores:
+                raise RuntimeError(
+                    f"valor {sliders[0].get()} nao e uma opcao valida "
+                    f"({nucleos} nucleos)"
+                )
+        finally:
+            janela.destroy()
+            root.update_idletasks()
 
 
 def _check_keywords_and_settings_tabs(app, settings_window) -> None:
@@ -315,6 +474,11 @@ def run(*, quiet: bool = False) -> int:
             _check_parallel_sliders(app, settings_window)
             settings_window.destroy()
             root.update_idletasks()
+
+            # Vacina do bug de 11/09: as Configurações precisam nascer
+            # inteiras também em máquinas com poucos núcleos (aqui a máquina
+            # tem núcleos de sobra, então o cenário é simulado).
+            _check_settings_window_on_low_core_machines(app, root)
 
         if not quiet:
             print("PASS: interface principal, abas e Configuracoes construidas")

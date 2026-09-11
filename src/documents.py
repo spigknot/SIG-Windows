@@ -4,6 +4,7 @@ Modelos em modelos/ (ao lado do executavel); templates sao baixados se faltarem.
 Fluxo: generate_docx_from_template -> export_docx_to_pdf_with_word -> render_pdf_preview.
 Sem Tkinter (a UI chama estas funcoes)."""
 
+import ctypes
 import hashlib
 import html
 import os
@@ -275,7 +276,6 @@ def _window_physical_dpi(root) -> int:
     if os.name != "nt":
         return 96
     try:
-        import ctypes
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32

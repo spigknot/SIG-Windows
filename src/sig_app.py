@@ -57,6 +57,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -178,10 +179,14 @@ from documents import (  # noqa: F401
 # Implementacao real em src/ui_widgets.py (codigo movido verbatim).
 from ui_widgets import (  # noqa: F401
     create_tooltip,
+    describe_parallel_values,
+    describe_step_values,
     nearest_value,
     NodeSlider,
+    parallel_values,
     PreviewIconButton,
     step_values,
+    workable_step,
 )
 
 
@@ -436,6 +441,7 @@ from app_env import (  # noqa: F401
     imei_history_path,
     cpu_parallel_options,
     default_parallelism,
+    physical_cpu_count,
 )
 
 
@@ -462,7 +468,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260911_001"
+APP_VERSION = "20260911_002"
 
 
 
@@ -809,6 +815,7 @@ class SigApp:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("sig")
+        self._install_error_reporter()
         self._apply_window_icon()
         self.root.geometry("1260x960")
         self.root.minsize(1220, 820)
@@ -1131,6 +1138,42 @@ class SigApp:
         self.root.after(0, self._refresh_microphone_availability)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _install_error_reporter(self):
+        """Erro em callback do Tk vai para o log e para um arquivo de texto.
+
+        O exe é `--windowed` (sem console) e o Tk engole a exceção depois de
+        imprimi-la no stderr, que não existe: sem isso, um erro no MEIO da
+        construção de uma janela deixa a janela pela metade em silêncio — foi
+        assim que a ajuda do slider de Conversões derrubou as Configurações em
+        PCs com poucos núcleos e o sintoma chegou como "menu colapsado", sem
+        nenhuma pista. O arquivo fica na pasta de dados do usuário
+        (%APPDATA%/sig/sig_erros.log), nunca na pasta do aplicativo — a pasta
+        do app é sincronizada pelo updater.
+        """
+        try:
+            self.root.report_callback_exception = self._report_callback_exception
+        except Exception:
+            pass
+
+    def _report_callback_exception(self, exc_type, exc, tb) -> None:
+        detalhe = "".join(traceback.format_exception(exc_type, exc, tb))
+        resumo = f"Erro interno: {exc_type.__name__}: {exc}"
+        try:
+            caminho = settings_path().parent / "sig_erros.log"
+            with caminho.open("a", encoding="utf-8") as arquivo:
+                arquivo.write(
+                    f"\n=== {datetime.now().isoformat(timespec='seconds')} "
+                    f"(versao {APP_VERSION})\n"
+                )
+                arquivo.write(detalhe)
+        except Exception:
+            pass
+        try:
+            self._append_activity_log(f"{resumo} (detalhes em sig_erros.log)", "activity_step_error")
+            self.status_var.set(resumo)
+        except Exception:
+            pass
 
     def _build_style(self):
         style = ttk.Style()
@@ -7803,7 +7846,10 @@ try {
             command=import_api_keys,
         ).pack(side=RIGHT)
 
-        cpu_count = max(1, os.cpu_count() or 1)
+        # NÚCLEOS físicos (não threads): num Xeon 18c/36t o `os.cpu_count()`
+        # devolve 36 e a escala 1..n sairia 1..36 — o usuário define a escala
+        # pelos núcleos (18).
+        cpu_count = max(1, physical_cpu_count())
         # Valor padrão das duas slidebars: metade dos núcleos da CPU (n/2),
         # com arredondamento inteligente para números ímpares.
         default_parallel = default_parallelism(cpu_count)
@@ -7812,15 +7858,12 @@ try {
             row: int,
             label: str,
             variable: IntVar,
-            maximum: int,
+            valores: list[int],
             help_text: str,
-            step: int = 1,
-            minimum: int = 1,
         ):
-            # Slider de NÓS (mesmo visual do TurboCore): os valores possíveis são
-            # os múltiplos do passo, então o valor salvo é encaixado no nó mais
-            # próximo (ex.: padrão n/2 = 9 cai em 8 quando o passo é 4).
-            valores = step_values(step, maximum, minimum)
+            # Slider de NÓS (mesmo visual do TurboCore): um nó por opção, então o
+            # valor salvo é encaixado no nó mais próximo.
+            maximum = valores[-1]
             if not (1 <= variable.get() <= maximum):
                 variable.set(nearest_value(default_parallel, valores))
             else:
@@ -7843,7 +7886,12 @@ try {
             scale = NodeSlider(
                 parallel_frame,
                 values=valores,
-                length=170,
+                # Um nó a cada ~12px para os círculos não se encostarem. O teto
+                # de 288px é MEDIDO: até ele a aba Avançado fica com 482px de
+                # largura, igual à aba Modelos — quem dita o tamanho da janela
+                # (518) é a maior aba, então o slider não pode passar disso ou a
+                # janela cresceria ao clicar em Avançado (regressão de 10/09).
+                length=max(170, min(288, 12 * len(valores))),
                 command=on_scale,
             )
             scale.set(variable.get())
@@ -7862,35 +7910,37 @@ try {
             help_button.grid(row=row, column=3, sticky="w", pady=5, padx=(8, 0))
             return scale
 
-        # Conversões: passo de 4 em 4, até 2n (n = núcleos da CPU).
-        conv_max = cpu_count * 2
-        conv_valores = step_values(4, conv_max)
+        # Conversões: as opções da máquina são 1, 2, 3, ..., n, 3n/2, 2n, 5n/2,
+        # 3n, 7n/2, 4n (n + 6 opções) — ver `parallel_values`.
+        conv_valores = parallel_values(cpu_count)
+        conv_max = conv_valores[-1]
         conv_help = (
             "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
-            f"O slider sobe de 4 em 4: {conv_valores[0]}, {conv_valores[1]}, "
-            f"{conv_valores[2]}... até {conv_valores[-1]} (2 × {cpu_count} núcleos).\n\n"
+            f"{describe_parallel_values(conv_valores, cpu_count)}\n\n"
             "Cada conversão FFmpeg usa bastante CPU e leitura/escrita de disco. "
             "Paralelismo alto demais disputa recursos com o resto do sistema "
             "(e com a transcrição, quando roda em sequência), podendo até "
             "diminuir a velocidade total em vez de aumentar. "
             "Metade dos núcleos mantém a máquina responsiva e a conversão eficiente."
         )
-        parallel_scale(0, "Conversões", conv_var, conv_max, conv_help, step=4)
+        parallel_scale(0, "Conversões", conv_var, conv_valores, conv_help)
 
-        # Requisições: passo de 2 em 2, até 16.
+        # Requisições: passo de 2 em 2, até 16 (regra do usuário de 31/08 — o
+        # gargalo é a rede, não a CPU; a regra nova das opções vale só para as
+        # Conversões até o usuário pedir o contrário).
         req_max = 16
-        req_valores = step_values(2, req_max)
+        req_step = workable_step(2, req_max)
+        req_valores = step_values(req_step, req_max)
         req_help = (
             "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
-            f"O slider sobe de 2 em 2: {req_valores[0]}, {req_valores[1]}, "
-            f"{req_valores[2]}... até {req_valores[-1]}.\n\n"
+            f"{describe_step_values(req_valores, req_step)}\n\n"
             "Cada requisição de transcrição envia áudio e espera a resposta "
             "do servidor — o gargalo é a rede e o servidor, não a CPU local. "
             "Paralelismo alto demais satura a conexão e pode causar timeouts "
             "ou respostas instáveis. Metade dos núcleos dá o melhor equilíbrio "
             "entre velocidade e estabilidade."
         )
-        parallel_scale(1, "Requisições", req_var, req_max, req_help, step=2)
+        parallel_scale(1, "Requisições", req_var, req_valores, req_help)
 
         # ── Seção de Keywords (aba Avançado, abaixo de Paralelismo) ──────
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
@@ -10898,7 +10948,11 @@ try {
                         display = self._current_live_text_locked()
                     self._queue("live_display", display)
                 if self.elevenlabs_ws_intentional_close and not self.elevenlabs_ws_done_event.is_set():
-                    self._finish_elevenlabs_session()
+                    # _finish_elevenlabs_session e uma funcao ANINHADA deste
+                    # escopo (nao um metodo de SigApp): chamar via self. dava
+                    # AttributeError e o texto final do Scribe se perdia no
+                    # fechamento intencional.
+                    _finish_elevenlabs_session()
                 return
             if event_type.startswith("scribe_") and "error" in event_type:
                 self.elevenlabs_ws_lost_event.set()
@@ -10938,7 +10992,7 @@ try {
             if _app is not self.elevenlabs_ws_app:
                 return
             if self.elevenlabs_ws_intentional_close and not self.elevenlabs_ws_done_event.is_set():
-                self._finish_elevenlabs_session()
+                _finish_elevenlabs_session()
                 return
             if (
                 not self.elevenlabs_ws_intentional_close
