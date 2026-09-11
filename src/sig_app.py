@@ -178,7 +178,10 @@ from documents import (  # noqa: F401
 # Implementacao real em src/ui_widgets.py (codigo movido verbatim).
 from ui_widgets import (  # noqa: F401
     create_tooltip,
+    nearest_value,
+    NodeSlider,
     PreviewIconButton,
+    step_values,
 )
 
 
@@ -7622,7 +7625,9 @@ try {
             style="Settings.TLabelframe",
         )
         parallel_frame.pack(fill=X, anchor="n")
-        parallel_frame.columnconfigure(0, minsize=170)
+        # Coluna do rótulo estreita: o slider começa logo depois do texto, sem o
+        # vão grande que existia quando a coluna reservava 170px.
+        parallel_frame.columnconfigure(0, minsize=0)
         parallel_frame.columnconfigure(1, weight=1)
         columns = [model_sections, [parallel_frame]]
         (
@@ -7809,12 +7814,19 @@ try {
             variable: IntVar,
             maximum: int,
             help_text: str,
+            step: int = 1,
+            minimum: int = 1,
         ):
-            # Valor salvo fora da faixa (ou ausente) cai para o padrão n/2.
+            # Slider de NÓS (mesmo visual do TurboCore): os valores possíveis são
+            # os múltiplos do passo, então o valor salvo é encaixado no nó mais
+            # próximo (ex.: padrão n/2 = 9 cai em 8 quando o passo é 4).
+            valores = step_values(step, maximum, minimum)
             if not (1 <= variable.get() <= maximum):
-                variable.set(default_parallel)
+                variable.set(nearest_value(default_parallel, valores))
+            else:
+                variable.set(nearest_value(variable.get(), valores))
             ttk.Label(parallel_frame, text=label).grid(
-                row=row, column=0, sticky="w", pady=5, padx=(0, 12)
+                row=row, column=0, sticky="w", pady=5, padx=(0, 8)
             )
             value_label = ttk.Label(parallel_frame, text=str(variable.get()), width=4)
             value_label.grid(row=row, column=2, sticky="w", pady=5, padx=(8, 0))
@@ -7824,17 +7836,17 @@ try {
                     selected = int(round(float(str(value).replace(",", "."))))
                 except (TypeError, ValueError):
                     selected = variable.get()
-                selected = max(1, min(selected, maximum))
+                selected = nearest_value(selected, valores)
                 variable.set(selected)
                 value_label.configure(text=str(selected))
 
-            scale = ttk.Scale(
+            scale = NodeSlider(
                 parallel_frame,
-                from_=1,
-                to=maximum,
-                value=variable.get(),
+                values=valores,
+                length=170,
                 command=on_scale,
             )
+            scale.set(variable.get())
             scale.grid(row=row, column=1, sticky="ew", pady=5)
 
             help_button = ttk.Button(
@@ -7850,28 +7862,35 @@ try {
             help_button.grid(row=row, column=3, sticky="w", pady=5, padx=(8, 0))
             return scale
 
-        # Conversões: 1..2n (n = núcleos da CPU); padrão n/2.
+        # Conversões: passo de 4 em 4, até 2n (n = núcleos da CPU).
         conv_max = cpu_count * 2
+        conv_valores = step_values(4, conv_max)
         conv_help = (
             "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
+            f"O slider sobe de 4 em 4: {conv_valores[0]}, {conv_valores[1]}, "
+            f"{conv_valores[2]}... até {conv_valores[-1]} (2 × {cpu_count} núcleos).\n\n"
             "Cada conversão FFmpeg usa bastante CPU e leitura/escrita de disco. "
             "Paralelismo alto demais disputa recursos com o resto do sistema "
             "(e com a transcrição, quando roda em sequência), podendo até "
             "diminuir a velocidade total em vez de aumentar. "
             "Metade dos núcleos mantém a máquina responsiva e a conversão eficiente."
         )
-        parallel_scale(0, "Conversões", conv_var, conv_max, conv_help)
+        parallel_scale(0, "Conversões", conv_var, conv_max, conv_help, step=4)
 
-        # Requisições: 1..16; padrão n/2.
+        # Requisições: passo de 2 em 2, até 16.
+        req_max = 16
+        req_valores = step_values(2, req_max)
         req_help = (
             "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
+            f"O slider sobe de 2 em 2: {req_valores[0]}, {req_valores[1]}, "
+            f"{req_valores[2]}... até {req_valores[-1]}.\n\n"
             "Cada requisição de transcrição envia áudio e espera a resposta "
             "do servidor — o gargalo é a rede e o servidor, não a CPU local. "
             "Paralelismo alto demais satura a conexão e pode causar timeouts "
             "ou respostas instáveis. Metade dos núcleos dá o melhor equilíbrio "
             "entre velocidade e estabilidade."
         )
-        parallel_scale(1, "Requisições", req_var, 16, req_help)
+        parallel_scale(1, "Requisições", req_var, req_max, req_help, step=2)
 
         # ── Seção de Keywords (aba Avançado, abaixo de Paralelismo) ──────
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos

@@ -83,6 +83,63 @@ def _check_transcription_models_menu(app) -> None:
         raise RuntimeError(f"selecao padrao do menu Modelos inesperada: {checked}")
 
 
+def _check_parallel_sliders(app, settings_window) -> None:
+    """Sliders de nós da aba Avançado (visual do TurboCore e passos).
+
+    Vacinas do pedido de 10/09: Conversões sobe de 4 em 4 e Requisições de 2
+    em 2; o slider começa logo depois do rótulo (sem o vão de 170px) e usa o
+    mesmo NodeSlider do TurboCore (não o ttk.Scale, que não tem nós).
+    """
+    from tkinter import ttk
+
+    from ui_widgets import NodeSlider
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    def clicar_aba(nome: str) -> None:
+        for rotulo in descendentes(settings_window):
+            if isinstance(rotulo, tk.Label) and rotulo.cget("text") == nome:
+                rotulo.event_generate("<Button-1>", x=1, y=1)
+                settings_window.update_idletasks()
+                return
+        raise RuntimeError(f"aba {nome!r} nao encontrada")
+
+    clicar_aba("Avançado")
+    painel = next(
+        (w for w in descendentes(settings_window)
+         if isinstance(w, ttk.LabelFrame) and w.cget("text") == "Paralelismo"),
+        None,
+    )
+    if painel is None:
+        raise RuntimeError("secao Paralelismo ausente na aba Avancado")
+    sliders = [w for w in descendentes(painel) if isinstance(w, NodeSlider)]
+    if len(sliders) != 2:
+        raise RuntimeError(f"esperava 2 sliders de nos, achei {len(sliders)}")
+    esperado = [4, 2]
+    for slider, passo in zip(sliders, esperado):
+        if slider.values[1] - slider.values[0] != passo:
+            raise RuntimeError(
+                f"passo do slider {slider.values[:3]}... diferente de {passo}"
+            )
+        if slider.values[0] != passo:
+            raise RuntimeError(f"o slider deveria comecar em {passo}: {slider.values[0]}")
+    # O slider precisa comecar logo depois do rótulo (pedido do usuário).
+    for slider in sliders:
+        irmaos = [w for w in descendentes(painel) if isinstance(w, ttk.Label)]
+        rotulo = max(
+            (l for l in irmaos if l.winfo_y() == slider.winfo_y()),
+            key=lambda l: l.winfo_x(),
+            default=None,
+        )
+        if rotulo is not None:
+            vao = slider.winfo_x() - (rotulo.winfo_x() + rotulo.winfo_width())
+            if vao > 40:
+                raise RuntimeError(f"slaider longe do rotulo ({vao}px de vao)")
+
+
 def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     """Checkbox Keywords (Transcrição/Ocorrência) + aba Modelos das chaves.
 
@@ -255,6 +312,7 @@ def run(*, quiet: bool = False) -> int:
             # chaves e botão KEYWORDS) antes de ser destruída.
             settings_window = settings_windows[0]
             _check_keywords_and_settings_tabs(app, settings_window)
+            _check_parallel_sliders(app, settings_window)
             settings_window.destroy()
             root.update_idletasks()
 
