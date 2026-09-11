@@ -142,8 +142,33 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
         return [w.cget("text") for w in descendentes(settings_window) if isinstance(w, tipo)]
 
     botoes = textos(ttk.Button)
-    if "KEYWORDS" not in botoes:
-        raise RuntimeError("botao KEYWORDS ausente na aba Avancado")
+    # A seção de Keywords vive na aba Avançado (o botão KEYWORDS foi removido):
+    # o conteúdo está num LabelFrame "Keywords", logo abaixo de "Paralelismo".
+    if "KEYWORDS" in botoes:
+        raise RuntimeError("o botao KEYWORDS deveria ter sido removido")
+    secoes_avancado = [
+        w for w in descendentes(settings_window) if isinstance(w, ttk.LabelFrame)
+    ]
+    keywords_secao = next((w for w in secoes_avancado if w.cget("text") == "Keywords"), None)
+    if keywords_secao is None:
+        raise RuntimeError("secao 'Keywords' ausente na aba Avancado")
+    paralelismo = next((w for w in secoes_avancado if w.cget("text") == "Paralelismo"), None)
+    if paralelismo is None:
+        raise RuntimeError("secao 'Paralelismo' ausente na aba Avancado")
+    if paralelismo.master is not keywords_secao.master:
+        raise RuntimeError("Paralelismo e Keywords deveriam estar na mesma aba")
+    irmaos = list(keywords_secao.master.winfo_children())
+    if irmaos.index(keywords_secao) < irmaos.index(paralelismo):
+        raise RuntimeError("a secao Keywords deveria ficar ABAIXO de Paralelismo")
+    # Os controles dos perfis precisam estar dentro da seção de Keywords.
+    botoes_secao = [
+        b.cget("text") for b in descendentes(keywords_secao) if isinstance(b, ttk.Button)
+    ]
+    for rotulo in ("+ Perfil", "Renomear", "Excluir", "+", "\u2212"):
+        if rotulo not in botoes_secao:
+            raise RuntimeError(f"controle {rotulo!r} ausente na secao Keywords")
+    if not any(isinstance(w, ttk.Treeview) for w in descendentes(keywords_secao)):
+        raise RuntimeError("tabela de termos ausente na secao Keywords")
     marcadores = [
         w for w in descendentes(settings_window)
         if isinstance(w, tk.Label) and w.cget("text") == "?"

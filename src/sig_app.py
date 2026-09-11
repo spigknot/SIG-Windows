@@ -7613,19 +7613,10 @@ try {
             section.columnconfigure(0, minsize=170)
             section.columnconfigure(1, weight=1)
             model_sections.append(section)
-        # Aba Avançado: a tela inicial (botão KEYWORDS + Paralelismo) e a tela
-        # de Keywords trocam entre si DENTRO da aba, sem mexer nas outras.
-        advanced_home = ttk.Frame(advanced_tab, style="Settings.TFrame")
-        advanced_home.pack(fill=BOTH, expand=True, anchor="n")
-        advanced_keywords_bar = ttk.Frame(advanced_home, style="Settings.Inner.TFrame")
-        advanced_keywords_bar.pack(anchor="e", pady=(0, 8))
-        ttk.Button(
-            advanced_keywords_bar,
-            text="KEYWORDS",
-            command=lambda: show_keywords_screen(),
-        ).pack(side=RIGHT)
+        # Aba Avançado: Paralelismo e, logo abaixo, a seção de Keywords (o
+        # conteúdo que antes ficava numa tela separada atrás do botão KEYWORDS).
         parallel_frame = ttk.LabelFrame(
-            advanced_home,
+            advanced_tab,
             text="Paralelismo",
             padding=(12, 8),
             style="Settings.TLabelframe",
@@ -7882,11 +7873,17 @@ try {
         )
         parallel_scale(1, "Requisições paralelas", req_var, 16, req_help)
 
-        # ── Tela de Keywords (aba Avançado) ──────────────────────────────
+        # ── Seção de Keywords (aba Avançado, abaixo de Paralelismo) ──────
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
         # seletores "Keywords" das telas de Transcrição e Ocorrência. Cada
         # modelo continua montando o próprio parâmetro na requisição.
-        keywords_page = ttk.Frame(advanced_tab, style="Settings.TFrame")
+        keywords_page = ttk.LabelFrame(
+            advanced_tab,
+            text="Keywords",
+            padding=(12, 8),
+            style="Settings.TLabelframe",
+        )
+        keywords_page.pack(fill=X, anchor="n", pady=(8, 0))
         keywords_profiles_edit: dict[str, list[str]] = {
             nome: list(termos)
             for nome, termos in keyword_profiles(self.settings).items()
@@ -7936,22 +7933,6 @@ try {
                 "cada. Clique em ? para os limites de cada modelo."
             )
 
-        keywords_top = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
-        keywords_top.pack(fill=X, pady=(0, 10))
-        ttk.Button(
-            keywords_top,
-            text="\u2190  Voltar",
-            command=lambda: show_advanced_home(),
-        ).pack(side=LEFT)
-        ttk.Label(
-            keywords_top,
-            text="Keywords — termos que os modelos devem reconhecer",
-            style="Settings.TLabel",
-        ).pack(side=LEFT, padx=(14, 0))
-        self._make_help_marker(
-            keywords_top, lambda: self._open_keywords_help(win)
-        ).pack(side=LEFT, padx=(8, 0))
-
         keywords_profile_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_profile_row.pack(fill=X, pady=(0, 8))
         ttk.Label(keywords_profile_row, text="Perfil:", style="Settings.TLabel").pack(side=LEFT)
@@ -7962,6 +7943,11 @@ try {
             width=28,
         )
         keywords_profile_combo.pack(side=LEFT, padx=(6, 0))
+        # "?" no fim da linha: limites reais por modelo e aviso de falso
+        # positivo (mesmo marcador discreto usado no VAD).
+        self._make_help_marker(
+            keywords_profile_row, lambda: self._open_keywords_help(win)
+        ).pack(side=LEFT, padx=(10, 0))
 
         keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_entry_row.pack(fill=X, pady=(0, 10))
@@ -8236,15 +8222,6 @@ try {
             justify="left",
         ).pack(anchor="w", pady=(8, 0))
         refresh_profile_combo()
-
-        def show_keywords_screen():
-            advanced_home.pack_forget()
-            keywords_page.pack(fill=BOTH, expand=True, anchor="n")
-            keyword_entry.focus_set()
-
-        def show_advanced_home():
-            keywords_page.pack_forget()
-            advanced_home.pack(fill=BOTH, expand=True, anchor="n")
 
         transcription_server_row = 0
         ttk.Label(transcription_frame, text="Modelo de transcrição 1").grid(
@@ -9116,6 +9093,7 @@ try {
             police_frame,
             api_models_frame,
             api_imei_frame,
+            keywords_page,
         ]
         for section in all_settings_sections:
             normalize_settings_surface(section)
