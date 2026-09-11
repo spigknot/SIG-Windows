@@ -13,6 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from app_env import physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
+from providers import (  # noqa: E402  (catalogo: quem tem o controle "- t = +")
+    ALIBABA_API_NAME,
+    ASSEMBLYAI_API_NAME,
+    DEEPGRAM_API_NAME,
+    ELEVENLABS_API_NAME,
+    GROK_API_NAME,
+    LOCAL_GRANITE_SERVER_NAME,
+    META_MUSE_API_NAME,
+)
 
 MAIN_TABS = ("live", "files", "qualification", "imei", "ffmpeg", "diarias", "qrcode")
 TAB_BUTTONS = (
@@ -24,6 +33,26 @@ TAB_BUTTONS = (
     "diarias_tab_button",
     "qrcode_tab_button",
 )
+
+# Provedores de API (todos SEM o controle "- t = +" da tela de Ocorrência:
+# so o servidor local Granite NAR transcreve em fatias REST com intervalo).
+# Os nomes vem do CATALOGO (providers) — provedor novo entra sozinho na
+# varredura deste check.
+SERVIDORES_DE_API = (
+    GROK_API_NAME,
+    DEEPGRAM_API_NAME,
+    ASSEMBLYAI_API_NAME,
+    ELEVENLABS_API_NAME,
+    META_MUSE_API_NAME,
+    ALIBABA_API_NAME,
+)
+
+# Servidor STT local (Granite NAR): o UNICO que mostra o grupo do intervalo.
+SERVIDOR_LOCAL = LOCAL_GRANITE_SERVER_NAME
+
+# Colunas dos microfones da linha de controles: NAO podem se mexer quando o
+# grupo do intervalo aparece/some (regra explicita do usuario).
+COLUNAS_DE_MICROFONE = ("live_normal_mic_column", "live_pause_column", "live_mic_column")
 
 
 def _destroy_toplevels(root: tk.Tk) -> None:
@@ -492,6 +521,159 @@ def _check_api_key_visibility_toggle(app, settings_window) -> None:
         raise RuntimeError("o icone do botao nao voltou ao olho aberto")
 
 
+def _check_api_key_field_layout(app, settings_window) -> None:
+    """Aba Chaves API: rótulo curto do IMEI e campos 25% mais longos.
+
+    Vacina do pedido de 11/09 (dois pedidos na mesma tela):
+    - o rótulo do campo do IMEI é "IMEI Check" (era "Chave API do IMEI Check");
+    - os 8 campos de chave COMEÇAM mais à esquerda do que com a coluna de rótulo
+      antiga (190px) e ficaram 25% mais longos.
+
+    A largura "antiga" é medida na hora, com um Entry da largura anterior
+    (60 caracteres): em caracteres o ganho acompanha a fonte e a comparação
+    continua valendo em DPI diferente — pixels fixos não valeriam.
+    """
+    from tkinter import ttk
+
+    import sig_app
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    secoes = [w for w in descendentes(settings_window) if isinstance(w, ttk.LabelFrame)]
+    imei = next((w for w in secoes if w.cget("text") == "IMEI CHECK"), None)
+    if imei is None:
+        raise RuntimeError("secao 'IMEI CHECK' ausente na aba Chaves API")
+    modelos = next((w for w in secoes if w.cget("text") == "Modelos"), None)
+    if modelos is None:
+        raise RuntimeError("secao 'Modelos' ausente na aba Chaves API")
+
+    rotulos_imei = [
+        rotulo.cget("text") for rotulo in descendentes(imei) if isinstance(rotulo, ttk.Label)
+    ]
+    if rotulos_imei != ["IMEI Check"]:
+        raise RuntimeError(f"rotulo do campo do IMEI fora do padrao: {rotulos_imei}")
+
+    # A largura renderizada só existe com a aba EMPACOTADA: clica nela como o
+    # usuário faria (a janela assume o tamanho requisitado da aba ativa).
+    botoes, _conteudo = _settings_tab_pages(settings_window)
+    botoes["Chaves API"].event_generate("<Button-1>", x=1, y=1)
+    settings_window.update_idletasks()
+
+    for secao in (modelos, imei):
+        campos = [w for w in descendentes(secao) if isinstance(w, ttk.Entry)]
+        if not campos:
+            raise RuntimeError(f"secao {secao.cget('text')!r} sem campos de chave")
+        referencia = ttk.Entry(secao, width=sig_app.API_KEY_ENTRY_WIDTH_LEGACY_CHARS)
+        largura_antiga = referencia.winfo_reqwidth()
+        referencia.destroy()
+        exigido = largura_antiga * sig_app.API_KEY_FIELD_MIN_GROWTH
+        # Margem direita da seção (borda + padding): os campos terminam nela, o
+        # que prova que TODO o ganho veio da esquerda e não de uma janela maior.
+        margem_direita = sig_app.API_KEY_SECTION_HORIZONTAL_MARGIN // 2
+        for campo in campos:
+            if campo.winfo_width() < exigido:
+                raise RuntimeError(
+                    f"campo de chave da secao {secao.cget('text')!r} com "
+                    f"{campo.winfo_width()}px: os 25% sobre os {largura_antiga}px "
+                    f"anteriores exigem {exigido:.0f}px"
+                )
+            if campo.winfo_x() > sig_app.API_KEY_LABEL_COLUMN_LEGACY_WIDTH:
+                raise RuntimeError(
+                    f"campo de chave da secao {secao.cget('text')!r} comeca em "
+                    f"x={campo.winfo_x()}: deveria comecar antes dos "
+                    f"{sig_app.API_KEY_LABEL_COLUMN_LEGACY_WIDTH}px da coluna antiga"
+                )
+            fim = campo.winfo_x() + campo.winfo_width()
+            if abs(fim - (secao.winfo_width() - margem_direita)) > 2:
+                raise RuntimeError(
+                    f"campo de chave da secao {secao.cget('text')!r} termina em "
+                    f"{fim}px numa secao de {secao.winfo_width()}px: a margem "
+                    f"direita mudou (o ganho deveria vir so da ESQUERDA)"
+                )
+
+
+def _check_live_local_server_controls(app, root) -> None:
+    """Controles exclusivos do servidor local (Granite NAR) na tela de Ocorrencia.
+
+    Vacina do pedido de 11/09. Com o servidor local aparecem SO o grupo
+    "- t = +" (TEMPO) e nada mais da linha: Timestamps, Diarizacao, Idioma e
+    Keywords ficam ocultos e o grupo do intervalo fica encostado a ESQUERDA.
+    Com qualquer provedor de API e o inverso: o intervalo some, o Timestamps
+    volta encostado a esquerda e o bloco de idioma/keywords reaparece.
+
+    A janela precisa estar MAPEADA: e a unica forma de o Tk calcular posicoes
+    reais (com o root withdrawn todo x e 0). As tres colunas de microfone NAO
+    podem se mexer em nenhum dos cenarios.
+    """
+    import sig_app
+
+    def estado(servidor: str) -> dict:
+        app.settings["transcription_server"] = servidor
+        app._refresh_live_grok_controls()
+        root.update()
+        return {
+            "intervalo_gerenciado": app.live_interval_controls.winfo_manager(),
+            "intervalo_x": app.live_interval_controls.winfo_x(),
+            "timestamps_gerenciado": app.live_timestamps_check.winfo_manager(),
+            "timestamps_x": app.live_timestamps_check.winfo_x(),
+            "idioma_gerenciado": app.live_grok_controls.winfo_manager(),
+            "mics": {nome: getattr(app, nome).winfo_x() for nome in COLUNAS_DE_MICROFONE},
+        }
+
+    original = app.settings.get("transcription_server")
+    app.select_main_tab("live")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    try:
+        local = estado(SERVIDOR_LOCAL)
+        provedores = {nome: estado(nome) for nome in SERVIDORES_DE_API}
+    finally:
+        app.settings["transcription_server"] = original
+        app._refresh_live_grok_controls()
+        if not mapeado:
+            root.withdraw()
+
+    if local["intervalo_gerenciado"] != "pack":
+        raise RuntimeError(
+            "grupo '- t = +' nao esta visivel com o servidor local (Granite NAR) selecionado"
+        )
+    if local["intervalo_x"] != 0:
+        raise RuntimeError(
+            f"o grupo '- t = +' nao esta encostado a esquerda: x={local['intervalo_x']}px"
+        )
+    for campo in ("timestamps", "idioma"):
+        if local[f"{campo}_gerenciado"]:
+            raise RuntimeError(
+                f"'{campo}' continua visivel com o servidor local (Granite NAR) selecionado"
+            )
+    if app.live_timestamps_var.get():
+        raise RuntimeError("o checkbox de Timestamps ficou marcado com o servidor local")
+
+    for nome, dados in provedores.items():
+        if dados["intervalo_gerenciado"]:
+            raise RuntimeError(f"grupo '- t = +' continua visivel com {nome} selecionado")
+        if dados["timestamps_gerenciado"] != "pack":
+            raise RuntimeError(f"'Timestamps' nao voltou com {nome} selecionado")
+        if dados["timestamps_x"] != 0:
+            raise RuntimeError(
+                f"o resto da linha nao foi para a esquerda com {nome}: "
+                f"Timestamps em x={dados['timestamps_x']}px"
+            )
+        if dados["idioma_gerenciado"] != "pack":
+            raise RuntimeError(f"bloco de idioma/keywords nao voltou com {nome} selecionado")
+        for coluna in COLUNAS_DE_MICROFONE:
+            if dados["mics"][coluna] != local["mics"][coluna]:
+                raise RuntimeError(
+                    f"a coluna de microfone {coluna} mudou de lugar com {nome}: "
+                    f"{local['mics'][coluna]}px -> {dados['mics'][coluna]}px"
+                )
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -512,6 +694,7 @@ def run(*, quiet: bool = False) -> int:
 
             _check_transcription_language_selector(app)
             _check_transcription_models_menu(app)
+            _check_live_local_server_controls(app, root)
 
             before = set(root.winfo_children())
             app.open_settings()
@@ -528,6 +711,7 @@ def run(*, quiet: bool = False) -> int:
             settings_window = settings_windows[0]
             _check_keywords_and_settings_tabs(app, settings_window)
             _check_api_key_visibility_toggle(app, settings_window)
+            _check_api_key_field_layout(app, settings_window)
             _check_parallel_sliders(app, settings_window)
             settings_window.destroy()
             root.update_idletasks()

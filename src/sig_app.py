@@ -404,6 +404,7 @@ from providers import (  # noqa: F401
     fallback_text_model_for_missing_api_key,
     fallback_transcription_server_for_missing_api_key,
     is_realtime_only_transcription_server,
+    is_local_granite_transcription_server,
     plausible_elevenlabs_api_key,
     plausible_assemblyai_api_key,
     plausible_xai_api_key,
@@ -468,7 +469,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260911_003"
+APP_VERSION = "20260911_004"
 
 
 
@@ -818,6 +819,28 @@ API_KEY_VISIBILITY_ICON_MIN_SIZE = 14
 API_KEY_EYE_GAP = 10
 # Cinza dos outros ícones desenhados pelo app (paste/copiar/gear).
 API_KEY_VISIBILITY_ICON_COLOR = "#263735"
+# Largura da coluna de rótulos da aba Chaves API. Os 190px originais existiam
+# por causa do rótulo longo "Chave API do IMEI Check" (hoje "IMEI Check");
+# com 98px — que ainda cabe no rótulo mais largo, "AssemblyAI" — os campos
+# começam 92px mais à esquerda.
+API_KEY_LABEL_COLUMN_WIDTH = 98
+# Valor ANTIGO da mesma coluna: é a base do ganho de 25% medido pelos testes.
+API_KEY_LABEL_COLUMN_LEGACY_WIDTH = 190
+# Largura dos campos de chave EM CARACTERES (era 60). 76 = 60 * 1,25 arredondado
+# PARA CIMA, porque a quantização em caracteres não dá 25% exatos: o Tk pede
+# (caracteres * largura do caractere + padding), então 75 caracteres dariam
+# 456px (24,6%). Em caracteres os 25% acompanham a fonte, portanto valem em
+# qualquer DPI. Também é o que mantém a janela no tamanho atual: o Tk dimensiona
+# a janela de Configurações pela requisição da aba ATIVA, e só estreitar a coluna
+# de rótulos faria a janela encolher junto (medido: 366 → 428px, em vez de 462px).
+API_KEY_ENTRY_WIDTH_CHARS = 76
+# Valor ANTIGO da mesma largura em caracteres: base medida pelo teste da UI.
+API_KEY_ENTRY_WIDTH_LEGACY_CHARS = 60
+# Ganho mínimo exigido nos campos de chave (vacina da UI em scripts/ui_smoke.py).
+API_KEY_FIELD_MIN_GROWTH = 1.25
+# Padding horizontal do LabelFrame (12+12) + borda (2+2) de cada seção de
+# chaves: é o que sobra entre a largura da seção e a coluna do rótulo + campo.
+API_KEY_SECTION_HORIZONTAL_MARGIN = 28
 
 
 def api_key_visibility_image(crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE) -> "Image.Image":
@@ -2323,11 +2346,27 @@ class SigApp:
         self.live_top = live_top
         live_top.bind("<Configure>", self._on_live_top_configure, add="+")
 
-        self.live_interval_minus = ttk.Button(live_top, text="-", width=3, command=lambda: self._change_live_interval(-1))
+        # Controles da linha do servidor local x controles dos provedores de
+        # API. Tudo num container único e na ordem fixa (intervalo, timestamps,
+        # diarização/idioma/keywords) para que omitir um membro NÃO precise de
+        # `pack(before=...)`: o pack só reflui o que está visível — o `before`
+        # apontando para um irmão oculto levanta TclError ("isn't packed").
+        self.live_line_controls = ttk.Frame(live_top)
+        self.live_line_controls.pack(side=LEFT)
+
+        # Grupo "- t = +": intervalo de TEMPO das fatias REST do servidor STT
+        # LOCAL (Granite NAR). Fica num frame próprio porque a visibilidade é
+        # CONDICIONAL ao modelo escolhido (`_refresh_live_local_server_controls`)
+        # — sem o frame, esconder o grupo exigiria esconder widget por widget e
+        # a linha não fecharia à esquerda sozinha.
+        self.live_interval_controls = ttk.Frame(self.live_line_controls)
+        self.live_interval_minus = ttk.Button(
+            self.live_interval_controls, text="-", width=3, command=lambda: self._change_live_interval(-1)
+        )
         self.live_interval_minus.pack(side=LEFT)
-        ttk.Label(live_top, text=" t =", style="Muted.TLabel").pack(side=LEFT, padx=(6, 2))
+        ttk.Label(self.live_interval_controls, text=" t =", style="Muted.TLabel").pack(side=LEFT, padx=(6, 2))
         self.live_interval_entry = ttk.Combobox(
-            live_top,
+            self.live_interval_controls,
             textvariable=self.live_interval_var,
             values=tuple(f"{value / 1000:.1f}" for value in LIVE_INTERVAL_VALUES_MS),
             width=5,
@@ -2336,17 +2375,23 @@ class SigApp:
         )
         self.live_interval_entry.pack(side=LEFT)
         self.live_interval_entry.bind("<<ComboboxSelected>>", lambda _event: self._apply_live_interval_entry())
-        self.live_interval_plus = ttk.Button(live_top, text="+", width=3, command=lambda: self._change_live_interval(1))
+        self.live_interval_plus = ttk.Button(
+            self.live_interval_controls, text="+", width=3, command=lambda: self._change_live_interval(1)
+        )
         self.live_interval_plus.pack(side=LEFT, padx=(6, 8))
+        self.live_interval_controls.pack(side=LEFT)
+        # Timestamps: só faz sentido nos provedores de API (o Granite NAR local
+        # não devolve marcação por palavra) — a visibilidade segue o mesmo
+        # refresh do grupo do intervalo.
         self.live_timestamps_check = ttk.Checkbutton(
-            live_top,
+            self.live_line_controls,
             text="Timestamps",
             variable=self.live_timestamps_var,
             command=self._toggle_live_timestamps,
             state="disabled",
         )
         self.live_timestamps_check.pack(side=LEFT, padx=(0, 10))
-        self.live_grok_controls = ttk.Frame(live_top)
+        self.live_grok_controls = ttk.Frame(self.live_line_controls)
         self.live_diarize_check = ttk.Checkbutton(
             self.live_grok_controls,
             text="Diarização",
@@ -6785,7 +6830,10 @@ try {
             self.live_grok_controls.pack_forget()
             self.live_diarize_var.set(False)
         else:
-            self.live_grok_controls.pack(side=LEFT, before=self.live_top_spacer)
+            # Dentro do container da linha, empacotar sem `before` ACRESCENTA no
+            # fim — e este frame é o membro mais à direita do grupo, então a
+            # ordem original (intervalo, timestamps, idioma/keywords) é mantida.
+            self.live_grok_controls.pack(side=LEFT)
             if self.live_diarize_check is not None:
                 if diarize_supported:
                     self.live_diarize_check.configure(state="normal")
@@ -6796,9 +6844,48 @@ try {
                     self.live_diarize_check.configure(state="disabled")
         self._rebuild_live_language_menu()
         self._rebuild_keywords_menus()
+        self._refresh_live_local_server_controls()
         interval_state = "disabled" if self.live_state != "idle" else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
             widget.configure(state=interval_state)
+
+    def _refresh_live_local_server_controls(self):
+        """Visibilidade dos controles que só existem no servidor STT LOCAL.
+
+        Regra do usuário (11/09): o controle "- t = +" (TEMPO — intervalo em
+        segundos entre as fatias REST) e o "Timestamps" só aparecem quando o
+        modelo de transcrição selecionado é o SERVIDOR LOCAL (Granite NAR):
+
+        - Granite NAR: o grupo do intervalo aparece; "Timestamps" e todo o
+          bloco Diarização/Idioma/Keywords (omitido em `_refresh_live_grok_controls`,
+          que é quem decide a diarização) ficam ocultos;
+        - qualquer provedor de API: o grupo do intervalo é OMITIDO e o
+          "Timestamps" volta.
+
+        Em ambos os casos o container da linha reflui sozinho, então o que
+        sobra fica encostado à esquerda. Os controles dos MICROFONES ficam
+        depois do `live_top_spacer` (que expande) e NUNCA se movem.
+        """
+        server = selected_transcription_server(self.settings)
+        local = is_local_granite_transcription_server(server.get("name"))
+        # 1) esconde o que não vale para o modelo escolhido (antes de mostrar o
+        #    resto, para a ordem final não depender da ordem das chamadas);
+        # 2) mostra o que vale. No container, `pack` sem `before` acrescenta no
+        #    FIM: o "Timestamps" tem de voltar ANTES do bloco Diarização/Idioma/
+        #    Keywords quando ele estiver visível (o `before` só é usado com um
+        #    irmão EMPACOTADO — apontar para um oculto levanta TclError).
+        if local:
+            self.live_timestamps_var.set(False)
+            self.live_timestamps_check.pack_forget()
+            self.live_interval_controls.pack(side=LEFT)
+            return
+        self.live_interval_controls.pack_forget()
+        if self.live_grok_controls.winfo_manager():
+            self.live_timestamps_check.pack(
+                side=LEFT, padx=(0, 10), before=self.live_grok_controls
+            )
+        else:
+            self.live_timestamps_check.pack(side=LEFT, padx=(0, 10))
 
     def start_normal_live_recording(self):
         if self.normal_recording:
@@ -7760,7 +7847,10 @@ try {
                 style="Settings.TLabelframe",
             )
             section.pack(fill=X, anchor="n", pady=(0, 8))
-            section.columnconfigure(0, minsize=190)
+            # Coluna do rótulo estreita (era 190px): é o que faz os campos
+            # começarem mais à esquerda. O Tk nunca renderiza a coluna menor que
+            # o rótulo mais largo dela, então nenhum rótulo é cortado.
+            section.columnconfigure(0, minsize=API_KEY_LABEL_COLUMN_WIDTH)
             section.columnconfigure(1, weight=1)
             return section
 
@@ -7780,7 +7870,12 @@ try {
             ttk.Label(section, text=label).grid(
                 row=row, column=0, sticky="w", pady=5, padx=(0, 12)
             )
-            entry = ttk.Entry(section, textvariable=variable, show="*", width=60)
+            entry = ttk.Entry(
+                section,
+                textvariable=variable,
+                show="*",
+                width=API_KEY_ENTRY_WIDTH_CHARS,
+            )
             entry.grid(row=row, column=1, sticky="ew", pady=5)
             if help_text:
                 create_tooltip(entry, help_text)
@@ -7836,7 +7931,7 @@ try {
             alibaba_api_key_var,
             "Preencha para liberar o Alibaba Fun ASR/Qwen na lista de transcrição.",
         )
-        add_api_field(api_imei_frame, 0, "Chave API do IMEI Check", imei_api_key_var)
+        add_api_field(api_imei_frame, 0, "IMEI Check", imei_api_key_var)
 
         # Botão de olho da aba (fica no topo, ao lado do IMPORTAR): revela as
         # chaves dos campos e, já reveladas, vira o olho cortado com a função de

@@ -237,12 +237,22 @@ PARTS_EXTRACTION_LABELS = {
 }
 
 
+# Servidor STT LOCAL (Granite NAR). É o único modelo que transcreve em fatias
+# REST com intervalo ajustável — por isso é ele que "possui" o controle
+# "- t = +" da tela de Ocorrência (a visibilidade do grupo é decidida por
+# `is_local_granite_transcription_server`).
+LOCAL_GRANITE_SERVER_NAME = "servidor"
+
+
+LOCAL_GRANITE_STT_MODEL = "granite-speech-4.1-2b-nar"
+
+
 def read_transcription_servers() -> list[dict]:
     servers = [
         {
-            "name": "servidor",
+            "name": LOCAL_GRANITE_SERVER_NAME,
             "url": "http://servidor:8100",
-            "parameters": {"model": "granite-speech-4.1-2b-nar"},
+            "parameters": {"model": LOCAL_GRANITE_STT_MODEL},
             "selected": True,
         }
     ]
@@ -530,6 +540,21 @@ REALTIME_ONLY_TRANSCRIPTION_SERVERS = frozenset(
 def is_realtime_only_transcription_server(server_name: str) -> bool:
     """True para modelo exclusivo de WebSocket/ao vivo (não aceito em lote)."""
     return str(server_name or "").strip() in REALTIME_ONLY_TRANSCRIPTION_SERVERS
+
+
+def is_local_granite_transcription_server(server_name: str) -> bool:
+    """True para o servidor STT LOCAL (Granite NAR).
+
+    É o ÚNICO modelo que ganha o controle "- t = +" (intervalo de tempo das
+    fatias REST) na linha de controles da tela de Ocorrência: os provedores de
+    API transcrevem por WebSocket/REST próprios e não têm esse parâmetro.
+    Aceita tanto o NOME do servidor ("servidor") quanto o MODELO
+    ("granite-speech-4.1-2b-nar"), porque a seleção circula nos dois formatos.
+    """
+    candidate = str(server_name or "").strip()
+    if not candidate:
+        return False
+    return candidate in {LOCAL_GRANITE_SERVER_NAME, LOCAL_GRANITE_STT_MODEL}
 
 
 # Nome do servidor STT -> provedor das regras de idioma/diarização
