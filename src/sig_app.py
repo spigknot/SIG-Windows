@@ -7850,7 +7850,7 @@ try {
             help_button.grid(row=row, column=3, sticky="w", pady=5, padx=(8, 0))
             return scale
 
-        # Conversões paralelas: 1..2n (n = núcleos da CPU); padrão n/2.
+        # Conversões: 1..2n (n = núcleos da CPU); padrão n/2.
         conv_max = cpu_count * 2
         conv_help = (
             "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
@@ -7860,9 +7860,9 @@ try {
             "diminuir a velocidade total em vez de aumentar. "
             "Metade dos núcleos mantém a máquina responsiva e a conversão eficiente."
         )
-        parallel_scale(0, "Conversões paralelas", conv_var, conv_max, conv_help)
+        parallel_scale(0, "Conversões", conv_var, conv_max, conv_help)
 
-        # Requisições paralelas: 1..16; padrão n/2.
+        # Requisições: 1..16; padrão n/2.
         req_help = (
             "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
             "Cada requisição de transcrição envia áudio e espera a resposta "
@@ -7871,7 +7871,7 @@ try {
             "ou respostas instáveis. Metade dos núcleos dá o melhor equilíbrio "
             "entre velocidade e estabilidade."
         )
-        parallel_scale(1, "Requisições paralelas", req_var, 16, req_help)
+        parallel_scale(1, "Requisições", req_var, 16, req_help)
 
         # ── Seção de Keywords (aba Avançado, abaixo de Paralelismo) ──────
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
@@ -7933,6 +7933,11 @@ try {
                 "cada. Clique em ? para os limites de cada modelo."
             )
 
+        # Botões dos perfis ACIMA do seletor (o usuário pediu nesta ordem:
+        # primeiro as ações, depois o seletor de qual perfil está em edição).
+        keywords_profiles_bar = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
+        keywords_profiles_bar.pack(fill=X, pady=(0, 8))
+
         keywords_profile_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_profile_row.pack(fill=X, pady=(0, 8))
         ttk.Label(keywords_profile_row, text="Perfil:", style="Settings.TLabel").pack(side=LEFT)
@@ -7940,7 +7945,7 @@ try {
             keywords_profile_row,
             textvariable=keywords_profile_var,
             state="readonly",
-            width=28,
+            width=24,
         )
         keywords_profile_combo.pack(side=LEFT, padx=(6, 0))
         # "?" no fim da linha: limites reais por modelo e aviso de falso
@@ -7952,7 +7957,7 @@ try {
         keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_entry_row.pack(fill=X, pady=(0, 10))
         keyword_entry_var = StringVar()
-        keyword_entry = ttk.Entry(keywords_entry_row, textvariable=keyword_entry_var, width=42)
+        keyword_entry = ttk.Entry(keywords_entry_row, textvariable=keyword_entry_var, width=40)
         keyword_entry.pack(side=LEFT)
 
         keywords_table_frame = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
@@ -7967,7 +7972,10 @@ try {
         keywords_tree.heading("ordem", text="N\u00ba")
         keywords_tree.heading("palavra", text="Keyword")
         keywords_tree.column("ordem", width=44, anchor="center", stretch=False)
-        keywords_tree.column("palavra", width=300, anchor="w")
+        # Largura da coluna escolhida para a janela de Configurações voltar ao
+        # tamanho inicial com a aba Avançado ativa (a tabela é a parte principal
+        # desta seção e é ela que define a largura mínima).
+        keywords_tree.column("palavra", width=392, anchor="w")
         keywords_scroll = ttk.Scrollbar(
             keywords_table_frame, orient="vertical", command=keywords_tree.yview
         )
@@ -8101,17 +8109,17 @@ try {
             refresh_profile_combo()
 
         ttk.Button(
-            keywords_profile_row,
+            keywords_profiles_bar,
             text="+ Perfil",
             command=new_profile,
-        ).pack(side=LEFT, padx=(8, 0))
+        ).pack(side=LEFT)
         ttk.Button(
-            keywords_profile_row,
+            keywords_profiles_bar,
             text="Renomear",
             command=rename_profile,
         ).pack(side=LEFT, padx=(6, 0))
         ttk.Button(
-            keywords_profile_row,
+            keywords_profiles_bar,
             text="Excluir",
             command=delete_profile,
         ).pack(side=LEFT, padx=(6, 0))
@@ -8209,16 +8217,18 @@ try {
         ttk.Label(
             keywords_actions,
             text=(
-                "Selecione um item e clique em \u2212 para excluir. O perfil em edição é o "
-                "escolhido em \"Perfil\"; clique em Salvar para manter."
+                "Selecione um item e clique em \u2212 para excluir.\n"
+                "O perfil em edição é o escolhido em \"Perfil\".\n"
+                "Clique em Salvar para manter."
             ),
             style="Muted.TLabel",
+            justify="left",
         ).pack(side=LEFT, padx=(12, 0))
         ttk.Label(
             keywords_page,
             textvariable=keywords_hint_var,
             style="Muted.TLabel",
-            wraplength=560,
+            wraplength=420,
             justify="left",
         ).pack(anchor="w", pady=(8, 0))
         refresh_profile_combo()

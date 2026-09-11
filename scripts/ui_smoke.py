@@ -160,7 +160,16 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
     irmaos = list(keywords_secao.master.winfo_children())
     if irmaos.index(keywords_secao) < irmaos.index(paralelismo):
         raise RuntimeError("a secao Keywords deveria ficar ABAIXO de Paralelismo")
-    # Os controles dos perfis precisam estar dentro da seção de Keywords.
+    # A janela das Configurações é `resizable(False, False)`: ela assume o
+    # tamanho requisitado da ABA ATIVA, então uma seção larga demais faz a
+    # janela crescer ao trocar de aba. A aba Avançado precisa caber no tamanho
+    # inicial (o mesmo da aba Modelos), senão a janela estica na cara do usuário
+    # (aconteceu: 836px por causa de uma linha de texto longa).
+    if keywords_secao.winfo_reqwidth() > 500:
+        raise RuntimeError(
+            f"secao Keywords larga demais ({keywords_secao.winfo_reqwidth()}px): "
+            "vai esticar a janela de Configuracoes"
+        )
     botoes_secao = [
         b.cget("text") for b in descendentes(keywords_secao) if isinstance(b, ttk.Button)
     ]
