@@ -595,6 +595,26 @@ class QrCodeTabTests(unittest.TestCase):
         self.assertEqual(app.activity_log.lines[-1][1], "activity_step_done")
         self.assertEqual(self.messages.calls, [])
 
+    def test_preview_fills_the_canvas_without_margins(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        captured = {}
+
+        class _PhotoStub:
+            def __init__(self, image, **_kwargs):
+                captured["image"] = image
+
+        with patch.object(sig_app.ImageTk, "PhotoImage", _PhotoStub):
+            app.generate_qrcode()
+        image = captured["image"]
+        code = app.qrcode
+        canvas_size = int(app.qrcode_canvas["width"])
+        # Maior escala INTEIRA que cabe no quadro: o QR preenche a area de
+        # exibicao (sem a margem de 4 modulos antiga — pedido do usuario, 12/09).
+        self.assertEqual(image.size, (code.size * (canvas_size // code.size),) * 2)
+        # Sem borda branca: o canto da imagem e o primeiro modulo do finder.
+        self.assertEqual(image.getpixel((0, 0)), (0, 0, 0))
+
     def test_generate_without_a_link_warns_and_keeps_the_state(self):
         app = self._make_app()
         app.generate_qrcode()
@@ -664,6 +684,29 @@ class QrCodeTabTests(unittest.TestCase):
         copied.assert_called_once()
         self.assertTrue(app.activity_log.lines[-1][0].endswith("QR Code copiado\n"))
         self.assertEqual(app.activity_log.lines[-1][1], "activity_step_done")
+
+    def test_copy_posts_a_quarter_resolution_image_without_margins(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.generate_qrcode()
+        code = app.qrcode
+        with patch("qr_encoder.copy_image_to_windows_clipboard") as copied:
+            app.copy_qrcode_image()
+        image = copied.call_args[0][0]
+        # 1/4 de cada lado (1/4 da altura e 1/4 da largura = 1/16 dos pixels):
+        # a escala por modulo 14 dividida por 4 da 3,5, que nao existe em pixel
+        # inteiro — a escala arredonda para 4.
+        self.assertEqual(sig_app.QRCODE_COPY_SCALE, 4)
+        self.assertEqual(image.size, (code.size * sig_app.QRCODE_COPY_SCALE,) * 2)
+        # Sem margem branca: a borda da imagem e a propria borda do codigo.
+        self.assertEqual(sig_app.QRCODE_COPY_BORDER, 0)
+        self.assertEqual(image.getpixel((0, 0)), (0, 0, 0))  # canto do finder
+        matrix = code.get_matrix()
+        scale = sig_app.QRCODE_COPY_SCALE
+        for index in range(code.size):
+            for x, y in ((index, 0), (0, index)):
+                color = (0, 0, 0) if matrix[y][x] else (255, 255, 255)
+                self.assertEqual(image.getpixel((x * scale, y * scale)), color, (x, y))
 
     def test_copy_without_a_code_warns(self):
         app = self._make_app()

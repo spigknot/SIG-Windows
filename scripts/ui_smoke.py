@@ -674,6 +674,669 @@ def _check_live_local_server_controls(app, root) -> None:
                 )
 
 
+def _check_ffmpeg_preview_stage(app, root) -> None:
+    """Palco da prévia das ferramentas FFmpeg (pedido de 11/09).
+
+    Com geometria REAL (janela mapeada): o palco abraça a proporção da mídia,
+    ocupa o espaço que sobra dos controles, nao encosta no widget seguinte, e o
+    zoom da roda + arrasto do mouse funcionam sobre o quadro.
+    """
+    from PIL import Image
+
+    from ffmpeg_tools_panel import MediaProfile, preview_drawn_size, preview_view_rect
+
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    try:
+        palcos = {
+            "Cortar": (panel.cut_tab, panel.cut_preview, (1920, 1080)),
+            "Extrair áudio": (panel.extract_tab, panel.extract_preview, (1920, 1080)),
+            "Girar vídeo": (panel.rotate_tab, panel.rotate_preview, (1280, 720)),
+        }
+        for ferramenta, (aba, canvas, midia) in palcos.items():
+            panel._select_ffmpeg_tool(ferramenta)
+            largura, altura = midia
+            panel._reset_preview_view(canvas, largura, altura)
+            root.update()
+
+            view = panel.preview_viewports[canvas]
+            holder = panel.preview_holders[canvas]
+            disponivel_largura, disponivel_altura = panel._preview_available_box(aba, holder)
+            # 0) a aba inteira continua visível: o palco não empurra os controles
+            #    para baixo da dobra (o desconto inclui pady e padding da aba).
+            painel_altura = panel.ffmpeg_scroll_canvas.winfo_height()
+            if aba.winfo_reqheight() > painel_altura + 6:
+                raise RuntimeError(
+                    f"[{ferramenta}] conteudo da aba ({aba.winfo_reqheight()}px) passa do painel "
+                    f"({painel_altura}px): o palco comeu a folga dos controles"
+                )
+            # 1) o palco tem tamanho próprio (nao e' um quadrado fixo nem o canvas inteiro)
+            if (holder.winfo_width(), holder.winfo_height()) != (view.stage_width, view.stage_height):
+                raise RuntimeError(
+                    f"[{ferramenta}] holder {holder.winfo_width()}x{holder.winfo_height()} difere do palco "
+                    f"{view.stage_width}x{view.stage_height}"
+                )
+            # 2) proporcao da midia preservada dentro do arredondamento
+            proporcao_palco = view.stage_width / view.stage_height
+            proporcao_midia = largura / altura
+            if abs(proporcao_palco - proporcao_midia) > 0.02:
+                raise RuntimeError(
+                    f"[{ferramenta}] palco {view.stage_width}x{view.stage_height} perdeu a proporcao "
+                    f"da midia ({proporcao_palco:.3f} vs {proporcao_midia:.3f})"
+                )
+            # 3) aproveita todo o espaco: encosta na LARGURA ou na ALTURA disponivel
+            if (
+                abs(view.stage_width - disponivel_largura) > 2
+                and abs(view.stage_height - disponivel_altura) > 2
+            ):
+                raise RuntimeError(
+                    f"[{ferramenta}] palco {view.stage_width}x{view.stage_height} nao aproveita o espaco "
+                    f"disponivel ({disponivel_largura:.0f}x{disponivel_altura:.0f})"
+                )
+            # 4) nunca fica em cima do widget seguinte da aba
+            irmaos = [filho for filho in aba.winfo_children() if filho is not holder]
+            abaixo = [filho for filho in irmaos if filho.winfo_y() >= holder.winfo_y()]
+            if abaixo:
+                primeiro = min(abaixo, key=lambda filho: filho.winfo_y())
+                if holder.winfo_y() + holder.winfo_height() > primeiro.winfo_y():
+                    raise RuntimeError(
+                        f"[{ferramenta}] o palco invade o controle seguinte "
+                        f"({holder.winfo_y() + holder.winfo_height()} > {primeiro.winfo_y()})"
+                    )
+
+            # 5) o quadro preenche o palco e o zoom/arrasto respeitam os limites
+            panel.preview_stills[canvas] = Image.new("RGB", (largura, altura), (0, 0, 255))
+            panel._paint_preview_view(canvas)
+            root.update()
+            bbox = canvas.bbox("all")
+            # O quadro desenhado é arredondado para par (exigência do FFmpeg),
+            # então a cobertura do palco pode ficar 1px menor de cada lado.
+            if bbox is None or bbox[0] > 0 or bbox[1] > 0 or bbox[2] < view.stage_width - 2 or bbox[3] < view.stage_height - 2:
+                raise RuntimeError(
+                    f"[{ferramenta}] quadro nao preenche o palco no zoom 1.0: "
+                    f"{bbox} vs palco {view.stage_width}x{view.stage_height}"
+                )
+
+            if panel._preview_wheel(canvas, _preview_event(view.stage_width // 2, view.stage_height // 2, 120)) != "break":
+                raise RuntimeError(f"[{ferramenta}] a roda nao foi consumida pelo palco (rolaria a aba)")
+            root.update()
+            if view.zoom <= 1.0:
+                raise RuntimeError(f"[{ferramenta}] roda para cima nao aproximou (zoom={view.zoom})")
+
+            # Roda de VERDADE pelo Tk (o evento real manda '??' nos campos que não
+            # existem — foi assim que o log recebeu "int() with base 10: '??'").
+            erros: list = []
+            handler_original = root.report_callback_exception
+            root.report_callback_exception = lambda *args: erros.append(args)
+            zoom_antes = view.zoom
+            try:
+                for delta in (120, 120, -120):
+                    canvas.event_generate(
+                        "<MouseWheel>",
+                        delta=delta,
+                        x=view.stage_width // 2,
+                        y=view.stage_height // 2,
+                    )
+                    root.update()
+            finally:
+                root.report_callback_exception = handler_original
+            if erros:
+                raise RuntimeError(f"[{ferramenta}] a roda do mouse gerou erro interno: {erros[0][1]!r}")
+            if abs(view.zoom - zoom_antes) < 1e-6:
+                raise RuntimeError(f"[{ferramenta}] a roda real do Tk nao mudou o zoom ({zoom_antes})")
+            desenhado = preview_drawn_size(view.stage_width, view.stage_height, view.zoom)[:2]
+            origem = preview_view_rect(
+                view.stage_width, view.stage_height, desenhado[0], desenhado[1], view.offset_x, view.offset_y
+            )
+            if (
+                origem[0] > 0
+                or origem[1] > 0
+                or origem[0] + desenhado[0] < view.stage_width
+                or origem[1] + desenhado[1] < view.stage_height
+            ):
+                raise RuntimeError(
+                    f"[{ferramenta}] com zoom o fundo do palco aparece: origem={origem} desenhado={desenhado}"
+                )
+
+            antes = (view.offset_x, view.offset_y)
+            panel._preview_pan_start(canvas, _preview_event(view.stage_width // 2, view.stage_height // 2))
+            panel._preview_pan_move(canvas, _preview_event(0, 0))
+            panel._preview_pan_end(canvas)
+            if (view.offset_x, view.offset_y) == antes:
+                raise RuntimeError(f"[{ferramenta}] mover o vídeo ampliado nao mudou o quadro")
+            if view.offset_x > 0 or view.offset_y > 0:
+                raise RuntimeError(
+                    f"[{ferramenta}] o movimento deixou fundo aparecer no palco: {view.offset_x}, {view.offset_y}"
+                )
+            panel._preview_pan_move(canvas, _preview_event(-9000, -9000))
+            limite = (view.stage_width - desenhado[0], view.stage_height - desenhado[1])
+            if (view.offset_x, view.offset_y) != limite:
+                raise RuntimeError(
+                    f"[{ferramenta}] arrasto passou do limite: {view.offset_x}, {view.offset_y} vs {limite}"
+                )
+
+            panel._reset_preview_view(canvas, largura, altura)
+            panel.preview_stills.pop(canvas, None)
+            root.update()
+
+        # 6) girar 90 graus troca a proporcao do palco
+        panel._select_ffmpeg_tool("Girar vídeo")
+        view = panel.preview_viewports[panel.rotate_preview]
+        panel._reset_preview_view(panel.rotate_preview, 1920, 1080)
+        paisagem = (view.stage_width, view.stage_height)
+        panel.rotate_media_profile = MediaProfile(10.0, True, 1920, 1080, "30", "1M", "128k", 48000, 2, "stereo")
+        panel.rotate_degrees_var.set("90")
+        panel._apply_rotate_media_size()
+        root.update()
+        retrato = (view.stage_width, view.stage_height)
+        if retrato[0] >= retrato[1] or retrato == paisagem:
+            raise RuntimeError(f"girar 90 graus nao trocou a proporcao do palco: {paisagem} -> {retrato}")
+        panel.rotate_media_profile = None
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
+def _check_ffmpeg_output_rows(app, root) -> None:
+    """Pasta de saída dentro de cada ferramenta (pedido de 12/09).
+
+    Botões "Abrir pasta"/"Escolher pasta" na MESMA linha de opções da ferramenta
+    e o caminho da pasta na linha de baixo. E, no Cortar, os campos Início/Fim
+    centralizados na mesma coluna do botão PLAY.
+    """
+    from tkinter import ttk
+
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+
+    def descendentes(widget):
+        for filho in widget.winfo_children():
+            yield filho
+            yield from descendentes(filho)
+
+    def por_texto(aba, textos, classe):
+        return [
+            widget
+            for widget in descendentes(aba)
+            if isinstance(widget, classe) and widget.cget("text") in textos
+        ]
+
+    try:
+        for ferramenta, aba in (
+            ("Cortar", panel.cut_tab),
+            ("Extrair áudio", panel.extract_tab),
+            ("Girar vídeo", panel.rotate_tab),
+            ("Juntar áudios/vídeos", panel.join_tab),
+            ("Inserir áudio", panel.insert_tab),
+            ("Limpar áudio", panel.clean_tab),
+        ):
+            panel._select_ffmpeg_tool(ferramenta)
+            root.update()
+            botoes = por_texto(aba, ("Abrir pasta", "Escolher pasta"), ttk.Button)
+            caminhos = por_texto(aba, ("Pasta de saída:",), ttk.Label)
+            if len(botoes) != 2:
+                raise RuntimeError(f"[{ferramenta}] esperava 2 botões de pasta, achei {len(botoes)}")
+            if len(caminhos) != 1:
+                raise RuntimeError(f"[{ferramenta}] esperava 1 linha de caminho, achei {len(caminhos)}")
+            abrir, escolher = sorted(botoes, key=lambda widget: widget.winfo_rootx())
+            if abs(abrir.winfo_rooty() - escolher.winfo_rooty()) > 2:
+                raise RuntimeError(f"[{ferramenta}] os dois botões de pasta não estão na mesma linha")
+            pai = abrir.master
+            if escolher.master is not pai:
+                raise RuntimeError(f"[{ferramenta}] os botões de pasta estão em linhas diferentes")
+            # Mesma linha das OPÇÕES: algum controle da ferramenta divide a linha
+            # com os botões (nas abas com grade os botões ficam numa célula própria).
+            topo = abrir.winfo_rooty()
+            base = topo + abrir.winfo_height()
+            dividem = [
+                widget
+                for widget in descendentes(aba)
+                if isinstance(widget, (ttk.Label, ttk.Combobox, ttk.Checkbutton, ttk.Entry))
+                and widget.winfo_ismapped()
+                and widget is not abrir
+                and widget is not escolher
+                and widget.winfo_rooty() < base - 2
+                and widget.winfo_rooty() + widget.winfo_height() > topo + 2
+            ]
+            if not dividem:
+                raise RuntimeError(
+                    f"[{ferramenta}] os botões de pasta não estão na linha das opções"
+                )
+            if caminhos[0].winfo_rooty() <= abrir.winfo_rooty():
+                raise RuntimeError(f"[{ferramenta}] o caminho da pasta não está na linha de baixo")
+            # Adjacência exata onde o usuário pediu (Cortar): o caminho vem na
+            # linha imediatamente seguinte à dos botões.
+            if ferramenta == "Cortar" and caminhos[0].master.winfo_rooty() >= abrir.winfo_rooty() + abrir.winfo_height() + 6:
+                raise RuntimeError(f"[{ferramenta}] o caminho da pasta ficou longe dos botões")
+
+        # Início/Fim do Cortar alinhados com o botão PLAY (centro horizontal).
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+        inicio = por_texto(panel.cut_tab, ("Início (segundos):",), ttk.Label)[0]
+        linha = inicio.master
+        centro_linha = linha.winfo_rootx() + linha.winfo_width() / 2
+        play = panel.cut_play_button
+        centro_play = play.winfo_rootx() + play.winfo_width() / 2
+        if abs(centro_linha - centro_play) > 4:
+            raise RuntimeError(
+                f"os campos Início/Fim não estão alinhados com o botão PLAY: "
+                f"centro dos campos={centro_linha:.0f}px, centro do PLAY={centro_play:.0f}px"
+            )
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
+def _check_live_mic_icons(app, root) -> None:
+    """Os botoes da aba Ocorrencia desenham os PNGs de assets/ (pedido de 12/09).
+
+    Em repouso, os dois microfones e o botao de pausar (quando ativo) mostram o
+    icone PNG — um unico item de imagem no canvas. Durante a gravacao o desenho
+    vetorial (check verde / circulo amarelo com triangulo) volta a valer.
+    """
+    import sig_app
+
+    def itens(canvas):
+        return [canvas.type(item) for item in canvas.find_all()]
+
+    estado = (
+        app.live_state,
+        app.normal_recording,
+        app.normal_record_paused,
+    )
+    try:
+        for kind, canvas in (
+            ("mic_vermelho", app.live_mic_canvas),
+            ("mic_branco", app.live_normal_mic_canvas),
+        ):
+            if itens(canvas) != ["image"]:
+                raise RuntimeError(
+                    f"{kind}: canvas em repouso com itens {itens(canvas)} "
+                    "(esperado o PNG)"
+                )
+            photo = app._live_icon_photo(kind)
+            if (photo.width(), photo.height()) != (sig_app.LIVE_ICON_SIZE,) * 2:
+                raise RuntimeError(
+                    f"{kind}: icone {photo.width()}x{photo.height()}px "
+                    f"(esperado {sig_app.LIVE_ICON_SIZE}px)"
+                )
+            item = canvas.find_all()[0]
+            if canvas.itemcget(item, "image") != str(photo):
+                raise RuntimeError(f"{kind}: o canvas nao usa a imagem carregada")
+
+        if itens(app.live_pause_canvas):
+            raise RuntimeError("pause: o botao tem que ficar vazio quando nao ha gravacao")
+
+        app.live_state = "listening"
+        app._draw_live_mic_button()
+        app.normal_recording = True
+        app._draw_normal_live_mic_button()
+        app._draw_live_pause_button()
+        if itens(app.live_mic_canvas) != ["oval", "line", "line"]:
+            raise RuntimeError("gravando: o microfone vermelho perdeu o check verde")
+        if itens(app.live_normal_mic_canvas) != ["oval", "line", "line"]:
+            raise RuntimeError("gravando: o microfone branco perdeu o check verde")
+        if itens(app.live_pause_canvas) != ["image"]:
+            raise RuntimeError("gravando: o botao de pausar nao mostra o icone de pausa")
+
+        app.normal_record_paused = True
+        app._draw_live_pause_button()
+        if itens(app.live_pause_canvas) != ["oval", "polygon"]:
+            raise RuntimeError("pausado: o botao nao mostra o triangulo de retomar")
+    finally:
+        app.live_state, app.normal_recording, app.normal_record_paused = estado
+        app._draw_live_mic_button()
+        app._draw_normal_live_mic_button()
+        app._draw_live_pause_button()
+        root.update_idletasks()
+
+
+def _check_ffmpeg_encoder_selector(app, root) -> None:
+    """Seletor de encoder: GPU/CPU no principal e Avançado só no modo GPU (12/09)."""
+    from video_encoders import ENCODER_PATH_CPU, ENCODER_PATH_GPU, PATH_LABELS
+
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    try:
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+        combo = panel.acceleration_combo
+        if tuple(combo.cget("values")) != (PATH_LABELS[ENCODER_PATH_GPU], PATH_LABELS[ENCODER_PATH_CPU]):
+            raise RuntimeError(f"o seletor principal nao e GPU/CPU: {combo.cget('values')}")
+        if panel._encoder_path() != ENCODER_PATH_GPU:
+            raise RuntimeError(f"o padrao deveria ser GPU: {panel._encoder_path()}")
+        # Avancado visivel no modo GPU e escondido no modo CPU
+        panel._refresh_encoder_control_state()
+        root.update()
+        gpu_avancado = panel.encoder_advanced_combo.winfo_manager()
+        disponiveis = panel._advanced_labels()
+        if len(disponiveis) > 1 and gpu_avancado != "pack":
+            raise RuntimeError("o Avancado nao apareceu no modo GPU")
+        if disponiveis[0] != panel.ENCODER_ADVANCED_AUTO_LABEL:
+            raise RuntimeError(f"o Avancado nao comeca pelo Automático: {disponiveis}")
+        for rotulo in disponiveis[1:]:
+            if rotulo not in [option.label for option in panel.available_encoder_options]:
+                raise RuntimeError(f"o Avancado oferece encoder que nao passou na sondagem: {rotulo}")
+        panel.acceleration_var.set(PATH_LABELS[ENCODER_PATH_CPU])
+        panel._on_encoder_path_changed()
+        root.update()
+        if panel.encoder_advanced_combo.winfo_manager():
+            raise RuntimeError("o Avancado continuou visivel no modo CPU")
+        if panel.encoder_advanced_var.get() != panel.ENCODER_ADVANCED_AUTO_LABEL:
+            raise RuntimeError("o Avancado perdeu o Automático ao trocar para CPU")
+        panel.acceleration_var.set(PATH_LABELS[ENCODER_PATH_GPU])
+        panel._on_encoder_path_changed()
+        root.update()
+        # o "?" abre a explicacao dos dois caminhos
+        with patch("ffmpeg_tools_panel.messagebox.showinfo") as aviso:
+            panel.encoder_help_button.invoke()
+        if not aviso.called:
+            raise RuntimeError("o '?' do encoder nao abriu a explicacao")
+        texto = aviso.call_args[0][1]
+        for trecho in ("GPU", "CPU", "Avançado"):
+            if trecho not in texto:
+                raise RuntimeError(f"a explicacao do encoder nao fala de {trecho!r}")
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
+def _check_ffmpeg_cut_modes(app, root) -> None:
+    """Seletor de modos de corte: três opções, ordem, padrão e o "?" (12/09)."""
+    from ffmpeg_tools_panel import CUT_MODE_HELP, CUT_MODES
+
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    try:
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+        combo = panel.cut_mode_combo
+        if tuple(combo.cget("values")) != CUT_MODES:
+            raise RuntimeError(f"opções do seletor de corte fora de ordem: {combo.cget('values')}")
+        if tuple(CUT_MODES) != ("SmartCut", "Reencode Completo", "Sem Reencode"):
+            raise RuntimeError(f"rótulos inesperados: {CUT_MODES}")
+        if panel.cut_mode_var.get() != "SmartCut":
+            raise RuntimeError(f"o padrão do corte não é SmartCut: {panel.cut_mode_var.get()}")
+        if combo.winfo_reqwidth() < 10:
+            raise RuntimeError("o seletor de corte não está visível")
+        # o "?" fica logo à direita do seletor e explica os três modos
+        ajuda = panel.cut_mode_help_button
+        if not ajuda.winfo_ismapped():
+            raise RuntimeError("o botão '?' dos modos de corte não está visível")
+        if ajuda.winfo_rootx() < combo.winfo_rootx():
+            raise RuntimeError("o '?' ficou à esquerda do seletor de corte")
+        with patch("ffmpeg_tools_panel.messagebox.showinfo") as aviso:
+            ajuda.invoke()
+        if not aviso.called:
+            raise RuntimeError("o '?' não abriu a explicação dos modos")
+        texto = aviso.call_args[0][1] if len(aviso.call_args[0]) > 1 else ""
+        if texto != CUT_MODE_HELP:
+            raise RuntimeError("a explicação dos modos não é a esperada")
+        for trecho in ("SmartCut", "EXPERIMENTAL", "Reencode Completo", "Sem Reencode"):
+            if trecho not in texto:
+                raise RuntimeError(f"a explicação dos modos não fala de {trecho!r}")
+        # trocar o modo não pode quebrar o controle de encoder
+        for modo in CUT_MODES:
+            panel.cut_mode_var.set(modo)
+            panel._update_cut_controls()
+            root.update()
+        panel.cut_mode_var.set("SmartCut")
+        panel._update_cut_controls()
+        root.update()
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
+def _check_ffmpeg_area_selection(app, root) -> None:
+    """Seleção de área com eventos REAIS do Tk (pedido de 12/09).
+
+    Desenha o quadro com o botão esquerdo, confere que ele fica sobre os pixels
+    escolhidos (acompanha o zoom), que os cantos redimensionam, que o botão
+    direito oferece "Desfazer seleção" e que o recorte em pixels sai certo.
+    """
+    from PIL import Image
+
+    from ffmpeg_tools_panel import MediaProfile, PreviewSelection, selection_handle_at
+
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    try:
+        panel._select_ffmpeg_tool("Cortar")
+        canvas = panel.cut_preview
+        panel._reset_preview_view(canvas, 1920, 1080)
+        panel.preview_stills[canvas] = Image.new("RGB", (1920, 1080), (0, 0, 255))
+        panel._paint_preview_view(canvas)
+        root.update()
+        view = panel.preview_viewports[canvas]
+        largura, altura = view.stage_width, view.stage_height
+
+        # 1) desenhar com o botão DIREITO (eventos de verdade do Tk)
+        erros: list = []
+        handler_original = root.report_callback_exception
+        root.report_callback_exception = lambda *args: erros.append(args)
+        try:
+            canvas.event_generate("<ButtonPress-3>", x=int(largura * 0.25), y=int(altura * 0.25))
+            root.update()
+            canvas.event_generate("<B3-Motion>", x=int(largura * 0.45), y=int(altura * 0.45))
+            root.update()
+            canvas.event_generate("<B3-Motion>", x=int(largura * 0.75), y=int(altura * 0.75))
+            root.update()
+            canvas.event_generate("<ButtonRelease-3>", x=int(largura * 0.75), y=int(altura * 0.75))
+            root.update()
+        finally:
+            root.report_callback_exception = handler_original
+        if erros:
+            raise RuntimeError(f"a seleção de área gerou erro interno: {erros[0][1]!r}")
+        selecao = panel.preview_selections.get(canvas)
+        if selecao is None:
+            raise RuntimeError("arrastar com o botão direito não criou a seleção")
+        if abs(selecao.left - 0.25) > 0.02 or abs(selecao.right - 0.75) > 0.02:
+            raise RuntimeError(f"a seleção não ficou onde foi desenhada: {selecao}")
+
+        # 1b) o botão ESQUERDO continua arrastando o vídeo (não cria seleção)
+        panel._preview_wheel(canvas, _preview_event(largura // 2, altura // 2, 120))
+        root.update()
+        deslocamento_antes = (view.offset_x, view.offset_y)
+        canvas.event_generate("<ButtonPress-1>", x=largura // 2, y=altura // 2)
+        root.update()
+        canvas.event_generate("<B1-Motion>", x=largura // 2 - 40, y=altura // 2 - 20)
+        root.update()
+        canvas.event_generate("<ButtonRelease-1>", x=largura // 2 - 40, y=altura // 2 - 20)
+        root.update()
+        if (view.offset_x, view.offset_y) == deslocamento_antes:
+            raise RuntimeError("o botão esquerdo não arrastou o vídeo ampliado")
+        if panel.preview_selections.get(canvas) != selecao:
+            raise RuntimeError("o arrasto com o botão esquerdo mexeu na seleção")
+
+        # 2) o recorte em pixels bate com o desenho (metade central do quadro).
+        #    Tolerância de 3px: largura do palco varia com a janela do gate.
+        crop = panel.preview_selections and panel._preview_selection_crop(canvas, 1920, 1080)
+        esperado = (480, 270, 960, 540)
+        if crop is None or any(abs(atual - alvo) > 3 for atual, alvo in zip(crop, esperado)):
+            raise RuntimeError(f"recorte em pixels inesperado: {crop} (esperado ~{esperado})")
+
+        # 3) a seleção segue o zoom (mesmos pixels, outra escala)
+        from ffmpeg_tools_panel import preview_fraction_from_view
+
+        def fracao_do_canto():
+            ox, oy, dw, dh = panel._preview_frame_transform(canvas)
+            rect = panel._preview_selection_view_rect(canvas)
+            return preview_fraction_from_view(rect[0], rect[1], dw, dh, ox, oy)
+
+        antes = panel._preview_selection_view_rect(canvas)
+        fracao_antes = fracao_do_canto()
+        zoom_antes = view.zoom
+        panel._preview_wheel(canvas, _preview_event(largura // 2, altura // 2, 240))
+        root.update()
+        depois = panel._preview_selection_view_rect(canvas)
+        fracao_depois = fracao_do_canto()
+        if view.zoom <= zoom_antes:
+            raise RuntimeError("a roda não aproximou o vídeo")
+        if depois == antes:
+            raise RuntimeError("a seleção não acompanhou o zoom")
+        if abs(fracao_antes[0] - fracao_depois[0]) > 0.02 or abs(fracao_antes[1] - fracao_depois[1]) > 0.02:
+            raise RuntimeError(
+                f"o zoom deslocou a seleção dos pixels escolhidos: {fracao_antes} -> {fracao_depois}"
+            )
+
+        # 4) redimensionar por um canto (arrastando a alça sudeste com o direito)
+        rect = panel._preview_selection_view_rect(canvas)
+        if selection_handle_at(rect, rect[2], rect[3]) != "se":
+            raise RuntimeError("a alça do canto sudeste não foi reconhecida")
+        panel._preview_select_press(canvas, _preview_event(rect[2], rect[3]))
+        panel._preview_select_motion(canvas, _preview_event(rect[2] + 40, rect[3] + 20))
+        panel._preview_select_release(canvas, _preview_event(rect[2] + 40, rect[3] + 20))
+        root.update()
+        redimensionada = panel.preview_selections.get(canvas)
+        if redimensionada is None or redimensionada.right <= selecao.right:
+            raise RuntimeError("a seleção não foi redimensionada pela alça")
+        if redimensionada.right > 1.0 or redimensionada.bottom > 1.0:
+            raise RuntimeError(f"a seleção saiu do vídeo: {redimensionada}")
+
+        # 5) clique PARADO com o direito sobre a seleção abre o menu (e ele apaga)
+        menus: list = []
+        menu_original = tk.Menu.tk_popup
+        tk.Menu.tk_popup = lambda self, *_args: menus.append(self)
+        try:
+            root.report_callback_exception = lambda *args: erros.append(args)
+            rect = panel._preview_selection_view_rect(canvas)
+            centro_x = int((rect[0] + rect[2]) / 2)
+            centro_y = int((rect[1] + rect[3]) / 2)
+            canvas.event_generate("<ButtonPress-3>", x=centro_x, y=centro_y)
+            root.update()
+            canvas.event_generate("<ButtonRelease-3>", x=centro_x, y=centro_y)
+            root.update()
+            if erros:
+                raise RuntimeError(f"o clique direito gerou erro interno: {erros[0][1]!r}")
+        finally:
+            tk.Menu.tk_popup = menu_original
+            root.report_callback_exception = handler_original
+        if not menus:
+            raise RuntimeError("o clique direito sobre a seleção não abriu o menu")
+        rotulos = [menus[-1].entrycget(indice, "label") for indice in range(menus[-1].index("end") + 1)]
+        if "Desfazer seleção" not in rotulos:
+            raise RuntimeError(f"o menu do botão direito não tem 'Desfazer seleção': {rotulos}")
+        if panel.preview_selections.get(canvas) is None:
+            raise RuntimeError("o clique parado do botão direito apagou a seleção sem passar pelo menu")
+        panel._clear_preview_selection(canvas)
+        root.update()
+        if panel.preview_selections.get(canvas) is not None:
+            raise RuntimeError("a seleção não foi apagada")
+        if canvas.find_withtag("preview_selection"):
+            raise RuntimeError("o desenho da seleção continuou no palco")
+
+        # 6) aviso do Executar: com seleção, cancelar não executa
+        panel.cut_media_profile = MediaProfile(
+            10.0, True, 1920, 1080, "30", "1M", "128k", 48000, 2, "stereo"
+        )
+        panel.preview_selections[canvas] = PreviewSelection(0.25, 0.25, 0.75, 0.75)
+        with patch("ffmpeg_tools_panel.messagebox.askokcancel", return_value=False) as aviso:
+            panel.run_current_tool()
+            if not aviso.called:
+                raise RuntimeError("Executar com seleção não avisou o usuário")
+            mensagem = aviso.call_args[0][1]
+            if "960 x 540" not in mensagem:
+                raise RuntimeError(f"o aviso não informou a resolução da seleção: {mensagem!r}")
+        if panel.running:
+            raise RuntimeError("o app executou mesmo com o usuário cancelando o aviso")
+
+        # 7) Girar: a seleção desenhada gira junto para cobrir os MESMOS pixels
+        panel._select_ffmpeg_tool("Girar vídeo")
+        root.update()
+        girar = panel.rotate_preview
+        panel.rotate_media_profile = MediaProfile(
+            10.0, True, 1920, 1080, "30", "1M", "128k", 48000, 2, "stereo"
+        )
+        panel.rotate_degrees_var.set("0")
+        panel._reset_preview_view(girar, 1920, 1080)
+        panel.preview_stills[girar] = Image.new("RGB", (1920, 1080), (0, 200, 0))
+        panel._paint_preview_view(girar)
+        root.update()
+        view_girar = panel.preview_viewports[girar]
+        panel._preview_select_press(girar, _preview_event(view_girar.stage_width * 0.2, view_girar.stage_height * 0.1))
+        panel._preview_select_motion(girar, _preview_event(view_girar.stage_width * 0.6, view_girar.stage_height * 0.3))
+        panel._preview_select_release(girar, _preview_event(view_girar.stage_width * 0.6, view_girar.stage_height * 0.3))
+        root.update()
+        antes_da_selecao = panel.preview_selections.get(girar)
+        corte_antes = panel._selection_crops()["rotate_crop"]
+        if antes_da_selecao is None or corte_antes is None:
+            raise RuntimeError("não consegui desenhar a seleção na aba Girar")
+        if panel.preview_selection_filters.get(girar, None) != "":
+            raise RuntimeError("a seleção não guardou os filtros de giro em vigor")
+
+        panel.rotate_degrees_var.set("90")
+        # Só a parte do giro (sem gerar miniatura: o check não pode depender de ffmpeg).
+        # A ligação com _refresh_rotate_thumbnail é coberta pelo teste AST.
+        panel._rotate_selection_with_filters()
+        panel._apply_rotate_media_size()
+        root.update()
+        depois_da_selecao = panel.preview_selections.get(girar)
+        corte_depois = panel._selection_crops()["rotate_crop"]
+        if depois_da_selecao == antes_da_selecao:
+            raise RuntimeError("girar 90 graus não girou a seleção junto")
+        if panel.preview_selection_filters.get(girar) != "transpose=1":
+            raise RuntimeError("a seleção não passou a registrar o giro novo")
+        # o palco virou retrato (proporção trocada) e a seleção acompanhou
+        if view_girar.stage_height <= view_girar.stage_width:
+            raise RuntimeError(
+                f"o palco não trocou de proporção ao girar: {view_girar.stage_width}x{view_girar.stage_height}"
+            )
+        if corte_depois is None or corte_depois[2] >= corte_antes[2]:
+            raise RuntimeError(
+                f"o recorte não acompanhou o giro: {corte_antes} -> {corte_depois}"
+            )
+        # a área (em pixels) tem que ser a mesma, só trocada de eixos
+        if abs(corte_depois[2] - corte_antes[3]) > 4 or abs(corte_depois[3] - corte_antes[2]) > 4:
+            raise RuntimeError(
+                f"o recorte girado não cobre os mesmos pixels: {corte_antes} -> {corte_depois}"
+            )
+        panel.rotate_media_profile = None
+        panel.rotate_degrees_var.set("0")
+        panel._clear_preview_selection(girar)
+        panel.preview_stills.pop(girar, None)
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+        panel._clear_preview_selection(canvas)
+        panel.preview_stills.pop(canvas, None)
+        panel.cut_media_profile = None
+        root.update()
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
+def _preview_event(x: int, y: int, delta: int = 0):
+    evento = tk.Event()
+    evento.x = x
+    evento.y = y
+    evento.delta = delta
+    evento.num = 0
+    return evento
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -695,6 +1358,17 @@ def run(*, quiet: bool = False) -> int:
             _check_transcription_language_selector(app)
             _check_transcription_models_menu(app)
             _check_live_local_server_controls(app, root)
+            # Vacina do pedido de 12/09: os botoes da linha de controles da aba
+            # Ocorrencia usam os PNGs de assets/ (microfones vermelho/branco e
+            # pausar) no lugar dos desenhos vetoriais.
+            _check_live_mic_icons(app, root)
+            # Vacina do pedido de 11/09: o palco da previa das ferramentas
+            # FFmpeg preenche o espaco disponivel, com zoom (roda) e arrasto.
+            _check_ffmpeg_preview_stage(app, root)
+            _check_ffmpeg_output_rows(app, root)
+            _check_ffmpeg_cut_modes(app, root)
+            _check_ffmpeg_encoder_selector(app, root)
+            _check_ffmpeg_area_selection(app, root)
 
             before = set(root.winfo_children())
             app.open_settings()

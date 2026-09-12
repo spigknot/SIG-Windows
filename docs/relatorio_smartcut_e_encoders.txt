@@ -1,0 +1,393 @@
+================================================================================
+SIG WINDOWS - RELATORIO DE MUDANCAS
+SmartCut, modos de corte e selecao de encoder (GPU/CPU)
+Data: 12/09/2026
+Estado verificado: 885 testes passando (0 falhas) + 140 subtests
+                   ui-smoke PASS (com 6 checagens novas)
+                   dist/sig.exe rebuildado e conferido por dentro
+                   nada publicado / nada commitado
+================================================================================
+
+
+SUMARIO
+-------
+1. SmartCut - o corte hibrido
+   1.1 O que foi feito
+   1.2 Compatibilidade das bordas com o miolo copiado
+   1.3 Dois bugs reais encontrados (e corrigidos) com medicao
+   1.4 Fallbacks (todos com aviso no log)
+   1.5 Verificacao com arquivo real
+   1.6 Limitacoes conhecidas (por isso "experimental")
+2. Seletor de modos de corte (SmartCut / Reencode Completo / Sem Reencode)
+3. Seletor de encoder: GPU/CPU + Avancado
+   3.1 Modulo novo src/video_encoders.py (catalogo + resolvedor)
+   3.2 Regras exatas de escolha (com o motivo registrado)
+   3.3 Por que a sondagem e real (e nao a lista do -encoders)
+   3.4 Interface
+   3.5 Medicoes que justificam a regra do "trecho curto"
+   3.6 Falha de hardware NAO rebaixa a preferencia do usuario
+   3.7 Codec preservado + tag hvc1
+   3.8 Verificacao do resolvedor
+4. Arquivos tocados e vacinas (testes)
+5. Pendencia honesta (1 item do plano nao feito)
+6. Fora de escopo por decisao (com justificativa)
+7. Como usar no app
+8. Como reverter / riscos conhecidos
+
+
+--------------------------------------------------------------------------------
+1. SMARTCUT - O CORTE HIBRIDO
+--------------------------------------------------------------------------------
+
+1.1 O QUE FOI FEITO
+--------------------
+Modo que COPIA o miolo sem reencodar e REENCODA apenas as bordas:
+
+ 1) _extract_keyframes(fonte) lista os keyframes que servem de fronteira, com
+    tolerancia de 0,02s e INCLUSIVE nas pontas (keyframe exatamente no tempo
+    pedido = nao existe borda para reencodar).
+ 2) Monta ate 3 trechos em MPEG-TS:
+      - cabeca reencodada ........ [inicio, 1o keyframe)
+      - MIOLO COPIADO (stream copy) [keyA, keyB)
+      - cauda reencodada ......... [ultimo keyframe, fim)
+    A duracao de cada trecho decide a copia (miolo) ou o reencode (bordas).
+ 3) Cola tudo com concat demuxer + "-c copy", reusando a mesma maquina que o
+    SmartJoin ja usava no app:
+      -bsf:v h264_mp4toannexb / hevc_mp4toannexb
+      -mpegts_flags +resend_headers+initial_discontinuity
+      -avoid_negative_ts make_zero
+      -video_track_timescale 90000
+      -movflags +faststart
+    A rotacao e devolvida no mux final com -display_rotation (os trechos saem
+    com -noautorotate, como no SmartJoin, para todas as partes ficarem na mesma
+    orientacao).
+
+Justificativa: e a unica forma de ter limites exatos (ao frame/tempo pedido) sem
+pagar o custo de reencodar o video inteiro. O trecho pesado (o miolo) fica
+bit-exato, sem perda de qualidade nenhuma.
+
+
+1.2 COMPATIBILIDADE DAS BORDAS COM O MIOLO COPIADO
+--------------------------------------------------
+(orientacao explicita sua: "verificar as caracteristicas do trecho copiado e
+reencodar os outros 2 trechinhos de forma que seja compativel com o copiado")
+
+As bordas espelham o trecho COPIADO, porque e o miolo intocado que dita o padrao
+do arquivo final:
+  - mesmo codec: o encoder sai da FAMILIA DO CODEC DO ARQUIVO
+    (_smart_join_acceleration_for_codec / resolvedor novo), nunca do combo por
+    acaso;
+  - -pix_fmt, -r (fps) e setsar (SAR) copiados da fonte;
+  - bitrate de referencia = o bitrate do original (media.video_bitrate);
+  - audio: reencodado com os parametros da fonte na politica "Precisao maxima
+    (AAC)"; copiado na politica "Copiar audio (limites por pacote)".
+
+
+1.3 DOIS BUGS REAIS ENCONTRADOS (E CORRIGIDOS) COM MEDICAO
+----------------------------------------------------------
+Bugs que so apareceram porque testei com ffmpeg de verdade, num video real de 6s
+com GOP de 1s:
+
+ (A) OUTPUT SEEK + "-c:v copy"  (-i src -ss X -t D)
+     Sintoma medido: o video do miolo comecava em 1,023s em vez de 0 - o FFmpeg
+     RECUA ate o keyframe ANTERIOR. Resultado: ~1s de video extra e audio fora de
+     sincronia.
+     Correcao: INPUT SEEK (-ss X -i src) em TODOS os trechos. Assim o corte cai
+     no keyframe pedido e o -t fecha a duracao.
+
+ (B) AUDIO COPIADO NAO RESPEITA O -t
+     Sintoma medido: a cabeca saia com 1,11s para um pedido de 0,60s (o arquivo
+     final ficou 870ms maior que o pedido).
+     Correcao: com a politica "Precisao maxima (AAC)" o audio e reencodado nos
+     trechos (ai o -t vale tambem para o audio) e o mux final recebe -t com o
+     tempo pedido, fechando o arquivo no limite.
+
+ Observacao adicional medida: cada trecho TS carrega um "lead" de ~2 quadros;
+ por isso o arquivo final fica ~0,1s mais longo que o pedido (2-4 quadros).
+
+
+1.4 FALLBACKS (TODOS COM AVISO NO LOG)
+--------------------------------------
+ - Sem 2 keyframes uteis no intervalo ......... Reencode Completo
+ - Codec do arquivo fora de H.264/HEVC ........ Reencode Completo
+   (VP9/AV1/MPEG-4 Part 2/ProRes etc. nao entram no concat por TS)
+ - Selecao de area desenhada .................. Reencode Completo
+   (o miolo copiado nao pode ser recortado)
+ - Encoder escolhido nao produz o codec do
+   miolo (ex.: fallback mpeg4) ................ Reencode Completo
+
+Justificativa: em nenhum caso o app entrega um arquivo quebrado ou "meio certo" em
+silencio - ele troca de modo e diz o motivo no log de atividade.
+
+
+1.5 VERIFICACAO COM ARQUIVO REAL
+--------------------------------
+Fonte: 6s, 640x360, 25 fps, GOP de 1s (keyframes 0,1,2,3,4,5). Corte [1.4 -> 4.6].
+
+  - duracao final ................ 3,310s (pedido 3,200s => +0,11s = 2,8 quadros)
+  - MIOLO COPIADO ................ bit a bit IDENTICO a fonte (diferenca 0.000
+                                   na comparacao de quadros decodificados)
+  - decodificacao ................ nenhum erro
+  - tamanho ...................... 412 KB (SmartCut) x 436 KB (Reencode Completo)
+  - log .......................... "SmartCut: 2.00s copiados sem reencode e
+                                   1.20s reencodados (3 trechos)."
+
+
+1.6 LIMITACOES CONHECIDAS (POR ISSO "EXPERIMENTAL")
+--------------------------------------------------
+ - A emenda mistura quadros reencodados com os originais. A compatibilidade da
+   secao 1.2 minimiza a diferenca (e o TS reenvia os parametros no inicio de cada
+   trecho), mas em tese pode piscar 1-2 quadros em algum player.
+ - O limite NAO e exato ao quadro: fica dentro de ~0,1-0,2s do pedido.
+ - Para limite exato ao quadro, o modo "Reencode Completo" continua sendo a
+   referencia - e o "?" do seletor explica essa diferenca na hora.
+
+
+--------------------------------------------------------------------------------
+2. SELETOR DE MODOS DE CORTE
+--------------------------------------------------------------------------------
+ - Ordem e rotulos exatos: SmartCut | Reencode Completo | Sem Reencode
+   (constante CUT_MODES), com SMARTCUT como padrao.
+ - Botao "?" a direita do seletor abre CUT_MODE_HELP:
+     "SmartCut: corte preciso e rapido, mas EXPERIMENTAL ...
+      Reencode Completo: reencoda todo o trecho - lento e preciso.
+      Sem Reencode: copia os streams sem reencodar - rapido e menos preciso,
+      porque inicio e fim escorregam ate o keyframe/pacote disponivel."
+ - Despacho no worker (_cut_worker):
+     "Sem Reencode"      -> copia de streams (-c copy), limites por keyframe;
+     "Reencode Completo" -> reencode total (limites exatos);
+     "SmartCut"          -> o hibrido da secao 1.
+ - Com SELEcao de area, o modo "Sem Reencode" nao serve (copiar streams nao
+   recorta pixels): o aviso do Executar troca para "Reencode Completo" e explica.
+ - Encoder de video aparece como "nao aplicavel" no modo de copia, e o combo de
+   streams de audio so fica habilitado no modo que realmente os copia.
+
+
+--------------------------------------------------------------------------------
+3. SELETOR DE ENCODER: GPU/CPU + AVANCADO
+--------------------------------------------------------------------------------
+
+3.1 MODULO NOVO src/video_encoders.py (puro, sem Tk)
+----------------------------------------------------
+ CATALOG  - catalogo DECLARATIVO de encoders (familia x codec):
+     nvenc: h264_nvenc, hevc_nvenc
+     qsv:   h264_qsv,   hevc_qsv
+     amf:   h264_amf,   hevc_amf
+     cpu:   libx264,    libx265
+     cpu-mpeg4: mpeg4 (ULTIMO recurso, so quando nao ha libx264)
+ resolve_encoder(codec, path, available, advanced, seconds)
+     -> devolve ESCOLHA + MOTIVO (o motivo vai para o log).
+ Outros: options_to_tuples/options_from_tuples (levar o catalogo sondado para a
+ worker como valores simples), hevc_tag_arguments (tag hvc1), normalize_codec,
+ SHORT_JOB_SECONDS = 3.0.
+
+ Por que catalogo em vez de ifs espalhados: acrescentar um encoder novo (ou um
+ codec novo) passa a ser UMA LINHA na tabela, e a matriz de testes valida o
+ conjunto inteiro - alem de o motivo da escolha ficar num lugar so.
+
+
+3.2 REGRAS EXATAS DE ESCOLHA (COM O MOTIVO REGISTRADO)
+------------------------------------------------------
+ Situacao                                   Escolha        Motivo no log
+ --------------------------------------------------------------------------
+ GPU + codec disponivel + job normal        GPU (melhor    "GPU disponivel para
+                                            prioridade:    H264/HEVC: NVENC
+                                            NVENC>QSV>AMF) (NVIDIA)"
+ Duracao desconhecida                       GPU            idem (nunca rebaixa
+                                                           por falta de info)
+ GPU sem encoder daquele codec              CPU do mesmo   "a GPU desta maquina
+                                            codec          nao tem encoder HEVC;
+                                                           usando CPU (libx265)"
+ Avancado forcado e disponivel              o forcado      "NVENC forcado no
+                                            (mesmo em      Avancado"
+                                            trecho curto)
+ Avancado forcado indisponivel              CPU            "nvenc nao passou na
+                                                           sondagem desta
+                                                           maquina; usando CPU"
+ Automatico + trecho curto (< 3s)           CPU            "trecho curto de 0.60s
+                                                           (< 3s): a inicializacao
+                                                           da GPU nao compensa"
+ Modo CPU escolhido pelo usuario            software       "modo CPU escolhido
+                                                           pelo usuario (libx264)"
+
+ Regra de ouro (a sua preocupacao): a GPU e usada SEMPRE que possivel. So cai na
+ CPU nos casos acima - e em todos eles o LOG diz por que. Nada silencioso.
+
+
+3.3 POR QUE A SONDAGEM E REAL (E NAO A LISTA DO -encoders)
+----------------------------------------------------------
+ _probe_catalog roda _test_encoder (um encode real de 1 quadro) em CADA opcao do
+ catalogo. Medido nesta maquina agora:
+
+   Encoder        aparece no -encoders?   execucao real
+   h264_nvenc     sim                    OK
+   hevc_nvenc     sim                    OK
+   av1_nvenc      sim                    FALHA: "No capable devices found"
+                                         (3060 Ti e Ampere: NVENC sem AV1)
+   h264_qsv       sim                    FALHA: "Error creating a MFX session: -9"
+                                         (Xeon sem iGPU)
+   h264_amf       sim                    FALHA: "CreateComponent ... error 13"
+                                         (nao ha GPU AMD)
+
+ Justificativa: se o app confiasse na lista do ffmpeg, o Avancado ofereceria
+ encoders que so falham na hora de rodar. Hoje so aparece o que passou no teste.
+
+
+3.4 INTERFACE
+-------------
+   Encoder de video:  [ GPU v ]    Avancado: [ Automatico v ]   ?     Qualidade: [ Alta v ]  ?
+
+ - Principal: SOMENTE GPU e CPU (sem "Automatico" no principal, como definido),
+   padrao GPU.
+ - "Avancado" aparece SOMENTE no modo GPU, com "Automatico" em primeiro e depois
+   os encoders que passaram na sondagem (nesta maquina: NVENC). Escolher um deles
+   FORCA aquela placa. UMA ENTRADA POR VENDOR: o catalogo tem NVENC em H.264 e em
+   HEVC, mas a lista mostra "NVENC (NVIDIA)" uma unica vez - o codec quem decide e
+   a tarefa (preservar o do arquivo), nunca o usuario. Correcao de 12/09 apos o
+   relato de "duas opcoes repetidas" (bug de rotulo duplicado no combo).
+ - "?" explica GPU x CPU x Avancado (incluindo o aviso de que falha de hardware
+   cai na CPU com registro no log).
+ - Quando o automatico manda para a CPU no modo GPU (trecho curto, ou GPU sem o
+   codec), aparece um rotulo discreto no topo:
+       "-> CPU (libx265): trecho curto de 0.60s ..."
+   Para o operador nunca ser surpreendido por uma decisao silenciosa.
+ - O seletor e DESABILITADO nas ferramentas que nao reencodam video (Extrair,
+   Limpar; Inserir e audio). E o MESMO seletor serve todas as ferramentas que
+   reencodam (Cortar, Girar, Juntar), com a decisao sendo tomada POR TAREFA.
+
+
+3.5 MEDICOES QUE JUSTIFICAM A REGRA DO "TRECHO CURTO"
+-----------------------------------------------------
+ (1080p, nesta maquina - 3060 Ti + Xeon, libx264 medium vs NVENC preset p4)
+
+   Cenario                GPU (NVENC)          CPU (libx264)
+   borda de 1,2s          831 ms / 1799 KB     789 ms / 982 KB
+   reencode de 10s        1900 ms / 13711 KB   2935 ms / 8063 KB
+
+ Leitura: em trabalho real a GPU ganha (35% mais rapido em 10s); em trecho curto
+ ela EMPATA (a inicializacao do NVENC custa ~0,4-0,6s) e gera 1,8x mais bytes.
+ Dai SHORT_JOB_SECONDS = 3.0 - aplicado SOMENTE no modo Automatico (forcado e
+ forcado).
+
+
+3.6 FALHA DE HARDWARE NAO REBAIXA A PREFERENCIA DO USUARIO
+----------------------------------------------------------
+ Antes: uma falha do NVENC trocava o combo para CPU e ficava assim pelo resto da
+ sessao (o proximo job, mesmo longo, rodava na CPU sem necessidade).
+ Agora (_execute_video):
+   - a tarefa e repetida na CPU do MESMO CODEC (_cpu_encoder_for: HEVC -> libx265
+     se a GPU era hevc_nvenc);
+   - o log diz: "NVENC (NVIDIA) falhou (...); repetindo na CPU (libx265) SOMENTE
+     nesta tarefa.";
+   - a preferencia do usuario (GPU) NAO e alterada - a proxima tarefa tenta a GPU
+     de novo.
+ Isso responde direto ao seu medo de "acabar com um fallback para CPU
+ desnecessario".
+
+
+3.7 CODEC PRESERVADO + TAG hvc1
+-------------------------------
+ - _preserved_codec(media): o codec do ARQUIVO vai para o resolvedor. Um arquivo
+   HEVC continua HEVC no corte preciso e no giro (antes virava H.264 em silencio).
+ - hevc_tag_arguments(): poe "-tag:v hvc1" nos reencodes MP4 com HEVC.
+   Verificado: o arquivo sai "hevc (Main) (hvc1)" e decodifica sem erro.
+ - SmartCut: cada BORDA e resolvida com a duracao DAQUELE trecho
+   (_smartcut_edge_encoder(familia, duracao)) - job longo usa GPU, borda de 0,6s
+   usa CPU, e cada uma explica no log.
+
+
+3.8 VERIFICACAO DO RESOLVEDOR
+-----------------------------
+   job longo HEVC : hevc_nvenc -> "GPU disponivel para HEVC: NVENC (NVIDIA)"
+   borda curta    : libx265    -> "trecho curto de 0.60s (< 3s): a inicializacao
+                                  da GPU nao compensa; usando CPU (libx265)"
+   forcado CPU    : libx265    -> "modo CPU escolhido pelo usuario (libx265)"
+   (de)serializacao das opcoes: round-trip OK
+
+
+--------------------------------------------------------------------------------
+4. ARQUIVOS TOCADOS E VACINAS (TESTES)
+--------------------------------------------------------------------------------
+ src/video_encoders.py            (NOVO) catalogo + resolvedor + regra do trecho
+                                  curto + tag hvc1 + (de)serializacao
+ src/ffmpeg_tools_panel.py        SmartCut (trechos/concat/fallbacks), 3 modos de
+                                  corte + "?", seletor GPU/CPU + Avancado + "?",
+                                  sondagem pelo catalogo, resolucao por tarefa,
+                                  preservacao de codec + hvc1, fallback sem
+                                  rebaixar, CPU casando o codec
+ tests/test_video_encoders.py     (NOVO) 26 testes: catalogo, matriz do
+                                  resolvedor, tag hvc1, codec preservado, wiring
+ tests/test_ffmpeg_cut_modes.py   (NOVO) 22 testes: SmartCut e os 3 modos
+                                  (comandos dos trechos, despacho, fallbacks)
+ tests/test_ffmpeg_tools_logic.py atualizado: fallback de hardware agora NAO
+                                  rebaixa e cai no libx265 quando a GPU era HEVC
+ scripts/ui_smoke.py              6 checagens novas em geometria real: palco,
+                                  linhas de pasta de saida, modos de corte,
+                                  seletor GPU/CPU + Avancado + "?", selecao de
+                                  area (e as anteriores)
+
+ Gates rodados:
+   pytest .......... 885 passed, 0 falhas (+140 subtests; 7 skips do
+                     test_qr_encoder por "tkinter indisponivel", pre-existentes)
+   ui-smoke ........ PASS
+   dist/sig.exe .... rebuildado (12/09 19:42) e conferido por dentro: modulo
+                     video_encoders presente, metodos novos presentes
+
+
+--------------------------------------------------------------------------------
+5. PENDENCIA HONESTA (1 ITEM DO PLANO NAO FEITO)
+--------------------------------------------------------------------------------
+ Persistencia da escolha GPU/CPU e do Avancado nas Configuracoes.
+
+ Motivo de nao ter feito: o painel de FFmpeg NUNCA tocou app.settings (nem a
+ qualidade de video e persistida hoje). Para fazer direito sao necessarias:
+   - 2 chaves em providers.DEFAULT_SETTINGS E em normalize_settings (se faltar em
+     normalize_settings, o valor volta ao padrao ao salvar - armadilha conhecida
+     deste repositorio);
+   - o gancho de salvar do app.
+ E pequeno e isolado, mas preferi NAO arriscar o resto do trabalho sem voce
+ revisar antes. Hoje: a escolha vale para a sessao e o padrao e GPU.
+
+ Tambem nao foi possivel testar o Avancado com DUAS GPUs (aqui so existe NVIDIA):
+ o caminho esta coberto por testes unitarios, mas nao por um caso real.
+
+
+--------------------------------------------------------------------------------
+6. FORA DE ESCOPO POR DECISAO (COM JUSTIFICATIVA)
+--------------------------------------------------------------------------------
+ - AV1 (av1_nvenc/av1_qsv/av1_amf/libsvtav1): a 3060 Ti nao encoda AV1 e, em CPU,
+   e muito mais lento que NVENC H.264. Ficaria para um modo "arquivo menor".
+ - VP8/VP9/WebM: pior compatibilidade para video de evidencia.
+ - ProRes/DNxHR/FFV1: codecs de edicao/master - outro fluxo de trabalho.
+ - H.266/vvenc: sem suporte em players.
+ Observacao: todos ficam triviais de acrescentar depois (uma linha no catalogo).
+
+
+--------------------------------------------------------------------------------
+7. COMO USAR NO APP
+--------------------------------------------------------------------------------
+ Aba FFmpeg -> "Encoder de video: GPU" (padrao) -> "Avancado: Automatico" ->
+ escolha a ferramenta. Em CORTAR:
+   - Modo SmartCut .......... corte hibrido (rapido + preciso; padrao)
+   - Reencode Completo ...... quando precisar de limite exato ao quadro
+   - Sem Reencode ........... copia pura dos streams (mais rapido, menos preciso)
+ O log de atividade sempre diz QUAL encoder foi usado e POR QUE. Os botoes "?"
+ de cada seletor explicam em portugues.
+
+
+--------------------------------------------------------------------------------
+8. COMO REVERTER / RISCOS CONHECIDOS
+--------------------------------------------------------------------------------
+ - Reverter o SmartCut: voltar o padrao do seletor de modos para "Reencode
+   Completo" (uma linha) - nada mais depende do hibrido.
+ - Reverter o seletor GPU/CPU: o catalogo e o resolvedor sao um modulo isolado;
+   o painel chama resolve_encoder em um unico ponto (_resolve_task_encoder).
+ - Risco 1 (medido): SmartCut fica ~0,1-0,2s mais longo que o pedido.
+ - Risco 2 (teorico): artefato de 1-2 quadros na emenda em players exigentes.
+ - Risco 3 (mitigado): falha de GPU cai na CPU somente naquela tarefa, com aviso.
+ - Riscos NAO existentes: encoder que nao funciona na maquina (sondado), codec
+   errado no fallback de CPU (casado pelo resolvedor), HEVC sem tag hvc1.
+
+================================================================================
+FIM DO RELATORIO
+================================================================================

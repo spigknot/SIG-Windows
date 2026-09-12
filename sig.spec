@@ -27,6 +27,10 @@ a = Analysis(
         ('assets/appwin.png', 'assets'),
         ('assets/icon.png', 'assets'),
         ('assets/default_nomes.txt', 'assets'),
+        # Ícones dos botões da tela de Ocorrência (microfones e pausar).
+        ('assets/mic_vermelho.png', 'assets'),
+        ('assets/mic_branco.png', 'assets'),
+        ('assets/mic_pause.png', 'assets'),
         ('prompts/*.txt', 'prompts'),
     ] + sounddevice_datas + pdfium_datas,
     hiddenimports=[

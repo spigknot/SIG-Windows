@@ -466,10 +466,24 @@ from log_formatting import (  # noqa: F401
     mode_label_from_value,
     format_ws_params_block,
     params_block_single_line,
+    RAW_REQUEST_BOUNDARY,
+    format_raw_request,
+    format_raw_multipart,
+    format_raw_request_line,
+    format_raw_websocket_frame,
+    format_raw_audio_label,
 )
 
 
-APP_VERSION = "20260911_004"
+APP_VERSION = "20260912_001"
+
+
+def _audio_file_size(path: Path) -> int | None:
+    """Tamanho do áudio para o texto cru da requisição (None se ainda não há)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 
@@ -528,9 +542,31 @@ LIVE_INTERVAL_VALUES_MS = (
 # slot da coluna vermelha abriga o botão de reenvio do áudio integral por
 # REST, sempre centralizado na mesma coluna do microfone vermelho.
 LIVE_RECOVERY_SLOT_HEIGHT = 26
+# Ícones (PNG em assets/) dos botões da linha de controles da aba Ocorrência:
+# microfone vermelho (WS), microfone branco (REST) e pausar. Substituem os
+# desenhos vetoriais que existiam no lugar (pedido do usuário, 12/09).
+LIVE_ICON_SIZE = 36
+LIVE_ICON_FILES = {
+    "mic_vermelho": "assets/mic_vermelho.png",
+    "mic_branco": "assets/mic_branco.png",
+    "mic_pause": "assets/mic_pause.png",
+}
+# Amarelo do círculo do ícone de pausa (medido em assets/mic_pause.png): é a cor
+# usada no estado "retomar", que desenha o mesmo círculo com o triângulo preto.
+LIVE_PAUSE_CIRCLE_COLOR = "#fddd02"
+# Preto do símbolo dentro dos ícones (as barras do pause).
+LIVE_ICON_GLYPH_COLOR = "#000000"
 GROK_RECONNECT_MAX_ATTEMPTS = 8
 GROK_RECONNECT_BUFFER_MILLIS = 8000
 IMEI_HISTORY_COLLAPSED_LIMIT = 10
+# Imagem do QR Code copiada para a area de transferencia (botao Copiar da aba
+# QR Code): escala por modulo 14 -> 4 (1/4 de cada lado — altura e largura —
+# isto e, 1/16 dos pixels da imagem antiga; a divisao exata 14/4 = 3,5 nao
+# existe em pixel inteiro e 4 preserva 4 px por modulo para a leitura) e SEM
+# margem branca (border 4 -> 0) — pedido do usuario, 12/09. A previa no
+# canvas nao muda.
+QRCODE_COPY_SCALE = 4
+QRCODE_COPY_BORDER = 0
 
 
 
@@ -891,6 +927,31 @@ def api_key_visibility_image(crossed: bool, size: int = API_KEY_VISIBILITY_ICON_
     return image.resize((size, size), Image.Resampling.LANCZOS)
 
 
+_LIVE_ICON_IMAGE_CACHE: dict = {}
+
+
+def live_icon_image(kind: str, size: int = LIVE_ICON_SIZE) -> "Image.Image":
+    """Ícone PNG da aba Ocorrência (`live_icons`), aberto e reduzido para `size`.
+
+    Os três PNGs de `assets/` já são quadrados com o círculo encostando nas
+    bordas (a margem transparente foi recortada na importação), então basta o
+    LANCZOS preservando o canal alfa — a transparência em volta do círculo é o
+    que deixa o botão parecer redondo sobre o fundo da aba. A imagem fica em
+    cache: os botões são redesenhados a cada mudança de estado e abrir/reescalar
+    um PNG de 256px toda vez seria desperdício.
+    """
+    chave = (kind, size)
+    cacheada = _LIVE_ICON_IMAGE_CACHE.get(chave)
+    if cacheada is not None:
+        return cacheada
+    with Image.open(resource_path(LIVE_ICON_FILES[kind])) as origem:
+        image = origem.convert("RGBA")
+    if image.size != (size, size):
+        image = image.resize((size, size), Image.Resampling.LANCZOS)
+    _LIVE_ICON_IMAGE_CACHE[chave] = image
+    return image
+
+
 class SigApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -1206,6 +1267,9 @@ class SigApp:
         self.gear_icon = self._make_gear_icon()
         self.recover_icon = self._make_recover_icon()
         self.recover_audio_icon = self._make_recover_icon("#d39b00")
+        # PhotoImage dos ícones PNG dos botões da aba Ocorrência (o Tk não segura
+        # a referência sozinho: o cache mantém as imagens vivas).
+        self._live_icon_photos = {}
         self.document_copy_icon = self._make_document_action_icon("copy")
         self.document_save_icon = self._make_document_action_icon("save")
         self.document_view_icon = self._make_document_action_icon("preview")
@@ -1846,28 +1910,43 @@ class SigApp:
         return True
 
     def _copy_params_block(self, box, block_tag: str) -> bool:
-        """Copia a requisição inteira do bloco de parâmetros em uma só linha."""
-        ranges = box.tag_ranges(block_tag)
-        if len(ranges) < 2:
-            return False
-        single = params_block_single_line(box.get(str(ranges[0]), str(ranges[-1])))
-        if not single:
+        """Copia a requisição crua do bloco de parâmetros.
+
+        O texto copiado é o da requisição montada (linha de pedido, headers e
+        corpo com os parâmetros já prontos) — ver `format_raw_request`. O bloco
+        só cai no resumo em uma linha quando o produtor não informou a
+        requisição crua (compatibilidade com blocos antigos).
+        """
+        raw = getattr(self, "_params_block_raw", {}).get(block_tag)
+        if not raw:
+            ranges = box.tag_ranges(block_tag)
+            if len(ranges) < 2:
+                return False
+            raw = params_block_single_line(box.get(str(ranges[0]), str(ranges[-1])))
+        if not raw:
             return False
         self.root.clipboard_clear()
-        self.root.clipboard_append(single)
+        self.root.clipboard_append(raw)
         return True
 
-    def _append_params_block(self, title: str, params) -> None:
+    def _append_params_block(self, title: str, params, raw_request: str = "") -> None:
         """Insere bloco de parâmetros: tudo amarelo + tag única do bloco.
 
         A tag única permite copiar a requisição inteira com um clique em
-        qualquer linha do bloco (ver _activity_log_click).
+        qualquer linha do bloco (ver _activity_log_click); `raw_request` é o
+        texto cru que vai para a área de transferência.
         """
         box = getattr(self, "activity_log", None)
         if box is None or not box.winfo_exists():
             return
         self._params_block_seq = int(getattr(self, "_params_block_seq", 0) or 0) + 1
         block_tag = f"{PARAMS_BLOCK_TAG_PREFIX}{self._params_block_seq}"
+        if raw_request:
+            blocks = getattr(self, "_params_block_raw", None)
+            if blocks is None:
+                blocks = {}
+                self._params_block_raw = blocks
+            blocks[block_tag] = raw_request
         if "warning" not in box.tag_names():
             box.tag_configure("warning", foreground="#a65300")
         text = format_ws_params_block(title, params)
@@ -3556,11 +3635,12 @@ class SigApp:
             self._draw_qrcode_placeholder()
             return
         canvas_size = int(canvas["width"])
-        # Conta as margens brancas para caber inteiro na area de exibicao.
-        # Sem piso artificial: versoes altas (v23+) precisam de escala menor
-        # para nao estourar o canvas e cortar o QR Code.
-        scale = max(1, canvas_size // (code.size + 8))
-        image = code.to_image(scale=scale, border=4)
+        # Preenche o quadro: maior escala INTEIRA que cabe na area de exibicao
+        # e SEM margem branca (pedido do usuario, 12/09). O resto da divisao
+        # fica so na centralizacao. Sem piso artificial alem do 1: versoes
+        # altas (v23+) precisam de escala menor para nao cortar o QR Code.
+        scale = max(1, canvas_size // code.size)
+        image = code.to_image(scale=scale, border=0)
         self.qrcode_photo = ImageTk.PhotoImage(image, master=self.root)
         canvas.delete("all")
         offset = (canvas_size - image.width) // 2
@@ -3615,7 +3695,9 @@ class SigApp:
             )
             return
         try:
-            qr_encoder.copy_image_to_windows_clipboard(self.qrcode.to_image(scale=14, border=4))
+            qr_encoder.copy_image_to_windows_clipboard(
+                self.qrcode.to_image(scale=QRCODE_COPY_SCALE, border=QRCODE_COPY_BORDER)
+            )
         except Exception as exc:
             self._set_activity_status(f"Cópia do QR Code falhou: {exc}", log=False)
             self._append_activity_log(f"QR Code não copiado: {exc}", "activity_step_error")
@@ -5494,23 +5576,36 @@ class SigApp:
         except Exception as exc:
             messagebox.showerror("sig", f"Não foi possível abrir a pasta:\\n{exc}")
 
+    def _live_icon_photo(self, kind: str) -> "ImageTk.PhotoImage":
+        """PhotoImage do ícone PNG, criado uma única vez por tipo."""
+        photo = self._live_icon_photos.get(kind)
+        if photo is None:
+            photo = ImageTk.PhotoImage(live_icon_image(kind), master=self.root)
+            self._live_icon_photos[kind] = photo
+        return photo
+
+    def _draw_canvas_icon(self, canvas, kind: str):
+        """Desenha o ícone PNG centralizado no canvas do botão (44x44)."""
+        canvas.delete("all")
+        largura = canvas.winfo_reqwidth() or LIVE_ICON_SIZE
+        altura = canvas.winfo_reqheight() or LIVE_ICON_SIZE
+        canvas.create_image(largura / 2, altura / 2, image=self._live_icon_photo(kind))
+
     def _draw_live_mic_button(self):
         canvas = self.live_mic_canvas
-        canvas.delete("all")
         state = self.live_state
         if state == "finalizing":
+            canvas.delete("all")
             canvas.create_oval(4, 4, 40, 40, fill="#d6dddd", outline="#879191", width=2)
             canvas.create_arc(16, 14, 28, 30, start=20, extent=300, outline="#5d6868", width=3, style="arc")
             return
-        canvas.create_oval(4, 4, 40, 40, fill="#13201e", outline="#2c403d", width=2)
         if state in ("listening", "paused"):
+            canvas.delete("all")
+            canvas.create_oval(4, 4, 40, 40, fill="#13201e", outline="#2c403d", width=2)
             canvas.create_line(15, 21, 20, 27, fill="#3ddc66", width=5, capstyle="round")
             canvas.create_line(20, 27, 30, 15, fill="#3ddc66", width=5, capstyle="round")
-        else:
-            canvas.create_oval(17, 10, 27, 26, fill="#ff4b4b", outline="#ffd0d0", width=2)
-            canvas.create_line(22, 26, 22, 33, fill="#ff4b4b", width=3, capstyle="round")
-            canvas.create_arc(13, 18, 31, 34, start=200, extent=140, outline="#ff4b4b", width=3, style="arc")
-            canvas.create_line(16, 34, 28, 34, fill="#ff4b4b", width=3, capstyle="round")
+            return
+        self._draw_canvas_icon(canvas, "mic_vermelho")
 
     def _set_live_audio_recovery_visible(self, visible: bool):
         button = getattr(self, "live_recover_audio_button", None)
@@ -5567,30 +5662,29 @@ class SigApp:
 
     def _draw_live_pause_button(self):
         canvas = self.live_pause_canvas
-        canvas.delete("all")
         normal_active = self.normal_recording
         if self.live_state not in ("listening", "paused") and not normal_active:
+            canvas.delete("all")
             return
-        canvas.create_oval(4, 4, 40, 40, fill="#f2cf37", outline="#c49d00", width=2)
         is_paused = self.live_state == "paused" or (normal_active and self.normal_record_paused)
         if not is_paused:
-            canvas.create_rectangle(15, 13, 19, 31, fill="#1b5b92", outline="")
-            canvas.create_rectangle(25, 13, 29, 31, fill="#1b5b92", outline="")
-        else:
-            canvas.create_polygon(17, 13, 17, 31, 31, 22, fill="#1b5b92", outline="#16466f")
+            self._draw_canvas_icon(canvas, "mic_pause")
+            return
+        # Retomar: o mesmo círculo amarelo do ícone, com um triângulo preto (a
+        # cor do símbolo dentro do PNG) — as duas faces do botão combinam.
+        canvas.delete("all")
+        canvas.create_oval(4, 4, 40, 40, fill=LIVE_PAUSE_CIRCLE_COLOR, outline="", width=0)
+        canvas.create_polygon(17, 13, 17, 31, 31, 22, fill=LIVE_ICON_GLYPH_COLOR, outline="")
 
     def _draw_normal_live_mic_button(self):
         canvas = self.live_normal_mic_canvas
-        canvas.delete("all")
         if self.normal_recording:
+            canvas.delete("all")
             canvas.create_oval(4, 4, 40, 40, fill="#3d1515", outline="#5a2424", width=2)
             canvas.create_line(15, 21, 20, 27, fill="#3ddc66", width=5, capstyle="round")
             canvas.create_line(20, 27, 30, 15, fill="#3ddc66", width=5, capstyle="round")
             return
-        canvas.create_oval(4, 4, 40, 40, fill="#ffffff", outline="#768282", width=2)
-        canvas.create_oval(17, 10, 27, 26, fill="#536565", outline="")
-        canvas.create_line(22, 26, 22, 33, fill="#536565", width=3, capstyle="round")
-        canvas.create_arc(13, 18, 31, 34, start=200, extent=140, outline="#536565", width=3, style="arc")
+        self._draw_canvas_icon(canvas, "mic_branco")
 
     def _reset_live_waveform(self):
         with self.live_waveform_lock:
@@ -6978,11 +7072,35 @@ try {
                 record_settings = self.settings.copy()
                 if self.normal_record_diarize:
                     record_settings["diarize"] = True
+                muse_body = metamuse_rest_request_body(
+                    bool(record_settings.get("diarize")), record_settings
+                )
                 self._queue(
                     "params_block",
                     "Parâmetros REST (Muse):",
-                    metamuse_rest_request_body(
-                        bool(record_settings.get("diarize")), record_settings
+                    muse_body,
+                    format_raw_request(
+                        "POST",
+                        META_MUSE_STT_URL,
+                        [
+                            ("accept", "application/json"),
+                            (
+                                "Content-Type",
+                                f"multipart/form-data; boundary={RAW_REQUEST_BOUNDARY}",
+                            ),
+                            ("Authorization", "Bearer ***"),
+                        ],
+                        format_raw_multipart(
+                            RAW_REQUEST_BOUNDARY,
+                            [
+                                (
+                                    "request",
+                                    json.dumps(muse_body, ensure_ascii=False),
+                                    "application/json",
+                                )
+                            ],
+                            [("audio", wav_path.name, "audio/wav", _audio_file_size(wav_path))],
+                        ),
                     ),
                 )
                 text = metamuse_rest_transcribe(
@@ -6995,17 +7113,35 @@ try {
                     self._queue("status", "Transcrição concluída.")
                 return
             if getattr(self, "normal_record_alibaba", False):
+                vocabulary_id = self._alibaba_vocabulary_for(self.settings, ALIBABA_REST_MODEL)
+                rest_body = alibaba_rest_body(
+                    "data:audio/wav;base64,"
+                    + format_raw_audio_label(_audio_file_size(wav_path)),
+                    self.settings,
+                    vocabulary_id,
+                )
                 self._queue(
                     "params_block",
                     "Parâmetros REST (Alibaba):",
                     alibaba_rest_log_params(self.settings),
+                    format_raw_request(
+                        "POST",
+                        ALIBABA_REST_URL,
+                        [
+                            ("accept", "application/json"),
+                            ("Content-Type", "application/json"),
+                            ("Authorization", "Bearer ***"),
+                            ("X-DashScope-SSE", "disable"),
+                        ],
+                        json.dumps(rest_body, ensure_ascii=False),
+                    ),
                 )
                 text = alibaba_rest_transcribe(
                     cancel,
                     self.settings.copy(),
                     wav_path,
                     wav_path.with_suffix(".raw"),
-                    self._alibaba_vocabulary_for(self.settings, ALIBABA_REST_MODEL),
+                    vocabulary_id,
                 )
                 if not text.strip():
                     self._queue("status", "Transcrição ao vivo finalizada sem conteúdo")
@@ -7025,6 +7161,7 @@ try {
                     record_settings["diarize"] = True
                 uploader = create_transcription_uploader(cancel, record_settings)
                 url = transcribe_url(record_settings)
+                audio_size = _audio_file_size(wav_path)
                 if getattr(self, "normal_record_deepgram", False):
                     self._queue(
                         "params_block",
@@ -7032,33 +7169,113 @@ try {
                         urllib.parse.parse_qsl(
                             deepgram_query_string(record_settings), keep_blank_values=True
                         ),
+                        format_raw_request(
+                            "POST",
+                            url,
+                            [
+                                ("accept", "application/json"),
+                                ("Authorization", "Token ***"),
+                                ("Content-Type", "audio/wav"),
+                            ],
+                            format_raw_audio_label(audio_size),
+                        ),
                     )
                 elif is_assemblyai_transcription(self.settings):
+                    assemblyai_fields = transcription_form_fields(record_settings)
                     self._queue(
                         "params_block",
                         "Parâmetros REST (AssemblyAI):",
-                        transcription_form_fields(record_settings),
+                        assemblyai_fields,
+                        format_raw_request(
+                            "POST",
+                            url,
+                            [
+                                ("accept", "application/json"),
+                                (
+                                    "Content-Type",
+                                    f"multipart/form-data; boundary={RAW_REQUEST_BOUNDARY}",
+                                ),
+                                ("Authorization", "***"),
+                                ("X-AAI-Model", "u3-sync-pro"),
+                            ],
+                            format_raw_multipart(
+                                RAW_REQUEST_BOUNDARY,
+                                list(assemblyai_fields.items()),
+                                [("audio", wav_path.name, "audio/wav", audio_size)],
+                            ),
+                        ),
                     )
                 elif is_elevenlabs_transcription(self.settings):
                     rest_fields = {"model_id": "scribe_v2"}
                     rest_fields.update(transcription_form_fields(record_settings))
-                    self._queue("params_block", "Parâmetros REST (ElevenLabs):", rest_fields)
+                    self._queue(
+                        "params_block",
+                        "Parâmetros REST (ElevenLabs):",
+                        rest_fields,
+                        format_raw_request(
+                            "POST",
+                            url,
+                            [
+                                ("accept", "application/json"),
+                                (
+                                    "Content-Type",
+                                    f"multipart/form-data; boundary={RAW_REQUEST_BOUNDARY}",
+                                ),
+                                ("xi-api-key", "***"),
+                            ],
+                            format_raw_multipart(
+                                RAW_REQUEST_BOUNDARY,
+                                list(rest_fields.items()),
+                                [("file", wav_path.name, "audio/wav", audio_size)],
+                            ),
+                        ),
+                    )
             else:
                 fields = {"language": self.normal_record_language, "format": "true", "filler_words": "false"}
                 if self.normal_record_diarize:
                     fields["diarize"] = "true"
-                self._queue(
-                    "params_block",
-                    "Parâmetros REST (Grok):" if grok else "Parâmetros REST (servidor):",
-                    dict(fields),
-                )
+                url = GROK_STT_URL if grok else transcribe_url(self.settings)
+                file_field = "file" if grok else "files"
+                raw_headers = [
+                    ("accept", "application/json"),
+                    (
+                        "Content-Type",
+                        f"multipart/form-data; boundary={RAW_REQUEST_BOUNDARY}",
+                    ),
+                ]
+                if grok:
+                    raw_headers.append(("Authorization", "Bearer ***"))
+                if grok:
+                    self._queue(
+                        "params_block",
+                        "Parâmetros REST (Grok):",
+                        dict(fields),
+                        format_raw_request(
+                            "POST",
+                            url,
+                            raw_headers,
+                            format_raw_multipart(
+                                RAW_REQUEST_BOUNDARY,
+                                list(fields.items()),
+                                [(file_field, wav_path.name, "audio/wav", _audio_file_size(wav_path))],
+                            ),
+                        ),
+                    )
+                else:
+                    # Granite NAR: o servidor não usa query — os campos vão no
+                    # multipart. O copiado vira a mesma leitura de uma linha.
+                    self._queue(
+                        "params_block",
+                        "Parâmetros REST (servidor):",
+                        dict(fields),
+                        format_raw_request_line("POST", url, fields),
+                    )
                 uploader = GraniteUploader(
                     cancel,
                     fields,
                     {"Authorization": f"Bearer {self.settings['grok_api_key']}"} if grok else {},
-                    "file" if grok else "files",
+                    file_field,
                 )
-                url = GROK_STT_URL if grok else transcribe_url(self.settings)
             status, parsed = uploader.post_file_parsed(
                 url,
                 wav_path,
@@ -10601,7 +10818,17 @@ try {
                     pass
             self.alibaba_ws_ready_event.clear()
             self.alibaba_ws_lost_event.clear()
-            self._queue("params_block", "Parâmetros Alibaba", alibaba_ws_log_params(self.settings))
+            self._queue(
+                "params_block",
+                "Parâmetros Alibaba",
+                alibaba_ws_log_params(self.settings),
+                format_raw_websocket_frame(
+                    json.dumps(
+                        alibaba_ws_run_task(task_id, self.settings, alibaba_vocabulary_id),
+                        ensure_ascii=False,
+                    )
+                ),
+            )
             hints = alibaba_language_hints(self.settings)
             self._queue(
                 "status_silent",
@@ -10901,6 +11128,12 @@ try {
                 "params_block",
                 "Parâmetros Muse",
                 metamuse_ws_log_params(self.settings, self.live_grok_diarize),
+                format_raw_websocket_frame(
+                    json.dumps(
+                        metamuse_handshake_payload("***", self.live_grok_diarize, self.settings),
+                        ensure_ascii=False,
+                    )
+                ),
             )
             # Sem header de autenticação: a credencial vai no handshake JSON.
             app = websocket.WebSocketApp(
@@ -11234,6 +11467,7 @@ try {
                 "params_block",
                 "Parâmetros Scribe",
                 urllib.parse.parse_qsl(query, keep_blank_values=True),
+                format_raw_request_line("GET", f"{ELEVENLABS_WEBSOCKET_URL}?{query}"),
             )
             app = websocket.WebSocketApp(
                 f"{ELEVENLABS_WEBSOCKET_URL}?{query}",
@@ -11520,6 +11754,7 @@ try {
                 "params_block",
                 "Parâmetros AssemblyAI",
                 urllib.parse.parse_qsl(query, keep_blank_values=True),
+                format_raw_request_line("GET", f"{ASSEMBLYAI_WEBSOCKET_URL}?{query}"),
             )
             app = websocket.WebSocketApp(
                 f"{ASSEMBLYAI_WEBSOCKET_URL}?{query}",
@@ -11783,6 +12018,7 @@ try {
                 "params_block",
                 "Parâmetros Deepgram",
                 urllib.parse.parse_qsl(query, keep_blank_values=True),
+                format_raw_request_line("GET", f"{DEEPGRAM_STT_WEBSOCKET_URL}?{query}"),
             )
             app = websocket.WebSocketApp(
                 f"{DEEPGRAM_STT_WEBSOCKET_URL}?{query}",
@@ -12008,6 +12244,7 @@ try {
                 "params_block",
                 "Parâmetros",
                 urllib.parse.parse_qsl(query, keep_blank_values=True),
+                format_raw_request_line("GET", f"{GROK_STT_WEBSOCKET_URL}?{query}"),
             )
             app = websocket.WebSocketApp(
                 f"{GROK_STT_WEBSOCKET_URL}?{query}",
@@ -13817,7 +14054,11 @@ try {
                     tag = message[2] if len(message) > 2 else None
                     self._append_activity_log(message[1], tag)
                 elif kind == "params_block":
-                    self._append_params_block(message[1], message[2])
+                    self._append_params_block(
+                        message[1],
+                        message[2],
+                        message[3] if len(message) > 3 else "",
+                    )
                 elif kind == "settings_key":
                     # Persistência pedida por um worker (ex.: vocabulary_id da
                     # Alibaba criado no loop ao vivo): grava na UI thread, que é

@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from sig_app import FfmpegToolsPanel, MediaProfile, VideoAcceleration  # noqa: E402
+from ffmpeg_tools_panel import CUT_MODE_COPY, CUT_MODE_REENCODE  # noqa: E402
+from video_encoders import EncoderOption  # noqa: E402
 
 
 class FfmpegToolsLogicTests(unittest.TestCase):
@@ -235,20 +237,21 @@ class FfmpegToolsLogicTests(unittest.TestCase):
             )
         self.assertIn("taxas de amostragem", str(ctx.exception))
 
-    def test_execute_video_uses_detected_cpu_fallback(self):
+    def test_execute_video_falls_back_to_cpu_only_for_that_task(self):
+        """GPU que falha repete a tarefa na CPU — sem trocar a preferência do usuário."""
         panel = object.__new__(FfmpegToolsPanel)
-        mpeg4_cpu = VideoAcceleration("cpu", "CPU (fallback)", "mpeg4")
-        panel.available_accelerations = [
-            VideoAcceleration("nvenc", "NVENC", "h264_nvenc"),
-            mpeg4_cpu,
+        nvenc = VideoAcceleration("nvenc", "NVENC (NVIDIA)", "h264_nvenc")
+        cpu = VideoAcceleration("cpu", "CPU", "libx264")
+        panel.available_accelerations = [nvenc, cpu]
+        panel.available_encoder_options = [
+            EncoderOption("nvenc", "NVENC (NVIDIA)", "gpu", "h264", "h264_nvenc", 10),
+            EncoderOption("cpu", "CPU", "cpu", "h264", "libx264", 100),
         ]
-        panel.acceleration = panel.available_accelerations[0]
+        panel.acceleration = nvenc
         panel._append_log = MagicMock()
+        panel._log_encoder_choice = MagicMock()
 
-        call_count = 0
         def failing_builder(acc: VideoAcceleration):
-            nonlocal call_count
-            call_count += 1
             if acc.key == "nvenc":
                 raise RuntimeError("NVENC falhou")
             return ["ffmpeg", "-c:v", acc.encoder]
@@ -257,8 +260,35 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._execute = lambda cmd, *a, **kw: executed_commands.append(cmd)
 
         panel._execute_video("Render", failing_builder)
-        self.assertEqual(panel.acceleration.encoder, "mpeg4")
-        self.assertIn("mpeg4", executed_commands[0])
+        # repetiu na CPU só nesta tarefa...
+        self.assertIn("libx264", executed_commands[0])
+        # ...e NÃO rebaixou a escolha (a próxima volta a tentar a GPU)
+        self.assertEqual(panel.acceleration, nvenc)
+        avisos = " ".join(str(chamada) for chamada in panel._log_encoder_choice.call_args_list)
+        self.assertIn("SOMENTE nesta tarefa", avisos)
+
+    def test_execute_video_guarda_o_codec_no_fallback_de_cpu(self):
+        """Fallback de uma GPU HEVC cai no libx265 (nunca no libx264)."""
+        panel = object.__new__(FfmpegToolsPanel)
+        nvenc_hevc = VideoAcceleration("nvenc", "NVENC (NVIDIA)", "hevc_nvenc")
+        panel.available_accelerations = [nvenc_hevc, VideoAcceleration("cpu", "CPU", "libx265")]
+        panel.available_encoder_options = [
+            EncoderOption("nvenc", "NVENC (NVIDIA)", "gpu", "hevc", "hevc_nvenc", 10),
+            EncoderOption("cpu", "CPU", "cpu", "hevc", "libx265", 100),
+        ]
+        panel.acceleration = nvenc_hevc
+        panel._append_log = MagicMock()
+        panel._log_encoder_choice = MagicMock()
+        executados = []
+        panel._execute = lambda cmd, *a, **kw: executados.append(cmd)
+
+        def failing_builder(acc: VideoAcceleration):
+            if acc.key == "nvenc":
+                raise RuntimeError("NVENC falhou")
+            return ["ffmpeg", "-c:v", acc.encoder]
+
+        panel._execute_video("Render", failing_builder)
+        self.assertIn("libx265", executados[0])
 
     def test_probe_media_extracts_video_codec_pix_fmt_timebase(self):
         fake_output = (
@@ -657,6 +687,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.cut_input = src
         panel.cut_start_var = MagicMock(); panel.cut_start_var.get.return_value = "1"
         panel.cut_end_var = MagicMock(); panel.cut_end_var.get.return_value = "5"
+        panel.cut_mode_var = MagicMock(); panel.cut_mode_var.get.return_value = CUT_MODE_REENCODE
         panel._seconds = lambda value, *_args: float(value)
         profile = MediaProfile(10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo", True, audio_codec="aac", video_codec="h264")
         panel._probe_media = lambda _path: profile
@@ -1019,7 +1050,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel.cut_input = src
         panel.cut_start_var = MagicMock(); panel.cut_start_var.get.return_value = "1"
         panel.cut_end_var = MagicMock(); panel.cut_end_var.get.return_value = "5"
-        panel.cut_mode_var = MagicMock(); panel.cut_mode_var.get.return_value = "Rápido (sem reencodar)"
+        panel.cut_mode_var = MagicMock(); panel.cut_mode_var.get.return_value = CUT_MODE_COPY
         panel._seconds = lambda value, *_args: float(value)
         panel._probe_media = lambda _path: MediaProfile(
             10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo",

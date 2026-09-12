@@ -51,6 +51,22 @@ from tkinter import (
 )
 from ui_widgets import PreviewIconButton, create_tooltip
 import smart_join_planner
+from video_encoders import (
+    CATALOG,
+    ENCODER_ADVANCED_AUTO,
+    ENCODER_PATH_CPU,
+    ENCODER_PATH_GPU,
+    PATH_LABELS,
+    SHORT_JOB_SECONDS,
+    EncoderOption,
+    available_keys,
+    catalog_options,
+    hevc_tag_arguments,
+    normalize_codec,
+    options_from_tuples,
+    options_to_tuples,
+    resolve_encoder,
+)
 
 
 VIDEO_QUALITY_LEVELS = ("Máxima", "Muito alta", "Alta", "Média", "Econômica")
@@ -63,6 +79,468 @@ VIDEO_QUALITY_MENU_LABELS = {
     "Média": "Média",
     "Econômica": "Econômica",
 }
+
+
+# --- Palco de prévia (players das ferramentas FFmpeg) ------------------------
+# Regras do usuário: o vídeo ocupa TODO o espaço disponível da aba (sem perder a
+# proporção e sem ficar em cima dos controles), a roda do mouse dá zoom (para
+# cima aproxima, para baixo afasta) e o arrasto com o botão esquerdo move o
+# quadro quando ele está ampliado.
+PREVIEW_STAGE_BACKGROUND = "#f4f7f6"
+# Zoom: 1.0 = o vídeo INTEIRO no palco (não tem zoom out além disso) e até 5x
+# para aproximar detalhes.
+PREVIEW_ZOOM_MIN = 1.0
+PREVIEW_ZOOM_MAX = 5.0
+PREVIEW_ZOOM_STEP = 1.25
+PREVIEW_ZOOM_RESTART_MS = 250
+PREVIEW_SPEED_VALUES = (0.25, 0.5, 1.0, 2.0, 4.0)
+
+# Modos de corte da aba Cortar (na ordem exibida; SmartCut é o padrão).
+CUT_MODE_SMART = "SmartCut"
+CUT_MODE_REENCODE = "Reencode Completo"
+CUT_MODE_COPY = "Sem Reencode"
+CUT_MODES = (CUT_MODE_SMART, CUT_MODE_REENCODE, CUT_MODE_COPY)
+CUT_MODE_HELP = (
+    "SmartCut: corte preciso e rápido, mas EXPERIMENTAL — copia os trechos que já começam em "
+    "keyframe e reencoda apenas as bordas até os tempos exatos.\n\n"
+    "Reencode Completo: reencoda todo o trecho — lento e preciso.\n\n"
+    "Sem Reencode: copia os streams sem reencodar — rápido e menos preciso, porque início e fim "
+    "escorregam até o keyframe/pacote disponível."
+)
+# SmartCut: margem mínima para valer a pena reencodar a borda e para considerar
+# que há miolo copiável entre dois keyframes.
+SMARTCUT_MIN_EDGE = 0.05
+PREVIEW_STAGE_MIN_WIDTH = 240
+PREVIEW_STAGE_MIN_HEIGHT = 135
+PREVIEW_STAGE_MAX_HEIGHT = 760
+PREVIEW_STAGE_MARGIN = 8
+# Orçamentos medidos nesta máquina (FFmpeg rawvideo + PIL + PhotoImage, 15 fps de
+# alvo): 1200x675 ~= 40 quadros/s, 1600x900 ~= 22, 1920x1080 ~= 16. Renderizar o
+# pipeline acima de 1600x900 derruba a taxa da prévia sem ganho de imagem.
+PREVIEW_RENDER_MAX_PIXELS = 1600 * 900
+# Limite da imagem exibida (zoom): evita PhotoImage gigante na memória.
+PREVIEW_DISPLAY_MAX_PIXELS = 2600 * 1500
+
+
+@dataclass
+class PreviewViewport:
+    """Zoom e deslocamento de um palco de prévia (um por ferramenta)."""
+
+    zoom: float = 1.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    media_width: int = 0
+    media_height: int = 0
+    stage_width: int = 0
+    stage_height: int = 0
+    drag_origin: tuple[int, int] | None = None
+    drag_offsets: tuple[float, float] = (0.0, 0.0)
+
+
+def preview_aspect(media_width: int, media_height: int) -> float:
+    """Proporção exibida da mídia (16:9 quando as dimensões não são conhecidas)."""
+    if media_width > 0 and media_height > 0:
+        return media_width / media_height
+    return 16.0 / 9.0
+
+
+def parse_tk_padding(value) -> tuple[int, ...]:
+    """Valores numéricos de um 'pady'/'padding' do Tk.
+
+    O Tk devolve objetos de pixel como "<pixel object: '12'>" e listas como
+    "{12 12 12 12}" — por isso a extração é por dígitos, não por split cru.
+    """
+    if isinstance(value, (tuple, list)):
+        partes = [str(item) for item in value]
+    else:
+        partes = [str(value)]
+    valores: list[int] = []
+    for parte in partes:
+        encontrados = re.findall(r"-?\d+", parte)
+        if not encontrados:
+            return ()
+        valores.extend(int(numero) for numero in encontrados)
+    return tuple(valores)
+
+
+def vertical_padding_total(value) -> int:
+    """Soma do espaçamento vertical de um 'pady' do pack (topo + base)."""
+    return sum(parse_tk_padding(value))
+
+
+def frame_vertical_padding(value) -> int:
+    """Soma do padding vertical interno de um frame ttk (1, 2 ou 4 valores)."""
+    valores = parse_tk_padding(value)
+    if len(valores) == 1:
+        return valores[0] * 2
+    if len(valores) == 2:
+        return valores[0] * 2
+    if len(valores) >= 4:
+        return valores[0] + valores[2]
+    return 0
+
+
+def preview_stage_size(
+    available_width: float,
+    available_height: float,
+    media_width: int,
+    media_height: int,
+) -> tuple[int, int]:
+    """Maior palco com a proporção da mídia que cabe no espaço disponível.
+
+    Ele encosta em pelo menos um dos limites (largura ou altura): é isso que faz
+    o vídeo preencher todo o espaço sem barras sobrando e sem distorcer. Os
+    mínimos utilizáveis (PREVIEW_STAGE_MIN_*) vencem a caixa — numa janela
+    pequena o palco mantém o tamanho mínimo e a aba rola.
+    """
+    aspect = preview_aspect(media_width, media_height)
+    width = max(PREVIEW_STAGE_MIN_WIDTH, int(available_width))
+    height = width / aspect
+    limit = max(PREVIEW_STAGE_MIN_HEIGHT, int(available_height))
+    if height > limit:
+        height = limit
+        width = height * aspect
+    if width < PREVIEW_STAGE_MIN_WIDTH:
+        width = PREVIEW_STAGE_MIN_WIDTH
+        height = width / aspect
+    if height < PREVIEW_STAGE_MIN_HEIGHT:
+        height = PREVIEW_STAGE_MIN_HEIGHT
+        width = height * aspect
+    return max(4, int(round(width))), max(4, int(round(height)))
+
+
+def preview_zoom_clamped(zoom: float) -> float:
+    return max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(zoom)))
+
+
+def preview_drawn_size(stage_width: int, stage_height: int, zoom: float) -> tuple[int, int, float]:
+    """Tamanho desenhado do quadro (par) e zoom efetivo, limitado pelo orçamento."""
+    stage_width = max(2, int(stage_width))
+    stage_height = max(2, int(stage_height))
+    budget = (PREVIEW_DISPLAY_MAX_PIXELS / max(1, stage_width * stage_height)) ** 0.5
+    effective = min(preview_zoom_clamped(zoom), max(PREVIEW_ZOOM_MIN, budget))
+    width = max(2, int(round(stage_width * effective)))
+    height = max(2, int(round(stage_height * effective)))
+    # O scale/pad do FFmpeg exige dimensões pares.
+    return width - width % 2, height - height % 2, effective
+
+
+def preview_render_size(
+    drawn_width: int,
+    drawn_height: int,
+    media_width: int,
+    media_height: int,
+) -> tuple[int, int]:
+    """Resolução que o pipeline de quadros produz: no máximo a nativa e o orçamento."""
+    width = max(2, int(drawn_width))
+    height = max(2, int(drawn_height))
+    scale = 1.0
+    if media_width > 0:
+        scale = min(scale, media_width / width)
+    pixels = width * height
+    if pixels > PREVIEW_RENDER_MAX_PIXELS:
+        scale = min(scale, (PREVIEW_RENDER_MAX_PIXELS / pixels) ** 0.5)
+    width = max(2, int(round(width * scale)))
+    height = max(2, int(round(height * scale)))
+    return width - width % 2, height - height % 2
+
+
+def preview_clamped_offset(stage: int, drawn: int, offset: float) -> float:
+    """Deslocamento válido: nunca deixa aparecer fundo no palco enquanto ampliado."""
+    if drawn <= stage:
+        return 0.0
+    return float(min(0, max(int(stage) - int(drawn), int(round(offset)))))
+
+
+def preview_view_rect(
+    stage_width: int,
+    stage_height: int,
+    drawn_width: int,
+    drawn_height: int,
+    offset_x: float,
+    offset_y: float,
+) -> tuple[int, int]:
+    """Canto superior esquerdo do quadro no palco (centralizado quando menor)."""
+    if drawn_width <= stage_width:
+        x = (int(stage_width) - int(drawn_width)) // 2
+    else:
+        x = int(preview_clamped_offset(stage_width, drawn_width, offset_x))
+    if drawn_height <= stage_height:
+        y = (int(stage_height) - int(drawn_height)) // 2
+    else:
+        y = int(preview_clamped_offset(stage_height, drawn_height, offset_y))
+    return x, y
+
+
+def preview_zoom_offsets(
+    stage_width: int,
+    stage_height: int,
+    drawn_width: int,
+    drawn_height: int,
+    offset_x: float,
+    offset_y: float,
+    zoomed_width: int,
+    zoomed_height: int,
+    cursor_x: float,
+    cursor_y: float,
+) -> tuple[float, float]:
+    """Deslocamentos que mantêm sob o cursor o mesmo ponto da imagem."""
+    origin_x, origin_y = preview_view_rect(
+        stage_width, stage_height, drawn_width, drawn_height, offset_x, offset_y
+    )
+    ratio_x = (cursor_x - origin_x) / max(1, drawn_width)
+    ratio_y = (cursor_y - origin_y) / max(1, drawn_height)
+    return cursor_x - ratio_x * zoomed_width, cursor_y - ratio_y * zoomed_height
+
+
+# --- Seleção de área no palco (recorte por pixels) ---------------------------
+PREVIEW_SELECTION_OUTLINE = "#ffd700"
+PREVIEW_SELECTION_HANDLE_FILL = "#ffd700"
+PREVIEW_SELECTION_TAG = "preview_selection"
+PREVIEW_SELECTION_WIDTH = 1
+PREVIEW_SELECTION_MIN_SIZE = 8
+PREVIEW_SELECTION_HANDLE = 7
+PREVIEW_SELECTION_HANDLE_SIZE = 4
+# Movimento mínimo para o botão direito virar um desenho (abaixo disso é clique).
+PREVIEW_SELECTION_DRAG_THRESHOLD = 4
+PREVIEW_SELECTION_CURSORS = {
+    "n": "sb_v_double_arrow",
+    "s": "sb_v_double_arrow",
+    "e": "sb_h_double_arrow",
+    "w": "sb_h_double_arrow",
+    "nw": "sizing",
+    "ne": "sizing",
+    "sw": "sizing",
+    "se": "sizing",
+    "move": "hand2",
+}
+
+
+@dataclass
+class PreviewSelection:
+    """Área escolhida pelo usuário, em FRAÇÕES (0..1) do quadro.
+
+    Guardar em frações faz a seleção sobreviver ao zoom, ao arrasto e ao
+    redimensionamento da janela: ela continua exatamente sobre os mesmos pixels.
+    """
+
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+    @property
+    def width(self) -> float:
+        return max(0.0, self.right - self.left)
+
+    @property
+    def height(self) -> float:
+        return max(0.0, self.bottom - self.top)
+
+    def to_view(self, drawn_width: int, drawn_height: int, origin_x: float, origin_y: float) -> tuple[float, float, float, float]:
+        """Retângulo na tela (view) sobre o quadro desenhado, que já inclui o zoom."""
+        escala_x = max(1, int(drawn_width))
+        escala_y = max(1, int(drawn_height))
+        return (
+            self.left * escala_x + origin_x,
+            self.top * escala_y + origin_y,
+            self.right * escala_x + origin_x,
+            self.bottom * escala_y + origin_y,
+        )
+
+
+def preview_fraction_from_view(
+    x: float,
+    y: float,
+    drawn_width: int,
+    drawn_height: int,
+    origin_x: float,
+    origin_y: float,
+) -> tuple[float, float]:
+    """Fração (0..1) do quadro para um ponto da tela, limitada ao vídeo.
+
+    O tamanho recebido é o do quadro DESENHADO (que já inclui o zoom): assim o
+    desenho e o recorte em pixels usam exatamente o mesmo referencial.
+    """
+    escala_x = max(1, int(drawn_width))
+    escala_y = max(1, int(drawn_height))
+    fracao_x = (x - origin_x) / escala_x
+    fracao_y = (y - origin_y) / escala_y
+    return min(1.0, max(0.0, fracao_x)), min(1.0, max(0.0, fracao_y))
+
+
+def selection_from_drag(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    minimum_fraction_x: float,
+    minimum_fraction_y: float,
+) -> PreviewSelection | None:
+    """Seleção a partir de dois cantos (frações) — None quando é pequena demais."""
+    left, right = sorted((start[0], end[0]))
+    top, bottom = sorted((start[1], end[1]))
+    left = min(1.0, max(0.0, left))
+    top = min(1.0, max(0.0, top))
+    right = min(1.0, max(0.0, right))
+    bottom = min(1.0, max(0.0, bottom))
+    if right - left < minimum_fraction_x or bottom - top < minimum_fraction_y:
+        return None
+    return PreviewSelection(left, top, right, bottom)
+
+
+def selection_handle_at(rect: tuple[float, float, float, float], x: float, y: float, tolerance: int = PREVIEW_SELECTION_HANDLE) -> str | None:
+    """Handle sob o ponteiro (coords de tela): n/s/e/w/cantos, 'move' ou None."""
+    left, top, right, bottom = rect
+    nos_x = (abs(x - left) <= tolerance, abs(x - right) <= tolerance)
+    nos_y = (abs(y - top) <= tolerance, abs(y - bottom) <= tolerance)
+    dentro_x = left - tolerance <= x <= right + tolerance
+    dentro_y = top - tolerance <= y <= bottom + tolerance
+    if not (dentro_x and dentro_y):
+        return None
+    if nos_x[0] and nos_y[0]:
+        return "nw"
+    if nos_x[1] and nos_y[0]:
+        return "ne"
+    if nos_x[0] and nos_y[1]:
+        return "sw"
+    if nos_x[1] and nos_y[1]:
+        return "se"
+    if nos_y[0]:
+        return "n"
+    if nos_y[1]:
+        return "s"
+    if nos_x[0]:
+        return "w"
+    if nos_x[1]:
+        return "e"
+    if left <= x <= right and top <= y <= bottom:
+        return "move"
+    return None
+
+
+def selection_resized(
+    selection: PreviewSelection,
+    handle: str,
+    fracao_x: float,
+    fracao_y: float,
+    minimum_fraction_x: float,
+    minimum_fraction_y: float,
+) -> PreviewSelection:
+    """Novo retângulo ao arrastar um lado/canto (respeita tamanho mínimo e limites)."""
+    left, top, right, bottom = selection.left, selection.top, selection.right, selection.bottom
+    fracao_x = min(1.0, max(0.0, fracao_x))
+    fracao_y = min(1.0, max(0.0, fracao_y))
+    if "w" in handle:
+        left = min(fracao_x, right - minimum_fraction_x)
+    if "e" in handle:
+        right = max(fracao_x, left + minimum_fraction_x)
+    if "n" in handle:
+        top = min(fracao_y, bottom - minimum_fraction_y)
+    if "s" in handle:
+        bottom = max(fracao_y, top + minimum_fraction_y)
+    return PreviewSelection(
+        min(1.0, max(0.0, left)),
+        min(1.0, max(0.0, top)),
+        min(1.0, max(0.0, right)),
+        min(1.0, max(0.0, bottom)),
+    )
+
+
+def selection_moved(
+    selection: PreviewSelection,
+    delta_x: float,
+    delta_y: float,
+) -> PreviewSelection:
+    """Move a seleção sem deixá-la sair do quadro."""
+    largura, altura = selection.width, selection.height
+    left = min(max(0.0, selection.left + delta_x), 1.0 - largura)
+    top = min(max(0.0, selection.top + delta_y), 1.0 - altura)
+    return PreviewSelection(left, top, left + largura, top + altura)
+
+
+def selection_crop_pixels(
+    selection: PreviewSelection,
+    video_width: int,
+    video_height: int,
+) -> tuple[int, int, int, int] | None:
+    """(x, y, largura, altura) em PIXELS do vídeo, par e dentro do quadro.
+
+    O FFmpeg (e o yuv420p) trabalham melhor com valores pares; o mínimo é 2x2.
+    """
+    if video_width <= 0 or video_height <= 0:
+        return None
+    if selection.width <= 0 or selection.height <= 0:
+        return None
+    x0 = int(round(selection.left * video_width))
+    y0 = int(round(selection.top * video_height))
+    x1 = int(round(selection.right * video_width))
+    y1 = int(round(selection.bottom * video_height))
+    x0 = min(max(0, x0), max(0, video_width - 2))
+    y0 = min(max(0, y0), max(0, video_height - 2))
+    x1 = min(max(x0 + 2, x1), video_width)
+    y1 = min(max(y0 + 2, y1), video_height)
+    largura = (x1 - x0) - (x1 - x0) % 2
+    altura = (y1 - y0) - (y1 - y0) % 2
+    largura = max(2, largura)
+    altura = max(2, altura)
+    return x0, y0, largura, altura
+
+
+def selection_crop_filter(crop: tuple[int, int, int, int]) -> str:
+    """Filtro de recorte do FFmpeg para a seleção."""
+    x, y, largura, altura = crop
+    return f"crop={largura}:{altura}:{x}:{y}"
+
+
+def selection_filter_atoms(filters: str) -> list[str]:
+    """Operações atômicas de giro/espelhamento na ordem em que são aplicadas."""
+    atomos = []
+    for parte in str(filters or "").split(","):
+        parte = parte.strip()
+        if parte in ("transpose=1", "transpose=2", "hflip", "vflip"):
+            atomos.append(parte)
+    return atomos
+
+
+def selection_after_filter_atom(selection: PreviewSelection, atom: str) -> PreviewSelection:
+    """Seleção reexpressa depois de UMA operação (em frações do quadro resultante).
+
+    As operações suportadas (giro em múltiplos de 90° e espelhamentos) levam
+    retângulos alinhados em retângulos alinhados — por isso a conta é exata.
+    """
+    left, top, right, bottom = selection.left, selection.top, selection.right, selection.bottom
+    if atom == "hflip":
+        return PreviewSelection(1.0 - right, top, 1.0 - left, bottom)
+    if atom == "vflip":
+        return PreviewSelection(left, 1.0 - bottom, right, 1.0 - top)
+    if atom == "transpose=1":
+        return PreviewSelection(1.0 - bottom, left, 1.0 - top, right)
+    if atom == "transpose=2":
+        return PreviewSelection(top, 1.0 - right, bottom, 1.0 - left)
+    return selection
+
+
+def selection_between_filters(
+    selection: PreviewSelection,
+    old_filters: str,
+    new_filters: str,
+) -> PreviewSelection:
+    """Reexpressa a seleção quando o giro muda: ela continua sobre os MESMOS pixels.
+
+    Desfaz o giro antigo (ordem inversa, operações invertidas) e aplica o novo —
+    o resultado é a mesma região da imagem original na nova orientação exibida.
+    """
+    invertidos = {
+        "hflip": "hflip",
+        "vflip": "vflip",
+        "transpose=1": "transpose=2",
+        "transpose=2": "transpose=1",
+    }
+    atual = selection
+    for atomo in reversed(selection_filter_atoms(old_filters)):
+        atual = selection_after_filter_atom(atual, invertidos[atomo])
+    for atomo in selection_filter_atoms(new_filters):
+        atual = selection_after_filter_atom(atual, atomo)
+    return atual
 
 
 @dataclass(frozen=True)
@@ -637,7 +1115,11 @@ class FfmpegToolsPanel:
         self.worker_options: dict[str, object] = {}
         self.available_accelerations: list[VideoAcceleration] = []
         self.acceleration_by_label: dict[str, VideoAcceleration] = {}
-        self.acceleration_var = StringVar(value="Detectando opções...")
+        self.acceleration_var = StringVar(value=PATH_LABELS[ENCODER_PATH_GPU])
+        self.encoder_advanced_var = StringVar(value=self.ENCODER_ADVANCED_AUTO_LABEL)
+        self.encoder_effective_var = StringVar(value="Encoder de vídeo: detectando opções...")
+        self.available_encoder_options: list[EncoderOption] = []
+        self.worker_acceleration: VideoAcceleration | None = None
         self.encoder_help: dict[str, str] = {}
         self.video_quality_var = StringVar(value="Alta")
         self.output_dir = app_base_dir() / "temp" / "ffmpeg"
@@ -653,7 +1135,7 @@ class FfmpegToolsPanel:
         self.cut_start_var = StringVar(value="0")
         self.cut_end_var = StringVar(value="")
         self.cut_current_var = StringVar(value="0:00")
-        self.cut_mode_var = StringVar(value="Preciso (reencodar)")
+        self.cut_mode_var = StringVar(value=CUT_MODE_SMART)
         self.cut_audio_policy_var = StringVar(value="Precisão máxima (AAC)")
         self.cut_stream_policy_var = StringVar(value="Vídeo e áudio")
 
@@ -671,6 +1153,7 @@ class FfmpegToolsPanel:
         self.extract_preset_sync = False
 
         self.rotate_input: Path | None = None
+        self.rotate_media_profile: MediaProfile | None = None
         self.rotate_input_var = StringVar(value="Nenhum vídeo selecionado")
         self.rotate_degrees_var = StringVar(value="90")
         self.rotate_hflip_var = BooleanVar(value=False)
@@ -721,6 +1204,16 @@ class FfmpegToolsPanel:
         self.preview_speed_var = StringVar(value="1.0x")
         self.preview_after_id = None
         self.preview_image_refs: dict[Canvas, object] = {}
+        self.preview_viewports: dict[Canvas, PreviewViewport] = {}
+        self.preview_holders: dict[Canvas, object] = {}
+        self.preview_parents: dict[Canvas, object] = {}
+        self.preview_stills: dict[Canvas, object] = {}
+        self.preview_frames: dict[Canvas, object] = {}
+        self.preview_frame_items: dict[Canvas, int] = {}
+        self.preview_selections: dict[Canvas, PreviewSelection] = {}
+        self.preview_selection_drag: dict[Canvas, dict] = {}
+        self.preview_selection_filters: dict[Canvas, str] = {}
+        self.preview_restart_id = None
         self.external_preview_process: subprocess.Popen | None = None
         self.external_preview_started_at = 0.0
         self.external_preview_offset = 0.0
@@ -763,10 +1256,21 @@ class FfmpegToolsPanel:
         self.acceleration_combo = ttk.Combobox(
             tool_tab_bar,
             textvariable=self.acceleration_var,
+            values=(PATH_LABELS[ENCODER_PATH_GPU], PATH_LABELS[ENCODER_PATH_CPU]),
             state="disabled",
-            width=20,
+            width=6,
         )
         self.acceleration_combo.pack(side=RIGHT, padx=(0, 4), pady=(2, 0))
+        self.acceleration_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_encoder_path_changed())
+        self.encoder_advanced_combo = ttk.Combobox(
+            tool_tab_bar,
+            textvariable=self.encoder_advanced_var,
+            state="readonly",
+            width=16,
+        )
+        self.encoder_advanced_label = ttk.Label(tool_tab_bar, text="Avançado:", style="Muted.TLabel")
+        self.encoder_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_encoder_help)
+        self.encoder_effective_label = ttk.Label(tool_tab_bar, textvariable=self.encoder_effective_var, style="Muted.TLabel")
         self.acceleration_label = ttk.Label(tool_tab_bar, text="Encoder de vídeo:", style="Muted.TLabel")
         self.acceleration_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
         self.quality_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_quality_help)
@@ -834,13 +1338,6 @@ class FfmpegToolsPanel:
         self._build_clean_tab()
         self._select_ffmpeg_tool("Cortar")
 
-        output_row = ttk.Frame(frame)
-        output_row.pack(fill=X, pady=(10, 0))
-        ttk.Label(output_row, text="Pasta de saída:", style="Muted.TLabel").pack(side=LEFT)
-        ttk.Label(output_row, textvariable=self.output_dir_var, style="Muted.TLabel").pack(side=LEFT, fill=X, expand=True, padx=(6, 8))
-        ttk.Button(output_row, text="Escolher pasta", command=self.choose_output_dir).pack(side=RIGHT)
-        ttk.Button(output_row, text="Abrir pasta", command=self.open_output_dir).pack(side=RIGHT, padx=(0, 8))
-
         bottom = ttk.Frame(frame)
         bottom.pack(fill=X, pady=(10, 0))
         self.progress = ttk.Progressbar(bottom, maximum=100, variable=self.progress_var)
@@ -860,13 +1357,12 @@ class FfmpegToolsPanel:
 
     def _resize_ffmpeg_scroll_content(self, event) -> None:
         self.ffmpeg_scroll_canvas.itemconfigure(self.ffmpeg_scroll_window, width=event.width)
+        # A altura visível do painel muda junto: o palco da prévia precisa ser
+        # reencaixado (senão ele fica no tamanho da janela anterior).
+        self._fit_visible_preview_stages()
 
     def _scroll_ffmpeg_panel(self, event) -> None:
         self.ffmpeg_scroll_canvas.yview_scroll(-max(1, event.delta // 120), "units")
-
-    def _section_title(self, parent, title: str, detail: str) -> None:
-        ttk.Label(parent, text=title, font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        ttk.Label(parent, text=detail, style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(3, 14))
 
     def _file_row(self, parent, variable: StringVar, command, label: str = "Selecionar arquivo") -> None:
         row = ttk.Frame(parent)
@@ -874,15 +1370,565 @@ class FfmpegToolsPanel:
         ttk.Button(row, text=label, command=command).pack(side=LEFT)
         ttk.Label(row, textvariable=variable, style="Muted.TLabel", wraplength=720).pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
 
-    def _create_stable_preview(self, parent, message: str, size: int = 312) -> Canvas:
-        """Área quadrada fixa: a orientação da mídia não altera o layout."""
-        holder = ttk.Frame(parent, width=size, height=size)
+    def _output_buttons(self, row) -> None:
+        """Botões da pasta de saída — entram na MESMA linha das opções da ferramenta."""
+        ttk.Button(row, text="Escolher pasta", command=self.choose_output_dir).pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(row, text="Abrir pasta", command=self.open_output_dir).pack(side=RIGHT, padx=(16, 0))
+
+    def _output_path_row(self, parent) -> None:
+        """Caminho da pasta de saída, na linha logo abaixo dos botões."""
+        row = ttk.Frame(parent)
+        row.pack(fill=X, pady=(4, 0))
+        ttk.Label(row, text="Pasta de saída:", style="Muted.TLabel").pack(side=LEFT)
+        ttk.Label(
+            row,
+            textvariable=self.output_dir_var,
+            style="Muted.TLabel",
+            wraplength=780,
+            justify="left",
+        ).pack(side=LEFT, padx=(6, 0))
+
+    def _create_preview_stage(self, parent, message: str) -> Canvas:
+        """Palco do player: o canvas abraça a proporção da mídia e preenche a aba.
+
+        O palco é um widget empacotado com altura própria (recalculada em
+        _fit_preview_stage), então ele nunca fica por cima dos controles. A roda
+        do mouse dá zoom e o arrasto com o botão esquerdo move o quadro ampliado.
+        """
+        holder = ttk.Frame(parent)
         holder.pack(anchor="center", pady=(0, 6))
         holder.pack_propagate(False)
-        canvas = Canvas(holder, highlightthickness=0, background="#f4f7f6")
+        canvas = Canvas(holder, highlightthickness=0, background=PREVIEW_STAGE_BACKGROUND, cursor="crosshair")
         canvas.pack(fill=BOTH, expand=True)
-        canvas.create_text(size // 2, size // 2, text=message, fill="#667371", font=("Segoe UI", 10))
+        view = PreviewViewport()
+        self.preview_viewports[canvas] = view
+        self.preview_holders[canvas] = holder
+        self.preview_parents[canvas] = parent
+        canvas.bind("<Configure>", lambda _event, target=canvas: self._fit_preview_stage(target))
+        # A aba também avisa: enquanto ela não é mapeada o Tk não sabe a largura
+        # real (o palco nasceria no tamanho mínimo e ficaria parado ali).
+        parent.bind("<Configure>", lambda _event, target=canvas: self._fit_preview_stage(target), add="+")
+        canvas.bind("<MouseWheel>", lambda event, target=canvas: self._preview_wheel(target, event))
+        canvas.bind("<Button-4>", lambda event, target=canvas: self._preview_wheel(target, event))
+        canvas.bind("<Button-5>", lambda event, target=canvas: self._preview_wheel(target, event))
+        canvas.bind("<ButtonPress-1>", lambda event, target=canvas: self._preview_press(target, event))
+        canvas.bind("<B1-Motion>", lambda event, target=canvas: self._preview_motion(target, event))
+        canvas.bind("<ButtonRelease-1>", lambda event, target=canvas: self._preview_release(target, event))
+        canvas.bind("<Motion>", lambda event, target=canvas: self._preview_hover(target, event))
+        # Botão DIREITO desenha/ajusta a seleção; clique simples sobre a seleção
+        # abre o menu "Desfazer seleção" (o esquerdo ficou para arrastar o vídeo).
+        canvas.bind("<ButtonPress-3>", lambda event, target=canvas: self._preview_select_press(target, event))
+        canvas.bind("<B3-Motion>", lambda event, target=canvas: self._preview_select_motion(target, event))
+        canvas.bind("<ButtonRelease-3>", lambda event, target=canvas: self._preview_select_release(target, event))
+        # Botão do meio também move o vídeo ampliado.
+        canvas.bind("<ButtonPress-2>", lambda event, target=canvas: self._preview_pan_start(target, event))
+        canvas.bind("<B2-Motion>", lambda event, target=canvas: self._preview_pan_move(target, event))
+        canvas.bind("<ButtonRelease-2>", lambda _event, target=canvas: self._preview_pan_end(target))
+        self._preview_show_hint(canvas, message)
+        self.root.after_idle(lambda: self._fit_preview_stage(canvas))
         return canvas
+
+    def _preview_show_hint(self, canvas: Canvas, message: str) -> None:
+        """Mensagem centralizada no palco (nenhuma mídia carregada ainda)."""
+        canvas.delete("all")
+        self.preview_frame_items.pop(canvas, None)
+        self.preview_frames.pop(canvas, None)
+        self.preview_stills.pop(canvas, None)
+        self._clear_preview_selection(canvas)
+        stage_width = max(1, canvas.winfo_width())
+        stage_height = max(1, canvas.winfo_height())
+        canvas.create_text(
+            stage_width // 2,
+            stage_height // 2,
+            text=message,
+            fill="#667371",
+            font=("Segoe UI", 10),
+            justify="center",
+            width=max(160, stage_width - 24),
+        )
+
+    def _preview_available_box(self, parent, holder) -> tuple[int, int]:
+        """Espaço que sobra para o palco: largura da aba e altura visível menos os controles.
+
+        O desconto soma a altura PEDIDA de cada outra linha mais os espaçamentos
+        (pady) e o padding interno da aba — sem eles o palco come a folga e as
+        últimas linhas da ferramenta caem abaixo da dobra. A conta NÃO depende da
+        altura do palco (senão o Tk entra em laço de reencaixe).
+        """
+        available_width = parent.winfo_width() - PREVIEW_STAGE_MARGIN * 2
+        reserved = 0
+        for widget in parent.winfo_children():
+            if widget is holder:
+                continue
+            reserved += max(0, int(widget.winfo_reqheight()))
+            if widget.winfo_manager() == "pack":
+                reserved += vertical_padding_total(widget.pack_info().get("pady", 0))
+        try:
+            reserved += frame_vertical_padding(parent.cget("padding"))
+        except Exception:
+            reserved += PREVIEW_STAGE_MARGIN * 2
+        panel_height = self.ffmpeg_scroll_canvas.winfo_height()
+        available_height = panel_height - reserved - PREVIEW_STAGE_MARGIN * 2
+        available_height = max(PREVIEW_STAGE_MIN_HEIGHT, min(PREVIEW_STAGE_MAX_HEIGHT, available_height))
+        return max(PREVIEW_STAGE_MIN_WIDTH, available_width), available_height
+
+    def _fit_preview_stage(self, canvas: Canvas) -> None:
+        """Recalcula o tamanho do palco para ocupar todo o espaço disponível."""
+        view = self.preview_viewports.get(canvas)
+        holder = self.preview_holders.get(canvas)
+        parent = self.preview_parents.get(canvas)
+        if view is None or holder is None or parent is None:
+            return
+        available_width, available_height = self._preview_available_box(parent, holder)
+        width, height = preview_stage_size(
+            available_width, available_height, view.media_width, view.media_height
+        )
+        changed = (width, height) != (view.stage_width, view.stage_height)
+        if changed:
+            view.stage_width, view.stage_height = width, height
+            holder.configure(width=width, height=height)
+            self.preview_player.resize(canvas)
+        if changed or not self.preview_frame_items.get(canvas):
+            self._paint_preview_view(canvas)
+        if changed:
+            self._schedule_preview_restart(canvas)
+
+    def _preview_drawn_size(self, view: PreviewViewport) -> tuple[int, int]:
+        width, height, _zoom = preview_drawn_size(view.stage_width, view.stage_height, view.zoom)
+        return width, height
+
+    def _preview_scaled_image(self, image, width: int, height: int):
+        if (image.width, image.height) == (width, height):
+            return image
+        shrinking = width * height < image.width * image.height
+        return image.resize((width, height), Image.LANCZOS if shrinking else Image.BILINEAR)
+
+    def _paint_preview_view(self, canvas: Canvas) -> None:
+        """Desenha o quadro atual (vivo ou congelado) na geometria de zoom/deslocamento."""
+        view = self.preview_viewports.get(canvas)
+        if view is None or view.stage_width <= 0 or view.stage_height <= 0:
+            return
+        source = self.preview_frames.get(canvas) or self.preview_stills.get(canvas)
+        if source is None:
+            return
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        image = self._preview_scaled_image(source, drawn_width, drawn_height)
+        photo = ImageTk.PhotoImage(image, master=self.root)
+        self.preview_image_refs[canvas] = photo
+        canvas.delete("all")
+        x, y = preview_view_rect(
+            view.stage_width,
+            view.stage_height,
+            drawn_width,
+            drawn_height,
+            view.offset_x,
+            view.offset_y,
+        )
+        self.preview_frame_items[canvas] = canvas.create_image(x, y, image=photo, anchor="nw")
+        # A seleção é redesenhada por último: ela fica sempre sobre os pixels
+        # escolhidos, com o zoom/deslocamento atuais.
+        self._draw_preview_selection(canvas)
+
+    def _preview_move_item(self, canvas: Canvas) -> None:
+        """Arrasta o quadro sem redesenhar (o canvas recorta o que passa das bordas)."""
+        view = self.preview_viewports.get(canvas)
+        item = self.preview_frame_items.get(canvas)
+        if view is None or item is None:
+            return
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        x, y = preview_view_rect(
+            view.stage_width,
+            view.stage_height,
+            drawn_width,
+            drawn_height,
+            view.offset_x,
+            view.offset_y,
+        )
+        canvas.coords(item, x, y)
+        # A seleção acompanha o arrasto do quadro (mesmos pixels, outra posição).
+        self._redraw_preview_selection(canvas)
+
+    def _preview_can_pan(self, view: PreviewViewport) -> bool:
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        return drawn_width > view.stage_width or drawn_height > view.stage_height
+
+    @staticmethod
+    def _preview_wheel_steps(event) -> float:
+        """Passos da roda do mouse; campos ausentes chegam do Tk como '??'."""
+
+        def numero(valor) -> float:
+            try:
+                return float(valor)
+            except (TypeError, ValueError):
+                return 0.0
+
+        button = numero(getattr(event, "num", 0))
+        if button in (4.0, 5.0):
+            return 1.0 if button == 4.0 else -1.0
+        delta = numero(getattr(event, "delta", 0))
+        return delta / 120.0 if delta else 0.0
+
+    def _preview_wheel(self, canvas: Canvas, event) -> str:
+        """Roda para cima aproxima, para baixo afasta (nunca rola o painel)."""
+        steps = self._preview_wheel_steps(event)
+        view = self.preview_viewports.get(canvas)
+        if view is None or not steps or not self.preview_stills.get(canvas) and not self.preview_frames.get(canvas):
+            return "break"
+        self._preview_zoom_at(canvas, event.x, event.y, PREVIEW_ZOOM_STEP ** steps)
+        return "break"
+
+    def _preview_zoom_at(self, canvas: Canvas, cursor_x: float, cursor_y: float, factor: float) -> None:
+        """Aproxima/afasta mantendo sob o cursor o mesmo ponto do quadro."""
+        view = self.preview_viewports.get(canvas)
+        if view is None or view.stage_width <= 0:
+            return
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        zoomed = preview_zoom_clamped(view.zoom * factor)
+        zoomed_width, zoomed_height, effective = preview_drawn_size(
+            view.stage_width, view.stage_height, zoomed
+        )
+        if (zoomed_width, zoomed_height) == (drawn_width, drawn_height):
+            return
+        offset_x, offset_y = preview_zoom_offsets(
+            view.stage_width,
+            view.stage_height,
+            drawn_width,
+            drawn_height,
+            view.offset_x,
+            view.offset_y,
+            zoomed_width,
+            zoomed_height,
+            cursor_x,
+            cursor_y,
+        )
+        view.zoom = effective
+        view.offset_x = preview_clamped_offset(view.stage_width, zoomed_width, offset_x)
+        view.offset_y = preview_clamped_offset(view.stage_height, zoomed_height, offset_y)
+        self._paint_preview_view(canvas)
+        self._schedule_preview_restart(canvas)
+
+    def _preview_pan_start(self, canvas: Canvas, event) -> str:
+        view = self.preview_viewports.get(canvas)
+        if view is None:
+            return "break"
+        view.drag_origin = (int(event.x), int(event.y))
+        view.drag_offsets = (view.offset_x, view.offset_y)
+        if self._preview_can_pan(view):
+            canvas.configure(cursor="fleur")
+        return "break"
+
+    def _preview_pan_move(self, canvas: Canvas, event) -> str:
+        view = self.preview_viewports.get(canvas)
+        if view is None or view.drag_origin is None or not self._preview_can_pan(view):
+            return "break"
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        origin_x, origin_y = view.drag_origin
+        view.offset_x = preview_clamped_offset(
+            view.stage_width, drawn_width, view.drag_offsets[0] + (event.x - origin_x)
+        )
+        view.offset_y = preview_clamped_offset(
+            view.stage_height, drawn_height, view.drag_offsets[1] + (event.y - origin_y)
+        )
+        self._preview_move_item(canvas)
+        return "break"
+
+    def _preview_pan_end(self, canvas: Canvas) -> str:
+        view = self.preview_viewports.get(canvas)
+        if view is not None:
+            view.drag_origin = None
+        canvas.configure(cursor="crosshair")
+        return "break"
+
+    def _preview_frame_transform(self, canvas: Canvas) -> tuple[float, float, int, int]:
+        """(origem_x, origem_y, largura, altura) do quadro desenhado no palco."""
+        view = self.preview_viewports.get(canvas)
+        if view is None:
+            return 0.0, 0.0, 1, 1
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        origin_x, origin_y = preview_view_rect(
+            view.stage_width, view.stage_height, drawn_width, drawn_height, view.offset_x, view.offset_y
+        )
+        return float(origin_x), float(origin_y), max(1, drawn_width), max(1, drawn_height)
+
+    def _preview_fraction_at(self, canvas: Canvas, x: float, y: float) -> tuple[float, float]:
+        origin_x, origin_y, drawn_w, drawn_h = self._preview_frame_transform(canvas)
+        return preview_fraction_from_view(x, y, drawn_w, drawn_h, origin_x, origin_y)
+
+    def _preview_minimum_fractions(self, canvas: Canvas) -> tuple[float, float]:
+        _ox, _oy, drawn_w, drawn_h = self._preview_frame_transform(canvas)
+        return PREVIEW_SELECTION_MIN_SIZE / drawn_w, PREVIEW_SELECTION_MIN_SIZE / drawn_h
+
+    def _preview_selection_view_rect(self, canvas: Canvas) -> tuple[float, float, float, float] | None:
+        selection = self.preview_selections.get(canvas)
+        if selection is None:
+            return None
+        origin_x, origin_y, drawn_w, drawn_h = self._preview_frame_transform(canvas)
+        return selection.to_view(drawn_w, drawn_h, origin_x, origin_y)
+
+    def _draw_preview_selection(self, canvas: Canvas) -> None:
+        """Traço fino amarelo + alças, sempre exatamente sobre os pixels escolhidos."""
+        rect = self._preview_selection_view_rect(canvas)
+        if rect is None:
+            return
+        left, top, right, bottom = rect
+        canvas.create_rectangle(
+            left, top, right, bottom,
+            outline=PREVIEW_SELECTION_OUTLINE, width=PREVIEW_SELECTION_WIDTH,
+            tags=PREVIEW_SELECTION_TAG,
+        )
+        size = PREVIEW_SELECTION_HANDLE_SIZE
+        for centro_x in (left, (left + right) / 2, right):
+            for centro_y in (top, (top + bottom) / 2, bottom):
+                canvas.create_rectangle(
+                    centro_x - size / 2, centro_y - size / 2,
+                    centro_x + size / 2, centro_y + size / 2,
+                    outline=PREVIEW_SELECTION_HANDLE_FILL, fill=PREVIEW_SELECTION_HANDLE_FILL,
+                    width=0, tags=PREVIEW_SELECTION_TAG,
+                )
+
+    def _redraw_preview_selection(self, canvas: Canvas) -> None:
+        canvas.delete(PREVIEW_SELECTION_TAG)
+        self._draw_preview_selection(canvas)
+
+    def _clear_preview_selection(self, canvas: Canvas) -> None:
+        self.preview_selections.pop(canvas, None)
+        self.preview_selection_drag.pop(canvas, None)
+        self.preview_selection_filters.pop(canvas, None)
+        canvas.delete(PREVIEW_SELECTION_TAG)
+
+    def _preview_selection_filters_for(self, canvas: Canvas) -> str:
+        """Filtros de giro/espelho em vigor no palco (o corte não tem nenhum)."""
+        if canvas is getattr(self, "rotate_preview", None):
+            return self._rotate_preview_filter()
+        return ""
+
+    def _preview_remember_selection_filters(self, canvas: Canvas) -> None:
+        self.preview_selection_filters[canvas] = self._preview_selection_filters_for(canvas)
+
+    def _preview_selection_crop(self, canvas: Canvas, video_width: int, video_height: int) -> tuple[int, int, int, int] | None:
+        selection = self.preview_selections.get(canvas)
+        if selection is None:
+            return None
+        return selection_crop_pixels(selection, video_width, video_height)
+
+    def _preview_press(self, canvas: Canvas, event) -> str:
+        """Botão ESQUERDO: arrasta o vídeo ampliado."""
+        return self._preview_pan_start(canvas, event)
+
+    def _preview_motion(self, canvas: Canvas, event) -> str:
+        """Arrasto com o botão esquerdo: movimenta o quadro (pan)."""
+        return self._preview_pan_move(canvas, event)
+
+    def _preview_release(self, canvas: Canvas, event) -> str:
+        return self._preview_pan_end(canvas)
+
+    def _preview_select_press(self, canvas: Canvas, event) -> str:
+        """Botão DIREITO: desenha a seleção (ou pega uma alça / move a seleção).
+
+        Um clique SEM arrastar sobre a seleção abre o menu "Desfazer seleção" —
+        é o que decide entre desenhar e abrir o menu.
+        """
+        view = self.preview_viewports.get(canvas)
+        if view is None:
+            return "break"
+        rect = self._preview_selection_view_rect(canvas)
+        handle = selection_handle_at(rect, event.x, event.y) if rect is not None else None
+        if handle == "move":
+            self.preview_selection_drag[canvas] = {
+                "mode": "move",
+                "selection": self.preview_selections[canvas],
+                "start": self._preview_fraction_at(canvas, event.x, event.y),
+                "press": (int(event.x), int(event.y)),
+            }
+            return "break"
+        if handle:
+            self.preview_selection_drag[canvas] = {
+                "mode": "resize",
+                "handle": handle,
+                "selection": self.preview_selections[canvas],
+                "press": (int(event.x), int(event.y)),
+            }
+            return "break"
+        # Sem alça: guarda o ponto e só começa a desenhar quando o mouse andar
+        # (clique parado no vazio não cria seleção nenhuma).
+        self.preview_selection_drag[canvas] = {
+            "mode": "pending",
+            "start": self._preview_fraction_at(canvas, event.x, event.y),
+            "press": (int(event.x), int(event.y)),
+            "previous": self.preview_selections.get(canvas),
+        }
+        return "break"
+
+    def _preview_select_motion(self, canvas: Canvas, event) -> str:
+        drag = self.preview_selection_drag.get(canvas)
+        if drag is None:
+            return "break"
+        mode = drag["mode"]
+        if mode == "pending":
+            inicio_x, inicio_y = drag["press"]
+            if abs(event.x - inicio_x) < PREVIEW_SELECTION_DRAG_THRESHOLD and abs(event.y - inicio_y) < PREVIEW_SELECTION_DRAG_THRESHOLD:
+                return "break"
+            # O arrasto começou: vira um desenho (a seleção anterior sai do lugar).
+            drag["mode"] = "draw"
+            self.preview_selections.pop(canvas, None)
+            mode = "draw"
+        if mode == "draw":
+            selecao = selection_from_drag(
+                drag["start"], self._preview_fraction_at(canvas, event.x, event.y), 0.0, 0.0
+            )
+            self.preview_selections[canvas] = selecao
+        elif mode == "resize":
+            minimo_x, minimo_y = self._preview_minimum_fractions(canvas)
+            fracao_x, fracao_y = self._preview_fraction_at(canvas, event.x, event.y)
+            self.preview_selections[canvas] = selection_resized(
+                drag["selection"], drag["handle"], fracao_x, fracao_y, minimo_x, minimo_y
+            )
+        elif mode == "move":
+            agora = self._preview_fraction_at(canvas, event.x, event.y)
+            self.preview_selections[canvas] = selection_moved(
+                drag["selection"], agora[0] - drag["start"][0], agora[1] - drag["start"][1]
+            )
+        self._redraw_preview_selection(canvas)
+        return "break"
+
+    def _preview_select_release(self, canvas: Canvas, event) -> str:
+        drag = self.preview_selection_drag.pop(canvas, None)
+        if drag is None:
+            return "break"
+        mode = drag["mode"]
+        if mode == "pending":
+            # Clique parado sobre a seleção: abre o menu de desfazer.
+            return self._preview_open_selection_menu(canvas, event, drag.get("press"))
+        if mode == "move":
+            inicio_x, inicio_y = drag["press"]
+            if abs(event.x - inicio_x) < PREVIEW_SELECTION_DRAG_THRESHOLD and abs(event.y - inicio_y) < PREVIEW_SELECTION_DRAG_THRESHOLD:
+                return self._preview_open_selection_menu(canvas, event, drag.get("press"))
+            self._redraw_preview_selection(canvas)
+            return "break"
+        if mode == "draw":
+            minimo_x, minimo_y = self._preview_minimum_fractions(canvas)
+            selecao = selection_from_drag(
+                drag["start"], self._preview_fraction_at(canvas, event.x, event.y), minimo_x, minimo_y
+            )
+            self.preview_selections[canvas] = selecao or drag.get("previous")
+        if self.preview_selections.get(canvas) is not None:
+            self._preview_remember_selection_filters(canvas)
+        self._redraw_preview_selection(canvas)
+        return "break"
+
+    def _preview_open_selection_menu(self, canvas: Canvas, event, press) -> str:
+        """Menu do botão direito na seleção (só para clique parado)."""
+        rect = self._preview_selection_view_rect(canvas)
+        if rect is None:
+            return "break"
+        ponto_x, ponto_y = press if press else (event.x, event.y)
+        left, top, right, bottom = rect
+        if not (left <= ponto_x <= right and top <= ponto_y <= bottom):
+            return "break"
+        menu = self.tk.Menu(canvas, tearoff=False)
+        menu.add_command(
+            label="Desfazer seleção",
+            command=lambda: self._clear_preview_selection(canvas),
+        )
+        try:
+            menu.tk_popup(getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _preview_hover(self, canvas: Canvas, event) -> str:
+        """Feedback do cursor: alças para redimensionar, mãozinha para mover."""
+        rect = self._preview_selection_view_rect(canvas)
+        if rect is None:
+            canvas.configure(cursor="crosshair")
+            return "break"
+        handle = selection_handle_at(rect, event.x, event.y)
+        canvas.configure(cursor=PREVIEW_SELECTION_CURSORS.get(handle or "", "crosshair"))
+        return "break"
+
+    def _reset_preview_view(self, canvas: Canvas, media_width: int, media_height: int) -> None:
+        """Nova mídia no palco: volta ao enquadramento que preenche o espaço."""
+        view = self.preview_viewports.get(canvas)
+        if view is None:
+            return
+        view.zoom = 1.0
+        view.offset_x = 0.0
+        view.offset_y = 0.0
+        view.media_width = max(0, int(media_width))
+        view.media_height = max(0, int(media_height))
+        view.drag_origin = None
+        self._clear_preview_selection(canvas)
+        self._fit_preview_stage(canvas)
+
+    def _preview_view_is_fitted(self, canvas: Canvas) -> bool:
+        """Sem zoom/deslocamento: o player nativo (MCI) ainda pode ser usado."""
+        view = self.preview_viewports.get(canvas)
+        if view is None:
+            return True
+        return (
+            abs(view.zoom - 1.0) < 1e-6
+            and abs(view.offset_x) < 0.5
+            and abs(view.offset_y) < 0.5
+        )
+
+    def _preview_pipeline_size(self, canvas: Canvas) -> tuple[int, int]:
+        """Resolução dos quadros do FFmpeg: o tamanho desenhado, dentro do orçamento."""
+        view = self.preview_viewports.get(canvas)
+        if view is None or view.stage_width <= 0 or view.stage_height <= 0:
+            return max(320, canvas.winfo_width()), max(180, canvas.winfo_height())
+        drawn_width, drawn_height = self._preview_drawn_size(view)
+        return preview_render_size(drawn_width, drawn_height, view.media_width, view.media_height)
+
+    def _preview_live_position(self, context: dict) -> float:
+        timeline = context["timeline"]
+        if self.external_preview_started_at <= 0:
+            return max(timeline.start, timeline.position)
+        elapsed = (time.monotonic() - self.external_preview_started_at) * self.preview_speed
+        return min(timeline.end, max(timeline.start, self.external_preview_offset + elapsed))
+
+    def _schedule_preview_restart(self, canvas: Canvas) -> None:
+        """O pipeline de quadros é recriado na resolução do novo zoom (com atraso)."""
+        context = self.preview_context
+        if (
+            not context
+            or context.get("canvas") is not canvas
+            or not self.preview_playing
+            or context.get("audio_only")
+        ):
+            return
+        if self.preview_restart_id:
+            try:
+                self.root.after_cancel(self.preview_restart_id)
+            except Exception:
+                pass
+            self.preview_restart_id = None
+        self.preview_restart_id = self.root.after(
+            PREVIEW_ZOOM_RESTART_MS, lambda: self._restart_canvas_preview(canvas)
+        )
+
+    def _restart_canvas_preview(self, canvas: Canvas) -> None:
+        """Reinicia a prévia viva mantendo a posição (zoom/deslocamento mudaram)."""
+        self.preview_restart_id = None
+        context = self.preview_context
+        if (
+            not context
+            or context.get("canvas") is not canvas
+            or not self.preview_playing
+            or context.get("audio_only")
+        ):
+            return
+        position = self._preview_live_position(context)
+        timeline = context["timeline"]
+        if position >= timeline.end - 0.02:
+            position = timeline.start
+        self.preview_player.close()
+        self.frame_preview_stop_event.set()
+        self._terminate_preview_process(self.external_preview_process)
+        self.external_preview_process = None
+        self._terminate_preview_process(self.frame_preview_process)
+        self.frame_preview_process = None
+        self.preview_playing = False
+        self._start_canvas_preview(context, position)
 
     def _add_preview_speed_controls(self, parent):
         """Monta o conjunto de controles comum aos players de áudio e vídeo."""
@@ -927,25 +1973,23 @@ class FfmpegToolsPanel:
         ttk.Label(parent, textvariable=current_var, style="Muted.TLabel").pack(anchor="center", pady=(0, 8))
 
     def _change_preview_speed(self, direction: int) -> None:
-        values = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
+        values = PREVIEW_SPEED_VALUES
         index = min(range(len(values)), key=lambda item: abs(values[item] - self.preview_speed))
         self.preview_speed = values[max(0, min(len(values) - 1, index + direction))]
-        self.preview_speed_var.set(f"{self.preview_speed:.2g}x")
+        self.preview_speed_var.set(f"{self.preview_speed:g}x")
         if self.preview_playing:
             self._toggle_preview()
             self._toggle_preview()
 
     def _build_cut_tab(self) -> None:
-        self._section_title(self.cut_tab, "Cortar áudio/vídeo", "Escolha entre corte preciso com reencode e corte rápido sem reencode, alinhado a keyframes/pacotes do codec.")
         self._file_row(self.cut_tab, self.cut_input_var, self.select_cut_input)
-        self.cut_preview = self._create_stable_preview(self.cut_tab, "Selecione uma mídia para visualizar")
-        self.cut_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.cut_preview))
+        self.cut_preview = self._create_preview_stage(self.cut_tab, "Selecione uma mídia para visualizar")
         self.cut_play_button = self._add_preview_speed_controls(self.cut_tab)
         self.cut_timeline = RangeTimeline(self.cut_tab, self._cut_timeline_changed)
         self.cut_timeline.pack(fill=X, pady=(0, 4))
         self._add_preview_time_label(self.cut_tab, self.cut_current_var)
         values = ttk.Frame(self.cut_tab)
-        values.pack(anchor="w")
+        values.pack(anchor="center", pady=(2, 0))
         ttk.Label(values, text="Início (segundos):").grid(row=0, column=0, sticky="w")
         cut_start_entry = ttk.Entry(values, textvariable=self.cut_start_var, width=12)
         cut_start_entry.grid(row=0, column=1, padx=(8, 20))
@@ -955,17 +1999,19 @@ class FfmpegToolsPanel:
         cut_start_entry.bind("<FocusOut>", lambda _event: self._sync_cut_range_from_entries())
         cut_end_entry.bind("<FocusOut>", lambda _event: self._sync_cut_range_from_entries())
         mode = ttk.Frame(self.cut_tab)
-        mode.pack(anchor="w", pady=(10, 0))
+        mode.pack(fill=X, pady=(8, 0))
         ttk.Label(mode, text="Modo:").pack(side=LEFT)
         self.cut_mode_combo = ttk.Combobox(
             mode,
             textvariable=self.cut_mode_var,
-            values=("Preciso (reencodar)", "Rápido (sem reencodar)"),
+            values=CUT_MODES,
             state="readonly",
-            width=25,
+            width=20,
         )
         self.cut_mode_combo.pack(side=LEFT, padx=(6, 0))
         self.cut_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_cut_controls())
+        self.cut_mode_help_button = ttk.Button(mode, text="?", width=3, command=self._show_cut_mode_help)
+        self.cut_mode_help_button.pack(side=LEFT, padx=(4, 0))
         ttk.Label(mode, text="Áudio do vídeo:").pack(side=LEFT, padx=(18, 0))
         self.cut_audio_policy_combo = ttk.Combobox(
             mode,
@@ -975,6 +2021,8 @@ class FfmpegToolsPanel:
             width=29,
         )
         self.cut_audio_policy_combo.pack(side=LEFT, padx=(6, 0))
+        self._output_buttons(mode)
+        self._output_path_row(self.cut_tab)
         streams = ttk.Frame(self.cut_tab)
         streams.pack(anchor="w", pady=(6, 0))
         ttk.Label(streams, text="Streams:").pack(side=LEFT)
@@ -986,19 +2034,11 @@ class FfmpegToolsPanel:
             width=39,
         )
         self.cut_stream_policy_combo.pack(side=LEFT, padx=(6, 0))
-        ttk.Label(
-            self.cut_tab,
-            text="O modo rápido preserva os codecs, mas início e fim podem variar até o keyframe/pacote disponível.",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
-        ttk.Label(self.cut_tab, text="Exemplo: início 12.5 e fim 47.0. O arquivo é salvo com o sufixo _cortado.", style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
         self._update_cut_controls()
 
     def _build_extract_tab(self) -> None:
-        self._section_title(self.extract_tab, "Extrair áudio", "Extrai o primeiro áudio de um ou mais vídeos/áudios. Os parâmetros são os mesmos usados no Android.")
         self._file_row(self.extract_tab, self.extract_summary_var, self.select_extract_inputs, "Selecionar arquivos")
-        self.extract_preview = self._create_stable_preview(self.extract_tab, "Escolha um arquivo para visualizar ou ouvir")
-        self.extract_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.extract_preview))
+        self.extract_preview = self._create_preview_stage(self.extract_tab, "Escolha um arquivo para visualizar ou ouvir")
         self.extract_play_button = self._add_preview_speed_controls(self.extract_tab)
         self.extract_timeline = RangeTimeline(self.extract_tab, self._extract_timeline_changed)
         self.extract_timeline.pack(fill=X, pady=(0, 4))
@@ -1018,7 +2058,7 @@ class FfmpegToolsPanel:
             command=lambda: self._set_extract_preset("compact"),
         ).pack(side=LEFT, padx=(16, 0))
         settings = ttk.Frame(self.extract_tab)
-        settings.pack(anchor="w")
+        settings.pack(fill=X)
         fields = (
             ("Formato:", self.extract_extension_var, ("wav", "m4a", "mp3", "aac", "ogg", "opus", "flac")),
             ("Hz:", self.extract_rate_var, ("8000", "16000", "22050", "44100", "48000")),
@@ -1039,8 +2079,14 @@ class FfmpegToolsPanel:
         self.extract_rate_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
         self.extract_channels_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
         self._on_extract_format_changed()
+        # A grade dos parâmetros recebe os botões da pasta (frame próprio: pack
+        # dentro de um widget que já é gerenciado por grid).
+        extract_output_buttons = ttk.Frame(settings)
+        extract_output_buttons.grid(row=0, column=8, sticky="e", padx=(24, 0))
+        self._output_buttons(extract_output_buttons)
+        self._output_path_row(self.extract_tab)
         trim = ttk.Frame(self.extract_tab)
-        trim.pack(anchor="w", pady=(12, 0))
+        trim.pack(anchor="center", pady=(12, 0))
         ttk.Label(trim, text="Recorte opcional - início (s):").grid(row=0, column=0, sticky="w")
         extract_start_entry = ttk.Entry(trim, textvariable=self.extract_start_var, width=10)
         extract_start_entry.grid(row=0, column=1, padx=(6, 16))
@@ -1051,16 +2097,14 @@ class FfmpegToolsPanel:
         extract_end_entry.bind("<FocusOut>", lambda _event: self._sync_extract_range_from_entries())
 
     def _build_rotate_tab(self) -> None:
-        self._section_title(self.rotate_tab, "Girar e cortar vídeo", "Gira a imagem, permite recortar o intervalo e preserva o áudio. A opção de metadados evita reencodar a imagem.")
         self._file_row(self.rotate_tab, self.rotate_input_var, self.select_rotate_input, "Selecionar vídeo")
-        self.rotate_preview = self._create_stable_preview(self.rotate_tab, "Selecione um vídeo para visualizar")
-        self.rotate_preview.bind("<Configure>", lambda _event: self.preview_player.resize(self.rotate_preview))
+        self.rotate_preview = self._create_preview_stage(self.rotate_tab, "Selecione um vídeo para visualizar")
         self.rotate_play_button = self._add_preview_speed_controls(self.rotate_tab)
         self.rotate_timeline = RangeTimeline(self.rotate_tab, self._rotate_timeline_changed)
         self.rotate_timeline.pack(fill=X, pady=(0, 4))
         self._add_preview_time_label(self.rotate_tab, self.rotate_current_var)
         trim = ttk.Frame(self.rotate_tab)
-        trim.pack(anchor="w", pady=(0, 10))
+        trim.pack(anchor="center", pady=(0, 10))
         ttk.Label(trim, text="Início (segundos):").grid(row=0, column=0, sticky="w")
         rotate_start_entry = ttk.Entry(trim, textvariable=self.rotate_start_var, width=12)
         rotate_start_entry.grid(row=0, column=1, padx=(6, 18))
@@ -1080,7 +2124,7 @@ class FfmpegToolsPanel:
         self.rotate_vflip_check = ttk.Checkbutton(row, text="Espelhar vertical", variable=self.rotate_vflip_var, command=self._on_rotate_transform_changed)
         self.rotate_vflip_check.pack(side=LEFT, padx=(0, 12))
         rotate_options = ttk.Frame(self.rotate_tab)
-        rotate_options.pack(anchor="w", pady=(12, 0))
+        rotate_options.pack(fill=X, pady=(12, 0))
         self.rotate_metadata_check = ttk.Checkbutton(
             rotate_options,
             text="Somente metadados de rotação (rápido, sem reencodar)",
@@ -1095,6 +2139,8 @@ class FfmpegToolsPanel:
             command=self._update_rotate_control_state,
         )
         self.rotate_parallel_check.pack(side=LEFT, padx=(18, 0))
+        self._output_buttons(rotate_options)
+        self._output_path_row(self.rotate_tab)
         self.rotate_parallel_frame = ttk.Frame(self.rotate_tab)
         ttk.Label(self.rotate_parallel_frame, text="Trechos:").pack(side=LEFT)
         self.rotate_segments_entry = ttk.Entry(self.rotate_parallel_frame, textvariable=self.rotate_segments_var, width=8)
@@ -1116,11 +2162,6 @@ class FfmpegToolsPanel:
         self._update_rotate_control_state()
 
     def _build_join_tab(self) -> None:
-        self._section_title(
-            self.join_tab,
-            "Juntar áudios/vídeos",
-            "Junta arquivos do mesmo tipo. O SmartJoin (Experimental) copia sem transição e reencoda a saída inteira quando há transição.",
-        )
         controls = ttk.Frame(self.join_tab)
         controls.pack(fill=X)
         ttk.Button(controls, text="Adicionar áudios/vídeos", command=self.add_join_inputs).pack(side=LEFT)
@@ -1189,14 +2230,15 @@ class FfmpegToolsPanel:
         )
         self.join_audio_policy_combo.grid(row=1, column=1, columnspan=2, sticky="w", padx=(6, 0), pady=(6, 0))
         self.join_audio_policy_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_join_controls())
+        # A grade das políticas recebe os botões da pasta (o frame interno usa pack,
+        # então nada de empilhar pack com grid no mesmo container).
+        join_output_buttons = ttk.Frame(policies)
+        join_output_buttons.grid(row=0, column=4, rowspan=2, sticky="e", padx=(24, 0))
+        self._output_buttons(join_output_buttons)
+        self._output_path_row(self.join_tab)
         self._update_join_controls()
 
     def _build_insert_tab(self) -> None:
-        self._section_title(
-            self.insert_tab,
-            "Inserir áudio",
-            "Insere um segundo áudio no ponto escolhido do áudio principal. Smart Insert preserva o máximo possível do áudio original (as curvas de transição, incluindo 'Fade in/out', suavizam apenas o áudio inserido); Reencode Completo também oferece 'Fade in/out' e as demais curvas com sobreposição (crossfade) e cortes precisos.",
-        )
         select_row = ttk.Frame(self.insert_tab)
         select_row.pack(anchor="w", pady=(0, 6))
         self.insert_main_button = ttk.Button(select_row, text="+ Áudio principal", command=self.select_insert_main_input)
@@ -1219,12 +2261,14 @@ class FfmpegToolsPanel:
         self._add_preview_time_label(self.insert_tab, self.insert_current_var)
 
         time_row = ttk.Frame(self.insert_tab)
-        time_row.pack(anchor="w", pady=(0, 8))
+        time_row.pack(fill=X, pady=(0, 8))
         ttk.Label(time_row, text="Ponto de inserção no áudio principal:").pack(side=LEFT)
         self.insert_time_entry = ttk.Entry(time_row, textvariable=self.insert_time_var, width=14)
         self.insert_time_entry.pack(side=LEFT, padx=(8, 0))
         self.insert_time_entry.bind("<FocusOut>", lambda _event: self._apply_insert_time())
         self.insert_time_entry.bind("<Return>", lambda _event: self._apply_insert_time())
+        self._output_buttons(time_row)
+        self._output_path_row(self.insert_tab)
 
         self.insert_options_frame = ttk.Frame(self.insert_tab)
         self.insert_options_frame.pack(anchor="w", pady=(4, 0))
@@ -1267,10 +2311,9 @@ class FfmpegToolsPanel:
         self.insert_options_frame.pack_forget()
 
     def _build_clean_tab(self) -> None:
-        self._section_title(self.clean_tab, "Limpar áudio", "Remove ruído e permite gerar áudio para transcrição ou preservar canais e taxa da fonte.")
         self._file_row(self.clean_tab, self.clean_input_var, self.select_clean_input)
         row = ttk.Frame(self.clean_tab)
-        row.pack(anchor="w")
+        row.pack(fill=X)
         ttk.Label(row, text="Filtro:").pack(side=LEFT)
         ttk.Combobox(row, textvariable=self.clean_mode_var, values=("equilibrado", "forte"), state="readonly", width=15).pack(side=LEFT, padx=(6, 0))
         ttk.Label(row, text="Saída:").pack(side=LEFT, padx=(18, 0))
@@ -1281,6 +2324,8 @@ class FfmpegToolsPanel:
             state="readonly",
             width=32,
         ).pack(side=LEFT, padx=(6, 0))
+        self._output_buttons(row)
+        self._output_path_row(self.clean_tab)
 
     def _select_ffmpeg_tool(self, selected: str) -> None:
         active_bg = "#ffffff"
@@ -1297,14 +2342,32 @@ class FfmpegToolsPanel:
         self.ffmpeg_tool_frames[selected].pack(fill=BOTH, expand=True)
         self.active_tool_var.set(selected)
         self._refresh_encoder_control_state()
+        self._fit_visible_preview_stages()
+        self._refresh_effective_encoder_label()
+
+    def _fit_visible_preview_stages(self) -> None:
+        """Reencaixa os palcos da aba visível (largura/altura só existem mapeadas)."""
+        active = self.ffmpeg_tool_frames.get(self.active_tool_var.get())
+        if active is None:
+            return
+        for canvas, parent in list(self.preview_parents.items()):
+            if parent is active:
+                self.root.after_idle(lambda target=canvas: self._fit_preview_stage(target))
 
     @staticmethod
     def _rotation_uses_video_encoder(metadata_only: bool, degrees: int, hflip: bool, vflip: bool) -> bool:
         # Sem filtro visual (grau 0 e sem espelhamento) o worker usa -c copy: encoder não tem efeito.
         return (not metadata_only) and (degrees % 360 != 0 or hflip or vflip)
 
+    def _cut_mode_is_copy(self) -> bool:
+        """Modo Sem Reencode (cópia dos streams)."""
+        return str(self.cut_mode_var.get()).startswith(CUT_MODE_COPY)
+
+    def _show_cut_mode_help(self) -> None:
+        messagebox.showinfo("Modos de corte", CUT_MODE_HELP)
+
     def _update_cut_controls(self) -> None:
-        fast = self.cut_mode_var.get().startswith("Rápido")
+        fast = self._cut_mode_is_copy()
         profile = getattr(self, "cut_media_profile", None)
         has_video = bool(profile and profile.has_video)
         running = getattr(self, "running", False)
@@ -1313,11 +2376,12 @@ class FfmpegToolsPanel:
         if not fast:
             self.cut_stream_policy_var.set("Vídeo e áudio")
         self._refresh_encoder_control_state()
+        self._refresh_effective_encoder_label()
 
     def _current_tool_uses_video_encoder(self) -> bool:
         tool = self.active_tool_var.get()
         if tool == "Cortar":
-            if self.cut_mode_var.get().startswith("Rápido"):
+            if self._cut_mode_is_copy():
                 return False
             if self.cut_input is None:
                 return False
@@ -1354,6 +2418,141 @@ class FfmpegToolsPanel:
             return not is_audio_only and has_reencode
         return False
 
+    ENCODER_ADVANCED_AUTO_LABEL = "Automático"
+
+    def _encoder_path(self) -> str:
+        var = getattr(self, "acceleration_var", None)
+        valor = var.get() if var is not None else PATH_LABELS[ENCODER_PATH_GPU]
+        return ENCODER_PATH_CPU if valor == PATH_LABELS[ENCODER_PATH_CPU] else ENCODER_PATH_GPU
+
+    def _advanced_key(self) -> str:
+        var = getattr(self, "encoder_advanced_var", None)
+        escolhido = var.get() if var is not None else ""
+        if not escolhido or escolhido == self.ENCODER_ADVANCED_AUTO_LABEL:
+            return ENCODER_ADVANCED_AUTO
+        for option in getattr(self, "available_encoder_options", []):
+            if option.path == ENCODER_PATH_GPU and option.label == escolhido:
+                return option.key
+        return ENCODER_ADVANCED_AUTO
+
+    def _advanced_labels(self) -> tuple[str, ...]:
+        """Uma entrada por VENDOR (o codec quem decide é a tarefa, não o usuário)."""
+        rotulos: list[str] = []
+        for option in getattr(self, "available_encoder_options", []):
+            if option.path == ENCODER_PATH_GPU and option.label not in rotulos:
+                rotulos.append(option.label)
+        return (self.ENCODER_ADVANCED_AUTO_LABEL,) + tuple(rotulos)
+
+    def _on_encoder_path_changed(self) -> None:
+        self._refresh_encoder_control_state()
+
+    def _show_encoder_help(self) -> None:
+        messagebox.showinfo(
+            "Encoder de vídeo",
+            "GPU: usa o encoder de hardware (NVENC/QSV/AMF) sempre que ele existir para o codec "
+            "necessário — em geral é bem mais rápido. Se a GPU falhar (driver, sessão ocupada), a "
+            "tarefa é repetida na CPU e o app avisa no log.\n\n"
+            "CPU: reencoda sempre no processador (libx264/libx265). Mais lento, porém menor arquivo "
+            "para o mesmo bitrate e sem depender do driver da placa.\n\n"
+            "Avançado (só no modo GPU): " + self.ENCODER_ADVANCED_AUTO_LABEL + " deixa o app escolher "
+            "sozinho entre os encoders de hardware disponíveis — e usar a CPU quando a GPU não tiver "
+            "o codec pedido ou quando o trecho a reencodar for curto demais para a inicialização do "
+            "hardware compensar. Escolher um encoder específico força aquela placa; se ela não "
+            "estiver disponível, o app cai na CPU avisando no log.",
+        )
+
+    def _log_encoder_choice(self, message: str) -> None:
+        """Informa a escolha do encoder no log de atividade (cor automática)."""
+        try:
+            app = getattr(self, "app", None)
+            if app is not None and hasattr(app, "_append_activity_log"):
+                app._append_activity_log(message)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _preserved_codec(media) -> str:
+        """Codec do arquivo quando dá para preservá-lo; senão H.264 (compatível)."""
+        return normalize_codec(getattr(media, "video_codec", "") or "") or "h264"
+
+    def _cut_job_seconds(self) -> float:
+        """Duração do trecho a reencodar no corte (0 quando não dá para saber)."""
+        if self._cut_mode_is_copy():
+            return 0.0
+        try:
+            inicio = float(str(self.cut_start_var.get()).replace(",", ".") or 0)
+            fim = float(str(self.cut_end_var.get()).replace(",", ".") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, fim - inicio)
+
+    def _rotate_job_seconds(self) -> float:
+        media = getattr(self, "rotate_media_profile", None)
+        duracao = float(getattr(media, "duration", 0.0) or 0.0)
+        try:
+            inicio = float(str(self.rotate_start_var.get()).replace(",", ".") or 0)
+            fim = float(str(self.rotate_end_var.get()).replace(",", ".") or duracao)
+        except (TypeError, ValueError):
+            return duracao
+        if fim > inicio:
+            trecho = min(fim, duracao or fim) - inicio
+            return trecho if trecho > 0 else duracao
+        return duracao
+
+    def _task_codec_and_seconds(self, tool: str) -> tuple[str, float]:
+        """Codec exigido pela tarefa e duração do vídeo a reencodar."""
+        if tool == "Cortar":
+            return self._preserved_codec(getattr(self, "cut_media_profile", None)), self._cut_job_seconds()
+        if tool == "Girar vídeo":
+            media = getattr(self, "rotate_media_profile", None)
+            return self._preserved_codec(media), self._rotate_job_seconds()
+        return "h264", 0.0
+
+    def _resolve_task_encoder(self, tool: str) -> VideoAcceleration | None:
+        """Escolhe o encoder da tarefa (GPU/CPU + codec + duração) e explica no log."""
+        codec, segundos = self._task_codec_and_seconds(tool)
+        escolha = resolve_encoder(
+            codec=codec,
+            path=self._encoder_path(),
+            available=list(self.available_encoder_options),
+            advanced=self._advanced_key(),
+            seconds=segundos,
+        )
+        if escolha is None:
+            self._log_encoder_choice(
+                "Nenhum encoder de vídeo disponível para esta tarefa; mantendo a escolha anterior."
+            )
+            return None
+        self._log_encoder_choice(
+            f"Encoder de vídeo: {escolha.option.label} ({escolha.option.encoder}) — {escolha.reason}"
+        )
+        return VideoAcceleration(escolha.option.key, escolha.option.label, escolha.option.encoder)
+
+    def _refresh_effective_encoder_label(self) -> None:
+        """Mostra no topo quando a escolha automática não é a "esperada" (ex.: CPU no modo GPU)."""
+        if not hasattr(self, "encoder_effective_label"):
+            return
+        etiqueta = self._encoder_extra("encoder_effective_label")
+        if etiqueta is None:
+            return
+        if self._encoder_path() != ENCODER_PATH_GPU:
+            etiqueta.pack_forget()
+            return
+        codec, segundos = self._task_codec_and_seconds(self.active_tool_var.get())
+        escolha = resolve_encoder(
+            codec=codec,
+            path=ENCODER_PATH_GPU,
+            available=list(self.available_encoder_options),
+            advanced=self._advanced_key(),
+            seconds=segundos,
+        )
+        if escolha is None or escolha.option.path == ENCODER_PATH_GPU:
+            etiqueta.pack_forget()
+            return
+        self.encoder_effective_var.set(f"→ {escolha.option.label} ({escolha.option.encoder}): {escolha.reason}")
+        if not etiqueta.winfo_ismapped():
+            etiqueta.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
+
     def _refresh_encoder_control_state(self) -> None:
         uses_video_encoder = self._current_tool_uses_video_encoder()
 
@@ -1365,12 +2564,51 @@ class FfmpegToolsPanel:
             self.quality_menu_button.pack_forget()
             self.quality_label.pack_forget()
             self.quality_help_button.pack_forget()
+            self._forget_encoder_extras()
             return
         self.acceleration_combo.configure(state="readonly")
         if not self.quality_label.winfo_ismapped():
             self.quality_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
             self.quality_menu_button.pack(side=RIGHT, pady=(2, 0))
             self.quality_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
+        ajuda = self._encoder_extra("encoder_help_button")
+        if ajuda is not None and not ajuda.winfo_ismapped():
+            ajuda.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
+        self._refresh_encoder_advanced_controls()
+
+    ENCODER_EXTRA_WIDGETS = (
+        "encoder_help_button",
+        "encoder_advanced_combo",
+        "encoder_advanced_label",
+        "encoder_effective_label",
+    )
+
+    def _encoder_extra(self, nome: str):
+        """Widget do seletor de encoder; tolerante a paineis sem UI (testes)."""
+        return getattr(self, nome, None)
+
+    def _forget_encoder_extras(self) -> None:
+        for nome in self.ENCODER_EXTRA_WIDGETS:
+            widget = self._encoder_extra(nome)
+            if widget is not None:
+                widget.pack_forget()
+
+    def _refresh_encoder_advanced_controls(self) -> None:
+        """O Avançado só aparece no modo GPU, com o que passou na sondagem."""
+        combo = self._encoder_extra("encoder_advanced_combo")
+        rotulo = self._encoder_extra("encoder_advanced_label")
+        if self._encoder_path() != ENCODER_PATH_GPU or combo is None or rotulo is None:
+            for widget in (combo, rotulo):
+                if widget is not None:
+                    widget.pack_forget()
+            return
+        rotulos = self._advanced_labels()
+        combo.configure(values=rotulos, state="readonly")
+        if self.encoder_advanced_var.get() not in rotulos:
+            self.encoder_advanced_var.set(self.ENCODER_ADVANCED_AUTO_LABEL)
+        if len(rotulos) > 1 and not combo.winfo_ismapped():
+            combo.pack(side=RIGHT, padx=(6, 0), pady=(2, 0))
+            rotulo.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
 
     @staticmethod
     def _show_video_quality_help() -> None:
@@ -1648,21 +2886,53 @@ class FfmpegToolsPanel:
             "has_video": media.has_video,
             "has_audio": media.has_audio,
         }
+        display_width, display_height = media.width, media.height
+        if tool == "rotate":
+            self.rotate_media_profile = media
+            display_width, display_height = self._rotated_media_size(media, self._rotate_preview_filter())
+        elif tool == "cut":
+            self.cut_media_profile = media
+            display_width, display_height = self._cut_display_size(media)
+        self._reset_preview_view(canvas, display_width, display_height)
         if not self.preview_context["audio_only"]:
             self._show_video_thumbnail(canvas, source, 0.0, self._rotate_preview_filter() if tool == "rotate" else "")
         else:
-            canvas.delete("all")
-            canvas.create_text(
-                canvas.winfo_width() // 2,
-                canvas.winfo_height() // 2,
-                text="Prévia de áudio",
-                fill="#d7e2df",
-                font=("Segoe UI", 11),
-            )
+            self._preview_show_hint(canvas, "Prévia de áudio")
+
+    @staticmethod
+    def _rotated_media_size(media: MediaProfile, filters: str) -> tuple[int, int]:
+        """Proporção EXIBIDA da mídia: 90/270 giram o quadro (largura <-> altura)."""
+        if "transpose=1" in filters or "transpose=2" in filters:
+            return media.height, media.width
+        return media.width, media.height
+
+    @staticmethod
+    def _cut_display_size(media: MediaProfile) -> tuple[int, int]:
+        """Tamanho EXIBIDO no corte: o FFmpeg autorrota o quadro antes dos filtros.
+
+        (Comprovado com um arquivo de matriz 90°: o quadro decodificado sai
+        transposto — por isso o recorte e a proporção usam este tamanho.)
+        """
+        if media.rotation % 180:
+            return media.height, media.width
+        return media.width, media.height
 
     def _stop_preview(self) -> None:
         self.preview_generation += 1
         self.preview_playing = False
+        if self.preview_restart_id:
+            try:
+                self.root.after_cancel(self.preview_restart_id)
+            except Exception:
+                pass
+            self.preview_restart_id = None
+        for canvas, view in self.preview_viewports.items():
+            view.drag_origin = None
+            self.preview_selection_drag.pop(canvas, None)
+            try:
+                canvas.configure(cursor="crosshair")
+            except Exception:
+                pass
         if self.preview_after_id:
             try:
                 self.root.after_cancel(self.preview_after_id)
@@ -1704,7 +2974,11 @@ class FfmpegToolsPanel:
             except Exception as exc:
                 messagebox.showerror("sig", f"Não foi possível reproduzir o áudio:\n{exc}")
             return
-        use_canvas = self.preview_speed != 1.0 or (context["tool"] == "rotate" and bool(self._rotate_preview_filter()))
+        use_canvas = (
+            self.preview_speed != 1.0
+            or (context["tool"] == "rotate" and bool(self._rotate_preview_filter()))
+            or not self._preview_view_is_fitted(context["canvas"])
+        )
         if use_canvas or not self.preview_player.open(context["source"], context["canvas"]):
             try:
                 self._start_canvas_preview(context, position)
@@ -2133,8 +3407,7 @@ class FfmpegToolsPanel:
             self.status_var.set("Reproduzindo áudio dentro da ferramenta.")
             self._audio_preview_tick(context, generation)
             return
-        width = max(320, canvas.winfo_width())
-        height = max(180, canvas.winfo_height())
+        width, height = self._preview_pipeline_size(canvas)
         fps = 15
         filters = []
         if context["tool"] == "rotate":
@@ -2252,11 +3525,9 @@ class FfmpegToolsPanel:
     def _render_canvas_frame(self, context: dict, generation: int, image: Image.Image, position: float) -> None:
         if self.frame_preview_stop_event.is_set() or context is not self.preview_context or generation != self.preview_generation:
             return
-        photo = ImageTk.PhotoImage(image)
         canvas = context["canvas"]
-        self.preview_image_refs[canvas] = photo
-        canvas.delete("all")
-        canvas.create_image(canvas.winfo_width() // 2, canvas.winfo_height() // 2, image=photo, anchor="center")
+        self.preview_frames[canvas] = image
+        self._paint_preview_view(canvas)
         context["timeline"].set_position(position)
         context["current_var"].set(self._clock(position))
 
@@ -2403,6 +3674,8 @@ class FfmpegToolsPanel:
         if not self.rotate_input:
             return
         self._stop_preview()
+        self._rotate_selection_with_filters()
+        self._apply_rotate_media_size()
         self._show_video_thumbnail(
             self.rotate_preview,
             self.rotate_input,
@@ -2410,16 +3683,39 @@ class FfmpegToolsPanel:
             self._rotate_preview_filter(),
         )
 
+    def _rotate_selection_with_filters(self) -> None:
+        """Seleção desenhada + giro novo: ela gira junto para cobrir os mesmos pixels."""
+        canvas = getattr(self, "rotate_preview", None)
+        selecao = self.preview_selections.get(canvas)
+        if selecao is None:
+            return
+        antigos = self.preview_selection_filters.get(canvas, "")
+        novos = self._rotate_preview_filter()
+        if antigos == novos:
+            return
+        self.preview_selections[canvas] = selection_between_filters(selecao, antigos, novos)
+        self.preview_selection_filters[canvas] = novos
+
+    def _apply_rotate_media_size(self) -> None:
+        """A aba Girar muda a proporção exibida: 90/270 trocam largura e altura."""
+        media = self.rotate_media_profile
+        view = self.preview_viewports.get(getattr(self, "rotate_preview", None))
+        if media is None or view is None:
+            return
+        width, height = self._rotated_media_size(media, self._rotate_preview_filter())
+        if (width, height) != (view.media_width, view.media_height):
+            view.media_width, view.media_height = width, height
+            self._fit_preview_stage(self.rotate_preview)
+
     def _show_video_thumbnail(self, canvas: Canvas, source: Path, seconds: float, filters: str) -> None:
         canvas.delete("all")
+        self.preview_frames.pop(canvas, None)
+        self.preview_frame_items.pop(canvas, None)
         context = getattr(self, "preview_context", None)
         context_matches = bool(context and context.get("source") == source)
         has_video = bool(context.get("has_video")) if context_matches else self._probe_media(source).has_video
         if not has_video:
-            canvas.create_text(
-                max(80, canvas.winfo_width() // 2), max(40, canvas.winfo_height() // 2),
-                text=f"{source.name}\nPrévia de áudio", fill="#667371", font=("Segoe UI", 10), justify="center",
-            )
+            self._preview_show_hint(canvas, f"{source.name}\nPrévia de áudio")
             return
         self.output_dir.mkdir(parents=True, exist_ok=True)
         image_path = self.output_dir / f"preview_{uuid.uuid4().hex}.png"
@@ -2432,11 +3728,11 @@ class FfmpegToolsPanel:
             result = subprocess.run(command, capture_output=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if result.returncode != 0 or not image_path.exists():
                 raise RuntimeError("FFmpeg não gerou a prévia")
+            # O quadro fica guardado na resolução da FONTE: o zoom e o
+            # redimensionamento do palco saem daqui, sem outro FFmpeg.
             with Image.open(image_path) as image:
-                image.thumbnail((max(240, canvas.winfo_width() - 12), max(150, canvas.winfo_height() - 12)), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(image.copy())
-            self.preview_image_refs[canvas] = photo
-            canvas.create_image(canvas.winfo_width() // 2, canvas.winfo_height() // 2, image=photo, anchor="center")
+                self.preview_stills[canvas] = image.copy()
+            self._paint_preview_view(canvas)
         except Exception:
             canvas.create_text(
                 max(80, canvas.winfo_width() // 2), max(40, canvas.winfo_height() // 2),
@@ -2469,8 +3765,11 @@ class FfmpegToolsPanel:
             else:
                 self._stop_preview()
                 self.extract_timeline.set_media(0)
-                self.extract_preview.delete("all")
-                self.extract_preview.create_text(400, 90, text="O recorte com marcadores fica disponível ao selecionar um único arquivo.", fill="#d7e2df", font=("Segoe UI", 10))
+                self._reset_preview_view(self.extract_preview, 0, 0)
+                self._preview_show_hint(
+                    self.extract_preview,
+                    "O recorte com marcadores fica disponível ao selecionar um único arquivo.",
+                )
                 self.extract_start_var.set("")
                 self.extract_end_var.set("")
 
@@ -2790,6 +4089,59 @@ class FfmpegToolsPanel:
                 self.progress_var.set(safe_progress)
         self.root.after(0, apply)
 
+    def _log_saved_output(self) -> None:
+        """Conclusão da ferramenta: só no log de atividade (padrão verde automático)."""
+        def apply():
+            try:
+                app = getattr(self, "app", None)
+                if app is not None and hasattr(app, "_append_activity_log"):
+                    app._append_activity_log(f"Concluído. Arquivos salvos em {self.output_dir}")
+            except Exception:
+                pass
+            self.progress_var.set(100)
+        self.root.after(0, apply)
+
+    def _selection_crops(self) -> dict[str, tuple[int, int, int, int] | None]:
+        """Recorte (x, y, largura, altura) por ferramenta, vindo da seleção desenhada."""
+        crops: dict[str, tuple[int, int, int, int] | None] = {"cut_crop": None, "rotate_crop": None}
+        cut_media = self.cut_media_profile
+        if cut_media is not None and cut_media.has_video:
+            largura, altura = self._cut_display_size(cut_media)
+            crops["cut_crop"] = self._preview_selection_crop(self.cut_preview, largura, altura)
+        rotate_media = self.rotate_media_profile
+        if rotate_media is not None and rotate_media.has_video:
+            largura, altura = self._rotated_media_size(rotate_media, self._rotate_preview_filter())
+            crops["rotate_crop"] = self._preview_selection_crop(self.rotate_preview, largura, altura)
+        return crops
+
+    def _confirm_preview_selection(self, tool: str) -> bool:
+        """Confirma o recorte por pixels antes de executar (regra do usuário).
+
+        Salvar com uma seleção desenhada significa: o arquivo terá SÓ os pixels
+        dentro da seleção (resolução n x m); o resto do quadro é descartado.
+        """
+        if tool not in ("Cortar", "Girar vídeo"):
+            return True
+        crop = self._selection_crops()["cut_crop" if tool == "Cortar" else "rotate_crop"]
+        if crop is None:
+            return True
+        x, y, largura, altura = crop
+        extra = ""
+        if tool == "Cortar" and self._cut_mode_is_copy():
+            self.cut_mode_var.set(CUT_MODE_REENCODE)
+            self._update_cut_controls()
+            extra = "\n\nA seleção exige reencodar: o modo foi alterado para 'Reencode Completo'."
+        elif tool == "Girar vídeo" and (
+            self.rotate_metadata_var.get() or not self._rotate_preview_filter()
+        ):
+            extra = "\n\nA seleção exige reencodar: o arquivo será regerado."
+        message = (
+            f"Será salvo apenas o que está DENTRO da seleção: {largura} x {altura} pixels, "
+            f"a partir de ({x}, {y}).\n"
+            "O restante do quadro será descartado." + extra
+        )
+        return bool(messagebox.askokcancel("sig", message))
+
     def run_current_tool(self) -> None:
         if self.running:
             return
@@ -2801,7 +4153,11 @@ class FfmpegToolsPanel:
             return
         if tool == "Juntar áudios/vídeos" and not self._ask_join_rotation():
             return
+        if not self._confirm_preview_selection(tool):
+            return
+        selection_crops = self._selection_crops()
         # Capture Tk state on the UI thread. Workers use only plain Python values.
+        self.worker_acceleration = self._resolve_task_encoder(tool)
         self.selected_acceleration_label = self.acceleration_var.get()
         self.selected_video_quality = self.video_quality_var.get()
         self.worker_tool_uses_video_encoder = self._current_tool_uses_video_encoder()
@@ -2827,6 +4183,13 @@ class FfmpegToolsPanel:
             "insert_reencode": self.insert_reencode_var.get(), "insert_smart": self.insert_smart_var.get(),
             "insert_transition": self.insert_transition_var.get(), "insert_seconds": self.insert_seconds_var.get(),
             "clean_mode": self.clean_mode_var.get(), "clean_output_profile": self.clean_output_profile_var.get(),
+            "cut_crop": selection_crops["cut_crop"], "rotate_crop": selection_crops["rotate_crop"],
+            "encoder_path": self._encoder_path(),
+            "encoder_advanced": self._advanced_key(),
+            "encoder_options": [
+                (option.key, option.label, option.path, option.codec, option.encoder, option.priority)
+                for option in self.available_encoder_options
+            ],
         }
         workers = {
             "Cortar": self._cut_worker,
@@ -2851,7 +4214,11 @@ class FfmpegToolsPanel:
     def _worker_wrapper(self, worker) -> None:
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            if hasattr(self, "selected_acceleration_label"):
+            escolhido = getattr(self, "worker_acceleration", None)
+            if escolhido is not None:
+                # Encoder decidido na UI thread (GPU/CPU + codec + duracao).
+                self.acceleration = escolhido
+            elif hasattr(self, "selected_acceleration_label"):
                 selected_label = self.selected_acceleration_label
                 self.acceleration = getattr(self, "acceleration_by_label", {}).get(selected_label)
                 if self.acceleration is None:
@@ -2870,7 +4237,9 @@ class FfmpegToolsPanel:
                 self._set_status("Encoder de vídeo: não aplicável", 0)
             worker()
             if not self.cancel_event.is_set():
-                self._set_status("Concluído. Arquivo(s) salvo(s) na pasta de saída.", 100)
+                # Regra do usuário: a barra de status não repete "arquivo salvo";
+                # a conclusão (verde) vai para o log de atividade.
+                self._log_saved_output()
                 elapsed = max(.001, time.monotonic() - self.task_started_at)
                 encoder = self.acceleration.encoder if (self.acceleration and tool_uses_video_encoder) else "não aplicável"
                 self.task_tracker.success(f"Tempo de processamento: {elapsed:.1f}s\nEncoder: {encoder}") if self.task_tracker else None
@@ -2888,6 +4257,20 @@ class FfmpegToolsPanel:
         if options and name in options:
             return options[name]
         return variable.get()
+
+    def _worker_crop(self, key: str) -> tuple[int, int, int, int] | None:
+        """Recorte por seleção capturado na UI thread (o worker usa valores simples)."""
+        options = getattr(self, "worker_options", None) or {}
+        raw = options.get(key)
+        if not raw:
+            return None
+        try:
+            x, y, largura, altura = (int(valor) for valor in raw)
+        except (TypeError, ValueError):
+            return None
+        if largura < 2 or altura < 2:
+            return None
+        return x, y, largura, altura
 
     def _worker_value_default(self, name: str, variable_name: str, default):
         options = getattr(self, "worker_options", None)
@@ -2960,10 +4343,12 @@ class FfmpegToolsPanel:
         def apply() -> None:
             self.available_accelerations = profiles
             self.acceleration_by_label = {profile.label: profile for profile in profiles}
-            self.acceleration_combo.configure(values=tuple(profile.label for profile in profiles))
-            if self.acceleration_var.get() not in self.acceleration_by_label:
-                self.acceleration_var.set(profiles[0].label)
+            # O combo principal agora escolhe ONDE processar (GPU/CPU); o encoder
+            # concreto sai do catalogo sondado, por tarefa.
+            if self.acceleration_var.get() not in PATH_LABELS.values():
+                self.acceleration_var.set(PATH_LABELS[ENCODER_PATH_GPU])
             self._refresh_encoder_control_state()
+            self._refresh_effective_encoder_label()
 
         self.root.after(0, apply)
 
@@ -2982,22 +4367,26 @@ class FfmpegToolsPanel:
             encoders = (result.stdout + result.stderr).lower()
         except Exception:
             encoders = ""
-        candidates = (
-            VideoAcceleration("nvenc", "NVENC (NVIDIA)", "h264_nvenc"),
-            VideoAcceleration("qsv", "QSV (Intel)", "h264_qsv"),
-            VideoAcceleration("vaapi", "VAAPI (Linux)", "h264_vaapi"),
-            VideoAcceleration("amf", "AMF (AMD)", "h264_amf"),
-        )
-        available: list[VideoAcceleration] = []
-        for candidate in candidates:
-            if candidate.encoder not in encoders:
+        return [self._catalog_video_acceleration(option) for option in self._probe_catalog(encoders)]
+
+    def _probe_catalog(self, encoders: str) -> list[EncoderOption]:
+        """Catalogo sondado de verdade: so entra o encoder que compila E funciona aqui."""
+        opcoes: list[EncoderOption] = []
+        for option in CATALOG:
+            if option.encoder not in encoders:
                 continue
-            if candidate.key == "vaapi" and (os.name == "nt" or not Path("/dev/dri/renderD128").exists()):
+            if option.key == "vaapi" and (os.name == "nt" or not Path("/dev/dri/renderD128").exists()):
                 continue
-            if self._test_encoder(candidate):
-                available.append(candidate)
-        available.append(VideoAcceleration("cpu", "CPU (fallback)", "libx264" if "libx264" in encoders else "mpeg4"))
-        return available
+            if not self._test_encoder(option):
+                continue
+            opcoes.append(option)
+        self.available_encoder_options = opcoes
+        return opcoes
+
+    @staticmethod
+    def _catalog_video_acceleration(option: EncoderOption) -> VideoAcceleration:
+        chave = "cpu" if option.path == ENCODER_PATH_CPU else option.key
+        return VideoAcceleration(chave, option.label, option.encoder)
 
     def _test_encoder(self, profile: VideoAcceleration) -> bool:
         command = [str(self._ffmpeg()), "-hide_banner", "-loglevel", "error"]
@@ -3176,18 +4565,33 @@ class FfmpegToolsPanel:
             tracker.complete(tracker_label)
         self._set_status(f"{label} concluído ({progress}/{total})", int(progress * 100 / max(total, 1)))
 
+    def _cpu_encoder_for(self, encoder: str) -> VideoAcceleration:
+        """CPU equivalente ao codec do encoder que falhou (HEVC -> libx265)."""
+        codec = "hevc" if str(encoder or "").lower().startswith(("libx265", "hevc_")) else "h264"
+        opcoes = [
+            option for option in self.available_encoder_options
+            if option.path == ENCODER_PATH_CPU and option.codec == codec
+        ]
+        if opcoes:
+            return self._catalog_video_acceleration(opcoes[0])
+        return next(
+            (acc for acc in getattr(self, "available_accelerations", []) if acc.key == "cpu"),
+            VideoAcceleration("cpu", "CPU", "libx264"),
+        )
+
     def _execute_video(self, label: str, builder, progress: int = 1, total: int = 1, duration_seconds: float = 0.0, progress_callback=None) -> None:
-        cpu_fallback = next((acc for acc in getattr(self, "available_accelerations", []) if acc.key == "cpu"), VideoAcceleration("cpu", "CPU (fallback)", "libx264"))
-        profile = self.acceleration or cpu_fallback
+        profile = self.acceleration or self._cpu_encoder_for("libx264")
         try:
             self._execute(builder(profile), label, progress, total, duration_seconds, progress_callback)
         except RuntimeError as exc:
-            if profile.key == "cpu" or not self._is_hardware_encoder_error(str(exc)):
+            if str(profile.key).startswith("cpu") or not self._is_hardware_encoder_error(str(exc)):
                 raise
-            self._append_log(f"{profile.label} não concluiu a tarefa; repetindo com CPU ({cpu_fallback.encoder}).")
-            self.acceleration = cpu_fallback
-            if hasattr(self, "root") and hasattr(self, "acceleration_var"):
-                self.root.after(0, lambda: self.acceleration_var.set(cpu_fallback.label))
+            cpu_fallback = self._cpu_encoder_for(profile.encoder)
+            motivo = str(exc).strip().splitlines()[0] if str(exc).strip() else "erro do encoder"
+            # NÃO troca a preferência do usuário: a próxima tarefa volta a tentar a GPU.
+            self._log_encoder_choice(
+                f"{profile.label} falhou ({motivo}); repetindo na CPU ({cpu_fallback.encoder}) SOMENTE nesta tarefa."
+            )
             self._execute(builder(cpu_fallback), f"{label} (CPU)", progress, total, duration_seconds, progress_callback)
 
     @staticmethod
@@ -3298,8 +4702,19 @@ class FfmpegToolsPanel:
         if getattr(self, "worker_options", None) and "cut_mode" in self.worker_options:
             cut_mode = str(self.worker_options["cut_mode"])
         else:
-            cut_mode = str(cut_mode_var.get()) if cut_mode_var is not None else "Preciso (reencodar)"
-        fast_copy = cut_mode.startswith("Rápido")
+            cut_mode = str(cut_mode_var.get()) if cut_mode_var is not None else CUT_MODE_SMART
+        fast_copy = cut_mode.startswith(CUT_MODE_COPY)
+        smart_cut = not fast_copy and not cut_mode.startswith(CUT_MODE_REENCODE)
+        crop = self._worker_crop("cut_crop")
+        if crop and fast_copy:
+            # A seleção de área exige reencodar (copiar streams não recorta pixels).
+            self._append_log("A seleção de área exige reencodar: usando o Reencode Completo.")
+            fast_copy = False
+            smart_cut = False
+        elif crop and smart_cut:
+            # O miolo copiado não pode ser recortado: com seleção, reencoda tudo.
+            self._append_log("A seleção de área exige reencodar todo o trecho: usando o Reencode Completo.")
+            smart_cut = False
         audio_policy = str(self._worker_value_default("cut_audio_policy", "cut_audio_policy_var", "Precisão máxima (AAC)"))
         stream_policy = str(self._worker_value_default("cut_stream_policy", "cut_stream_policy_var", "Vídeo e áudio"))
         preserve_all_streams = fast_copy and stream_policy.startswith("Todos os streams")
@@ -3330,10 +4745,16 @@ class FfmpegToolsPanel:
                 command += ["-map", "0:a:0", "-vn", "-c", "copy"]
             command.append(str(output))
             self._execute(command, "Cortando sem reencodar", 1, 1, duration)
+        elif is_video and smart_cut:
+            self._cut_video_smartcut(
+                source, output, start, end, media,
+                audio_precise=not audio_policy.startswith("Copiar áudio"),
+            )
         elif is_video:
             self._cut_video_precise(
                 source, output, start, end, media,
                 copy_audio=audio_policy.startswith("Copiar áudio"),
+                crop=crop,
             )
         else:
             codec_args = self._audio_codec_args_for_source_codec(
@@ -3341,6 +4762,234 @@ class FfmpegToolsPanel:
             ) or self._audio_codec_args(extension, media.audio_bitrate)
             command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration), "-map", "0:a:0?", "-vn", *codec_args, "-map_metadata", "0", str(output)]
             self._execute(command, "Cortando áudio", 1, 1, duration)
+
+    @staticmethod
+    def _smartcut_codec_family(media: MediaProfile) -> str | None:
+        """Família de codec aceita pelo SmartCut (concat por TS exige mp4toannexb)."""
+        codec = (media.video_codec or "").lower()
+        if codec in ("h264", "avc1", "avc"):
+            return "h264"
+        if codec in ("hevc", "h265", "hvc1", "hev1"):
+            return "hevc"
+        return None
+
+    def _worker_encoder_inputs(self) -> tuple[str, str, list[EncoderOption]]:
+        """Preferência (GPU/CPU + Avançado) e catálogo sondado, vindos da UI thread."""
+        options = getattr(self, "worker_options", None) or {}
+        path = str(options.get("encoder_path") or ENCODER_PATH_GPU)
+        advanced = str(options.get("encoder_advanced") or ENCODER_ADVANCED_AUTO)
+        return path, advanced, options_from_tuples(options.get("encoder_options"))
+
+    def _smartcut_edge_encoder(self, codec_family: str, segundos: float = 0.0) -> VideoAcceleration | None:
+        """Encoder das bordas: tem que produzir o MESMO codec do trecho copiado.
+
+        O miolo copiado manda no codec; a escolha GPU/CPU segue a mesma regra do
+        resto do app (preferência do usuário, Avançado e o custo de inicialização
+        da GPU no tamanho DESTE trecho).
+        """
+        path, advanced, disponiveis = self._worker_encoder_inputs()
+        if disponiveis:
+            escolha = resolve_encoder(
+                codec=codec_family,
+                path=path,
+                available=disponiveis,
+                advanced=advanced,
+                seconds=segundos,
+            )
+            if escolha is not None:
+                if segundos:
+                    self._log_encoder_choice(
+                        f"Encoder da borda ({segundos:.2f}s): {escolha.option.encoder} — {escolha.reason}"
+                    )
+                return VideoAcceleration(escolha.option.key, escolha.option.label, escolha.option.encoder)
+        aceleracao = self._smart_join_acceleration_for_codec(codec_family)
+        encoder = (aceleracao.encoder or "").lower()
+        if codec_family == "h264" and not encoder.startswith(("libx264", "h264_")):
+            return None
+        if codec_family == "hevc" and not encoder.startswith(("libx265", "hevc_")):
+            return None
+        return aceleracao
+
+    def _smartcut_segment_arguments(
+        self,
+        source: Path,
+        segment: Path,
+        start: float,
+        duration: float,
+        media: MediaProfile,
+        codec_family: str,
+        reencode: bool,
+        audio_precise: bool = True,
+        encoder: VideoAcceleration | None = None,
+    ) -> list[str]:
+        """Um trecho do SmartCut em MPEG-TS pronto para ser concatenado.
+
+        Compatibilidade (pedido do usuário): as bordas reencodadas espelham as
+        características do trecho COPIADO — mesmo codec, resolução, fps, pix_fmt,
+        SAR e bitrate próximo — porque é o miolo copiado que dita o padrão do
+        arquivo final. O encoder também segue a família do codec de origem
+        (`_smart_join_acceleration_for_codec`), nunca o combo por acaso.
+
+        Áudio: com `audio_precise` (política "Precisão máxima (AAC)") o áudio é
+        reencodado em TODOS os trechos — assim o `-t` fecha exato e o arquivo não
+        sai mais longo (o áudio copiado escorrega até o pacote seguinte). Na
+        política "Copiar áudio", a cópia é mantida e essa folga é esperada.
+
+        Seek: input seek em todos os trechos. Com OUTPUT seek o `-c:v copy` recua
+        até o keyframe ANTERIOR (o miolo saía ~1 s deslocado, com o áudio fora de
+        sincronia); com input seek o corte cai no keyframe pedido e o `-t` fecha
+        a duração. A orientação fica no bitstream e o mux final devolve a rotação,
+        como no SmartJoin.
+        """
+        args = [str(self._ffmpeg()), "-hide_banner", "-y", "-noautorotate", "-display_rotation:v:0", "0"]
+        args += ["-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration)]
+        args += ["-map", "0:v:0"]
+        if media.has_audio:
+            args += ["-map", "0:a?"]
+        if reencode:
+            escolhido = encoder or self._smartcut_edge_encoder(codec_family) or self._smart_join_acceleration_for_codec(codec_family)
+            args += self._video_args(escolhido, media.video_bitrate)
+            # Espelha o padrão do trecho copiado (o miolo é a referência).
+            args += ["-pix_fmt", media.pix_fmt or "yuv420p"]
+            if media.sar and media.sar not in ("1:1", "0:1", "N/A", ""):
+                args += ["-vf", f"setsar={media.sar.replace(':', '/')}"]
+            if media.fps:
+                args += ["-r", media.fps]
+        else:
+            args += ["-c:v", "copy"]
+        if not media.has_audio:
+            args += ["-an"]
+        elif audio_precise:
+            # Reencoda o áudio com os mesmos parâmetros do miolo copiado.
+            args += [
+                "-c:a", "aac", "-b:a", media.audio_bitrate,
+                "-ar", str(media.audio_rate), "-ac", str(media.audio_channels),
+            ]
+        else:
+            args += ["-c:a", "copy"]
+        args += [
+            "-bsf:v", self._smart_join_ts_bitstream(codec_family),
+            "-avoid_negative_ts", "make_zero",
+            "-mpegts_flags", "+resend_headers+initial_discontinuity",
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-f", "mpegts", str(segment),
+        ]
+        return args
+
+    def _cut_video_smartcut(
+        self,
+        source: Path,
+        output: Path,
+        start: float,
+        end: float,
+        media: MediaProfile,
+        audio_precise: bool = True,
+    ) -> None:
+        """SmartCut: copia o miolo entre keyframes e reencoda só as bordas.
+
+        Cabeça e cauda (do tempo pedido até o keyframe mais próximo) são reencodadas
+        para os limites ficarem exatos; o miolo é copiado sem tocar nos codecs. Se
+        não houver keyframe útil (ou o codec não permitir), cai no Reencode Completo.
+        """
+        codec_family = self._smartcut_codec_family(media)
+        encoder_bordas = self._smartcut_edge_encoder(codec_family) if codec_family else None
+        if codec_family and encoder_bordas is None:
+            self._append_log(
+                "O encoder selecionado não produz o mesmo codec do arquivo (o miolo é copiado): "
+                "usando o Reencode Completo."
+            )
+            self._cut_video_precise(source, output, start, end, media)
+            return
+        # Keyframes que servem de fronteira: inclusive os que caem EXATAMENTE no
+        # início/fim pedidos (aí não há borda para reencodar).
+        limite = max(SMARTCUT_MIN_EDGE, 0.02)
+        keyframes = [
+            value for value in self._extract_keyframes(source)
+            if start - limite <= value <= end + limite
+        ]
+        cabeca_fim = min(keyframes) if keyframes else None
+        cauda_inicio = max(keyframes) if keyframes else None
+        if (
+            not codec_family
+            or encoder_bordas is None
+            or cabeca_fim is None
+            or cauda_inicio is None
+            or cauda_inicio - cabeca_fim <= SMARTCUT_MIN_EDGE
+        ):
+            self._append_log(
+                "SmartCut não encontrou keyframes úteis (ou o codec não é compatível): "
+                "usando o Reencode Completo."
+            )
+            self._cut_video_precise(source, output, start, end, media)
+            return
+
+        trechos: list[tuple[Path, float, float, bool, str]] = []
+        trabalho = output.parent / f"smartcut_{uuid.uuid4().hex[:8]}"
+        trabalho.mkdir(parents=True, exist_ok=True)
+        try:
+            if cabeca_fim - start > SMARTCUT_MIN_EDGE:
+                trechos.append((trabalho / "01_cabeca.ts", start, cabeca_fim - start, True, "Reencodando a borda inicial"))
+            trechos.append((trabalho / "02_miolo.ts", cabeca_fim, cauda_inicio - cabeca_fim, False, "Copiando o miolo"))
+            if end - cauda_inicio > SMARTCUT_MIN_EDGE:
+                trechos.append((trabalho / "03_cauda.ts", cauda_inicio, end - cauda_inicio, True, "Reencodando a borda final"))
+            copiado = sum(duration for _path, _start, duration, reencode, _label in trechos if not reencode)
+            total = max(0.01, end - start)
+            self._append_log(
+                f"SmartCut: {copiado:.2f}s copiados sem reencode e "
+                f"{total - copiado:.2f}s reencodados ({len(trechos)} trechos)."
+            )
+            passos = len(trechos) + 1
+            for indice, (segmento, trecho_inicio, duracao, reencode, rotulo) in enumerate(trechos, start=1):
+                self._execute(
+                    self._smartcut_segment_arguments(
+                        source, segmento, trecho_inicio, duracao, media, codec_family, reencode,
+                        audio_precise=audio_precise,
+                        encoder=self._smartcut_edge_encoder(codec_family, duracao) if reencode else None,
+                    ),
+                    rotulo,
+                    indice,
+                    passos,
+                    duracao,
+                )
+            manifest = trabalho / "lista.txt"
+            manifest.write_text(
+                "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path, *_resto in trechos),
+                encoding="utf-8",
+            )
+            concat = [
+                str(self._ffmpeg()), "-hide_banner", "-y",
+                "-display_rotation:v:0", str(media.rotation or 0),
+                "-fflags", "+genpts",
+                "-f", "concat", "-safe", "0", "-i", str(manifest),
+                "-map", "0:v:0",
+            ]
+            if media.has_audio:
+                concat += ["-map", "0:a?"]
+            concat += ["-c:v", "copy"]
+            if not media.has_audio:
+                concat += ["-an"]
+            else:
+                # Todos os trechos já saíram com o MESMO áudio (copiado ou
+                # reencodado), então o mux final só copia.
+                concat += ["-c:a", "copy"]
+                if audio_precise or media.audio_codec == "aac":
+                    concat += ["-bsf:a", "aac_adtstoasc"]
+            if codec_family == "hevc":
+                concat += ["-tag:v", "hvc1"]
+            concat += [
+                "-avoid_negative_ts", "make_zero",
+                # Fecha o arquivo exatamente no tempo pedido: os trechos podem
+                # trazer alguns milissegundos a mais de áudio na emenda.
+                "-t", self._fmt_seconds(total),
+                "-max_interleave_delta", "0",
+                "-video_track_timescale", "90000",
+                "-movflags", "+faststart",
+                "-map_metadata", "0", "-map_chapters", "-1",
+                str(output),
+            ]
+            self._execute(concat, "Montando o arquivo final", passos, passos, total)
+        finally:
+            shutil.rmtree(trabalho, ignore_errors=True)
 
     def _cut_video_precise(
         self,
@@ -3350,7 +4999,12 @@ class FfmpegToolsPanel:
         end: float,
         media: MediaProfile,
         copy_audio: bool = False,
+        crop: tuple[int, int, int, int] | None = None,
     ) -> None:
+        if crop:
+            self._append_log(
+                f"Recorte por seleção: {crop[2]} x {crop[3]} pixels a partir de ({crop[0]}, {crop[1]})."
+            )
         if media.audio_streams > 1:
             action = "copiadas nos limites de pacote" if copy_audio else "preservadas e reencodadas em AAC"
             self._append_log(f"{source.name} possui {media.audio_streams} faixas de áudio; todas serão {action}.")
@@ -3365,7 +5019,8 @@ class FfmpegToolsPanel:
             self._append_log("O vídeo será cortado com precisão; o áudio será copiado nos limites de pacote disponíveis.")
 
         def build(profile: VideoAcceleration):
-            input_args, filter_args = self._filter_for_profile("null", profile)
+            plan = selection_crop_filter(crop) if crop else "null"
+            input_args, filter_args = self._filter_for_profile(plan, profile)
             audio_args = ["-c:a", "copy"] if copy_audio else [
                 "-c:a", "aac", "-b:a", media.audio_bitrate,
                 "-ar", str(media.audio_rate), "-ac", str(media.audio_channels),
@@ -3375,7 +5030,8 @@ class FfmpegToolsPanel:
                 "-ss", self._fmt_seconds(start), "-i", str(source),
                 "-t", self._fmt_seconds(end - start),
                 "-map", "0:v:0?", "-map", "0:a?", "-sn", "-dn", *filter_args,
-                *self._video_args(profile, media.video_bitrate), *audio_args,
+                *self._video_args(profile, media.video_bitrate),
+                *hevc_tag_arguments(profile.encoder, output.suffix), *audio_args,
                 "-map_metadata", "0", "-map_chapters", "-1", "-movflags", "+faststart",
                 str(output),
             ]
@@ -3509,7 +5165,16 @@ class FfmpegToolsPanel:
         output = self._safe_output(self.output_dir, suffix, ".mp4")
         seek_args = ["-ss", self._fmt_seconds(start)] if has_trim else []
         duration_args = ["-t", self._fmt_seconds(trim_duration)] if has_trim else []
-        if bool(self._worker_value("rotate_metadata", self.rotate_metadata_var)):
+        crop = self._worker_crop("rotate_crop")
+        if crop:
+            self._append_log(
+                f"Recorte por seleção: {crop[2]} x {crop[3]} pixels a partir de ({crop[0]}, {crop[1]})."
+            )
+        metadata_mode = bool(self._worker_value("rotate_metadata", self.rotate_metadata_var))
+        if crop and metadata_mode:
+            self._append_log("A seleção de área exige reencodar: o modo somente metadados não será usado.")
+            metadata_mode = False
+        if metadata_mode:
             if has_trim:
                 self._append_log("Modo somente metadados com recorte: o corte é alinhado aos keyframes mais próximos (sem reencodar).")
             # A UI usa +90 como giro horário (transpose=1), enquanto
@@ -3539,6 +5204,8 @@ class FfmpegToolsPanel:
             filters.append("hflip")
         if bool(self._worker_value("rotate_vflip", self.rotate_vflip_var)):
             filters.append("vflip")
+        if crop:
+            filters.append(selection_crop_filter(crop))
         if not filters:
             output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
             if output.suffix.lower() == ".mp4":
@@ -3579,7 +5246,7 @@ class FfmpegToolsPanel:
         def build(profile):
             input_args, filter_args = self._filter_for_profile(filter_text, profile)
             audio_args = self._rotate_audio_args(media)
-            return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, *seek_args, "-i", str(source), *duration_args, "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", *filter_args, *self._video_args(profile, media.video_bitrate), *audio_args, "-map_metadata", "0", "-movflags", "+faststart", str(output)]
+            return [str(self._ffmpeg()), "-hide_banner", "-y", *input_args, *seek_args, "-i", str(source), *duration_args, "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", *filter_args, *self._video_args(profile, media.video_bitrate), *hevc_tag_arguments(profile.encoder, output.suffix), *audio_args, "-map_metadata", "0", "-movflags", "+faststart", str(output)]
         self._execute_video("Girando e cortando vídeo" if has_trim else "Girando vídeo", build, duration_seconds=trim_duration)
 
     def _rotate_audio_args(self, media: MediaProfile) -> list[str]:

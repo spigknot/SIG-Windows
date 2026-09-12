@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlencode
 
 
 # Marca o bloco de comandos FFmpeg exibido no log das ferramentas. Um clique em
@@ -196,6 +197,109 @@ def params_block_single_line(text: str) -> str:
         if stripped:
             parts.append(stripped)
     return " ".join(parts)
+
+
+# --- Texto cru da requisição (conteúdo copiado no clique do bloco) -----------
+#
+# O bloco amarelo do log mostra os parâmetros um por linha, para leitura. O clique
+# copia só a parte que CARREGA a informação, para colar em outro agente/terminal:
+# a linha de pedido (com a query) nos provedores de query/multipart, ou o frame
+# JSON de configuração nos WS que configuram por frame (Muse/Alibaba). O
+# handshake do `websocket-client`, o corpo binário do áudio e o boundary
+# aleatório ficam de fora. Segredos entram mascarados com ``***``.
+RAW_REQUEST_BOUNDARY = "<boundary>"
+
+
+def format_raw_audio_label(size: int | None = None) -> str:
+    """Marcador do corpo binário do arquivo (o log nunca carrega o binário)."""
+    if size is None:
+        return "<bytes do áudio: tamanho não medido>"
+    return f"<bytes do áudio: {int(max(0, size))} bytes>"
+
+
+def format_raw_request(
+    method: str,
+    url: str,
+    headers=None,
+    payload: str | None = None,
+) -> str:
+    """Requisição HTTP crua como o app a monta (linha de pedido + headers + corpo).
+
+    `headers` aceita dict ou lista de pares (a lista preserva chaves repetidas);
+    `payload` é o corpo já montado — JSON, multipart textual ou o marcador do
+    áudio binário — e pode ser omitido quando não há corpo.
+    """
+    lines = [f"{method} {url}"]
+    items = headers.items() if isinstance(headers, dict) else list(headers or [])
+    for name, value in items:
+        lines.append(f"{name}: {value}")
+    if payload:
+        lines.append("")
+        lines.append(payload)
+    return "\n".join(lines)
+
+
+def format_raw_request_line(method: str, url: str, params=None) -> str:
+    """Linha de pedido única (sem headers nem corpo) — o copiado do clique.
+
+    Nos WS que levam a configuração inteira na query (Grok, Deepgram, Scribe,
+    AssemblyAI) a URL já é a requisição toda: as linhas de handshake que o
+    `websocket-client` gera são boilerplate e o áudio é um fluxo de frames
+    binários, sem corpo textual para reproduzir.
+
+    `params` atende os provedores cujos parâmetros vão no formulário multipart
+    (Granite NAR no microfone branco): os mesmos valores do bloco amarelo entram
+    como query, para a mesma leitura de uma linha só. A query já montada na URL
+    (WS) é copiada como está, sem re-codificação.
+    """
+    line = f"{method} {url}"
+    items = params.items() if isinstance(params, dict) else list(params or [])
+    pairs = [(key, value) for key, value in items if value is not None]
+    if pairs:
+        line += ("&" if "?" in line else "?") + urlencode(pairs)
+    return line
+
+
+def format_raw_websocket_frame(frame: str) -> str:
+    """Requisição crua dos WS que configuram a sessão num frame JSON.
+
+    Muse e Alibaba não levam nada útil no handshake: os parâmetros (e, no Muse,
+    a própria credencial) viajam no primeiro frame de TEXTO da sessão. O que
+    interessa copiar é esse JSON — as linhas do handshake (Upgrade, Connection,
+    Sec-WebSocket-Key/Version) são boilerplate do `websocket-client` e o áudio é
+    um fluxo de frames binários, sem corpo textual para reproduzir.
+    """
+    return str(frame or "").strip()
+
+
+def format_raw_multipart(
+    boundary: str,
+    fields=None,
+    files=None,
+) -> str:
+    """Corpo multipart textual pronto, com o áudio substituído pelo marcador.
+
+    `fields`: ``(nome, valor)`` ou ``(nome, valor, content_type)``.
+    `files`: ``(nome do campo, filename, mime, tamanho em bytes)``.
+    """
+    lines: list[str] = []
+    for field in fields or []:
+        name, value = field[0], field[1]
+        content_type = field[2] if len(field) > 2 else None
+        lines.append(f"--{boundary}")
+        lines.append(f'Content-Disposition: form-data; name="{name}"')
+        if content_type:
+            lines.append(f"Content-Type: {content_type}")
+        lines.append("")
+        lines.append(str(value))
+    for name, filename, mime, size in files or []:
+        lines.append(f"--{boundary}")
+        lines.append(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"')
+        lines.append(f"Content-Type: {mime}")
+        lines.append("")
+        lines.append(format_raw_audio_label(size))
+    lines.append(f"--{boundary}--")
+    return "\n".join(lines)
 
 
 def format_ws_params_block(title: str, params) -> str:
