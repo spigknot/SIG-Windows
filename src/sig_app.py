@@ -13583,9 +13583,26 @@ try {
                 "warning",
             )
 
-    def _queue_phase_progress(self, label: str, done: int, total: int, phase_key: str | None = None, started: float | None = None):
+    def _queue_phase_progress(
+        self,
+        label: str,
+        done: int,
+        total: int,
+        phase_key: str | None = None,
+        started: float | None = None,
+        *,
+        update_progress: bool = True,
+    ):
+        """Linha viva de fase (log) + barra de status, no padrão do lote.
+
+        `update_progress=False` para quem tem o PRÓPRIO esquema de barra (o ZIP
+        mapeia a criação para 0-30% e o resto para 35-98%): a linha viva do log
+        e a barra de status continuam iguais, só o valor da barra de progresso
+        não é sobrescrito.
+        """
         percent = int((done / max(total, 1) * 100) + 0.5)
-        self._queue("progress", percent)
+        if update_progress:
+            self._queue("progress", percent)
         now = time.perf_counter()
         throttles = getattr(self, "_phase_throttle", None)
         if throttles is None:
@@ -13776,7 +13793,12 @@ try {
 
         uncompressed_size = 0
         create_started = time.perf_counter()
-        self._queue("status", f"Criando ZIP para envio: 0/{len(zip_jobs)} (0%)")
+        # Linha VIVA no log (padrão das conversões/transcrições), NUNCA uma linha
+        # por arquivo: numa fila de milhares o log virava uma parede (pedido do
+        # usuário, 13/09). Fecha verde com o tempo ao terminar.
+        self._queue_phase_progress(
+            "Criando ZIP para envio", 0, len(zip_jobs), "zip", create_started, update_progress=False
+        )
         self._queue("progress", 0)
         used_names: set[str] = set()
         try:
@@ -13793,7 +13815,14 @@ try {
                     archive.write(job.upload_path, arcname)
                     uncompressed_size += job.upload_path.stat().st_size
                     percent = int((index / max(len(zip_jobs), 1) * 100) + 0.5)
-                    self._queue("status", f"Criando ZIP para envio: {index}/{len(zip_jobs)} ({percent}%)")
+                    self._queue_phase_progress(
+                        "Criando ZIP para envio",
+                        index,
+                        len(zip_jobs),
+                        "zip",
+                        create_started,
+                        update_progress=False,
+                    )
                     self._queue("progress", min(30, int(percent * 0.3)))
             create_elapsed = time.perf_counter() - create_started
         except Cancelled:
@@ -13859,6 +13888,12 @@ try {
             extract_elapsed = time.perf_counter() - extract_started
 
             done = 0
+            process_started = time.perf_counter()
+            # Mesmo padrão da criação: UMA linha viva que fecha verde com o
+            # tempo — nunca uma linha por arquivo.
+            self._queue_phase_progress(
+                "Processando resposta ZIP", 0, len(zip_jobs), "zip_response", process_started, update_progress=False
+            )
             for job in zip_jobs:
                 if self.cancel_event.is_set():
                     raise Cancelled()
@@ -13875,7 +13910,14 @@ try {
                     self._queue("job", job.original_path, "Transcrição vazia" if not job.transcription else "Transcrito")
                 done += 1
                 percent = int((done / max(len(zip_jobs), 1) * 100) + 0.5)
-                self._queue("status", f"Processando resposta ZIP: {done}/{len(zip_jobs)} ({percent}%)")
+                self._queue_phase_progress(
+                    "Processando resposta ZIP",
+                    done,
+                    len(zip_jobs),
+                    "zip_response",
+                    process_started,
+                    update_progress=False,
+                )
                 self._queue("progress", min(98, 75 + int(percent * 0.23)))
         except Cancelled:
             raise
