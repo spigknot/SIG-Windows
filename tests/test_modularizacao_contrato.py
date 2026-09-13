@@ -56,6 +56,8 @@ MODULOS_SEM_UI = [
     "documents",
     "media_files",
     "audio_io",
+    "batch_errors",
+    "batch_execution",
 ]
 
 FONTE_SIG_APP = (SRC / "sig_app.py").read_text(encoding="utf-8")

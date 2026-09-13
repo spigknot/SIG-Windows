@@ -33,6 +33,10 @@ class AudioJob:
     vad_error: str = ""
     conversion_elapsed: float = 0.0
     status: str = "Aguardando"
+    # "" quando o arquivo foi convertido de verdade; "pronto"/"compactado"
+    # quando já estava no formato pedido e foi só encaminhado (sem reencode).
+    # Alimenta a linha "13/50 arquivos já estavam prontos" (13/09).
+    preparation: str = ""
     transcription: str = ""
     error: str = ""
     model_name: str = "Modelo 1"
@@ -103,6 +107,32 @@ def job_transcript_for_model(job: AudioJob, model_index: int) -> str:
     if not transcript and path and path.exists():
         transcript = path.read_text(encoding="utf-8", errors="replace")
     return transcript or ""
+
+
+def job_has_material(job: AudioJob, model_count: int = 1) -> bool:
+    """O job já produziu transcrição NESTA execução (estado em memória).
+
+    Usado pelo relatório parcial do cancelamento: só entra no HTML o que já
+    tinha sido transcrito quando o usuário cancelou. Lê apenas a memória (não
+    cai no arquivo .txt, que pode ser resto de uma execução anterior).
+    """
+    if (job.transcription or "").strip():
+        return True
+    for index in range(2, max(1, int(model_count or 1)) + 1):
+        if str(audio_job_attr(job, "transcription", index) or "").strip():
+            return True
+    return False
+
+
+def transcription_candidates(jobs: list[AudioJob]) -> list[AudioJob]:
+    """Jobs que vão para a transcrição: os que não têm ERRO de verdade.
+
+    Regras do usuário (13/09):
+    - arquivo SEM ÁUDIO (erro de conversão) NÃO vai para a transcrição;
+    - arquivo com ERRO NO VAD VAI normalmente (o VAD é filtro, não requisito:
+      `job.vad_error` é preenchido, `job.error` não).
+    """
+    return [job for job in jobs if not job.error]
 
 
 def job_problem_reason_for_model(job: AudioJob, transcript: str, model_index: int) -> str:

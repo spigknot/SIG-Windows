@@ -1001,6 +1001,144 @@ def _check_live_mic_icons(app, root) -> None:
         root.update_idletasks()
 
 
+def _check_ffmpeg_stage_hints(app, root) -> None:
+    """Dica do palco: única, completa e centralizada no tamanho ATUAL (12/09).
+
+    Bug relatado: sobrava um pedaço do texto no meio da tela ("lizar" no Girar,
+    "ou ouvir" no Extrair) porque a dica era criada no tamanho mínimo do palco e
+    nunca redesenhada quando ele crescia.
+    """
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    esperado = {
+        "Cortar": "Selecione uma mídia para visualizar",
+        "Extrair áudio": "Escolha um arquivo para visualizar ou ouvir",
+        "Girar vídeo": "Selecione um vídeo para visualizar",
+    }
+    try:
+        for ferramenta, texto in esperado.items():
+            panel._select_ffmpeg_tool(ferramenta)
+            root.update()
+            canvas = {
+                "Cortar": panel.cut_preview,
+                "Extrair áudio": panel.extract_preview,
+                "Girar vídeo": panel.rotate_preview,
+            }[ferramenta]
+            # cenário real do bug: palco SEM mídia e que acabou de crescer
+            panel.preview_frames.pop(canvas, None)
+            panel.preview_stills.pop(canvas, None)
+            panel.preview_frame_items.pop(canvas, None)
+            panel.preview_viewports[canvas].stage_width = 0   # força reencaixe
+            panel._reset_preview_view(canvas, 1920, 1080)
+            root.update()
+            textos = [item for item in canvas.find_all() if canvas.type(item) == "text"]
+            if len(textos) != 1:
+                raise RuntimeError(
+                    f"[{ferramenta}] esperava UMA dica no palco, achei {len(textos)}: "
+                    f"{[canvas.itemcget(item, 'text') for item in textos]}"
+                )
+            conteudo = str(canvas.itemcget(textos[0], "text"))
+            if conteudo != texto:
+                raise RuntimeError(f"[{ferramenta}] dica diferente do esperado: {conteudo!r}")
+            coords = canvas.coords(textos[0])
+            centro_x, centro_y = canvas.winfo_width() / 2, canvas.winfo_height() / 2
+            if abs(coords[0] - centro_x) > 3 or abs(coords[1] - centro_y) > 3:
+                raise RuntimeError(
+                    f"[{ferramenta}] dica fora do centro do palco: {coords} x centro "
+                    f"({centro_x:.0f}, {centro_y:.0f})"
+                )
+            # o texto tem que caber: a dica do Extrair é a mais longa
+            bbox = canvas.bbox(textos[0])
+            if bbox and (bbox[0] < 0 or bbox[2] > canvas.winfo_width() + 2):
+                raise RuntimeError(f"[{ferramenta}] dica cortada nas laterais: {bbox}")
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
+def _check_ffmpeg_timeline_markers(app, root) -> None:
+    """Marcadores da linha do tempo: orientação e limites da cabeça (12/09)."""
+    import tkinter as tk
+
+    panel = app.ffmpeg_tools
+    app.select_main_tab("ffmpeg")
+    mapeado = bool(root.winfo_ismapped())
+    if not mapeado:
+        root.deiconify()
+        root.update()
+    try:
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+        linha = panel.cut_timeline
+        linha.set_media(20.0)
+        linha.set_range(4.0, 12.0)
+        root.update()
+
+        # 1) orientação real dos triângulos (geometria do canvas)
+        def triangulo(cor: str):
+            for item in linha.find_all():
+                if linha.type(item) == "polygon" and str(linha.itemcget(item, "fill")) == cor:
+                    coords = linha.coords(item)
+                    return [(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)]
+            return None
+
+        verde = triangulo("#2e7d5a")
+        vermelho = triangulo("#c64a42")
+        if not verde or not vermelho:
+            raise RuntimeError("não encontrei os triângulos verde e vermelho na linha do tempo")
+        ponta_verde = verde[0][1]
+        base_verde = verde[1][1]
+        if ponta_verde <= base_verde:
+            raise RuntimeError(f"o triângulo verde (início) não aponta para baixo: {verde}")
+        ponta_vermelha = vermelho[0][1]
+        base_vermelha = vermelho[1][1]
+        if ponta_vermelha >= base_vermelha:
+            raise RuntimeError(f"o triângulo vermelho (fim) não aponta para cima: {vermelho}")
+
+        # 2) a cabeça não passa dos marcadores — nem forçada pela API...
+        linha.set_position(999.0)
+        if linha.position != 12.0:
+            raise RuntimeError(f"set_position passou do marcador vermelho: {linha.position}")
+        linha.set_position(-50.0)
+        if linha.position != 4.0:
+            raise RuntimeError(f"set_position passou do marcador verde: {linha.position}")
+
+        # ...nem pelo arrasto do usuário (eventos de verdade do Tk)
+        largura = max(200, linha.winfo_width())
+        altura = linha.winfo_height() or 52
+        centro_y = altura // 2
+        linha.event_generate("<Button-1>", x=largura - 2, y=centro_y)
+        root.update()
+        linha.event_generate("<B1-Motion>", x=largura - 2, y=centro_y)
+        root.update()
+        linha.event_generate("<ButtonRelease-1>", x=largura - 2, y=centro_y)
+        root.update()
+        if linha.position > linha.end + 0.001:
+            raise RuntimeError(f"arrasto para a direita passou do marcador vermelho: {linha.position}")
+        linha.event_generate("<Button-1>", x=0, y=centro_y)
+        root.update()
+        linha.event_generate("<B1-Motion>", x=0, y=centro_y)
+        root.update()
+        linha.event_generate("<ButtonRelease-1>", x=0, y=centro_y)
+        root.update()
+        if linha.position < linha.start - 0.001:
+            raise RuntimeError(f"arrasto para a esquerda passou do marcador verde: {linha.position}")
+
+        # 3) mover os marcadores por cima da cabeça empurra a cabeça para dentro
+        linha.set_position(11.0)
+        linha.set_range(2.0, 5.0)
+        root.update()
+        if not (5.0 - 0.001 <= linha.position <= 5.0 + 0.001):
+            raise RuntimeError(f"a cabeça não foi empurrada para dentro do trecho: {linha.position}")
+    finally:
+        if not mapeado:
+            root.withdraw()
+
+
 def _check_ffmpeg_encoder_selector(app, root) -> None:
     """Seletor de encoder: GPU/CPU no principal e Avançado só no modo GPU (12/09)."""
     from video_encoders import ENCODER_PATH_CPU, ENCODER_PATH_GPU, PATH_LABELS
@@ -1337,6 +1475,232 @@ def _preview_event(x: int, y: int, delta: int = 0):
     return evento
 
 
+def _check_activity_log_scroll(app, root) -> None:
+    """Vacina do pedido de 13/09: a atualizacao do log nao pode mover a barra.
+
+    Antes, cada atualizacao (inclusive a linha viva "Convertendo/Transcrevendo
+    arquivos: N/M") puxava a vista para o fim — com o usuario lendo mais acima
+    nao dava para usar o log com o app trabalhando. Agora o log acompanha o fim
+    so enquanto o usuario esta no fim; rolando para cima, nada mais se mexe;
+    voltando ao fim, o acompanhamento volta.
+    """
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    try:
+        root.deiconify()
+        root.update()
+
+        def limpar() -> None:
+            log.configure(state="normal")
+            log.delete("1.0", "end")
+            log.configure(state="disabled")
+
+        limpar()
+        app._activity_log_tail_following = True
+        linhas = max(40, (log.winfo_height() // 12) + 10)
+        for indice in range(linhas):
+            app._append_activity_log(f"linha {indice} do log de atividade")
+        root.update()
+        if log.dlineinfo(log.index("end-1c linestart")) is None:
+            raise RuntimeError("o log nao acompanhou o fim com a barra no fim")
+
+        # O usuario rola para cima (pela barra, como no relato).
+        app._activity_log_scrollbar_command("moveto", "0.1")
+        root.update()
+        if app._activity_log_tail_following:
+            raise RuntimeError("a barra nao registrou a leitura mais acima")
+        topo = log.index("@0,0")
+
+        # Atualizacoes do fluxo real: linha viva + linhas novas + etapa.
+        app._update_activity_line("convert", "Convertendo arquivos: 3/10 (30%)")
+        app._update_activity_line("transcribe", "Transcrevendo arquivos: 3/10 (30%)")
+        app._append_activity_log("mensagem nova com a leitura em andamento")
+        app._begin_activity_step("smoke:etapa", "Etapa de teste")
+        app._finish_activity_step("smoke:etapa", 0.5)
+        root.update()
+        if log.index("@0,0") != topo:
+            raise RuntimeError(
+                f"a atualizacao moveu a barra: topo {topo} -> {log.index('@0,0')}"
+            )
+        if log.dlineinfo(log.index("end-1c linestart")) is not None:
+            raise RuntimeError("a atualizacao arrastou a vista para o fim do log")
+
+        # Voltando ao fim, o log volta a acompanhar.
+        app._activity_log_scrollbar_command("moveto", "1.0")
+        root.update()
+        app._append_activity_log("mensagem depois de voltar ao fim")
+        root.update()
+        if log.dlineinfo(log.index("end-1c linestart")) is None:
+            raise RuntimeError("o log nao voltou a acompanhar depois de voltar ao fim")
+
+        # Roda do mouse para cima (delta positivo no Tk/Windows): o
+        # acompanhamento tem que cair, senao a proxima escrita puxaria a vista.
+        log.event_generate("<MouseWheel>", delta=120)
+        root.update()
+        if app._activity_log_tail_following:
+            raise RuntimeError("a roda do mouse para cima nao marcou a leitura mais acima")
+
+        limpar()
+        app._activity_log_tail_following = True
+    finally:
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
+def _check_batch_log_lines(app, root) -> None:
+    """Erros agregados por tipo + arquivos ja prontos no log (pedido de 13/09).
+
+    Com o Tk de verdade: cada tipo de erro tem UMA linha (com a contagem), a
+    linha de arquivos prontos NAO e vermelha, o horario continua o da primeira
+    ocorrencia e a atualizacao NAO embaralha a ordem das linhas vivas (marca +
+    deslocamento — antes cada atualizacao jogava a linha para o fim).
+    """
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    try:
+        root.deiconify()
+        root.update()
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_log_tail_following = True
+        app._run_sequence = 999
+        app._batch_error_entries = {}
+        app._error_line_raw = {}
+        app._prep_counts = {}
+
+        def linha_como(numero: int) -> str:
+            return log.get(f"{numero}.0", f"{numero}.0 lineend")
+
+        def achar(trecho: str):
+            for numero, conteudo in enumerate(log.get("1.0", "end").splitlines(), start=1):
+                if trecho in conteudo:
+                    return numero, conteudo
+            return 0, ""
+
+        app._update_activity_line("convert", "Convertendo arquivos: 3/10 (30%)")
+        app._register_batch_error("sem áudio (código 4294967274)", "a.mp4")
+        app._register_batch_error("com erro no VAD", "b.wav")
+        app._register_preparation("pronto", 50)
+        root.update()
+        numero_sem_audio, texto_sem_audio = achar("arquivo(s) sem áudio")
+        numero_vad, _ = achar("arquivo(s) com erro no VAD")
+        numero_prontos, _ = achar("arquivos já estavam prontos")
+        if not (numero_sem_audio and numero_vad and numero_prontos):
+            raise RuntimeError("as linhas do lote nao apareceram no log")
+        if numero_sem_audio >= numero_vad:
+            raise RuntimeError("a ordem de criacao das linhas de erro nao foi respeitada")
+        if "activity_step_error" not in log.tag_names(f"{numero_sem_audio}.0"):
+            raise RuntimeError("a linha de erro agregada perdeu a cor vermelha")
+        if "activity_step_error" in log.tag_names(f"{numero_prontos}.0"):
+            raise RuntimeError("a linha de arquivos prontos ficou vermelha")
+        horario = texto_sem_audio.split("  ", 1)[0]
+
+        # Atualizacoes em ordem DIFERENTE da criacao: com o comportamento antigo
+        # (cada atualizacao joga a linha para o fim) a ordem das linhas vivas se
+        # inverte e o check quebra; com o Text.replace por tag a ordem nao muda.
+        app._register_preparation("pronto", 50)
+        app._register_batch_error("com erro no VAD", "e.wav")
+        app._register_batch_error("sem áudio (código 4294967274)", "c.mp4")
+        app._register_batch_error("sem áudio (código 4294967274)", "d.mp4")
+        app._update_activity_line("convert", "Convertendo arquivos: 4/10 (40%)")
+        root.update()
+        numero_sem_audio, texto_sem_audio = achar("arquivo(s) sem áudio")
+        numero_vad, _ = achar("arquivo(s) com erro no VAD")
+        numero_prontos, texto_prontos = achar("arquivos já estavam prontos")
+        horario_depois = log.get(
+            f"{numero_sem_audio}.0", f"{numero_sem_audio}.0 lineend"
+        ).split("  ", 1)[0]
+        if horario_depois != horario:
+            raise RuntimeError(f"o horario da linha mudou: {horario} -> {horario_depois}")
+        if "3 arquivo(s) sem áudio" not in texto_sem_audio:
+            raise RuntimeError(f"a contagem do tipo nao subiu: {texto_sem_audio}")
+        if "2 arquivo(s) com erro no VAD" not in linha_como(numero_vad):
+            raise RuntimeError("a contagem do VAD nao subiu")
+        if "2/50 arquivos já estavam prontos" not in texto_prontos:
+            raise RuntimeError(f"a contagem de prontos nao subiu: {texto_prontos}")
+        if numero_sem_audio >= numero_vad or numero_vad >= numero_prontos:
+            raise RuntimeError(
+                f"as atualizacoes embaralharam as linhas de erro "
+                f"(sem audio {numero_sem_audio}, VAD {numero_vad}, prontos {numero_prontos})"
+            )
+        conteudo_final = log.get("1.0", "end").splitlines()
+        if any("activity_step_error" in linha or "phase:" in linha for linha in conteudo_final):
+            raise RuntimeError(f"nome de tag vazou como texto no log: {conteudo_final}")
+        if len([linha for linha in conteudo_final if linha.strip()]) != 4:
+            raise RuntimeError(f"o log ganhou/perdeu linhas: {conteudo_final}")
+        if not any("Convertendo arquivos: 4/10" in linha for linha in conteudo_final):
+            raise RuntimeError("a linha de progresso nao foi atualizada")
+
+        # Clique na linha agregada copia o cabecalho + os arquivos do tipo.
+        app.root.clipboard_clear()
+        app.root.clipboard_append("vazio")
+        app._copy_error_line_text(f"phase:r999err1")
+        copiado = app.root.clipboard_get()
+        if "a.mp4" not in copiado or not copiado.startswith("3 arquivo(s) sem áudio"):
+            raise RuntimeError(f"o clique nao copiou a lista do tipo: {copiado!r}")
+
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._run_sequence = 0
+        app._batch_error_entries = {}
+        app._error_line_raw = {}
+        app._prep_counts = {}
+        app._activity_log_tail_following = True
+    finally:
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
+def _check_queue_count_line_color(app, root) -> None:
+    """Vacina do pedido de 13/09: "N arquivo(s) na fila." sai VERDE no log.
+
+    Escreve pela MESMA porta do app (`status_var` -> trace ->
+    `_append_activity_log`) e confere a tag da ultima linha no Tk de verdade.
+    """
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    anterior = app.status_var.get()
+    try:
+        root.deiconify()
+        root.update()
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_status_suppressed = 0
+        app._activity_log_tail_following = True
+        app.status_var.set("1405 arquivo(s) na fila.")
+        root.update()
+        # A linha e localizada pelo CONTEUDO: os temporizadores do app
+        # (poll da fila, relogio do assistente) podem escrever depois dela.
+        linhas = log.get("1.0", "end").splitlines()
+        encontradas = [
+            numero
+            for numero, conteudo in enumerate(linhas, start=1)
+            if "1405 arquivo(s) na fila" in conteudo
+        ]
+        if not encontradas:
+            raise RuntimeError(f"a mensagem da fila nao apareceu no log: {linhas}")
+        for numero in encontradas:
+            tags = log.tag_names(f"{numero}.0")
+            if "activity_step_done" not in tags:
+                raise RuntimeError(
+                    f"a linha da fila ({numero}) nao saiu verde (tags: {tags})"
+                )
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+    finally:
+        # Restaura a barra de status SEM passar pelo log de atividade.
+        app._set_activity_status(anterior, log=False)
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -1362,12 +1726,24 @@ def run(*, quiet: bool = False) -> int:
             # Ocorrencia usam os PNGs de assets/ (microfones vermelho/branco e
             # pausar) no lugar dos desenhos vetoriais.
             _check_live_mic_icons(app, root)
+            # Vacina do pedido de 13/09: a atualizacao do log de atividade nao
+            # pode mover a barra de rolagem (linha viva "Convertendo/
+            # Transcrevendo arquivos: N/M") enquanto o usuario le mais acima.
+            _check_activity_log_scroll(app, root)
+            # Vacina do pedido de 13/09: erros do lote em UMA linha por tipo (com
+            # contagem) e a linha de arquivos ja prontos, sem embaralhar a ordem.
+            _check_batch_log_lines(app, root)
+            # Vacina do pedido de 13/09: "N arquivo(s) na fila." sai verde no log
+            # assim que aparece (mesmo caminho: status_var -> trace -> log).
+            _check_queue_count_line_color(app, root)
             # Vacina do pedido de 11/09: o palco da previa das ferramentas
             # FFmpeg preenche o espaco disponivel, com zoom (roda) e arrasto.
             _check_ffmpeg_preview_stage(app, root)
             _check_ffmpeg_output_rows(app, root)
             _check_ffmpeg_cut_modes(app, root)
             _check_ffmpeg_encoder_selector(app, root)
+            _check_ffmpeg_timeline_markers(app, root)
+            _check_ffmpeg_stage_hints(app, root)
             _check_ffmpeg_area_selection(app, root)
 
             before = set(root.winfo_children())

@@ -7,6 +7,7 @@ import html
 import os
 from domain_models import (
     AudioJob,
+    job_has_material,
     job_problem_reason,
     job_problem_reason_for_model,
     job_transcript_for_model,
@@ -192,6 +193,16 @@ def write_html_report(jobs: list[AudioJob], html_path: Path, stats: list[tuple[s
         encoding="utf-8",
     )
     return problem_path
+
+
+def jobs_with_material(jobs: list[AudioJob], model_count: int = 1) -> list[AudioJob]:
+    """Só os jobs que já têm transcrição — base do relatório PARCIAL (cancelamento).
+
+    Um lote cancelado no meio não pode listar como "problema" tudo o que ainda
+    não tinha começado; o HTML parcial sai igual ao de sempre, só com o material
+    que existia na hora do cancelamento (regra do usuário, 13/09).
+    """
+    return [job for job in jobs if job_has_material(job, model_count)]
 
 
 def build_live_html(text: str) -> str:

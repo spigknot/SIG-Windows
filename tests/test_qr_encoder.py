@@ -228,6 +228,12 @@ class _ActivityLogStub:
     def insert(self, index, line, tag=None):
         self.lines.append((str(line), tag))
 
+    def index(self, _value):
+        return "1.0"
+
+    def dlineinfo(self, _index):
+        return (8, 8, 0, 13, 10)
+
     def see(self, index):
         pass
 

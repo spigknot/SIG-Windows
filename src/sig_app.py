@@ -188,6 +188,17 @@ from ui_widgets import (  # noqa: F401
     step_values,
     workable_step,
 )
+from batch_errors import (
+    batch_error_detail,
+    batch_error_text,
+    conversion_label,
+    PREPARATION_LABELS,
+    preparation_text,
+    transcription_label,
+    vad_label,
+    zip_label,
+)
+from batch_execution import cancellable_executor, cancellable_join, iter_completed
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
@@ -199,6 +210,7 @@ from media_files import (  # noqa: F401
     MIME_TYPES,
     is_video_file,
     is_transcription_ready_wav,
+    is_transcription_ready_compressed,
 )
 
 
@@ -208,6 +220,7 @@ from reporting import (  # noqa: F401
     html_document,
     write_html_report,
     build_live_html,
+    jobs_with_material,
 )
 
 
@@ -422,6 +435,8 @@ from domain_models import (  # noqa: F401
     _JOB_LIST_PLURALS,
     job_transcript_text,
     job_problem_reason,
+    job_has_material,
+    transcription_candidates,
     audio_job_attr,
     audio_job_set,
     job_transcript_for_model,
@@ -475,7 +490,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260912_001"
+APP_VERSION = "20260913_001"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -567,6 +582,10 @@ IMEI_HISTORY_COLLAPSED_LIMIT = 10
 # canvas nao muda.
 QRCODE_COPY_SCALE = 4
 QRCODE_COPY_BORDER = 0
+# Tempo máximo que o worker espera a resposta do aviso "gerar relatório parcial?"
+# depois do cancelamento (o usuário pode demorar; o limite só evita travar para
+# sempre se a janela morrer — regra do usuário, 13/09).
+PARTIAL_REPORT_WAIT_SECONDS = 600.0
 
 
 
@@ -980,6 +999,16 @@ class SigApp:
         self.uploaders: list[GraniteUploader] = []
         self.tree_items: dict[Path, str] = {}
         self.running = False
+        # Fechando a janela: o aviso de relatório parcial é pulado (a UI para de
+        # responder) — regra do usuário, 13/09.
+        self._app_closing = False
+        # Estado por execução do lote: linhas de erro agregadas por tipo, marcas
+        # das linhas vivas e contadores de arquivos já prontos/compactados.
+        self._run_sequence = 0
+        self._batch_job_total = 0
+        self._batch_error_entries: dict[str, dict] = {}
+        self._error_line_raw: dict[str, str] = {}
+        self._prep_counts: dict[str, dict] = {}
         self.last_html_path: Path | None = None
         self.live_state = "idle"
         self.live_thread: threading.Thread | None = None
@@ -1601,6 +1630,82 @@ class SigApp:
         finally:
             self._activity_status_suppressed = max(0, self._activity_status_suppressed - 1)
 
+    def _activity_log_last_line_visible(self, box) -> bool:
+        """A última linha do log está visível (usuário colado no fim)?
+
+        Medido no Tk 8.6: com a vista colada no fim, o `dlineinfo` da última
+        linha devolve a caixa dela; qualquer rolagem para cima — até uma única
+        linha — devolve None. No log ainda não desenhado (log de uma janela
+        oculta) não existe leitura em andamento: mantém a cauda pronta.
+        """
+        try:
+            info = box.dlineinfo(box.index("end-1c linestart"))
+        except tk.TclError:
+            return True
+        if info is not None:
+            return True
+        try:
+            return not bool(box.winfo_ismapped())
+        except tk.TclError:
+            return True
+
+    def _activity_log_follow_tail(self, box) -> bool:
+        """Estado do acompanhamento do fim do log; medir ANTES de escrever.
+
+        A escrita empurra a última linha para fora da vista, então a medição
+        precisa vir antes dela. O estado fica guardado para o reancoramento em
+        redimensionamentos (`_activity_log_on_configure`).
+        """
+        following = self._activity_log_last_line_visible(box)
+        self._activity_log_tail_following = following
+        return following
+
+    def _scroll_activity_log_tail(self, box, follow: bool) -> None:
+        """Único lugar que rola o log de atividade até o fim.
+
+        Regra do usuário (13/09): a atualização NÃO pode mover a barra quando o
+        usuário rolou para cima para ler — antes, cada atualização (inclusive a
+        linha viva "Convertendo/Transcrevendo arquivos: N/M") puxava a vista
+        para o fim e não dava para ler o log com o app trabalhando.
+        """
+        if not follow:
+            return
+        try:
+            box.see("end")
+        except tk.TclError:
+            pass
+
+    def _activity_log_on_configure(self, _event=None) -> None:
+        """Redimensionar a janela não pode fazer o log parar de acompanhar."""
+        box = getattr(self, "activity_log", None)
+        if box is None or not getattr(self, "_activity_log_tail_following", True):
+            return
+        self._scroll_activity_log_tail(box, True)
+
+    def _activity_log_on_user_scroll(self, _event=None) -> None:
+        """Rolagem do usuário (roda do mouse): mede o novo estado depois dela."""
+        root = getattr(self, "root", None)
+        if root is None:
+            return
+        try:
+            root.after_idle(self._activity_log_sync_tail_state)
+        except tk.TclError:
+            pass
+
+    def _activity_log_sync_tail_state(self) -> None:
+        box = getattr(self, "activity_log", None)
+        if box is None or not box.winfo_exists():
+            return
+        self._activity_log_tail_following = self._activity_log_last_line_visible(box)
+
+    def _activity_log_scrollbar_command(self, *args) -> None:
+        """Comando da barra de rolagem: rola e reavalia o acompanhamento."""
+        box = getattr(self, "activity_log", None)
+        if box is None:
+            return
+        box.yview(*args)
+        self._activity_log_tail_following = self._activity_log_last_line_visible(box)
+
     def _begin_activity_step(self, key: str, label: str):
         """Insere uma etapa atualizável no log, como as tarefas do FFmpeg."""
         box = getattr(self, "activity_log", None)
@@ -1617,10 +1722,11 @@ class SigApp:
                 box.tag_configure(tag, foreground=color)
         mark = f"activity_step_{uuid.uuid4().hex}"
         started_at = time.strftime("%H:%M:%S")
+        follow = self._activity_log_follow_tail(box)
         box.insert(END, f"{started_at}  {label}\n", "activity_step_running")
         box.mark_set(mark, "end-2l linestart")
         box.mark_gravity(mark, "left")
-        box.see(END)
+        self._scroll_activity_log_tail(box, follow)
         box.configure(state="disabled")
         self._activity_steps[key] = {"mark": mark, "started_at": started_at, "label": label}
 
@@ -1646,6 +1752,7 @@ class SigApp:
         label = step["label"]
         try:
             box.configure(state="normal")
+            follow = self._activity_log_follow_tail(box)
             start = box.index(mark)
             end = box.index(f"{mark} lineend +1c")
             box.delete(start, end)
@@ -1658,7 +1765,7 @@ class SigApp:
                 tag = tag or "activity_step_done"
             box.insert(start, text, tag)
             box.mark_unset(mark)
-            box.see(END)
+            self._scroll_activity_log_tail(box, follow)
             box.configure(state="disabled")
         except tk.TclError:
             try:
@@ -1811,6 +1918,10 @@ class SigApp:
             r"^ouvindo",
             r"pausada",
             r"^transcrição concluída",
+            # Fila pronta para iniciar (pedido de 13/09): "1405 arquivo(s) na
+            # fila." fica verde no instante em que a linha é escrita — o mesmo
+            # vale para a linha de remoção, que reporta o total na fila.
+            r"arquivo\(s\) na fila",
         )
         if any(re.search(pattern, lower) for pattern in success_patterns):
             return "activity_step_done"
@@ -1832,14 +1943,29 @@ class SigApp:
             self.activity_log.tag_configure("warning", foreground="#a65300")
         if "ffmpeg_command" not in self.activity_log.tag_names():
             self.activity_log.tag_configure("ffmpeg_command", foreground="#c99a2e")
+        follow = self._activity_log_follow_tail(self.activity_log)
         for part in message.splitlines():
             line = f"{time.strftime('%H:%M:%S')}  {part}\n"
             self.activity_log.insert(END, line, tag or self._log_message_tag(part))
-        self.activity_log.see(END)
+        self._scroll_activity_log_tail(self.activity_log, follow)
         self.activity_log.configure(state="disabled")
 
-    def _update_activity_line(self, key: str, message: str, tag: str | None = None):
-        """Linha viva do activity log: atualiza a MESMA linha (por chave) sem criar novas."""
+    def _update_activity_line(
+        self,
+        key: str,
+        message: str,
+        tag: str | None = None,
+        *,
+        timestamp: str | None = None,
+        in_place: bool = False,
+    ):
+        """Linha viva do activity log: atualiza a MESMA linha (por chave) sem criar novas.
+
+        `timestamp` preserva o horário da PRIMEIRA ocorrência (linhas de erro e de
+        "já estavam prontos"). `in_place` reescreve a linha NO LUGAR em vez de
+        jogá-la para o fim a cada atualização — sem isso, várias linhas vivas ao
+        mesmo tempo (erros por tipo + progresso) ficariam trocando de posição.
+        """
         box = getattr(self, "activity_log", None)
         if box is None or not box.winfo_exists():
             return
@@ -1847,7 +1973,12 @@ class SigApp:
         if "vad_total" not in box.tag_names():
             box.tag_configure("vad_total", foreground="#0a7a2f")
         line_tag = f"phase:{key}"
-        line = f"{time.strftime('%H:%M:%S')}  {message}\n"
+        line = f"{timestamp or time.strftime('%H:%M:%S')}  {message}\n"
+        follow = self._activity_log_follow_tail(box)
+        if in_place and self._replace_live_line(box, line_tag, line, tag):
+            self._scroll_activity_log_tail(box, follow)
+            box.configure(state="disabled")
+            return
         try:
             box.delete(f"{line_tag}.first", f"{line_tag}.last")
         except tk.TclError:
@@ -1856,8 +1987,101 @@ class SigApp:
             box.insert("end", line, (line_tag, tag))
         else:
             box.insert("end", line, line_tag)
-        box.see("end")
+        self._scroll_activity_log_tail(box, follow)
         box.configure(state="disabled")
+
+    def _replace_live_line(self, box, line_tag: str, text: str, tag: str | None) -> bool:
+        """Reescreve a linha viva NO LUGAR usando a própria tag.
+
+        `Text.replace` troca o texto do intervalo da tag e reaplica a tag no texto
+        novo: a linha fica onde está (ordem estável) e a tag continua válida para
+        a próxima atualização. Medições que descartaram as alternativas: `tag.first`
+        levanta TclError depois de apagar o texto e a marca com "end-2l linestart"
+        cai na linha errada quando há VÁRIAS linhas vivas (a atualização seguinte
+        corrompia o log). Antes de existir texto com a tag, a linha é criada no fim
+        (append) e a tag passa a valer.
+        """
+        try:
+            ranges = box.tag_ranges(line_tag)
+        except tk.TclError:
+            return False
+        if len(ranges) < 2:
+            return False
+        tags = (line_tag, tag) if tag else (line_tag,)
+        try:
+            # A lista de tags vai como UM argumento (tupla): o `replace` do Tk
+            # aceita só uma lista e, com argumentos extras, o segundo vira TEXTO
+            # no log (medido: "activity_step_error" aparecia dentro da linha).
+            box.replace(str(ranges[0]), str(ranges[-1]), text, tags)
+        except tk.TclError:
+            return False
+        return True
+
+    def _register_batch_error(self, label: str, item: str = "") -> None:
+        """Uma linha VERMELHA viva por TIPO de erro (regra do usuário, 13/09).
+
+        Antes era uma linha por arquivo: numa fila de 1405 vídeos sem áudio o log
+        virava uma parede vermelha e não dava mais para ler nada. A contagem e o
+        horário da PRIMEIRA ocorrência ficam na mesma linha; clicar nela copia a
+        lista de arquivos daquele tipo (o detalhe não se perde).
+        """
+        entries = getattr(self, "_batch_error_entries", None)
+        if entries is None:
+            entries = {}
+            self._batch_error_entries = entries
+        entry = entries.get(label)
+        if entry is None:
+            entry = {
+                # Slug único por execução: sem isso o fallback por tag apagaria a
+                # linha de erro de uma execução anterior (mesmo nome de tag).
+                "slug": f"r{getattr(self, '_run_sequence', 0)}err{len(entries) + 1}",
+                "count": 0,
+                "started_at": time.strftime("%H:%M:%S"),
+                "items": [],
+            }
+            entries[label] = entry
+        entry["count"] += 1
+        if item:
+            entry["items"].append(str(item))
+        raw = getattr(self, "_error_line_raw", None)
+        if raw is None:
+            raw = {}
+            self._error_line_raw = raw
+        raw[f"phase:{entry['slug']}"] = batch_error_detail(entry["count"], label, entry["items"])
+        self._update_activity_line(
+            entry["slug"],
+            batch_error_text(entry["count"], label),
+            "activity_step_error",
+            timestamp=entry["started_at"],
+            in_place=True,
+        )
+
+    def _register_preparation(self, kind: str, total: int) -> None:
+        """Linha NORMAL (sem vermelho): "13/50 arquivos já estavam prontos".
+
+        Só aparece quando existe algum arquivo já no formato pedido (regra do
+        usuário, 13/09). O total é o da fila do lote.
+        """
+        if kind not in PREPARATION_LABELS:
+            return
+        counts = getattr(self, "_prep_counts", None)
+        if counts is None:
+            counts = {}
+            self._prep_counts = counts
+        entry = counts.get(kind)
+        if entry is None:
+            entry = {"count": 0, "started_at": time.strftime("%H:%M:%S"), "total": int(total or 0)}
+            counts[kind] = entry
+        entry["count"] += 1
+        if total:
+            entry["total"] = int(total)
+        self._update_activity_line(
+            f"r{getattr(self, '_run_sequence', 0)}prep:{kind}",
+            preparation_text(kind, entry["count"], entry["total"]),
+            None,
+            timestamp=entry["started_at"],
+            in_place=True,
+        )
 
     def _render_sync_file_line(self, path: str, display: str, tag: str | None) -> None:
         """Atualiza a linha viva de um arquivo do download (padrão do VAD).
@@ -1878,6 +2102,7 @@ class SigApp:
             line = f"{time.strftime('%H:%M:%S')}  Baixando {path}\n"
         else:
             line = f"{time.strftime('%H:%M:%S')}  Baixando {path} - {display}\n"
+        follow = self._activity_log_follow_tail(box)
         try:
             box.delete(f"{line_tag}.first", f"{line_tag}.last")
         except tk.TclError:
@@ -1885,7 +2110,7 @@ class SigApp:
         box.insert("end", line, (line_tag, tag or ()))
         if display == "100%" and tag:
             self._sync_file_marks.pop(path, None)
-        box.see("end")
+        self._scroll_activity_log_tail(box, follow)
         box.configure(state="disabled")
 
     def _copy_ffmpeg_command_block(self, box) -> bool:
@@ -1907,6 +2132,19 @@ class SigApp:
             return False
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(commands))
+        return True
+
+    def _copy_error_line_text(self, block_tag: str) -> bool:
+        """Copia o cabeçalho + a lista de arquivos de uma linha de erro agregada.
+
+        É o que o clique numa linha vermelha de tipo de erro copia (para o
+        detalhe por arquivo não se perder no log enxuto).
+        """
+        detail = (getattr(self, "_error_line_raw", None) or {}).get(block_tag)
+        if not detail:
+            return False
+        self.root.clipboard_clear()
+        self.root.clipboard_append(detail)
         return True
 
     def _copy_params_block(self, box, block_tag: str) -> bool:
@@ -1951,10 +2189,11 @@ class SigApp:
             box.tag_configure("warning", foreground="#a65300")
         text = format_ws_params_block(title, params)
         box.configure(state="normal")
+        follow = self._activity_log_follow_tail(box)
         for part in text.splitlines():
             line = f"{time.strftime('%H:%M:%S')}  {part}\n"
             box.insert(END, line, ("warning", block_tag))
-        box.see(END)
+        self._scroll_activity_log_tail(box, follow)
         box.configure(state="disabled")
 
     def _activity_log_click(self, event):
@@ -1972,6 +2211,11 @@ class SigApp:
             block_tags = [tag for tag in tags if tag.startswith(PARAMS_BLOCK_TAG_PREFIX)]
             if block_tags and self._copy_params_block(box, block_tags[0]):
                 return
+            # Linha de erro AGREGADA: copia o cabeçalho + a lista de arquivos do
+            # tipo (o detalhe por arquivo não fica mais no log — fica aqui).
+            for tag in tags:
+                if self._copy_error_line_text(tag):
+                    return
             # Amarelo: warning, activity_step_warning, ffmpeg_command.
             # Vermelho: error, activity_step_error.
             if tags & {
@@ -2389,7 +2633,12 @@ class SigApp:
         activity_box.pack(fill=BOTH, expand=True, pady=(10, 0))
         self.activity_box = activity_box
         self.activity_log = Text(activity_box, width=1, wrap="none", state="disabled", font=("Consolas", 8), background="#ffffff", foreground="#33403e", relief="solid", borderwidth=1, padx=7, pady=7)
-        activity_scroll = ttk.Scrollbar(activity_box, orient="vertical", command=self.activity_log.yview)
+        # Segue o fim do log enquanto o usuário não levar a barra para cima
+        # (regra do usuário, 13/09: a atualização não pode mover a barra).
+        self._activity_log_tail_following = True
+        activity_scroll = ttk.Scrollbar(
+            activity_box, orient="vertical", command=self._activity_log_scrollbar_command
+        )
         activity_hscroll = ttk.Scrollbar(activity_box, orient="horizontal", command=self.activity_log.xview)
         self.activity_log.configure(
             yscrollcommand=activity_scroll.set,
@@ -2401,6 +2650,11 @@ class SigApp:
         activity_scroll.grid(row=0, column=1, sticky="ns")
         activity_hscroll.grid(row=1, column=0, sticky="ew")
         self.activity_log.bind("<Button-1>", self._activity_log_click)
+        # Rolagem do usuário (roda do mouse sobre o log ou sobre a barra) e o
+        # redimensionamento da janela reavaliam o acompanhamento do fim.
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.activity_log.bind(sequence, self._activity_log_on_user_scroll, add="+")
+        self.activity_log.bind("<Configure>", self._activity_log_on_configure, add="+")
 
         self.live_tab = ttk.Frame(self.tab_content, padding=(14, 2, 14, 14))
         self.files_tab = ttk.Frame(self.tab_content, padding=14)
@@ -12661,6 +12915,12 @@ try {
             self._refresh_zip_controls()
             self.status_var.set("Multi model usa requisições individuais; o envio ZIP foi desativado.")
         self.cancel_event.clear()
+        # Cada execução tem o seu próprio conjunto de linhas vivas (erros por
+        # tipo, arquivos já prontos): as antigas ficam no log como histórico.
+        self._run_sequence = int(getattr(self, "_run_sequence", 0)) + 1
+        self._batch_error_entries = {}
+        self._error_line_raw = {}
+        self._prep_counts = {}
         self.uploader = create_transcription_uploader(self.cancel_event, workflow_settings)
         self.uploaders = [self.uploader]
         self.running = True
@@ -12795,6 +13055,8 @@ try {
         # cada comando FFmpeg nem com o resumo de cada arquivo — a linha viva
         # "Convertendo arquivos: N/M" já informa o progresso (regra do usuário).
         self._suppress_ffmpeg_command_log = len(jobs) > 1
+        # Total da fila: a linha "N/M arquivos já estavam prontos" usa este M.
+        self._batch_job_total = len(jobs)
         self._queue("activity_step_finish", "prepare", time.perf_counter() - getattr(self, "_prepare_started", time.perf_counter()))
 
         try:
@@ -12859,17 +13121,79 @@ try {
         except Cancelled:
             for job in jobs:
                 if not job.transcription and not job.error:
-                    job.error = "Cancelado pelo usuário."
+                    # NÃO marca job.error: o relatório parcial sai só com o que já
+                    # foi transcrito — o que nem começou não é "problema".
                     if job.txt_path:
-                        job.txt_path.write_text(job.error, encoding="utf-8")
+                        job.txt_path.write_text("Cancelado pelo usuário.", encoding="utf-8")
                     self._queue("job", job.original_path, "Cancelado")
             self._queue("status", "Cancelado.")
+            self._offer_partial_report(jobs, mode, settings, process_started, send_zip, zip_level, temp_dir)
         except Exception as exc:
             self._queue("status", f"Erro: {exc}")
         finally:
             self._queue("done")
 
+    def _offer_partial_report(
+        self,
+        jobs: list[AudioJob],
+        mode: str,
+        settings: dict,
+        process_started: float,
+        send_zip: bool,
+        zip_level: str,
+        temp_dir: Path,
+    ) -> None:
+        """Oferece o relatório parcial do que já foi transcrito (regra do usuário, 13/09).
+
+        O aviso é mostrado pela UI (o worker só espera a resposta); o HTML sai no
+        MESMO caminho e formato do relatório normal, só com o material existente:
+        os arquivos que nem começaram a ser transcritos não entram.
+        """
+        if getattr(self, "_app_closing", False):
+            return
+        model_count = 1
+        if settings.get("_multi_transcription"):
+            model_count = max(1, len(settings.get("_multi_transcription_models") or []) or 1)
+        parciais = jobs_with_material(jobs, model_count)
+        if not parciais:
+            # Nada transcrito ainda: não há o que oferecer.
+            return
+        decisao: list[bool] = [False]
+        pronto = threading.Event()
+        self._queue("partial_report_offer", decisao, pronto)
+        if not pronto.wait(timeout=PARTIAL_REPORT_WAIT_SECONDS):
+            return
+        if not decisao[0]:
+            return
+        html_path = temp_dir / "transcricoes.html"
+        try:
+            stats = self._batch_report_stats(
+                parciais, mode, settings, process_started, send_zip, zip_level, None
+            )
+            write_html_report(parciais, html_path, stats)
+        except Exception as exc:
+            self._queue("status", f"Falha ao gerar o relatório parcial: {exc}")
+            return
+        self._queue("html_ready", str(html_path))
+        self._queue("status", f"Relatório parcial gerado em {html_path}")
+        self._show_folder_button(visible=True)
+
     # ── VAD ──────────────────────────────────────────────────────────
+
+    def _note_vad_problem(self, job: AudioJob, detail: str) -> None:
+        """Falha do VAD NÃO descarta o arquivo (regra do usuário, 13/09).
+
+        O VAD é filtro, não requisito: o arquivo convertido segue para a
+        transcrição como está, sem VAD. O motivo fica em `job.vad_error` e o log
+        ganha UMA linha por tipo ("N arquivo(s) com erro no VAD") — antes era
+        uma linha vermelha por arquivo E o arquivo ficava de fora da transcrição.
+        """
+        job.vad_error = str(detail or "erro não informado pelo worker")
+        if job.upload_path is None and job.converted_path is not None:
+            if job.converted_path.exists():
+                job.upload_path = job.converted_path
+        self._queue("job", job.original_path, "Erro no VAD")
+        self._queue("batch_error", vad_label(job.vad_error), job.original_name)
 
     def _run_vad_on_jobs(self, jobs: list, vad_mode: str, settings: dict):
         """Gera WAVs filtrados e os define como arquivos de upload."""
@@ -12966,15 +13290,9 @@ try {
                     self._queue("job", job.original_path, "VAD aplicado")
                     self._queue("tree_size", job.original_path, self._job_size_column_text(job))
                 else:
-                    job.error = "ERRO VAD: arquivo filtrado vazio"
-                    self._queue("job", job.original_path, "Erro no VAD")
+                    self._note_vad_problem(job, "arquivo filtrado vazio")
             else:
-                detail = str(item.get("error", "erro não informado pelo worker"))
-                job.vad_error = detail
-                job.error = f"ERRO VAD: {detail}"
-                if job.txt_path:
-                    job.txt_path.write_text(job.error, encoding="utf-8")
-                self._queue("job", job.original_path, "Erro no VAD")
+                self._note_vad_problem(job, str(item.get("error", "erro não informado pelo worker")))
             completed += 1
             self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
 
@@ -13023,15 +13341,17 @@ try {
             if input_path in completed_inputs:
                 continue
             detail = worker_error or f"worker encerrado sem resultado (código {process.returncode})"
-            job.vad_error = detail
-            job.error = f"ERRO VAD: {detail}"
-            if job.txt_path:
-                job.txt_path.write_text(job.error, encoding="utf-8")
-            self._queue("job", job.original_path, "Erro no VAD")
+            self._note_vad_problem(job, detail)
             completed += 1
             self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
-        if all(job.error for job in eligible):
-            raise RuntimeError("o VAD falhou em todos os arquivos")
+        if eligible and all(job.vad_error for job in eligible):
+            # VAD é filtro, não requisito: os arquivos seguem para a transcrição
+            # sem VAD (regra do usuário, 13/09) — antes a fila inteira abortava.
+            self._queue(
+                "activity",
+                "O VAD falhou em todos os arquivos; seguindo para a transcrição sem VAD.",
+                "warning",
+            )
 
     def _queue_phase_progress(self, label: str, done: int, total: int, phase_key: str | None = None, started: float | None = None):
         percent = int((done / max(total, 1) * 100) + 0.5)
@@ -13060,19 +13380,33 @@ try {
         else:
             self._queue("status", message)
 
-    def _queue_pipeline_progress(self, converted_done: int, total: int, transcribed_done: int, convert_started: float, transcribe_started: float):
-        convert_percent = int((converted_done / max(total, 1) * 100) + 0.5)
-        transcribe_percent = int((transcribed_done / max(total, 1) * 100) + 0.5)
-        current_percent = convert_percent if converted_done < total else transcribe_percent
+    def _queue_pipeline_progress(
+        self,
+        converted_done: int,
+        convert_total: int,
+        transcribed_done: int,
+        transcribe_total: int,
+        convert_started: float,
+        transcribe_started: float,
+    ):
+        """Linhas do modo pipeline (conversão e transcrição ao mesmo tempo).
+
+        Cada linha tem o SEU total: os dois caem conforme arquivos saem da fila
+        (falha de conversão sai das duas; arquivo já pronto sai só da conversão,
+        porque continua sendo transcrito) — regra do usuário, 13/09.
+        """
+        convert_percent = int((converted_done / max(convert_total, 1) * 100) + 0.5)
+        transcribe_percent = int((transcribed_done / max(transcribe_total, 1) * 100) + 0.5)
+        current_percent = convert_percent if converted_done < convert_total else transcribe_percent
         self._queue("progress", current_percent)
-        if converted_done >= total:
-            self._queue("activity_line", "convert", f"Convertendo arquivos: {converted_done}/{total} ({format_duration(time.perf_counter() - convert_started)})", "vad_total")
+        if converted_done >= convert_total:
+            self._queue("activity_line", "convert", f"Convertendo arquivos: {converted_done}/{convert_total} ({format_duration(time.perf_counter() - convert_started)})", "vad_total")
         else:
-            self._queue("activity_line", "convert", f"Convertendo arquivos: {converted_done}/{total} ({convert_percent}%)", None)
-        if transcribed_done >= total:
-            self._queue("activity_line", "transcribe", f"Transcrevendo arquivos: {transcribed_done}/{total} ({format_duration(time.perf_counter() - transcribe_started)})", "vad_total")
+            self._queue("activity_line", "convert", f"Convertendo arquivos: {converted_done}/{convert_total} ({convert_percent}%)", None)
+        if transcribed_done >= transcribe_total:
+            self._queue("activity_line", "transcribe", f"Transcrevendo arquivos: {transcribed_done}/{transcribe_total} ({format_duration(time.perf_counter() - transcribe_started)})", "vad_total")
         else:
-            self._queue("activity_line", "transcribe", f"Transcrevendo arquivos: {transcribed_done}/{total} ({transcribe_percent}%)", None)
+            self._queue("activity_line", "transcribe", f"Transcrevendo arquivos: {transcribed_done}/{transcribe_total} ({transcribe_percent}%)", None)
 
     def _batch_report_stats(
         self,
@@ -13169,6 +13503,7 @@ try {
             if job.txt_path:
                 job.txt_path.write_text(job.error, encoding="utf-8")
             self._queue("job", job.original_path, "Erro no ZIP")
+            self._queue("batch_error", zip_label(detail), job.original_name)
 
     def _run_zip_transcription(
         self,
@@ -13178,7 +13513,7 @@ try {
         raw_dir: Path,
         zip_level: str,
     ) -> list[tuple[str, str]]:
-        candidates = [job for job in jobs if not job.error]
+        candidates = transcription_candidates(jobs)
         total = len(candidates)
         if total == 0:
             return [("Arquivos no ZIP", "0")]
@@ -13192,6 +13527,7 @@ try {
                 if job.txt_path:
                     job.txt_path.write_text(job.error, encoding="utf-8")
                 self._queue("job", job.original_path, "Erro na transcrição")
+                self._queue("batch_error", conversion_label(job.error), job.original_name)
         if not zip_jobs:
             return [("Arquivos no ZIP", "0")]
 
@@ -13262,6 +13598,10 @@ try {
             )
             request_elapsed = time.perf_counter() - request_started
             response_size = len(raw)
+            # Cancelar vale para a resposta inteira do servidor: não processar
+            # (nem esperar) o que chegou depois do cancelamento.
+            if self.cancel_event.is_set():
+                raise Cancelled()
             if status != 200:
                 preview = raw.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"HTTP {status}: {preview[:500]}")
@@ -13325,20 +13665,24 @@ try {
         ]
 
     def _run_conversions(self, jobs: list[AudioJob], settings: dict, next_stage_vad: bool = False):
-        total = len(jobs)
+        base_total = len(jobs)
         done = 0
+        # O total mostrado CAI a cada arquivo que sai da fila de verdade — falha de
+        # conversão ou arquivo que já estava no formato pedido: "Convertendo
+        # arquivos: 500/900 (55%)" (regra do usuário, 13/09). Com isso a linha
+        # fecha em N/N exatamente quando tudo terminou (done = total - pendentes).
+        excluidos = 0
         # Mede a conversão desde o início do lote (quando "Preparando fila"
         # apareceu) para o tempo mostrado bater com o relógio do log
         # (preparação + conversão), sem "sumir" com a preparação.
         convert_started = getattr(self, "_prepare_started", time.perf_counter())
-        self._queue_phase_progress("Convertendo arquivos", done, total, "convert", convert_started)
+        self._queue_phase_progress("Convertendo arquivos", done, base_total, "convert", convert_started)
         convert_workers = max(1, int(settings.get("convert_parallel") or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=convert_workers) as executor:
+        with cancellable_executor(convert_workers) as executor:
             future_map = {executor.submit(self._convert_job, job): job for job in jobs}
-            for future in concurrent.futures.as_completed(future_map):
+            for future in iter_completed(future_map, cancel_event=self.cancel_event):
                 job = future_map[future]
-                if self.cancel_event.is_set():
-                    raise Cancelled()
+                excluido = False
                 try:
                     future.result()
                     self._queue(
@@ -13352,14 +13696,30 @@ try {
                     job.error = f"ERRO conversão: {exc}"
                     job.txt_path.write_text(job.error, encoding="utf-8")
                     self._queue("job", job.original_path, self._conversion_failure_status(exc))
-                    self._queue("activity", f"{job.original_name}: {job.error}", "activity_step_error")
-                done += 1
-                self._queue_phase_progress("Convertendo arquivos", done, total, "convert", convert_started)
+                    # Uma linha vermelha por TIPO de erro (com a contagem), não
+                    # uma por arquivo (regra do usuário, 13/09).
+                    self._queue("batch_error", conversion_label(job.error), job.original_name)
+                    excluido = True
+                if job.preparation:
+                    # Já estava no formato pedido: não conta como conversão.
+                    excluido = True
+                if excluido:
+                    excluidos += 1
+                else:
+                    done += 1
+                self._queue_phase_progress(
+                    "Convertendo arquivos", done, max(0, base_total - excluidos), "convert", convert_started
+                )
 
     def _run_pipelined_conversions_and_transcriptions(self, jobs: list[AudioJob], settings: dict):
-        total = len(jobs)
+        base_total = len(jobs)
         converted_done = 0
         transcribed_done = 0
+        # Arquivos que saem da fila de verdade: falha de conversão sai das DUAS
+        # linhas (não vai para a transcrição); arquivo já no formato pedido sai só
+        # da conversão (continua indo para a transcrição) — regra do usuário, 13/09.
+        fora_da_conversao = 0
+        fora_da_transcricao = 0
         progress_lock = threading.Lock()
         converted_queue: queue.Queue = queue.Queue()
         sentinel = object()
@@ -13367,16 +13727,37 @@ try {
         convert_started = time.perf_counter()
         transcribe_started = time.perf_counter()
 
-        self._queue_pipeline_progress(converted_done, total, transcribed_done, convert_started, transcribe_started)
+        self._queue_pipeline_progress(
+            converted_done, base_total, transcribed_done, base_total, convert_started, transcribe_started
+        )
 
-        def update_progress(convert_delta: int = 0, transcribe_delta: int = 0):
-            nonlocal converted_done, transcribed_done
+        def update_progress(
+            convert_delta: int = 0,
+            transcribe_delta: int = 0,
+            *,
+            fora_da_conversao_agora: bool = False,
+            fora_da_transcricao_agora: bool = False,
+        ):
+            nonlocal converted_done, transcribed_done, fora_da_conversao, fora_da_transcricao
             with progress_lock:
                 converted_done += convert_delta
                 transcribed_done += transcribe_delta
+                if fora_da_conversao_agora:
+                    fora_da_conversao += 1
+                if fora_da_transcricao_agora:
+                    fora_da_transcricao += 1
                 current_converted = converted_done
                 current_transcribed = transcribed_done
-            self._queue_pipeline_progress(current_converted, total, current_transcribed, convert_started, transcribe_started)
+                total_convert = max(0, base_total - fora_da_conversao)
+                total_transcribe = max(0, base_total - fora_da_transcricao)
+            self._queue_pipeline_progress(
+                current_converted,
+                total_convert,
+                current_transcribed,
+                total_transcribe,
+                convert_started,
+                transcribe_started,
+            )
 
         def convert_runner(job: AudioJob):
             if self.cancel_event.is_set():
@@ -13384,7 +13765,12 @@ try {
             try:
                 self._convert_job(job)
                 self._queue("job", job.original_path, "Convertido")
-                update_progress(convert_delta=1)
+                if job.preparation:
+                    # Já estava no formato pedido: sai do total da conversão, mas
+                    # segue para a transcrição.
+                    update_progress(fora_da_conversao_agora=True)
+                else:
+                    update_progress(convert_delta=1)
                 converted_queue.put(job)
             except Cancelled:
                 raise
@@ -13392,8 +13778,8 @@ try {
                 job.error = f"ERRO conversão: {exc}"
                 job.txt_path.write_text(job.error, encoding="utf-8")
                 self._queue("job", job.original_path, self._conversion_failure_status(exc))
-                self._queue("activity", f"{job.original_name}: {job.error}", "activity_step_error")
-                update_progress(convert_delta=1, transcribe_delta=1)
+                self._queue("batch_error", conversion_label(job.error), job.original_name)
+                update_progress(fora_da_conversao_agora=True, fora_da_transcricao_agora=True)
 
         def transcribe_worker():
             while True:
@@ -13420,22 +13806,20 @@ try {
 
         transcribe_workers = max(1, int(settings.get("transcribe_parallel") or 1))
         convert_workers = max(1, int(settings.get("convert_parallel") or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=transcribe_workers) as transcribe_executor:
+        with cancellable_executor(transcribe_workers) as transcribe_executor:
             transcribe_futures = [
                 transcribe_executor.submit(transcribe_worker)
                 for _ in range(transcribe_workers)
             ]
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=convert_workers) as convert_executor:
+                with cancellable_executor(convert_workers) as convert_executor:
                     convert_futures = [convert_executor.submit(convert_runner, job) for job in jobs]
-                    for future in concurrent.futures.as_completed(convert_futures):
-                        if self.cancel_event.is_set():
-                            raise Cancelled()
+                    for future in iter_completed(convert_futures, cancel_event=self.cancel_event):
                         future.result()
                 for _ in transcribe_futures:
                     converted_queue.put(sentinel)
-                converted_queue.join()
-                for future in concurrent.futures.as_completed(transcribe_futures):
+                cancellable_join(converted_queue, cancel_event=self.cancel_event)
+                for future in iter_completed(transcribe_futures, cancel_event=self.cancel_event):
                     future.result()
             except Cancelled:
                 self.cancel_event.set()
@@ -13489,29 +13873,15 @@ try {
         self._queue("job", job.original_path, "Convertendo")
         conversion_started = time.perf_counter()
 
-        # Evita recodificar WAV PCM 16 kHz mono/16-bit que já está pronto.
+        # Evita recodificar o que JÁ está no formato pedido: WAV PCM 16 kHz
+        # mono/16-bit ("Enviar pronto") ou Ogg/Opus 16 kHz mono ("Enviar
+        # compactado"). Cada caso alimenta a linha "N/M arquivos já estavam
+        # prontos/compactados" no log (regra do usuário, 13/09).
         if job.mode == "ready" and is_transcription_ready_wav(job.original_path):
-            job.converted_path.parent.mkdir(parents=True, exist_ok=True)
-            if job.converted_path.exists():
-                job.converted_path.unlink()
-            try:
-                os.link(job.original_path, job.converted_path)
-                preparation = "Arquivo já pronto | sem recodificação (link local)"
-            except OSError:
-                shutil.copy2(job.original_path, job.converted_path)
-                preparation = "Arquivo já pronto | sem recodificação (cópia local)"
-            job.conversion_elapsed = time.perf_counter() - conversion_started
-            job.upload_path = job.converted_path
-            conversion_summary = (
-                f"{preparation} | {format_bytes(job.original_path.stat().st_size)} | "
-                f"{format_duration(job.conversion_elapsed)}"
-            )
-            if job.log_path:
-                try:
-                    job.log_path.write_text(conversion_summary + "\n", encoding="utf-8")
-                except OSError:
-                    pass
-            self._queue("tree_size", job.original_path, self._job_size_column_text(job))
+            self._stage_without_reencoding(job, "pronto", "Arquivo já pronto | sem recodificação")
+            return
+        if job.mode == "compact" and is_transcription_ready_compressed(job.original_path):
+            self._stage_without_reencoding(job, "compactado", "Arquivo já compactado | sem recodificação")
             return
 
         ffmpeg = app_base_dir() / "ffmpeg.exe"
@@ -13603,11 +13973,43 @@ try {
         # VAD removido da pipeline principal
 
 
+    def _stage_without_reencoding(self, job: AudioJob, kind: str, preparation: str) -> None:
+        """Encaminha o arquivo que já está no formato pedido, sem reencode.
+
+        Link local quando dá (mesmo volume), cópia quando não dá. Marca
+        `job.preparation` e avisa a UI para a linha "N/M arquivos já estavam
+        prontos/compactados" (regra do usuário, 13/09).
+        """
+        started = time.perf_counter()
+        job.converted_path.parent.mkdir(parents=True, exist_ok=True)
+        if job.converted_path.exists():
+            job.converted_path.unlink()
+        try:
+            os.link(job.original_path, job.converted_path)
+            detail = "link local"
+        except OSError:
+            shutil.copy2(job.original_path, job.converted_path)
+            detail = "cópia local"
+        job.preparation = kind
+        job.conversion_elapsed = time.perf_counter() - started
+        job.upload_path = job.converted_path
+        conversion_summary = (
+            f"{preparation} ({detail}) | {format_bytes(job.original_path.stat().st_size)} | "
+            f"{format_duration(job.conversion_elapsed)}"
+        )
+        if job.log_path:
+            try:
+                job.log_path.write_text(conversion_summary + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        self._queue("tree_size", job.original_path, self._job_size_column_text(job))
+        self._queue("prep_count", kind, int(getattr(self, "_batch_job_total", 0) or 0))
+
     def _run_transcriptions(self, jobs: list[AudioJob], settings: dict):
         if settings.get("_multi_transcription") and len(settings.get("_multi_transcription_models") or []) >= 2:
             self._run_multi_transcriptions(jobs, settings)
             return
-        candidates = [job for job in jobs if not job.error]
+        candidates = transcription_candidates(jobs)
         total = len(candidates)
         if total == 0:
             return
@@ -13620,15 +14022,13 @@ try {
             nonlocal done
             if not group:
                 return
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, parallelism)) as executor:
+            with cancellable_executor(max(1, parallelism)) as executor:
                 future_map = {
                     executor.submit(self._transcribe_job, job, url, None, settings): job
                     for job in group
                 }
-                for future in concurrent.futures.as_completed(future_map):
+                for future in iter_completed(future_map, cancel_event=self.cancel_event):
                     job = future_map[future]
-                    if self.cancel_event.is_set():
-                        raise Cancelled()
                     try:
                         future.result()
                         self._queue("job", job.original_path, "Transcrito")
@@ -13638,6 +14038,7 @@ try {
                         job.error = f"ERRO transcrição: {exc}"
                         job.txt_path.write_text(job.error, encoding="utf-8")
                         self._queue("job", job.original_path, "Erro na transcrição")
+                        self._queue("batch_error", transcription_label(str(exc)), job.original_name)
                     done += 1
                     self._queue_phase_progress("Transcrevendo arquivos", done, total, "transcribe", transcribe_started)
 
@@ -13675,7 +14076,7 @@ try {
             run_group(large, 1)
 
     def _run_multi_transcriptions(self, jobs: list[AudioJob], settings: dict):
-        candidates = [job for job in jobs if not job.error]
+        candidates = transcription_candidates(jobs)
         total = len(candidates)
         if total == 0:
             return
@@ -13738,7 +14139,7 @@ try {
             def run_group(group: list[AudioJob], parallelism: int):
                 if not group:
                     return
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, parallelism)) as executor:
+                with cancellable_executor(max(1, parallelism)) as executor:
                     future_map = {
                         executor.submit(
                             self._transcribe_job,
@@ -13750,10 +14151,8 @@ try {
                         ): job
                         for job in group
                     }
-                    for future in concurrent.futures.as_completed(future_map):
+                    for future in iter_completed(future_map, cancel_event=self.cancel_event):
                         job = future_map[future]
-                        if self.cancel_event.is_set():
-                            raise Cancelled()
                         try:
                             future.result()
                         except Cancelled:
@@ -13764,6 +14163,11 @@ try {
                             txt_path = job_attr(job, "txt_path", index)
                             if txt_path:
                                 txt_path.write_text(detail, encoding="utf-8")
+                            self._queue(
+                                "batch_error",
+                                transcription_label(str(exc), model_labels[index - 1]),
+                                job.original_name,
+                            )
                         finally:
                             update_progress(index)
 
@@ -13785,9 +14189,9 @@ try {
             run_group(medium, min(configured_parallelism, 2))
             run_group(large, 1)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(model_settings)) as executor:
+        with cancellable_executor(len(model_settings)) as executor:
             futures = [executor.submit(model_runner, index) for index in range(1, len(model_settings) + 1)]
-            for future in concurrent.futures.as_completed(futures):
+            for future in iter_completed(futures, cancel_event=self.cancel_event):
                 future.result()
 
         for job in candidates:
@@ -14074,6 +14478,28 @@ try {
                 elif kind == "activity_line":
                     key, text, tag = message[1], message[2], message[3] if len(message) > 3 else None
                     self._update_activity_line(key, text, tag)
+                elif kind == "batch_error":
+                    label = message[1]
+                    item = message[2] if len(message) > 2 else ""
+                    self._register_batch_error(label, item)
+                elif kind == "prep_count":
+                    kind_label = message[1]
+                    total = message[2] if len(message) > 2 else 0
+                    self._register_preparation(kind_label, total)
+                elif kind == "partial_report_offer":
+                    # Aviso do relatório parcial (cancelamento): a decisão volta
+                    # para o worker pelo Event, que é quem escreve o HTML.
+                    decisao, pronto = message[1], message[2]
+                    try:
+                        decisao[0] = bool(
+                            messagebox.askyesno(
+                                "sig",
+                                "Cancelado.\n\nDeseja gerar um relatório parcial (tabela HTML) "
+                                "com o que já foi transcrito?",
+                            )
+                        )
+                    finally:
+                        pronto.set()
                 elif kind == "activity_step_finish":
                     key, elapsed = message[1], float(message[2])
                     self._finish_activity_step(key, elapsed)
@@ -14613,6 +15039,7 @@ try {
                 pass
 
     def _on_close(self):
+        self._app_closing = True
         self.live_recovery_cancel_event.set()
         self.live_audio_recovery_available = False
         self._set_live_audio_recovery_visible(False)

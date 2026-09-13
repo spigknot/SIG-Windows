@@ -202,6 +202,12 @@ class ParamsBlockClipboardTests(unittest.TestCase):
             def configure(self, **_kwargs):
                 pass
 
+            def index(self, _value):
+                return "1.0"
+
+            def dlineinfo(self, _index):
+                return (8, 8, 0, 13, 10)
+
             def insert(self, _index, line, _tags):
                 self.lines.append(line)
 
@@ -228,6 +234,12 @@ class ParamsBlockClipboardTests(unittest.TestCase):
 
             def configure(self, **_kwargs):
                 pass
+
+            def index(self, _value):
+                return "1.0"
+
+            def dlineinfo(self, _index):
+                return (8, 8, 0, 13, 10)
 
             def insert(self, *_args):
                 pass

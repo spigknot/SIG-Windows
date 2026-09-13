@@ -65,3 +65,29 @@ def is_transcription_ready_wav(path: Path) -> bool:
             )
     except (wave.Error, OSError, EOFError):
         return False
+
+
+_OPUS_HEAD = b"OpusHead"
+
+
+def is_transcription_ready_compressed(path: Path) -> bool:
+    """Retorna se o arquivo já está no formato compacto que o app envia.
+
+    Mesmo alvo da conversão "Enviar compactado" (Ogg/Opus, 16 kHz, mono): o
+    cabeçalho `OpusHead` traz o número de canais (byte 9) e a taxa de entrada
+    (4 bytes little-endian, offset 12). Sem isso o arquivo é reconvertido — o
+    que é só desperdício, nunca incorreto (regra do usuário, 13/09).
+    """
+    if path.suffix.lower() not in {".ogg", ".opus"}:
+        return False
+    try:
+        with path.open("rb") as source:
+            head = source.read(1024)
+    except OSError:
+        return False
+    pos = head.find(_OPUS_HEAD)
+    if pos < 0 or pos + 16 > len(head):
+        return False
+    channels = head[pos + 9]
+    sample_rate = int.from_bytes(head[pos + 12:pos + 16], "little")
+    return channels == 1 and sample_rate == 16000

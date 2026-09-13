@@ -294,6 +294,12 @@ def preview_zoom_offsets(
 
 
 # --- Seleção de área no palco (recorte por pixels) ---------------------------
+# Quadro congelado da previa: espera curta para agrupar o arrasto da linha do tempo
+# (o log mostrou um FFmpeg por passo) e cache dos ultimos quadros extraidos.
+PREVIEW_STILL_DEBOUNCE_MS = 120
+PREVIEW_STILL_CACHE_SIZE = 8
+
+
 PREVIEW_SELECTION_OUTLINE = "#ffd700"
 PREVIEW_SELECTION_HANDLE_FILL = "#ffd700"
 PREVIEW_SELECTION_TAG = "preview_selection"
@@ -612,10 +618,17 @@ class RangeTimeline(Canvas):
             return
         self.start = max(0.0, min(start, self.duration))
         self.end = max(self.start, min(end, self.duration))
+        # A cabeça de reprodução vive DENTRO do trecho marcado: se os marcadores
+        # se moveram por cima dela, ela vai junto.
+        self.position = min(max(self.position, self.start), self.end)
         self.draw()
 
     def set_position(self, position: float) -> None:
-        self.position = max(0.0, min(position, self.duration))
+        """Posição da cabeça de reprodução, sempre entre os marcadores verde e vermelho."""
+        if self.duration <= 0:
+            self.position = 0.0
+        else:
+            self.position = min(max(self.start, min(position, self.duration)), self.end)
         self.draw()
 
     def _left(self) -> int:
@@ -644,8 +657,10 @@ class RangeTimeline(Canvas):
             return
         start_x, end_x, position_x = self._x_for(self.start), self._x_for(self.end), self._x_for(self.position)
         self.create_line(start_x, center, end_x, center, fill="#4b9d79", width=6, capstyle="round")
-        self.create_polygon(start_x, 8, start_x - 7, 19, start_x + 7, 19, fill="#2e7d5a", outline="")
-        self.create_polygon(end_x, 46, end_x - 7, 35, end_x + 7, 35, fill="#c64a42", outline="")
+        # Os dois triângulos apontam PARA A BARRA (o de início para baixo, o de
+        # fim para cima): a ponta marca exatamente o tempo na régua.
+        self.create_polygon(start_x, 19, start_x - 7, 8, start_x + 7, 8, fill="#2e7d5a", outline="")
+        self.create_polygon(end_x, 35, end_x - 7, 46, end_x + 7, 46, fill="#c64a42", outline="")
         self.create_line(position_x, 7, position_x, 47, fill="#243230", width=2)
         self.create_text(left, 48, text="0:00", anchor="w", fill="#667371", font=("Consolas", 8))
         self.create_text(right, 48, text=self._format_time(self.duration), anchor="e", fill="#667371", font=("Consolas", 8))
@@ -680,7 +695,9 @@ class RangeTimeline(Canvas):
             self.end = max(value, min(self.duration, self.start + 0.01))
             value = self.end
         else:
-            self.position = value
+            # A cabeça de reprodução não passa dos marcadores verde e vermelho.
+            self.position = min(max(value, self.start), self.end)
+            value = self.position
         self.draw()
         self.on_change(self.drag_target or "position", value)
 
@@ -1210,6 +1227,13 @@ class FfmpegToolsPanel:
         self.preview_stills: dict[Canvas, object] = {}
         self.preview_frames: dict[Canvas, object] = {}
         self.preview_frame_items: dict[Canvas, int] = {}
+        self.preview_hint_text: dict[Canvas, str] = {}
+        self.preview_still_after_id = None
+        self.preview_still_pending: dict | None = None
+        self.preview_still_running = False
+        self.preview_still_cache: dict[tuple, object] = {}
+        self.preview_still_key: dict[Canvas, tuple] = {}
+        self.preview_still_queue: queue.Queue = queue.Queue(maxsize=4)
         self.preview_selections: dict[Canvas, PreviewSelection] = {}
         self.preview_selection_drag: dict[Canvas, dict] = {}
         self.preview_selection_filters: dict[Canvas, str] = {}
@@ -1428,15 +1452,20 @@ class FfmpegToolsPanel:
         self.root.after_idle(lambda: self._fit_preview_stage(canvas))
         return canvas
 
-    def _preview_show_hint(self, canvas: Canvas, message: str) -> None:
-        """Mensagem centralizada no palco (nenhuma mídia carregada ainda)."""
+    def _preview_show_hint(self, canvas: Canvas, message: str, width: int | None = None, height: int | None = None) -> None:
+        """Mensagem centralizada no palco (nenhuma mídia carregada ainda).
+
+        `width`/`height` permitem centrar já no tamanho que o palco VAI ter: logo
+        após um `holder.configure` o `winfo_width()` do canvas ainda é o antigo.
+        """
+        self.preview_hint_text[canvas] = message
         canvas.delete("all")
         self.preview_frame_items.pop(canvas, None)
         self.preview_frames.pop(canvas, None)
         self.preview_stills.pop(canvas, None)
         self._clear_preview_selection(canvas)
-        stage_width = max(1, canvas.winfo_width())
-        stage_height = max(1, canvas.winfo_height())
+        stage_width = max(1, int(width or canvas.winfo_width()))
+        stage_height = max(1, int(height or canvas.winfo_height()))
         canvas.create_text(
             stage_width // 2,
             stage_height // 2,
@@ -1446,6 +1475,24 @@ class FfmpegToolsPanel:
             justify="center",
             width=max(160, stage_width - 24),
         )
+
+    def _refresh_preview_hint(self, canvas: Canvas) -> None:
+        """Redesenha a dica CENTRALIZADA no tamanho atual do palco.
+
+        Sem isso a dica criada no tamanho inicial (mínimo) ficava parada nas
+        coordenadas antigas quando o palco crescia — sobrava um pedaço do texto
+        (ex.: "lizar") no meio da tela, como se fosse um texto solto.
+        """
+        message = self.preview_hint_text.get(canvas)
+        if not message:
+            return
+        if self.preview_frames.get(canvas) is not None or self.preview_stills.get(canvas) is not None:
+            return
+        view = self.preview_viewports.get(canvas)
+        if view is not None and view.stage_width > 0 and view.stage_height > 0:
+            self._preview_show_hint(canvas, message, view.stage_width, view.stage_height)
+        else:
+            self._preview_show_hint(canvas, message)
 
     def _preview_available_box(self, parent, holder) -> tuple[int, int]:
         """Espaço que sobra para o palco: largura da aba e altura visível menos os controles.
@@ -1491,6 +1538,7 @@ class FfmpegToolsPanel:
         if changed or not self.preview_frame_items.get(canvas):
             self._paint_preview_view(canvas)
         if changed:
+            self._refresh_preview_hint(canvas)
             self._schedule_preview_restart(canvas)
 
     def _preview_drawn_size(self, view: PreviewViewport) -> tuple[int, int]:
@@ -1858,6 +1906,8 @@ class FfmpegToolsPanel:
         view.media_height = max(0, int(media_height))
         view.drag_origin = None
         self._clear_preview_selection(canvas)
+        self.preview_still_cache.clear()
+        self.preview_still_key.pop(canvas, None)
         self._fit_preview_stage(canvas)
 
     def _preview_view_is_fitted(self, canvas: Canvas) -> bool:
@@ -2920,6 +2970,12 @@ class FfmpegToolsPanel:
     def _stop_preview(self) -> None:
         self.preview_generation += 1
         self.preview_playing = False
+        if self.preview_still_after_id:
+            try:
+                self.root.after_cancel(self.preview_still_after_id)
+            except Exception:
+                pass
+            self.preview_still_after_id = None
         if self.preview_restart_id:
             try:
                 self.root.after_cancel(self.preview_restart_id)
@@ -3517,6 +3573,7 @@ class FfmpegToolsPanel:
                     self._render_canvas_frame(context, generation, image, position)
         except queue.Empty:
             pass
+        self._apply_pending_stills()
         try:
             self.root.after(33, self._poll_preview_frames)
         except Exception:
@@ -3707,8 +3764,23 @@ class FfmpegToolsPanel:
             view.media_width, view.media_height = width, height
             self._fit_preview_stage(self.rotate_preview)
 
+    def _preview_still_key(self, source: Path, seconds: float, filters: str) -> tuple:
+        """Chave do quadro congelado: arquivo (+mtime), tempo e filtros."""
+        try:
+            mtime = source.stat().st_mtime_ns
+        except OSError:
+            mtime = 0
+        return (str(source), mtime, round(max(0.0, float(seconds)), 2), str(filters or ""))
+
     def _show_video_thumbnail(self, canvas: Canvas, source: Path, seconds: float, filters: str) -> None:
-        canvas.delete("all")
+        """Quadro congelado da prévia: agrupado, com cache e SEM travar a interface.
+
+        Antes: um FFmpeg SÍNCRONO por movimento da linha do tempo — a interface
+        congelava durante a extração e o log era inundado (um comando por passo do
+        arrasto). Agora o pedido é agrupado (debounce curto), reaproveitado quando
+        já foi extraído antes (cache por arquivo+tempo+filtros) e extraído em
+        segundo plano, entregue pelo mesmo laço de UI que pinta os quadros vivos.
+        """
         self.preview_frames.pop(canvas, None)
         self.preview_frame_items.pop(canvas, None)
         context = getattr(self, "preview_context", None)
@@ -3717,29 +3789,103 @@ class FfmpegToolsPanel:
         if not has_video:
             self._preview_show_hint(canvas, f"{source.name}\nPrévia de áudio")
             return
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        image_path = self.output_dir / f"preview_{uuid.uuid4().hex}.png"
-        command = [str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-y", "-ss", self._fmt_seconds(seconds), "-i", str(source), "-frames:v", "1"]
-        if filters:
-            command += ["-vf", filters]
-        command.append(str(image_path))
-        try:
-            self._record_ffmpeg_command(command, force=True)
-            result = subprocess.run(command, capture_output=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-            if result.returncode != 0 or not image_path.exists():
-                raise RuntimeError("FFmpeg não gerou a prévia")
-            # O quadro fica guardado na resolução da FONTE: o zoom e o
-            # redimensionamento do palco saem daqui, sem outro FFmpeg.
-            with Image.open(image_path) as image:
-                self.preview_stills[canvas] = image.copy()
+        chave = self._preview_still_key(source, seconds, filters)
+        self.preview_still_key[canvas] = chave
+        guardado = self.preview_still_cache.get(chave)
+        if guardado is not None:
+            self.preview_stills[canvas] = guardado
             self._paint_preview_view(canvas)
-        except Exception:
-            canvas.create_text(
-                max(80, canvas.winfo_width() // 2), max(40, canvas.winfo_height() // 2),
-                text="Não foi possível gerar a prévia deste vídeo", fill="#667371", font=("Segoe UI", 10), justify="center",
+            return
+        self.preview_still_pending = {
+            "canvas": canvas, "source": source, "seconds": seconds, "filters": filters, "key": chave,
+        }
+        if self.preview_still_after_id:
+            try:
+                self.root.after_cancel(self.preview_still_after_id)
+            except Exception:
+                pass
+            self.preview_still_after_id = None
+        # Sem quadro nenhum ainda (primeira carga): extrai quase na hora; com
+        # quadro na tela (arrasto da linha do tempo), agrupa para não inundar.
+        atraso = PREVIEW_STILL_DEBOUNCE_MS if self.preview_stills.get(canvas) is not None else 1
+        self.preview_still_after_id = self.root.after(atraso, self._start_pending_still)
+
+    def _start_pending_still(self) -> None:
+        """Dispara a extração do último pedido — uma de cada vez, fora da UI."""
+        self.preview_still_after_id = None
+        if self.preview_still_running or not self.preview_still_pending:
+            return
+        pedido = self.preview_still_pending
+        self.preview_still_pending = None
+        self.preview_still_running = True
+        threading.Thread(target=self._extract_still_worker, args=(pedido,), daemon=True).start()
+
+    def _extract_still_worker(self, pedido: dict) -> None:
+        """Extrai o quadro em segundo plano (sem tocar em Tk) e devolve pela fila."""
+        imagem = None
+        image_path = self.output_dir / f"preview_{uuid.uuid4().hex}.png"
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            command = [
+                str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", self._fmt_seconds(float(pedido["seconds"])), "-i", str(pedido["source"]),
+                "-frames:v", "1", "-an",
+            ]
+            if pedido["filters"]:
+                command += ["-vf", str(pedido["filters"])]
+            command.append(str(image_path))
+            # Prévia NÃO é trabalho da ferramenta: registra como sonda para não
+            # inundar o log de atividade (o rastreador da tarefa continua vendo).
+            self._record_ffmpeg_command(command, probe=True)
+            result = subprocess.run(
+                command, capture_output=True, timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
+            if result.returncode == 0 and image_path.exists():
+                with Image.open(image_path) as image:
+                    imagem = image.copy()
+        except Exception:
+            imagem = None
         finally:
             image_path.unlink(missing_ok=True)
+        try:
+            self.preview_still_queue.put_nowait({"pedido": pedido, "image": imagem})
+        except queue.Full:
+            try:
+                self.preview_still_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.preview_still_queue.put_nowait({"pedido": pedido, "image": imagem})
+            except queue.Full:
+                pass
+
+    def _apply_pending_stills(self) -> None:
+        """Aplica (na UI) os quadros congelados que ficaram prontos no segundo plano."""
+        try:
+            while True:
+                pronto = self.preview_still_queue.get_nowait()
+                self.preview_still_running = False
+                pedido = pronto["pedido"]
+                canvas = pedido["canvas"]
+                imagem = pronto["image"]
+                if imagem is None:
+                    if self.preview_still_key.get(canvas) == pedido["key"]:
+                        canvas.create_text(
+                            max(80, canvas.winfo_width() // 2), max(40, canvas.winfo_height() // 2),
+                            text="Não foi possível gerar a prévia deste vídeo",
+                            fill="#667371", font=("Segoe UI", 10), justify="center",
+                        )
+                else:
+                    self.preview_still_cache[pedido["key"]] = imagem
+                    while len(self.preview_still_cache) > PREVIEW_STILL_CACHE_SIZE:
+                        self.preview_still_cache.pop(next(iter(self.preview_still_cache)))
+                    if self.preview_still_key.get(canvas) == pedido["key"]:
+                        self.preview_stills[canvas] = imagem
+                        self._paint_preview_view(canvas)
+                self._start_pending_still()
+        except queue.Empty:
+            pass
 
     def select_cut_input(self) -> None:
         selected = filedialog.askopenfilename(title="Selecionar mídia para cortar", filetypes=self._filetypes())
