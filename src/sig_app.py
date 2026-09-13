@@ -188,6 +188,7 @@ from ui_widgets import (  # noqa: F401
     step_values,
     workable_step,
 )
+from media_probe import audio_duration_seconds, wav_duration_seconds
 from batch_errors import (
     batch_error_detail,
     batch_error_text,
@@ -478,6 +479,8 @@ from log_formatting import (  # noqa: F401
     safe_stems,
     format_bytes,
     format_duration,
+    format_audio_total,
+    format_total_size,
     mode_label_from_value,
     format_ws_params_block,
     params_block_single_line,
@@ -13090,6 +13093,9 @@ try {
                     self._queue("progress", 100)
                     self._show_folder_button(visible=True)
                     return
+                # Resumo do que vai ser enviado (pedido do usuário, 13/09) — logo
+                # antes do envio, depois de conversão/VAD.
+                self._report_batch_totals(jobs)
                 if send_zip:
                     zip_stats = self._run_zip_transcription(jobs, settings, temp_dir, raw_dir, zip_level)
                 else:
@@ -13105,6 +13111,7 @@ try {
                     self._queue("progress", 100)
                     self._show_folder_button(visible=True)
                     return
+                self._report_batch_totals(jobs)
                 if send_zip:
                     zip_stats = self._run_zip_transcription(jobs, settings, temp_dir, raw_dir, zip_level)
                 else:
@@ -13177,6 +13184,118 @@ try {
         self._queue("html_ready", str(html_path))
         self._queue("status", f"Relatório parcial gerado em {html_path}")
         self._show_folder_button(visible=True)
+
+    def _batch_send_totals(
+        self, jobs: list[AudioJob], *, probe=None
+    ) -> tuple[int, float, int, int, int]:
+        """(arquivos, segundos de áudio, bytes, sem duração, sem tamanho) do ENVIO.
+
+        Só entram os arquivos que vão para a transcrição
+        (`transcription_candidates`) e o tamanho é o do arquivo JÁ CONVERTIDO
+        (`upload_path`, que já é a saída do VAD quando ele roda) — nunca o do
+        original (pedido do usuário, 13/09). Duração pelo cabeçalho do WAV no
+        caminho normal; o resto vai para a sonda externa em paralelo.
+        """
+        candidatos = transcription_candidates(jobs)
+        segundos = 0.0
+        total_bytes = 0
+        sem_duracao = 0
+        sem_tamanho = 0
+        pendentes: list[AudioJob] = []
+        for job in candidatos:
+            caminho = job.upload_path
+            if caminho is None:
+                sem_duracao += 1
+                sem_tamanho += 1
+                continue
+            try:
+                total_bytes += caminho.stat().st_size
+            except OSError:
+                sem_tamanho += 1
+            duracao = wav_duration_seconds(caminho)
+            if duracao is None:
+                pendentes.append(job)
+            else:
+                segundos += duracao
+        if pendentes:
+            medidos = (probe or self._probe_durations)(pendentes)
+            for job in pendentes:
+                duracao = medidos.get(id(job))
+                if duracao:
+                    segundos += duracao
+                else:
+                    sem_duracao += 1
+        return len(candidatos), segundos, total_bytes, sem_duracao, sem_tamanho
+
+    def _probe_durations(self, jobs: list[AudioJob]) -> dict[int, float]:
+        """Duração dos arquivos que NÃO são WAV (ffprobe/ffmpeg em paralelo).
+
+        Sonda externa é CARA (~83 ms por arquivo com ffprobe, medido nesta
+        máquina): roda com poucos workers e sempre na thread do worker — nunca na
+        thread da UI. Sem ffprobe/ffmpeg no pacote, devolve nada (a linha de
+        áudio sai em amarelo com a contagem de não medidos).
+        """
+        resultados: dict[int, float] = {}
+        ffprobe = app_base_dir() / "ffprobe.exe"
+        ffmpeg = app_base_dir() / "ffmpeg.exe"
+        if not (ffprobe.exists() or ffmpeg.exists()):
+            return resultados
+        caminhos = {id(job): job.upload_path for job in jobs if job.upload_path is not None}
+        if not caminhos:
+            return resultados
+        workers = min(8, max(2, (os.cpu_count() or 4) // 2))
+        with cancellable_executor(workers) as executor:
+            futuros = {
+                executor.submit(
+                    audio_duration_seconds, caminho, ffprobe=ffprobe, ffmpeg=ffmpeg
+                ): chave
+                for chave, caminho in caminhos.items()
+            }
+            for future in iter_completed(futuros, cancel_event=self.cancel_event):
+                chave = futuros[future]
+                try:
+                    segundos = future.result()
+                except Cancelled:
+                    raise
+                except Exception:
+                    segundos = None
+                if segundos:
+                    resultados[chave] = float(segundos)
+        return resultados
+
+    def _report_batch_totals(self, jobs: list[AudioJob], *, iniciando_envio: bool = True) -> None:
+        """Linhas de resumo antes do envio (pedido do usuário, 13/09).
+
+            Total de arquivos: 830
+            Total áudio: 1h27m32s
+            Tamanho total: 325 MB
+            Iniciando envio:
+
+        Verde quando o cálculo fecha; a linha afetada sai em AMARELO com a
+        contagem quando algum arquivo não pode ser medido.
+        """
+        total, segundos, tamanho, sem_duracao, sem_tamanho = self._batch_send_totals(jobs)
+        self._queue("activity", f"Total de arquivos: {total}", "vad_total")
+        texto_audio = f"Total áudio: {format_audio_total(segundos)}"
+        if sem_duracao:
+            self._queue(
+                "activity",
+                f"{texto_audio} ({sem_duracao} arquivo(s) sem duração medível)",
+                "warning",
+            )
+        else:
+            self._queue("activity", texto_audio, "vad_total")
+        texto_tamanho = f"Tamanho total: {format_total_size(tamanho)}"
+        if sem_tamanho:
+            self._queue(
+                "activity",
+                f"{texto_tamanho} ({sem_tamanho} arquivo(s) sem leitura)",
+                "warning",
+            )
+        else:
+            self._queue("activity", texto_tamanho, "vad_total")
+        if iniciando_envio:
+            self._queue("activity", "Iniciando envio:", "vad_total")
 
     # ── VAD ──────────────────────────────────────────────────────────
 

@@ -349,6 +349,27 @@ def format_duration(seconds: float) -> str:
     return f"{int(hours)}h {int(minutes)}min"
 
 
+def format_audio_total(seconds: float) -> str:
+    """Duração total em formato compacto de resumo: `1h27m32s` / `27m32s` / `32s`.
+
+    Diferente do `format_duration` (usado nas linhas de fase: "2min 14s"), este é
+    o formato pedido nas linhas de total antes do envio (13/09).
+    """
+    total = int(max(0.0, seconds))
+    horas, resto = divmod(total, 3600)
+    minutos, segundos = divmod(resto, 60)
+    if horas:
+        return f"{horas}h{minutos:02d}m{segundos:02d}s"
+    if minutos:
+        return f"{minutos}m{segundos:02d}s"
+    return f"{segundos}s"
+
+
+def format_total_size(size: int) -> str:
+    """Tamanho para as linhas de resumo: sem ",0" quando o valor é inteiro (325 MB)."""
+    return format_bytes(size).replace(".0 ", " ")
+
+
 def mode_label_from_value(mode: str) -> str:
     labels = {
         "ready": "Enviar pronto",

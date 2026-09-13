@@ -12,7 +12,7 @@ Orquestracao .. sig_app.py (classe SigApp), vad_worker.py, batch_execution.py
 Integracoes ... stt_clients.py, http_clients.py, text_models.py, imei_lookup.py
 Processamento . transcription_parsing.py, log_formatting.py, documents.py,
                 reporting.py, qualification.py, name_database.py, audio_io.py,
-                batch_errors.py
+                batch_errors.py, media_probe.py
 Config ........ providers.py, settings_store.py
 Dominio ....... domain_models.py
 Ambiente ...... app_env.py
@@ -36,7 +36,8 @@ Ambiente ...... app_env.py
 | `text_models.py` | Selecao e parsing de modelos de texto de IA (`selected_text_model*`, `extract_*`) | HTTP (usa `http_clients`) |
 | `http_clients.py` | `GraniteUploader` e `TextModelClient` (transporte HTTP, cancelamento) | Formato de cada provedor STT |
 | `stt_clients.py` | Protocolo STT: URLs, form fields, deteccao de provedor, REST/WS (Alibaba, MetaMuse, Deepgram...) | UI e persistencia |
-| `log_formatting.py` | Formatacao de comandos FFmpeg e de parametros para log; `format_bytes`, `format_duration` | Execucao de FFmpeg |
+| `log_formatting.py` | Formatacao de comandos FFmpeg e de parametros para log; `format_bytes`, `format_duration`, `format_audio_total` | Execucao de FFmpeg |
+| `media_probe.py` | Duracao de midia: cabecalho do WAV (barato) e sonda externa `ffprobe`/`ffmpeg -i` (para o resumo antes do envio) | UI, contagem de lote |
 | `batch_errors.py` | Rotulos curtos dos erros do lote (uma linha viva por TIPO de erro, com contagem) e texto das linhas "ja estavam prontos/compactados" | UI, contagem de estado |
 | `batch_execution.py` | Orquestracao de futures do lote com cancelamento imediato (`cancellable_executor`, `iter_completed`, `cancellable_join`) | Regra de negocio, rede |
 | `reporting.py` | HTML de relatorio e de status ao vivo (`html_document`, `write_html_report`, `build_live_html`) | Geracao de DOCX/PDF |
