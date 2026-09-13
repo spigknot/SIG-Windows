@@ -494,7 +494,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260913_001"
+APP_VERSION = "20260913_003"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -1187,6 +1187,10 @@ class SigApp:
         self.transcribe_after_convert_var = BooleanVar(value=False)
         self.send_zip_var = BooleanVar(value=False)
         self.zip_level_var = StringVar(value="1")
+        # "Um modelo por vez" (padrão: DESMARCADA): flag do LOTE — não é
+        # persistida em settings.json (mesmo padrão das outras checkboxes da
+        # linha), então o app sempre abre com ela desmarcada.
+        self.files_one_model_var = BooleanVar(master=self.root, value=False)
         self.files_language_label_var = StringVar(value="Idioma: pt")
         self.files_keywords_label_var = StringVar(master=self.root, value=f"Keywords: {KEYWORDS_OFF_LABEL}")
         self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
@@ -3613,6 +3617,18 @@ class SigApp:
         self.files_models_menu = tk.Menu(self.files_models_button, tearoff=0, postcommand=self._populate_models_menu)
         self.files_models_button.configure(menu=self.files_models_menu)
         self.files_models_button.pack(side=LEFT, padx=(16, 0))
+
+        # Checkbox "Um modelo por vez" (entre o botão "Modelos" e o seletor de
+        # Idioma, regra do usuário 13/09): marcada, o lote NÃO manda os áudios
+        # para os modelos ao mesmo tempo — a fila inteira vai para um modelo e
+        # só depois de ele terminar o próximo começa. O HTML continua sendo
+        # gerado uma única vez, no fim de TODOS os modelos.
+        self.files_one_model_check = ttk.Checkbutton(
+            options2,
+            text="Um modelo por vez",
+            variable=self.files_one_model_var,
+        )
+        self.files_one_model_check.pack(side=LEFT, padx=(12, 0))
 
         # Idioma do lote, logo à direita do botão "Modelos" (mesmo padrão do
         # seletor da aba Ocorrência). Aqui a opção é genérica (auto/pt/en/es):
@@ -7768,7 +7784,9 @@ try {
         self.files_language_label_var.set(f"Idioma: {option}")
         self._set_activity_status(f"Idioma selecionado: {option}.", log=False)
 
-    def _transcription_batch_settings(self, model_names: list[str]) -> dict:
+    def _transcription_batch_settings(
+        self, model_names: list[str], one_model_at_a_time: bool = False
+    ) -> dict:
         """Cópia de settings do lote com o idioma traduzido por modelo.
 
         O seletor guarda uma opção única, mas cada provedor recebe o SEU valor
@@ -7780,10 +7798,16 @@ try {
         ele é compartilhado com a aba Ocorrência (e pode estar num modelo só de
         WebSocket), então sem isto o lote de um único modelo usaria o modelo
         da Ocorrência em vez do que está selecionado na Transcrição.
+
+        `one_model_at_a_time` (checkbox "Um modelo por vez") entra como flag do
+        LOTE (`_one_model_at_a_time`): com ela, o multi-modelo manda a fila
+        inteira para um modelo e só depois passa para o próximo. Não vai para o
+        settings.json.
         """
         batch = self.settings.copy()
         batch["_multi_transcription"] = bool(model_names)
         batch["_multi_transcription_models"] = list(model_names)
+        batch["_one_model_at_a_time"] = bool(one_model_at_a_time)
         if model_names:
             batch["transcription_server"] = model_names[0]
         providers = transcription_providers_for_servers(
@@ -12946,7 +12970,9 @@ try {
             return
         # Cópia do lote: é ELA que define o modelo e o idioma realmente usados
         # (o `transcription_server` é compartilhado com a aba Ocorrência).
-        workflow_settings = self._transcription_batch_settings(multi_model_names)
+        workflow_settings = self._transcription_batch_settings(
+            multi_model_names, one_model_at_a_time=self.files_one_model_var.get()
+        )
         multi_transcription = len(multi_model_names) >= 2
         if is_grok_transcription(workflow_settings) and not workflow_settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de transcrever.")
@@ -14299,6 +14325,11 @@ try {
         done = [0] * len(model_settings)
         progress_lock = threading.Lock()
         model_starts = [time.perf_counter()] * len(model_settings)
+        # Relógio PRÓPRIO de cada modelo, CONGELADO no instante em que ele
+        # termina: a linha verde não pode continuar contando por conta dos
+        # outros modelos que ainda estão transcrevendo (bug relatado 13/09).
+        model_end_times: list[float | None] = [None] * len(model_settings)
+        model_reported = [False] * len(model_settings)
         model_labels = list(model_names)
 
         def update_progress(index: int):
@@ -14306,22 +14337,42 @@ try {
             with progress_lock:
                 done[index - 1] += 1
                 snapshot = list(done)
+                if snapshot[index - 1] >= total and model_end_times[index - 1] is None:
+                    model_end_times[index - 1] = now - model_starts[index - 1]
             self._queue("progress", int((sum(snapshot) / (total * len(model_settings))) * 100 + 0.5))
             throttles = getattr(self, "_model_throttle", None)
             if throttles is None:
                 throttles = {}
                 self._model_throttle = throttles
-            emit_lines = all(count >= total for count in snapshot) or now - throttles.get("all", 0.0) >= 0.1
+            # Terminou AGORA e ainda não avisou: a linha verde dele é o único
+            # aviso de conclusão e sai na hora, sem esperar o throttle.
+            pending = [
+                model_index
+                for model_index, count in enumerate(snapshot, start=1)
+                if count >= total and not model_reported[model_index - 1]
+            ]
+            emit_lines = bool(pending) or now - throttles.get("all", 0.0) >= 0.1
             if not emit_lines:
                 return
             throttles["all"] = now
             for model_index, count in enumerate(snapshot, start=1):
                 label = model_labels[model_index - 1]
                 if count >= total:
+                    # Linha FECHADA: escrita UMA única vez, com o tempo do
+                    # próprio modelo — reescrever aqui faria o relógio continuar
+                    # correndo enquanto os outros modelos transcrevem.
+                    with progress_lock:
+                        ja_avisado = model_reported[model_index - 1]
+                        model_reported[model_index - 1] = True
+                    if ja_avisado:
+                        continue
+                    end = model_end_times[model_index - 1]
+                    if end is None:
+                        end = now - model_starts[model_index - 1]
                     self._queue(
                         "activity_line",
                         f"model:{model_index}",
-                        f"{label} {count}/{total} ({format_duration(time.perf_counter() - model_starts[model_index - 1])})",
+                        f"{label} {count}/{total} ({format_duration(end)})",
                         "vad_total",
                     )
                 else:
@@ -14337,6 +14388,10 @@ try {
         def model_runner(index: int):
             current_settings = model_settings[index - 1]
             uploader = uploaders[index - 1]
+            # O relógio do modelo começa quando ELE começa de verdade — no modo
+            # "um modelo por vez" o segundo só entra depois de o primeiro
+            # terminar e não pode herdar o tempo da espera.
+            model_starts[index - 1] = time.perf_counter()
             url = transcribe_url(current_settings)
             configured_parallelism = max(1, int(settings["transcribe_parallel"]))
 
@@ -14393,10 +14448,22 @@ try {
             run_group(medium, min(configured_parallelism, 2))
             run_group(large, 1)
 
-        with cancellable_executor(len(model_settings)) as executor:
-            futures = [executor.submit(model_runner, index) for index in range(1, len(model_settings) + 1)]
-            for future in iter_completed(futures, cancel_event=self.cancel_event):
-                future.result()
+        if settings.get("_one_model_at_a_time"):
+            # "Um modelo por vez" (checkbox da aba Transcrição): a fila INTEIRA
+            # vai para o modelo da vez e só depois de ele terminar o próximo
+            # começa — os modelos nunca ficam em voo ao mesmo tempo (cada um
+            # mantém o paralelismo PRÓPRIO de requisições). O HTML do lote
+            # continua saindo uma única vez, no fim de TODOS os modelos, em
+            # `_workflow` — nada é gerado por modelo.
+            for index in range(1, len(model_settings) + 1):
+                if self.cancel_event.is_set():
+                    raise Cancelled()
+                model_runner(index)
+        else:
+            with cancellable_executor(len(model_settings)) as executor:
+                futures = [executor.submit(model_runner, index) for index in range(1, len(model_settings) + 1)]
+                for future in iter_completed(futures, cancel_event=self.cancel_event):
+                    future.result()
 
         for job in candidates:
             errors = [

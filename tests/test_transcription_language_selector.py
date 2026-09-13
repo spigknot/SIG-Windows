@@ -270,7 +270,14 @@ class InterfaceTest(unittest.TestCase):
         self.assertIn("transcription_providers_for_servers", fonte)
 
     def test_start_run_usa_a_copia_do_lote_no_enviador(self):
-        self.assertIn("self._transcription_batch_settings(multi_model_names)", SIG_APP_FONTE)
+        # A cópia do lote recebe também a marcação da checkbox "Um modelo por
+        # vez" (flag do lote, não persistida).
+        self.assertIn(
+            "self._transcription_batch_settings(\n"
+            "            multi_model_names, one_model_at_a_time=self.files_one_model_var.get()\n"
+            "        )",
+            SIG_APP_FONTE,
+        )
         self.assertIn(
             "create_transcription_uploader(self.cancel_event, workflow_settings)",
             SIG_APP_FONTE,

@@ -114,6 +114,44 @@ def _check_transcription_models_menu(app) -> None:
         raise RuntimeError(f"selecao padrao do menu Modelos inesperada: {checked}")
 
 
+def _check_one_model_checkbox(app) -> None:
+    """Checkbox "Um modelo por vez" da aba Transcricao (regra do usuario, 13/09).
+
+    Vacina da UI: fica ENTRE o botao "Modelos" e o seletor de Idioma, com o
+    rotulo exato e DESMARCADA por padrao (a marcacao e do lote — nao e
+    persistida no settings.json).
+    """
+    checkbox = getattr(app, "files_one_model_check", None)
+    if checkbox is None:
+        raise RuntimeError("checkbox 'Um modelo por vez' ausente na aba Transcricao")
+    if checkbox.winfo_manager() != "pack":
+        raise RuntimeError("checkbox 'Um modelo por vez' nao esta visivel")
+    models_button = getattr(app, "files_models_button", None)
+    language_button = getattr(app, "files_language_button", None)
+    if models_button is None or language_button is None:
+        raise RuntimeError("botoes da linha de controles da Transcricao ausentes")
+    barra = models_button.master
+    if checkbox.master is not barra or language_button.master is not barra:
+        raise RuntimeError("checkbox nao esta na mesma barra dos botoes Modelos/Idioma")
+    # A ordem que o usuario VÊ é a ordem de `pack` (pack_slaves), não a de
+    # criação dos widgets: mover o pack() da checkbox muda a posição na tela
+    # sem mudar winfo_children().
+    ordem = list(barra.pack_slaves())
+    for widget, nome in ((models_button, "botao Modelos"), (checkbox, "checkbox"), (language_button, "seletor de Idioma")):
+        if widget not in ordem:
+            raise RuntimeError(f"{nome} nao esta empacotado na barra da Transcricao")
+    if not ordem.index(models_button) < ordem.index(checkbox) < ordem.index(language_button):
+        raise RuntimeError("checkbox nao esta entre o botao Modelos e o seletor de Idioma")
+    if str(checkbox.cget("text")) != "Um modelo por vez":
+        raise RuntimeError(f"rotulo inesperado na checkbox: {checkbox.cget('text')!r}")
+    if str(checkbox.cget("variable")) != str(app.files_one_model_var):
+        raise RuntimeError("checkbox nao usa a variavel da aba (files_one_model_var)")
+    if checkbox.pack_info().get("side") != "left":
+        raise RuntimeError("checkbox fora do alinhamento padrao (side=left)")
+    if app.files_one_model_var.get():
+        raise RuntimeError("checkbox 'Um modelo por vez' precisa nascer desmarcada")
+
+
 def _expected_conversion_values(nucleos: int) -> list[int]:
     """Opções do slider de Conversões conforme a especificação.
 
@@ -1841,6 +1879,9 @@ def run(*, quiet: bool = False) -> int:
 
             _check_transcription_language_selector(app)
             _check_transcription_models_menu(app)
+            # Vacina do pedido de 13/09: a checkbox "Um modelo por vez" fica
+            # entre o botao "Modelos" e o seletor de Idioma, desmarcada.
+            _check_one_model_checkbox(app)
             _check_live_local_server_controls(app, root)
             # Vacina do pedido de 12/09: os botoes da linha de controles da aba
             # Ocorrencia usam os PNGs de assets/ (microfones vermelho/branco e
