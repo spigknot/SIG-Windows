@@ -8198,6 +8198,28 @@ try {
             settings_tab_buttons[name] = button
             button.pack(side=LEFT, padx=(0 if index == 0 else 4, 0))
 
+        # Tamanho da janela: o `resizable(False, False)` já está aplicado quando a
+        # janela é mapeada pela PRIMEIRA vez — e isso acontece no MEIO da
+        # construção (a medição do botão de olho chama `win.update_idletasks` com
+        # o conteúdo ainda parcial, ~1 linha por aba). Num PC onde o gerenciador
+        # de janelas não aceitou o crescimento posterior, as Configurações
+        # ficaram presas nesse tamanho mínimo (relatado em 13/09 num i5-8400, sem
+        # nenhum erro no log). Fixar a geometria no tamanho da aba ATIVA depois
+        # de montar torna o resultado determinístico em qualquer máquina.
+        janela_montada = {"pronta": False}
+
+        def ajustar_janela_ao_conteudo() -> None:
+            """Reaplica o tamanho NATURAL da janela (o do conteúdo da aba ativa).
+
+            `geometry("")` devolve o dimensionamento ao pedido do Tk: a janela
+            reassume o tamanho do conteúdo (em vez de ficar presa no tamanho do
+            primeiro mapeamento) e o layout interno continua com as larguras
+            naturais dos campos — fixar `WxH` explicitamente encolhia os campos
+            de chave (medido: 462px -> 356px).
+            """
+            win.update_idletasks()
+            win.geometry("")
+
         def select_settings_tab(name: str):
             for page in settings_tab_pages.values():
                 page.pack_forget()
@@ -8207,6 +8229,8 @@ try {
                     background=settings_active_bg if tab_name == name else settings_inactive_bg,
                     foreground=settings_active_fg if tab_name == name else settings_inactive_fg,
                 )
+            if janela_montada["pronta"]:
+                ajustar_janela_ao_conteudo()
 
         for name, button in settings_tab_buttons.items():
             button.bind("<Button-1>", lambda _event, selected=name: select_settings_tab(selected))
@@ -9902,10 +9926,15 @@ try {
         # permanece visível apenas para deixar claro que a opção está
         # indisponível, sem permitir alteração acidental.
         disable_settings_section(extraction_frame)
+        # Conteúdo completo: agora sim o tamanho da janela é fixado no conteúdo
+        # da aba ativa (ver `ajustar_janela_ao_conteudo`).
+        janela_montada["pronta"] = True
+        ajustar_janela_ao_conteudo()
         win.transient(self.root)
         win.grab_set()
         win.wait_visibility()
         win.focus()
+
     def open_about(self):
         if self.about_window is not None:
             try:

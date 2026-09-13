@@ -12,7 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from app_env import default_parallelism, physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
+from app_env import physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
 from providers import (  # noqa: E402  (catalogo: quem tem o controle "- t = +")
     ALIBABA_API_NAME,
     ASSEMBLYAI_API_NAME,
@@ -207,12 +207,15 @@ def _check_parallel_sliders(app, settings_window) -> None:
     if nomes != ["Conversões", "Requisições", "VAD"]:
         raise RuntimeError(f"rotulos das sliders fora da ordem esperada: {nomes}")
 
-    # O VAD nasce no padrao da especificacao: metade dos nucleos (n/2).
-    padrao = str(default_parallelism(nucleos))
+    # O slider mostra o valor PERSISTIDO (encaixado nas opcoes disponiveis); o
+    # padrao n/2 quando a chave nao existe é coberto pelos testes unitarios.
+    from ui_widgets import nearest_value as _nearest_value
+
+    padrao = str(_nearest_value(int(app.settings["vad_parallel"]), list(range(1, nucleos + 1))))
     valor_vad = irmao(sliders[-1], 2)
     if valor_vad is None or valor_vad.cget("text") != padrao:
         raise RuntimeError(
-            f"o slider VAD nao esta no padrao n/2 ({padrao}): "
+            f"o slider VAD nao mostra o valor persistido ({padrao}): "
             f"{valor_vad.cget('text') if valor_vad is not None else 'sem label de valor'!r}"
         )
 
@@ -1754,6 +1757,70 @@ def _check_queue_count_line_color(app, root) -> None:
         root.update_idletasks()
 
 
+def _check_settings_window_fills_its_content(app, root) -> None:
+    """Vacina do bug de 13/09 (i5-8400): a janela nao pode ficar presa pequena.
+
+    A janela de Configuracoes e mapeada no MEIO da construcao (o
+    `update_idletasks` da medicao do botao de olho acontece com o conteudo ainda
+    parcial, ~1 linha por aba) e com `resizable(False, False)` ja aplicado. Num
+    PC o gerenciador de janelas nao aceitou o crescimento posterior: cada aba
+    ficou mostrando so a primeira linha, SEM nenhum erro no log.
+
+    Aqui o estado ruim e SIMULADO (janela pequena) e o app precisa devolve-la ao
+    tamanho do conteudo — na abertura e a cada troca de aba.
+    """
+    antes = set(root.winfo_children())
+    app.open_settings()
+    root.update_idletasks()
+    janelas = [
+        filho for filho in root.winfo_children()
+        if isinstance(filho, tk.Toplevel) and filho not in antes
+    ]
+    if len(janelas) != 1:
+        raise RuntimeError(f"esperava uma janela de Configuracoes, achei {len(janelas)}")
+    janela = janelas[0]
+    try:
+        botoes, conteudo = _settings_tab_pages(janela)
+        if len(botoes) != 4:
+            raise RuntimeError(f"esperava 4 abas, achei {list(botoes)}")
+
+        def pagina_ativa():
+            return next(
+                (w for w in conteudo.winfo_children() if w.winfo_manager() == "pack"),
+                None,
+            )
+
+        pagina = pagina_ativa()
+        if pagina is None:
+            raise RuntimeError("nenhuma pagina ativa logo depois de abrir")
+        if janela.winfo_height() < pagina.winfo_reqheight():
+            raise RuntimeError(
+                f"a janela abriu com {janela.winfo_width()}x{janela.winfo_height()}px, "
+                f"menor que a aba ativa ({pagina.winfo_reqwidth()}x{pagina.winfo_reqheight()}px)"
+            )
+
+        # O caso do PC: janela presa no tamanho do primeiro mapeamento.
+        janela.geometry("416x110")
+        janela.update_idletasks()
+        for nome, botao in botoes.items():
+            botao.event_generate("<Button-1>", x=1, y=1)
+            janela.update_idletasks()
+            pagina = pagina_ativa()
+            if pagina is None:
+                raise RuntimeError(f"aba {nome} sem pagina ativa")
+            if (
+                janela.winfo_height() < pagina.winfo_reqheight()
+                or janela.winfo_width() < pagina.winfo_reqwidth()
+            ):
+                raise RuntimeError(
+                    f"a janela ficou presa em {janela.winfo_width()}x{janela.winfo_height()}px "
+                    f"com a aba {nome} ({pagina.winfo_reqwidth()}x{pagina.winfo_reqheight()}px)"
+                )
+    finally:
+        janela.destroy()
+        root.update_idletasks()
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -1823,6 +1890,10 @@ def run(*, quiet: bool = False) -> int:
             # inteiras também em máquinas com poucos núcleos (aqui a máquina
             # tem núcleos de sobra, então o cenário é simulado).
             _check_settings_window_on_low_core_machines(app, root)
+            # Vacina do pedido de 13/09 (PC i5-8400): a janela de Configuracoes
+            # nao pode ficar presa no tamanho do PRIMEIRO mapeamento (ela e
+            # mapeada no meio da construcao, com o conteudo parcial).
+            _check_settings_window_fills_its_content(app, root)
 
         if not quiet:
             print("PASS: interface principal, abas e Configuracoes construidas")
