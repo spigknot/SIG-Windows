@@ -39,7 +39,7 @@ Ambiente ...... app_env.py
 | `log_formatting.py` | Formatacao de comandos FFmpeg e de parametros para log; `format_bytes`, `format_duration`, `format_audio_total` | Execucao de FFmpeg |
 | `media_probe.py` | Duracao de midia: cabecalho do WAV (barato) e sonda externa `ffprobe`/`ffmpeg -i` (para o resumo antes do envio) | UI, contagem de lote |
 | `batch_errors.py` | Rotulos curtos dos erros do lote (uma linha viva por TIPO de erro, com contagem) e texto das linhas "ja estavam prontos/compactados" | UI, contagem de estado |
-| `batch_execution.py` | Orquestracao de futures do lote com cancelamento imediato (`cancellable_executor`, `iter_completed`, `cancellable_join`) | Regra de negocio, rede |
+| `batch_execution.py` | Orquestracao de futures do lote com cancelamento imediato (`cancellable_executor`, `iter_completed`, `cancellable_join`) e a divisao equilibrada da fila do VAD entre processos (`split_balanced`) | Regra de negocio, rede |
 | `reporting.py` | HTML de relatorio e de status ao vivo (`html_document`, `write_html_report`, `build_live_html`) | Geracao de DOCX/PDF |
 | `documents.py` | DOCX a partir dos modelos Word, PDF via Word, previa e clipboard | Regras de transcricao |
 | `media_files.py` | Extensoes suportadas, MIME e deteccao de tipo (`is_video_file`) | Processamento de midia |

@@ -4,6 +4,10 @@ Para adicionar um provedor STT: (1) constantes aqui, (2) DEFAULT_SETTINGS aqui,
 (3) campos de formulario em stt_clients.py, (4) rotulo na UI em sig_app.py.
 Sem Tkinter; sem I/O proprio (recebe dicts de settings de quem chamou)."""
 
+# `app_env` só é usado para o default dos sliders dependerem dos NÚCLEOS desta
+# máquina (n/2) — não há ciclo: app_env não importa nenhum módulo do projeto.
+from app_env import default_parallelism, physical_cpu_count
+
 
 # API keys are supplied by the user in Settings and are never shipped in source.
 IMEI_API_KEY = ""
@@ -12,6 +16,10 @@ IMEI_API_KEY = ""
 DEFAULT_SETTINGS = {
     "convert_parallel": 8,
     "transcribe_parallel": 16,
+    # VAD paralelo: nº de processos do VAD (cada worker é single-threaded, então
+    # é quantos núcleos o VAD ocupa). Padrão = metade dos núcleos FÍSICOS desta
+    # máquina, com arredondamento para cima em nº ímpar (regra do usuário, 13/09).
+    "vad_parallel": default_parallelism(physical_cpu_count()),
     "grok_chunk_ms": 100,
     "grok_rest_requests": False,
     "transcription_server": "servidor",

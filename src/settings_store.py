@@ -56,6 +56,9 @@ def normalize_settings(data: dict) -> dict:
     clean = DEFAULT_SETTINGS.copy()
     clean["convert_parallel"] = max(1, clamp_int(data.get("convert_parallel"), 1, 256, DEFAULT_SETTINGS["convert_parallel"]))
     clean["transcribe_parallel"] = max(1, clamp_int(data.get("transcribe_parallel"), 1, 256, DEFAULT_SETTINGS["transcribe_parallel"]))
+    # VAD paralelo: nº de processos do VAD (1 = arquivo por arquivo, como antes).
+    # Sem a chave, vale o padrão da máquina (n/2 dos núcleos físicos).
+    clean["vad_parallel"] = max(1, clamp_int(data.get("vad_parallel"), 1, 256, DEFAULT_SETTINGS["vad_parallel"]))
     clean["grok_chunk_ms"] = clamp_int(data.get("grok_chunk_ms"), 20, 2000, DEFAULT_SETTINGS["grok_chunk_ms"])
     for language_key, fallback in {
         "deepgram_language_mode": "pt-BR",

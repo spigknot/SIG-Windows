@@ -141,3 +141,14 @@ def default_parallelism(cpu_count: int) -> int:
     - 18 núcleos -> 9 (n/2 = 9).
     """
     return max(1, (cpu_count + 1) // 2)
+
+
+def vad_parallel_options(cpu_count: int) -> list[int]:
+    """Opções do slider "VAD": TODOS os inteiros de 1 até n (núcleos FÍSICOS).
+
+    Regra do usuário (13/09): o VAD roda em processos separados e cada processo
+    é single-threaded (a sessão ONNX usa 1 thread), então o valor é literalmente
+    quantos núcleos o VAD ocupa — n opções, sem passos e sem teto artificial
+    (ao contrário de Conversões, n + 6 opções até 4n, e Requisições, 2..16).
+    """
+    return list(range(1, max(1, int(cpu_count)) + 1))

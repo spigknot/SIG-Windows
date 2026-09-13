@@ -62,6 +62,29 @@ def cancellable_join(work_queue, *, cancel_event, poll: float = POLL_INTERVAL) -
             work_queue.all_tasks_done.wait(poll)
 
 
+def split_balanced(items, parts: int, *, weight):
+    """Divide `items` em no máximo `parts` listas de peso TOTAL equilibrado.
+
+    Usado pelo fan-out do VAD (um processo por núcleo escolhido na slider): cada
+    worker é single-threaded, então o tempo total é o do ramo MAIS PESADO.
+    Distribuir do maior para o menor, sempre no ramo mais leve (LPT), mantém os
+    ramos próximos do equilíbrio — a diferença entre o maior e o menor ramo fica
+    limitada ao peso do maior item.
+
+    O peso é `weight(item)`; no VAD é o tamanho do WAV convertido, que em PCM
+    16 kHz mono é exatamente proporcional à duração (logo, ao tempo do VAD).
+    Ramos vazios são descartados (nunca sobe processo sem arquivo).
+    """
+    total = max(1, int(parts))
+    ramos: list[list] = [[] for _ in range(total)]
+    cargas = [0] * total
+    for item in sorted(items, key=weight, reverse=True):
+        indice = min(range(total), key=lambda posicao: cargas[posicao])
+        ramos[indice].append(item)
+        cargas[indice] += weight(item)
+    return [ramo for ramo in ramos if ramo]
+
+
 def wait_cancellable(condition, *, cancel_event, poll: float = POLL_INTERVAL, timeout: float | None = None) -> bool:
     """Espera uma condição (callable) checar o cancelamento a cada `poll` s.
 

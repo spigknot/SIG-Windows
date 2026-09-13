@@ -12,7 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from app_env import physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
+from app_env import default_parallelism, physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
 from providers import (  # noqa: E402  (catalogo: quem tem o controle "- t = +")
     ALIBABA_API_NAME,
     ASSEMBLYAI_API_NAME,
@@ -162,31 +162,84 @@ def _check_parallel_sliders(app, settings_window) -> None:
     if painel is None:
         raise RuntimeError("secao Paralelismo ausente na aba Avancado")
     sliders = [w for w in descendentes(painel) if isinstance(w, NodeSlider)]
-    if len(sliders) != 2:
-        raise RuntimeError(f"esperava 2 sliders de nos, achei {len(sliders)}")
+    if len(sliders) != 3:
+        raise RuntimeError(f"esperava 3 sliders de nos, achei {len(sliders)}")
     # Opções do slider conforme a ESPECIFICAÇÃO (não a função do app): as
     # Conversões seguem 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n com n = NÚCLEOS
     # físicos; as Requisições continuam de 2 em 2 até 16 (regra de 31/08 — o
-    # gargalo é a rede).
+    # gargalo é a rede); o VAD (pedido de 13/09) tem TODAS as opções de 1 até n.
     nucleos = max(1, physical_cpu_count())
-    esperado = [_expected_conversion_values(nucleos), list(range(2, 17, 2))]
+    esperado = [
+        _expected_conversion_values(nucleos),
+        list(range(2, 17, 2)),
+        list(range(1, nucleos + 1)),
+    ]
     for slider, valores in zip(sliders, esperado):
         if list(slider.values) != valores:
             raise RuntimeError(
                 f"opcoes do slider {list(slider.values)[:6]}... diferentes de {valores[:6]}..."
             )
-    # O slider precisa comecar logo depois do rótulo (pedido do usuário).
+    # Rotulos e ordem: identificados pelo GRID (linha/coluna), nao por pixel —
+    # a geometria so existe com a janela desenhada e o canvas do slider nao tem
+    # o mesmo `winfo_y` dos labels.
+    pai = sliders[0].master
     for slider in sliders:
-        irmaos = [w for w in descendentes(painel) if isinstance(w, ttk.Label)]
-        rotulo = max(
-            (l for l in irmaos if l.winfo_y() == slider.winfo_y()),
-            key=lambda l: l.winfo_x(),
-            default=None,
+        if slider.master is not pai:
+            raise RuntimeError("os sliders de Paralelismo nao estao no mesmo frame")
+    filhos = pai.winfo_children()
+
+    def irmao(slider, coluna: int):
+        linha = int(slider.grid_info()["row"])
+        for widget in filhos:
+            if not isinstance(widget, ttk.Label) or widget.winfo_manager() != "grid":
+                continue
+            info = widget.grid_info()
+            if int(info["row"]) == linha and int(info["column"]) == coluna:
+                return widget
+        return None
+
+    nomes = []
+    for slider in sliders:
+        nome = irmao(slider, 0)
+        if nome is None:
+            raise RuntimeError("slaider sem rotulo na coluna 0")
+        nomes.append(nome.cget("text"))
+    if nomes != ["Conversões", "Requisições", "VAD"]:
+        raise RuntimeError(f"rotulos das sliders fora da ordem esperada: {nomes}")
+
+    # O VAD nasce no padrao da especificacao: metade dos nucleos (n/2).
+    padrao = str(default_parallelism(nucleos))
+    valor_vad = irmao(sliders[-1], 2)
+    if valor_vad is None or valor_vad.cget("text") != padrao:
+        raise RuntimeError(
+            f"o slider VAD nao esta no padrao n/2 ({padrao}): "
+            f"{valor_vad.cget('text') if valor_vad is not None else 'sem label de valor'!r}"
         )
-        if rotulo is not None:
-            vao = slider.winfo_x() - (rotulo.winfo_x() + rotulo.winfo_width())
-            if vao > 40:
-                raise RuntimeError(f"slaider longe do rotulo ({vao}px de vao)")
+
+    # Geometria (pedido do usuario, 10/09): os tres sliders ficam na MESMA
+    # coluna, que comeca logo depois da coluna dos rotulos. O vao maior de uma
+    # linha com rotulo curto (VAD) e o que sobra da largura dos rotulos maiores
+    # — nunca um pulo de coluna (era o bug de 170px).
+    mapeado = bool(settings_window.winfo_ismapped())
+    try:
+        settings_window.deiconify()
+        settings_window.update()
+        nomes_widget = [irmao(slider, 0) for slider in sliders]
+        posicoes = {slider.winfo_x() for slider in sliders}
+        if len(posicoes) != 1:
+            raise RuntimeError(f"sliders de Paralelismo desalinhados: x = {sorted(posicoes)}")
+        largura_maxima = max(nome.winfo_width() for nome in nomes_widget)
+        for slider, nome in zip(sliders, nomes_widget):
+            vao = slider.winfo_x() - (nome.winfo_x() + nome.winfo_width())
+            tolerancia = 40 + (largura_maxima - nome.winfo_width())
+            if vao > tolerancia:
+                raise RuntimeError(
+                    f"slaider {nome.cget('text')!r} longe do rotulo "
+                    f"({vao}px de vao, tolerado {tolerancia}px)"
+                )
+    finally:
+        if not mapeado:
+            settings_window.withdraw()
 
 
 def _settings_tab_pages(settings_window):

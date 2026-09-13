@@ -199,7 +199,7 @@ from batch_errors import (
     vad_label,
     zip_label,
 )
-from batch_execution import cancellable_executor, cancellable_join, iter_completed
+from batch_execution import cancellable_executor, cancellable_join, iter_completed, split_balanced
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
@@ -459,6 +459,7 @@ from app_env import (  # noqa: F401
     cpu_parallel_options,
     default_parallelism,
     physical_cpu_count,
+    vad_parallel_options,
 )
 
 
@@ -8218,6 +8219,7 @@ try {
 
         conv_var = IntVar(value=self.settings["convert_parallel"])
         req_var = IntVar(value=self.settings["transcribe_parallel"])
+        vad_var = IntVar(value=self.settings["vad_parallel"])
         transcription_labels = {}
         transcription_server_var = StringVar()
         refreshing_transcription_servers = False
@@ -8622,6 +8624,24 @@ try {
             "entre velocidade e estabilidade."
         )
         parallel_scale(1, "Requisições", req_var, req_valores, req_help)
+
+        # VAD: TODOS os inteiros de 1 até n núcleos físicos (regra do usuário,
+        # 13/09) — o VAD roda em processos separados e cada um usa UM núcleo,
+        # então o valor é literalmente quantos núcleos o VAD ocupa.
+        vad_valores = vad_parallel_options(cpu_count)
+        vad_help = (
+            "Recomendado: metade dos núcleos da CPU (n/2).\n\n"
+            f"{len(vad_valores)} opções: 1, 2, 3, ..., {vad_valores[-1]} "
+            f"(n = {cpu_count} núcleos físicos desta máquina).\n\n"
+            "O VAD (Silero/WebRTC) é o único estágio que não paraleliza sozinho: "
+            "ele roda em processos separados e cada processo usa UM núcleo — este "
+            "número é quantos núcleos o VAD ocupa. Com 1, a fila é processada "
+            "arquivo por arquivo (como sempre foi). Os arquivos são divididos "
+            "entre os processos pelo tamanho, então o tempo total é o do ramo "
+            "mais pesado; acima de metade dos núcleos o ganho costuma achatar "
+            "(o disco passa a ser o gargalo)."
+        )
+        parallel_scale(2, "VAD", vad_var, vad_valores, vad_help)
 
         # ── Seção de Keywords (aba Avançado, abaixo de Paralelismo) ──────
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
@@ -9785,6 +9805,7 @@ try {
                 {
                     "convert_parallel": conv_var.get(),
                     "transcribe_parallel": req_var.get(),
+                    "vad_parallel": vad_var.get(),
                     "grok_chunk_ms": grok_chunk_ms,
                     "grok_rest_requests": bool(grok_rest_var.get()),
                     "transcription_server": selected_transcription,
@@ -13345,48 +13366,72 @@ try {
         if not python_exe:
             raise RuntimeError("Python não encontrado para executar o VAD")
 
-        payload = {
-            "vad_type": vad_type,
-            "level": level,
-            "vad_deps": str(deps),
-            "files": [
-                {"input": str(job.converted_path), "output": str(job.vad_output_path)}
-                for job in eligible
-            ],
-        }
+        def _vad_weight(job) -> int:
+            """Peso do ramo: bytes do WAV de entrada (∝ duração em PCM 16k mono)."""
+            try:
+                return job.converted_path.stat().st_size
+            except OSError:
+                return 0
+
+        # FAN-OUT (13/09): um processo por núcleo escolhido na slider "VAD". Cada
+        # worker é single-threaded (sessão ONNX com 1 thread), então N processos
+        # usam N núcleos. Com 1, a fila inteira vai para um processo só, na
+        # mesma ordem de sempre.
+        parallel = max(1, int(settings.get("vad_parallel") or 1))
+        parallel = min(parallel, len(eligible))
+        if parallel <= 1:
+            ramos = [eligible]
+        else:
+            # Divisão por PESO: o tempo total é o do ramo mais pesado.
+            ramos = split_balanced(eligible, parallel, weight=_vad_weight)
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        process = subprocess.Popen(
-            [python_exe, str(worker)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            creationflags=creationflags,
-        )
-        with self.process_lock:
-            self.active_processes.add(process)
 
         output_events: queue.Queue = queue.Queue()
-        stderr_lines: list[str] = []
+        workers: list[dict] = []
+        for lote in ramos:
+            payload = {
+                "vad_type": vad_type,
+                "level": level,
+                "vad_deps": str(deps),
+                "files": [
+                    {"input": str(job.converted_path), "output": str(job.vad_output_path)}
+                    for job in lote
+                ],
+            }
+            process = subprocess.Popen(
+                [python_exe, str(worker)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                creationflags=creationflags,
+            )
+            with self.process_lock:
+                self.active_processes.add(process)
+            ramo = {"process": process, "jobs": lote, "stderr": [], "payload": payload, "threads": []}
+            workers.append(ramo)
 
-        def read_stdout():
-            assert process.stdout is not None
-            for line in process.stdout:
-                output_events.put(line)
-            output_events.put(None)
+            def read_stdout(process=process):
+                assert process.stdout is not None
+                for line in process.stdout:
+                    output_events.put(line)
+                output_events.put(None)
 
-        def read_stderr():
-            assert process.stderr is not None
-            for line in process.stderr:
-                stderr_lines.append(line)
+            def read_stderr(process=process, ramo=ramo):
+                assert process.stderr is not None
+                for line in process.stderr:
+                    ramo["stderr"].append(line)
 
-        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
+            for alvo in (read_stdout, read_stderr):
+                thread = threading.Thread(target=alvo, daemon=True)
+                thread.start()
+                ramo["threads"].append(thread)
 
         jobs_by_input = {str(job.converted_path): job for job in eligible}
+        ramo_por_input = {
+            str(job.converted_path): ramo for ramo in workers for job in ramo["jobs"]
+        }
         completed_inputs: set[str] = set()
         diagnostics: list[str] = []
         completed = 0
@@ -13415,25 +13460,32 @@ try {
             completed += 1
             self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
 
+        def encerrar(process):
+            """Encerra um worker do VAD: termina e, se preciso, mata."""
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
         try:
-            assert process.stdin is not None
-            process.stdin.write(json.dumps(payload, ensure_ascii=False))
-            process.stdin.close()
-            stdout_finished = False
-            while process.poll() is None or not stdout_finished or not output_events.empty():
+            for ramo in workers:
+                assert ramo["process"].stdin is not None
+                ramo["process"].stdin.write(json.dumps(ramo["payload"], ensure_ascii=False))
+                ramo["process"].stdin.close()
+            # Um stream fechado = um worker terminou (cada leitor enfileira None).
+            streams_abertos = len(workers)
+            while streams_abertos:
                 if self.cancel_event.is_set():
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                    for ramo in workers:
+                        encerrar(ramo["process"])
                     raise Cancelled()
                 try:
                     line = output_events.get(timeout=0.1)
                 except queue.Empty:
                     continue
                 if line is None:
-                    stdout_finished = True
+                    streams_abertos -= 1
                     continue
                 stripped = line.strip()
                 if not stripped:
@@ -13445,21 +13497,25 @@ try {
                     continue
                 if isinstance(item, dict):
                     accept_result(item)
-            process.wait()
-            stdout_thread.join(timeout=1)
-            stderr_thread.join(timeout=1)
+            for ramo in workers:
+                ramo["process"].wait()
+                for thread in ramo["threads"]:
+                    thread.join(timeout=1)
         finally:
             with self.process_lock:
-                self.active_processes.discard(process)
+                for ramo in workers:
+                    self.active_processes.discard(ramo["process"])
 
-        worker_error = "".join(stderr_lines).strip()
-        if diagnostics:
-            worker_error = "\n".join([worker_error, *diagnostics]).strip()
         for job in eligible:
             input_path = str(job.converted_path)
             if input_path in completed_inputs:
                 continue
-            detail = worker_error or f"worker encerrado sem resultado (código {process.returncode})"
+            ramo = ramo_por_input.get(input_path)
+            detalhe = "".join(ramo["stderr"]).strip() if ramo else ""
+            codigo = ramo["process"].returncode if ramo else None
+            if diagnostics:
+                detalhe = "\n".join([detalhe, *diagnostics]).strip()
+            detail = detalhe or f"worker encerrado sem resultado (código {codigo})"
             self._note_vad_problem(job, detail)
             completed += 1
             self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
