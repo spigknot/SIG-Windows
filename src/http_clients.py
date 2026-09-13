@@ -39,10 +39,33 @@ class GraniteUploader:
         self._lock = threading.Lock()
         self._connections: set[http.client.HTTPConnection] = set()
 
+    @staticmethod
+    def _force_close(sock) -> None:
+        """Fecha o socket de VERDADE e destrava um `recv` já bloqueado.
+
+        Medições nesta máquina (Windows): com o `makefile()` da resposta aberto
+        (`_io_refs > 0`) o `socket.close()` é ADIADO, e nem ele nem o
+        `shutdown()` interrompem um `recv` em andamento — só o fechamento real
+        (`_real_close`) destrava na hora. É o que faz o botão Parar funcionar
+        numa espera SEM timeout de socket (o servidor Granite NAR só responde
+        quando termina o ZIP, e isso pode levar horas).
+        """
+        fechar = getattr(sock, "_real_close", None)
+        try:
+            if fechar is not None:
+                fechar()
+            else:
+                sock.close()
+        except Exception:
+            pass
+
     def cancel(self):
         with self._lock:
             connections = list(self._connections)
         for conn in connections:
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                self._force_close(sock)
             try:
                 conn.close()
             except Exception:
@@ -128,7 +151,15 @@ class GraniteUploader:
         if parsed.query:
             path += f"?{parsed.query}"
         connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-        conn = connection_cls(parsed.netloc, timeout=60 * 60)
+        # SEM timeout de socket (None = espera indefinida — o padrão do Python).
+        # O servidor Granite NAR só responde quando termina o ZIP inteiro, e um
+        # lote grande passa de 1h de processamento (medido: ~10x tempo real —
+        # 47h de áudio ≈ 4-5h de servidor). O timeout antigo de 1h derrubava o
+        # LOTE INTEIRO com "timed out" no instante em que ele estourava
+        # (incidente de 13/09: 8910 arquivos descartados). O botão Parar
+        # continua funcionando: `cancel()` fecha o socket de verdade
+        # (`_force_close`) e destrava a leitura bloqueada na hora.
+        conn = connection_cls(parsed.netloc, timeout=None)
         with self._lock:
             self._connections.add(conn)
         try:
