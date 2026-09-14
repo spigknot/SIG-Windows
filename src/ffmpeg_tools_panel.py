@@ -503,6 +503,28 @@ def selection_crop_filter(crop: tuple[int, int, int, int]) -> str:
     return f"crop={largura}:{altura}:{x}:{y}"
 
 
+def smart_join_segment_order(
+    clip_count: int,
+    has_body: list[bool],
+    junction_indexes: list[int],
+) -> list[tuple[str, int]]:
+    """Ordem dos segmentos do SmartJoin: corpo j, emenda j, corpo j, … 
+
+    A junção j fica ENTRE o corpo j e o corpo j+1 (é o contrato do plano). O
+    Android já montava assim (corpo e emenda no mesmo laço); o port para o
+    Windows separou em dois laços e as emendas caíam todas no fim — medido no
+    N4: a linha do tempo saía 2>3>4>5>1 em vez de 1>2>3>4>5.
+    """
+    juncoes = set(junction_indexes)
+    ordem: list[tuple[str, int]] = []
+    for index in range(clip_count):
+        if index < len(has_body) and has_body[index]:
+            ordem.append(("body", index))
+        if index in juncoes:
+            ordem.append(("bridge", index))
+    return ordem
+
+
 def selection_crop_label(crop: tuple[int, int, int, int]) -> str:
     """Texto do recorte EFETIVO (os mesmos números que o filtro aplica).
 
@@ -6978,7 +7000,6 @@ class FfmpegToolsPanel:
                         ts_cmd, f"SmartJoin preparando corpo {index + 1}", step, total_steps,
                         clip_plan.body_duration_seconds,
                     )
-                pieces.append(ts_path)
 
             for junction in plan_result.junctions:
                 if self.cancel_event.is_set():
@@ -7006,8 +7027,22 @@ class FfmpegToolsPanel:
                     ts_cmd, f"SmartJoin preparando emenda {j + 1}", step, total_steps,
                     max(0.1, smart_join_planner.junction_duration_seconds(junction, fade_in_out)),
                 )
-                pieces.append(ts_path)
 
+            # F7: a ORDEM dos segmentos é o que define o arquivo final. Os dois
+            # laços acima só criam os arquivos; aqui eles entram intercalados —
+            # corpo 1, emenda 1, corpo 2, emenda 2, … (a junção j fica entre o
+            # corpo j e o corpo j+1, como no plano). Antes as emendas iam todas
+            # para o fim e o SmartJoin com transição saía fora de ordem:
+            # medido no N4, a linha do tempo foi 2>3>4>5>1.
+            pieces = []
+            for tipo, index in smart_join_segment_order(
+                len(plan_result.clips),
+                [clip.body_duration_seconds > 0.020 for clip in plan_result.clips],
+                [junction.index for junction in plan_result.junctions],
+            ):
+                arquivo = work_dir / f"{'body' if tipo == 'body' else 'bridge'}_{index:03d}.ts"
+                if arquivo.exists():
+                    pieces.append(arquivo)
             if not pieces:
                 raise RuntimeError("O SmartJoin não gerou segmentos.")
             step += 1
