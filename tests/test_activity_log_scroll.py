@@ -56,6 +56,13 @@ class _FakeLogBox:
     def tag_configure(self, *_args, **_kwargs) -> None:
         pass
 
+    def tag_ranges(self, _tag):
+        """Contrato novo (14/09): o horário da linha viva vem do texto atual."""
+        return ()
+
+    def get(self, _first, _last) -> str:
+        return ""
+
     def insert(self, _index, text, _tags=None) -> None:
         self.inserted.append(text)
 

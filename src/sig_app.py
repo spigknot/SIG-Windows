@@ -1970,9 +1970,12 @@ class SigApp:
         """Linha viva do activity log: atualiza a MESMA linha (por chave) sem criar novas.
 
         `timestamp` preserva o horário da PRIMEIRA ocorrência (linhas de erro e de
-        "já estavam prontos"). `in_place` reescreve a linha NO LUGAR em vez de
-        jogá-la para o fim a cada atualização — sem isso, várias linhas vivas ao
-        mesmo tempo (erros por tipo + progresso) ficariam trocando de posição.
+        "já estavam prontos"). Sem ele, o horário da linha viva também é o do
+        NASCIMENTO dela: a atualização do texto não troca o HH:MM:SS (regra do
+        usuário, 14/09) — o tempo decorrido aparece só no fechamento, entre
+        parênteses. `in_place` reescreve a linha NO LUGAR em vez de jogá-la para
+        o fim a cada atualização — sem isso, várias linhas vivas ao mesmo tempo
+        (erros por tipo + progresso) ficariam trocando de posição.
         """
         box = getattr(self, "activity_log", None)
         if box is None or not box.winfo_exists():
@@ -1981,7 +1984,9 @@ class SigApp:
         if "vad_total" not in box.tag_names():
             box.tag_configure("vad_total", foreground="#0a7a2f")
         line_tag = f"phase:{key}"
-        line = f"{timestamp or time.strftime('%H:%M:%S')}  {message}\n"
+        if timestamp is None:
+            timestamp = self._live_line_birth_stamp(box, line_tag) or time.strftime("%H:%M:%S")
+        line = f"{timestamp}  {message}\n"
         follow = self._activity_log_follow_tail(box)
         if in_place and self._replace_live_line(box, line_tag, line, tag):
             self._scroll_activity_log_tail(box, follow)
@@ -1997,6 +2002,29 @@ class SigApp:
             box.insert("end", line, line_tag)
         self._scroll_activity_log_tail(box, follow)
         box.configure(state="disabled")
+
+    @staticmethod
+    def _live_line_birth_stamp(box, line_tag: str) -> str:
+        """Horário em que a linha viva NASCEU (o prefixo `HH:MM:SS` do texto).
+
+        Preservá-lo é regra do usuário (14/09): `Criando ZIP para envio: 15/8910`
+        nasce às 01:46:16 e continua mostrando 01:46:16 quando o texto passa para
+        `2000/8910` — o tempo decorrido aparece só no fechamento (parênteses).
+        Devolve "" quando a linha ainda não existe (linha nova = horário novo).
+        """
+        try:
+            ranges = box.tag_ranges(line_tag)
+        except tk.TclError:
+            return ""
+        if len(ranges) < 2:
+            return ""
+        try:
+            texto = str(box.get(str(ranges[0]), str(ranges[-1])))
+        except tk.TclError:
+            return ""
+        if len(texto) >= 8 and texto[2] == ":" and texto[5] == ":":
+            return texto[:8]
+        return ""
 
     def _replace_live_line(self, box, line_tag: str, text: str, tag: str | None) -> bool:
         """Reescreve a linha viva NO LUGAR usando a própria tag.
@@ -13845,7 +13873,12 @@ try {
         try:
             if not self.uploader:
                 raise RuntimeError("uploader não inicializado")
-            self._queue("status", f"Enviando ZIP ({format_bytes(zip_size)}) e aguardando resposta do servidor...")
+            send_message = f"Enviando ZIP ({format_bytes(zip_size)}) e aguardando resposta do servidor..."
+            # PRETA enquanto espera (regra do usuário, 14/09): como linha viva
+            # ela NÃO passa pela cor automática do log — no `status` o padrão
+            # `^enviando` pintava de verde antes de o ZIP chegar.
+            self._queue("activity_line", "zip_send", send_message, None)
+            self._queue("status_silent", send_message)
             self._queue("progress", 35)
             request_started = time.perf_counter()
             status, raw, _headers = self.uploader.post_file_raw(
@@ -13867,6 +13900,12 @@ try {
             if not zipfile.is_zipfile(response_zip_path):
                 preview = raw.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"o servidor não retornou um ZIP válido: {preview[:500]}")
+
+            # ZIP recebido e válido: a linha do envio fecha VERDE com o tempo
+            # percorrido entre parênteses (regra do usuário, 14/09).
+            received_message = f"{send_message} ({format_duration(request_elapsed)})"
+            self._queue("activity_line", "zip_send", received_message, "vad_total")
+            self._queue("status_silent", received_message)
 
             self._queue("status", "Extraindo ZIP retornado pelo servidor...")
             self._queue("progress", 75)

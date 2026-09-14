@@ -155,14 +155,15 @@ def _check_one_model_checkbox(app) -> None:
 def _expected_conversion_values(nucleos: int) -> list[int]:
     """Opções do slider de Conversões conforme a especificação.
 
-    Regra do usuário (11/09): 1, 2, 3, ..., n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n,
-    aproximando a conta quebrada para cima no empate (4.5 -> 5). Derivado da
-    especificação de propósito: repetir a função do app daria falso positivo.
+    Regra do usuário (11/09; 8n e 16n pedidos em 14/09): 1, 2, 3, ..., n,
+    3n/2, 2n, 5n/2, 3n, 7n/2, 4n, 8n, 16n, aproximando a conta quebrada para
+    cima no empate (4.5 -> 5). Derivado da especificação de propósito: repetir
+    a função do app daria falso positivo.
     """
     import math
 
     valores = list(range(1, nucleos + 1))
-    for fator in (3, 4, 5, 6, 7, 8):
+    for fator in (3, 4, 5, 6, 7, 8, 16, 32):
         valores.append(int(math.floor(nucleos * fator / 2 + 0.5)))
     return sorted(set(valores))
 
@@ -203,9 +204,10 @@ def _check_parallel_sliders(app, settings_window) -> None:
     if len(sliders) != 3:
         raise RuntimeError(f"esperava 3 sliders de nos, achei {len(sliders)}")
     # Opções do slider conforme a ESPECIFICAÇÃO (não a função do app): as
-    # Conversões seguem 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n com n = NÚCLEOS
-    # físicos; as Requisições continuam de 2 em 2 até 16 (regra de 31/08 — o
-    # gargalo é a rede); o VAD (pedido de 13/09) tem TODAS as opções de 1 até n.
+    # Conversões seguem 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n, 8n, 16n com n =
+    # NÚCLEOS físicos; as Requisições continuam de 2 em 2 até 16 (regra de
+    # 31/08 — o gargalo é a rede); o VAD (pedido de 13/09) tem TODAS as opções
+    # de 1 até n.
     nucleos = max(1, physical_cpu_count())
     esperado = [
         _expected_conversion_values(nucleos),

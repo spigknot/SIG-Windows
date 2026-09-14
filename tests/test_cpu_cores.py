@@ -41,10 +41,12 @@ class PhysicalCoreCountTest(unittest.TestCase):
         self.assertLessEqual(nucleos, logico)
         self.assertLessEqual(logico / nucleos, 4.0)
 
-    def test_escala_de_18_nucleos_termina_em_72_e_nao_144(self):
-        # 18 núcleos / 36 threads: 4n = 72 (não 4 × 36 = 144).
-        self.assertEqual(72, parallel_values(18)[-1])
-        self.assertEqual(24, len(parallel_values(18)))       # n + 6 opções
+    def test_escala_de_18_nucleos_usa_nucleos_fisicos_e_nao_threads(self):
+        # 18 núcleos / 36 threads: o teto do slider é 16n = 288 (não
+        # 16 × 36 = 576). O slider de Conversões tem n + 8 opções (8n e 16n
+        # pedidos em 14/09).
+        self.assertEqual(288, parallel_values(18)[-1])
+        self.assertEqual(26, len(parallel_values(18)))
         # O caso real do build (Xeon 18c/36t) medido na máquina.
         if os.name == "nt" and physical_cpu_count() == 18:
             self.assertEqual(18, os.cpu_count() // 2)

@@ -100,42 +100,43 @@ class NearestValueTest(unittest.TestCase):
 
 
 class ParallelValuesTest(unittest.TestCase):
-    """Opções do slider de Conversões: 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n.
+    """Opções do slider de Conversões: 1..n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n, 8n, 16n.
 
-    Regra do usuário (11/09): n + 6 opções, aproximando a conta quebrada.
+    Regra do usuário (11/09; 8n e 16n pedidos em 14/09): n + 8 opções,
+    aproximando a conta quebrada.
     """
 
     def test_maquina_de_4_nucleos(self):
         # O caso real dos PCs que mostraram o problema.
         self.assertEqual(
-            [1, 2, 3, 4, 6, 8, 10, 12, 14, 16], parallel_values(4)
+            [1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 32, 64], parallel_values(4)
         )
 
     def test_maquina_de_2_nucleos(self):
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], parallel_values(2))
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 16, 32], parallel_values(2))
 
     def test_contas_quebradas_aproximam_para_cima_no_empate(self):
         # 3n/2 = 4.5 -> 5; 5n/2 = 7.5 -> 8; 7n/2 = 10.5 -> 11.
         self.assertEqual(
-            [1, 2, 3, 5, 6, 8, 9, 11, 12], parallel_values(3)
+            [1, 2, 3, 5, 6, 8, 9, 11, 12, 24, 48], parallel_values(3)
         )
         # 5 núcleos: 7.5 -> 8, 12.5 -> 13, 17.5 -> 18.
         self.assertEqual(
-            [1, 2, 3, 4, 5, 8, 10, 13, 15, 18, 20], parallel_values(5)
+            [1, 2, 3, 4, 5, 8, 10, 13, 15, 18, 20, 40, 80], parallel_values(5)
         )
 
     def test_maquina_de_18_nucleos(self):
         self.assertEqual(
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-             27, 36, 45, 54, 63, 72],
+             27, 36, 45, 54, 63, 72, 144, 288],
             parallel_values(18),
         )
 
-    def test_tem_n_mais_6_opcoes_e_termina_em_4n(self):
+    def test_tem_n_mais_8_opcoes_e_termina_em_16n(self):
         for nucleos in range(2, 129):
             valores = parallel_values(nucleos)
-            self.assertEqual(nucleos + 6, len(valores), f"n={nucleos}")
-            self.assertEqual(4 * nucleos, valores[-1], f"n={nucleos}")
+            self.assertEqual(nucleos + 8, len(valores), f"n={nucleos}")
+            self.assertEqual(16 * nucleos, valores[-1], f"n={nucleos}")
 
     def test_lista_crescente_e_sem_repeticao(self):
         for nucleos in range(1, 129):
@@ -153,9 +154,9 @@ class ParallelValuesTest(unittest.TestCase):
             recomendado = max(1, (nucleos + 1) // 2)
             self.assertIn(recomendado, parallel_values(nucleos), f"n={nucleos}")
 
-    def test_um_nucleo_nao_tem_como_ter_n_mais_6(self):
-        # Não existem 7 inteiros distintos até 4n = 4.
-        self.assertEqual([1, 2, 3, 4], parallel_values(1))
+    def test_um_nucleo_tem_seis_opcoes_distintas(self):
+        # Não existem 9 inteiros distintos até 16n = 16.
+        self.assertEqual([1, 2, 3, 4, 8, 16], parallel_values(1))
 
 
 class DescribeParallelValuesTest(unittest.TestCase):
@@ -163,7 +164,7 @@ class DescribeParallelValuesTest(unittest.TestCase):
 
     def test_lista_a_maquina_de_4_nucleos(self):
         self.assertEqual(
-            "Opções desta máquina (n = 4 núcleos): 1, 2, 3, 4, 6, 8, 10, 12, 14, 16.",
+            "Opções desta máquina (n = 4 núcleos): 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 32, 64.",
             describe_parallel_values(parallel_values(4), 4),
         )
 

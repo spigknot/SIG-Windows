@@ -142,6 +142,29 @@ class LinhaVivaDoZipTest(unittest.TestCase):
         self.assertTrue(sondas, "a barra de status ficou sem atualização do ZIP")
         self.assertIn(f"{ARQUIVOS}/{ARQUIVOS}", sondas[-1][1])
 
+        # A linha do ENVIO é preta na espera e fecha verde com o tempo quando o
+        # ZIP chega (regra do usuário, 14/09): no `status` o padrão `^enviando`
+        # do log automático a pintava de verde antes de o servidor responder.
+        envio_por_status = [
+            item
+            for item in fila
+            if item[0] == "status" and "Enviando ZIP" in str(item[1])
+        ]
+        self.assertEqual([], envio_por_status, "a linha do envio não pode ir pelo `status` (fica verde)")
+        envio = _linhas(fila, "zip_send")
+        self.assertTrue(envio, "faltou a linha viva do envio do ZIP")
+        self.assertIsNone(envio[0][3] if len(envio[0]) > 3 else None, "a linha do envio nasce SEM verde")
+        self.assertIn("Enviando ZIP", envio[0][2])
+        final_envio = envio[-1]
+        self.assertEqual("vad_total", final_envio[3], "a linha do envio precisa fechar verde no sucesso")
+        self.assertIn("Enviando ZIP", final_envio[2])
+        self.assertNotIn("%", final_envio[2])
+        self.assertRegex(
+            final_envio[2],
+            r"\((\d+\.\d+s|\d+min \d+s|\d+h \d+min)\)$",
+            "o fechamento do envio concatena o TEMPO entre parênteses",
+        )
+
         # O fluxo inteiro rodou: os TXT da resposta foram aplicados nos jobs.
         transcritos = [job for job in jobs if job.transcription.startswith("texto do arquivo")]
         self.assertEqual(ARQUIVOS, len(transcritos))
@@ -152,7 +175,7 @@ class LinhaVivaDoZipTest(unittest.TestCase):
         indice_envio = next(
             i
             for i, item in enumerate(fila)
-            if item[0] == "status" and str(item[1]).startswith("Enviando ZIP")
+            if item[0] == "activity_line" and item[1] == "zip_send"
         )
         indice_extracao = next(
             i

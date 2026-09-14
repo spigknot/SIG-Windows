@@ -79,11 +79,12 @@ def nearest_value(value, values: list[int]) -> int:
 def parallel_values(cpu_count: int) -> list[int]:
     """Opções do slider de paralelismo para uma máquina de `cpu_count` núcleos.
 
-    Regra do usuário (11/09): 1, 2, 3, ..., n, 3n/2, 2n, 5n/2, 3n, 7n/2, 4n —
-    ou seja, n + 6 opções. Conta que não dá exato aproxima para o inteiro mais
-    próximo, com o empate subindo (4.5 -> 5, 7.5 -> 8, 12.5 -> 13); a lista é
-    sempre crescente e sem repetições (com n = 1 as seis frações caem em
-    1/2/3/4 e sobram 4 opções — não existem 7 inteiros distintos até 4n).
+    Regra do usuário (11/09, estendida em 14/09 com 8n e 16n): 1, 2, 3, ..., n,
+    3n/2, 2n, 5n/2, 3n, 7n/2, 4n, 8n, 16n — ou seja, n + 8 opções. Conta que não
+    dá exato aproxima para o inteiro mais próximo, com o empate subindo
+    (4.5 -> 5, 7.5 -> 8, 12.5 -> 13); a lista é sempre crescente e sem
+    repetições (com n = 1 as oito frações caem em 1/2/3/4/8/16 e sobram 6
+    opções distintas — não existem 9 inteiros distintos até 16n).
 
     Vantagem sobre a lista antiga (só múltiplos do passo): o valor recomendado
     n/2 passa a existir como nó — antes, num 4 núcleos, o recomendado 2 era
@@ -91,7 +92,7 @@ def parallel_values(cpu_count: int) -> list[int]:
     """
     nucleos = max(1, int(cpu_count))
     valores = list(range(1, nucleos + 1))
-    for fator in (3, 4, 5, 6, 7, 8):        # 3n/2, 2n, 5n/2, 3n, 7n/2, 4n
+    for fator in (3, 4, 5, 6, 7, 8, 16, 32):   # 3n/2, 2n, 5n/2, 3n, 7n/2, 4n, 8n, 16n
         valores.append(int(math.floor(nucleos * fator / 2 + 0.5)))
     return sorted(set(valores))
 
