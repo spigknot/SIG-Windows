@@ -557,6 +557,25 @@ class VideoAcceleration:
 
 
 @dataclass(frozen=True)
+class AudioTrackProfile:
+    """Perfil de UMA faixa de áudio da entrada (uma por stream).
+
+    Motivo: o MediaProfile único expõe só a primeira faixa, e usá-lo para
+    reencodar todas impõe taxa, canais e bitrate errados às demais (medido:
+    faixa B estéreo/48 kHz saía mono/44,1 kHz).
+    """
+
+    index: int
+    codec: str
+    bitrate: str
+    rate: int
+    channels: int
+    layout: str
+    default: bool = False
+    language: str = ""
+
+
+@dataclass(frozen=True)
 class MediaProfile:
     """Características da mídia usadas quando uma operação precisa reencodar."""
 
@@ -580,6 +599,7 @@ class MediaProfile:
     audio_streams: int = 0
     subtitle_streams: int = 0
     data_streams: int = 0
+    audio_tracks: tuple["AudioTrackProfile", ...] = ()
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -5006,11 +5026,9 @@ class FfmpegToolsPanel:
         if not media.has_audio:
             args += ["-an"]
         elif audio_precise:
-            # Reencoda o áudio com os mesmos parâmetros do miolo copiado.
-            args += [
-                "-c:a", "aac", "-b:a", media.audio_bitrate,
-                "-ar", str(media.audio_rate), "-ac", str(media.audio_channels),
-            ]
+                    # Reencoda o áudio com o perfil de cada faixa (as bordas espelham
+                    # o miolo copiado faixa a faixa).
+                    args += self._precise_audio_args(media)
         else:
             args += ["-c:a", "copy"]
         args += [
@@ -5167,10 +5185,7 @@ class FfmpegToolsPanel:
         def build(profile: VideoAcceleration):
             plan = selection_crop_filter(crop) if crop else "null"
             input_args, filter_args = self._filter_for_profile(plan, profile)
-            audio_args = ["-c:a", "copy"] if copy_audio else [
-                "-c:a", "aac", "-b:a", media.audio_bitrate,
-                "-ar", str(media.audio_rate), "-ac", str(media.audio_channels),
-            ]
+            audio_args = ["-c:a", "copy"] if copy_audio else self._precise_audio_args(media)
             return [
                 str(self._ffmpeg()), "-hide_banner", "-y", *input_args,
                 "-ss", self._fmt_seconds(start), "-i", str(source),
@@ -5522,6 +5537,70 @@ class FfmpegToolsPanel:
         "7.1": 8, "7.1(wide)": 8, "7.1(wide-side)": 8, "octagonal": 8,
     }
 
+    def _parse_audio_tracks(self, text: str) -> tuple[AudioTrackProfile, ...]:
+        """Um AudioTrackProfile por faixa de áudio, na ordem da entrada.
+
+        O perfil único (o da primeira faixa) impõe taxa, canais e bitrate à
+        faixa errada quando o arquivo tem mais de um áudio: este inventário é
+        a fonte do reencode por faixa.
+        """
+        tracks: list[AudioTrackProfile] = []
+        for line in text.splitlines():
+            if "Audio:" not in line or not re.search(r"Stream #\d+:\d+", line):
+                continue
+            codec_match = re.search(r"Audio:\s*([a-zA-Z0-9_]+)", line)
+            codec = codec_match.group(1).lower() if codec_match else ""
+            rate_match = re.search(r"(\d+)\s*Hz", line)
+            rate = int(rate_match.group(1)) if rate_match else 48000
+            layout_match = re.search(r"(\d+)\s*Hz,\s*([a-zA-Z0-9][a-zA-Z0-9.()]*)", line)
+            layout_token = layout_match.group(2) if layout_match else ""
+            if layout_token in self._CHANNEL_LAYOUT_COUNTS:
+                layout = layout_token
+                channels = self._CHANNEL_LAYOUT_COUNTS[layout_token]
+            else:
+                channels_match = re.search(r"(\d+)\s*channels", line)
+                channels = int(channels_match.group(1)) if channels_match else 2
+                layout = {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}.get(channels, "stereo")
+            rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", line)
+            bitrate = f"{float(rates[-1]):g}k" if rates and float(rates[-1]) > 0 else "128k"
+            language_match = re.search(r"Stream #\d+:\d+(?:\[[^\]]*\])?\(([^)]*)\)", line)
+            tracks.append(
+                AudioTrackProfile(
+                    index=len(tracks),
+                    codec=codec,
+                    bitrate=bitrate,
+                    rate=rate,
+                    channels=channels,
+                    layout=layout,
+                    default="(default)" in line,
+                    language=language_match.group(1) if language_match else "",
+                )
+            )
+        return tuple(tracks)
+
+    def _precise_audio_args(self, media: MediaProfile) -> list[str]:
+        """Reencoda o áudio com o perfil de CADA faixa.
+
+        Os especificadores :N valem para a SAÍDA: como a seleção mapeia todas
+        as faixas de áudio na ordem da entrada (-map 0:a?), a faixa N da saída
+        corresponde à faixa N da entrada. Sem inventário (probe sem faixas),
+        mantém o comportamento anterior em vez de regredir.
+        """
+        if not media.audio_tracks:
+            return [
+                "-c:a", "aac", "-b:a", media.audio_bitrate,
+                "-ar", str(media.audio_rate), "-ac", str(media.audio_channels),
+            ]
+        args: list[str] = []
+        for track in media.audio_tracks:
+            args += [
+                f"-c:a:{track.index}", "aac",
+                f"-b:a:{track.index}", track.bitrate,
+                f"-ar:{track.index}", str(track.rate),
+                f"-ac:{track.index}", str(track.channels),
+            ]
+        return args
+
     def _probe_media(self, source: Path) -> MediaProfile:
         command = [str(self._ffmpeg()), "-hide_banner", "-i", str(source)]
         self._record_ffmpeg_command(command, probe=True)
@@ -5602,7 +5681,8 @@ class FfmpegToolsPanel:
             bool(video_line), rotation, audio_codec,
             video_codec, pix_fmt, timebase, sar,
             audio_streams, subtitle_streams, data_streams,
-        )
+                        audio_tracks=self._parse_audio_tracks(text),
+                    )
 
     def _max_audio_transition(self, clips) -> float:
         # Clipes internos recebem duas transições (uma em cada extremidade); os das
