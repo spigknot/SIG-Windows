@@ -5593,11 +5593,14 @@ class FfmpegToolsPanel:
             ]
         args: list[str] = []
         for track in media.audio_tracks:
+            # Especificador QUALIFICADO (a:N): o nu (-ar:0) casa por indice
+            # GLOBAL de stream e o stream 0 e o video — medido (14/09): a faixa
+            # A saia com a taxa da B (48000/2 em vez de 44100/1).
             args += [
                 f"-c:a:{track.index}", "aac",
                 f"-b:a:{track.index}", track.bitrate,
-                f"-ar:{track.index}", str(track.rate),
-                f"-ac:{track.index}", str(track.channels),
+                f"-ar:a:{track.index}", str(track.rate),
+                f"-ac:a:{track.index}", str(track.channels),
             ]
         return args
 

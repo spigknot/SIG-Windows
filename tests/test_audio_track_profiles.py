@@ -86,8 +86,8 @@ class ArgumentosPorFaixaTests(unittest.TestCase):
         self.assertEqual(
             args,
             [
-                "-c:a:0", "aac", "-b:a:0", "64k", "-ar:0", "44100", "-ac:0", "1",
-                "-c:a:1", "aac", "-b:a:1", "128k", "-ar:1", "48000", "-ac:1", "2",
+                "-c:a:0", "aac", "-b:a:0", "64k", "-ar:a:0", "44100", "-ac:a:0", "1",
+                "-c:a:1", "aac", "-b:a:1", "128k", "-ar:a:1", "48000", "-ac:a:1", "2",
             ],
         )
 
@@ -115,7 +115,7 @@ class ArgumentosPorFaixaTests(unittest.TestCase):
         comando = capturado[0]
         self.assertIn("-b:a:1", comando)
         self.assertEqual(comando[comando.index("-b:a:1") + 1], "128k")
-        self.assertIn("-ac:1", comando)
+        self.assertIn("-ac:a:1", comando)
         # O aviso ao operador continua dizendo que as faixas são preservadas.
         self.assertTrue(
             any("2 faixas de áudio" in str(chamada) for chamada in panel._append_log.call_args_list)
