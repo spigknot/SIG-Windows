@@ -503,6 +503,38 @@ def selection_crop_filter(crop: tuple[int, int, int, int]) -> str:
     return f"crop={largura}:{altura}:{x}:{y}"
 
 
+def copy_effective_start_seconds(start: float, keyframes: list[float]) -> float:
+    """Início EFETIVO de um corte em stream copy: o último keyframe <= início.
+
+    Copiar streams não corta em qualquer ponto: o FFmpeg recua até o keyframe
+    disponível. Declarar isso é o contrato do modo Sem Reencode (a promessa tem
+    que ser exatamente a entrega).
+    """
+    anteriores = [valor for valor in keyframes if valor <= start + 0.001]
+    return max(anteriores) if anteriores else 0.0
+
+
+def copy_interval_message(
+    requested_start: float,
+    requested_end: float,
+    effective_start: float,
+) -> str:
+    """Texto do intervalo pedido x efetivo do modo Sem Reencode."""
+    pedido = max(0.0, requested_end - requested_start)
+    efetivo = max(0.0, requested_end - effective_start)
+    recuo = requested_start - effective_start
+    if recuo <= 0.001:
+        return (
+            f"Sem Reencode: intervalo efetivo {effective_start:.3f}–{requested_end:.3f} s "
+            f"({efetivo:.3f} s) — igual ao pedido."
+        )
+    return (
+        f"Sem Reencode: intervalo efetivo {effective_start:.3f}–{requested_end:.3f} s "
+        f"({efetivo:.3f} s); pedido {requested_start:.3f}–{requested_end:.3f} s ({pedido:.3f} s) — "
+        f"o início recua {recuo:.3f} s até o keyframe anterior."
+    )
+
+
 def smart_join_segment_order(
     clip_count: int,
     has_body: list[bool],
@@ -5018,9 +5050,24 @@ class FfmpegToolsPanel:
             self._append_log(
                 "Corte rápido: codecs preservados; os limites são aproximados ao keyframe/pacote disponível."
             )
+            # F6: declarar o intervalo EFETIVO (pedido x entregue) E ancorar o
+            # seek no keyframe: cortar no meio do GOP deixa o começo do arquivo
+            # sem keyframe (medido: os primeiros quadros saíam P, com o primeiro
+            # keyframe em 0,6 s). Copiar streams só é fiel a partir de um keyframe.
+            inicio_efetivo = start
+            if is_video:
+                try:
+                    keyframes = self._extract_keyframes(source)
+                except Exception:
+                    keyframes = []
+                inicio_efetivo = copy_effective_start_seconds(start, keyframes)
+                self._append_log(
+                    copy_interval_message(start, start + duration, inicio_efetivo)
+                )
+            duracao_efetiva = max(0.01, (start + duration) - inicio_efetivo)
             command = [
-                str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(start),
-                "-i", str(source), "-t", self._fmt_seconds(duration),
+                str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(inicio_efetivo),
+                "-i", str(source), "-t", self._fmt_seconds(duracao_efetiva),
             ]
             if is_video:
                 if preserve_all_streams:
