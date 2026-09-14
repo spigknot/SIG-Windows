@@ -35,6 +35,7 @@ from ffmpeg_tools_panel import (  # noqa: E402
     FfmpegToolsPanel,
     MediaProfile,
     PreviewSelection,
+    selection_crop_label,
     VideoAcceleration,
     preview_drawn_size,
     preview_fraction_from_view,
@@ -192,6 +193,23 @@ class SelectionGeometryTests(unittest.TestCase):
 
     def test_crop_filter_text(self):
         self.assertEqual(selection_crop_filter((10, 20, 100, 50)), "crop=100:50:10:20")
+
+    def test_crop_pixels_snap_an_odd_origin_down_to_the_even_grid(self):
+        # F3/T05: pedir y=87 entregava a linha 86 (a grade de croma ajusta um
+        # pixel para cima); alinhar para BAIXO faz o retangulo anunciado ser
+        # exatamente o que sai no arquivo.
+        selecao = PreviewSelection(100 / 1280, 87 / 720, (100 + 322) / 1280, (87 + 162) / 720)
+        crop = selection_crop_pixels(selecao, 1280, 720)
+
+        self.assertEqual(crop, (100, 86, 322, 162))
+        for valor in crop:
+            self.assertEqual(valor % 2, 0)
+
+    def test_crop_label_matches_the_filter_numbers(self):
+        # O rotulo usa os MESMOS numeros do filtro: promessa igual a entrega.
+        crop = (100, 86, 322, 162)
+        self.assertEqual(selection_crop_filter(crop), "crop=322:162:100:86")
+        self.assertEqual(selection_crop_label(crop), "322 x 162 pixels a partir de (100, 86)")
 
 
 class SelectionWiringTests(unittest.TestCase):

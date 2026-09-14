@@ -484,6 +484,12 @@ def selection_crop_pixels(
     y0 = min(max(0, y0), max(0, video_height - 2))
     x1 = min(max(x0 + 2, x1), video_width)
     y1 = min(max(y0 + 2, y1), video_height)
+    # A grade de croma (yuv420p) exige origem E tamanho PARES: com a origem
+    # ímpar o FFmpeg entrega o retângulo deslocado um pixel (medido: pedir y=87
+    # entregou a linha 86). Alinhar para BAIXO faz o filtro, o diálogo e o
+    # rótulo anunciarem exatamente o retângulo que sai no arquivo.
+    x0 -= x0 % 2
+    y0 -= y0 % 2
     largura = (x1 - x0) - (x1 - x0) % 2
     altura = (y1 - y0) - (y1 - y0) % 2
     largura = max(2, largura)
@@ -495,6 +501,16 @@ def selection_crop_filter(crop: tuple[int, int, int, int]) -> str:
     """Filtro de recorte do FFmpeg para a seleção."""
     x, y, largura, altura = crop
     return f"crop={largura}:{altura}:{x}:{y}"
+
+
+def selection_crop_label(crop: tuple[int, int, int, int]) -> str:
+    """Texto do recorte EFETIVO (os mesmos números que o filtro aplica).
+
+    Existe para o rótulo nunca divergir do que sai no arquivo: o retângulo já
+    vem alinhado à grade par por selection_crop_pixels.
+    """
+    x, y, largura, altura = crop
+    return f"{largura} x {altura} pixels a partir de ({x}, {y})"
 
 
 def selection_filter_atoms(filters: str) -> list[str]:
@@ -4302,8 +4318,8 @@ class FfmpegToolsPanel:
         ):
             extra = "\n\nA seleção exige reencodar: o arquivo será regerado."
         message = (
-            f"Será salvo apenas o que está DENTRO da seleção: {largura} x {altura} pixels, "
-            f"a partir de ({x}, {y}).\n"
+            f"Será salvo apenas o que está DENTRO da seleção: "
+            f"{selection_crop_label(crop)}.\n"
             "O restante do quadro será descartado." + extra
         )
         return bool(messagebox.askokcancel("sig", message))
@@ -5167,7 +5183,7 @@ class FfmpegToolsPanel:
     ) -> None:
         if crop:
             self._append_log(
-                f"Recorte por seleção: {crop[2]} x {crop[3]} pixels a partir de ({crop[0]}, {crop[1]})."
+                f"Recorte por seleção: {selection_crop_label(crop)}."
             )
         if media.audio_streams > 1:
             action = "copiadas nos limites de pacote" if copy_audio else "preservadas e reencodadas em AAC"
@@ -5329,7 +5345,7 @@ class FfmpegToolsPanel:
         crop = self._worker_crop("rotate_crop")
         if crop:
             self._append_log(
-                f"Recorte por seleção: {crop[2]} x {crop[3]} pixels a partir de ({crop[0]}, {crop[1]})."
+                f"Recorte por seleção: {selection_crop_label(crop)}."
             )
         metadata_mode = bool(self._worker_value("rotate_metadata", self.rotate_metadata_var))
         if crop and metadata_mode:
