@@ -625,6 +625,51 @@ class MediaProfile:
         return (self.duration, self.has_audio, self.width, self.height, self.fps)[index]
 
 
+# Codecs que podem ser COPIADOS (sem reencodar) ao extrair áudio, por
+# extensão aceita pelo app. Espelha o canCopyAudioWithoutConversion do Android.
+EXTRACT_COPY_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "aac": ("m4a", "aac"),
+    "mp3": ("mp3",),
+    "opus": ("opus",),
+    "vorbis": ("ogg",),
+    "flac": ("flac",),
+}
+
+
+def extract_can_copy(
+    media: MediaProfile,
+    extension: str,
+    rate: str,
+    channels: str,
+    has_trim: bool,
+) -> bool:
+    """Cópia sem perdas só quando o pedido é o PRÓPRIO stream.
+
+    Mesmo codec (extensão compatível), mesma taxa e mesmos canais e SEM recorte
+    — recorte exige reencodar (stream copy não corta por amostras com precisão).
+    Era o comportamento do Android; no Windows o Extrair sempre reencodava.
+    """
+    if has_trim:
+        return False
+    codec = (media.audio_codec or "").lower()
+    if not codec:
+        return False
+    if codec.startswith("pcm_"):
+        compativeis: tuple[str, ...] = ("wav",)
+    else:
+        compativeis = EXTRACT_COPY_EXTENSIONS.get(codec, ())
+    if not compativeis or extension.lower() not in compativeis:
+        return False
+    try:
+        if rate and int(str(rate)) != int(media.audio_rate):
+            return False
+        if channels and int(str(channels)) != int(media.audio_channels):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 class RangeTimeline(Canvas):
     """Linha do tempo simples com playhead e marcadores de início/fim arrastáveis."""
 
@@ -5328,15 +5373,25 @@ class FfmpegToolsPanel:
                 start > 0.001 or media.duration <= 0 or effective_end < media.duration - 0.05
             )
             output = self._safe_output(self.output_dir, f"{source.stem}_audio", f".{extension}")
+            # F4b: quando o pedido é o próprio stream, extrair é COPIAR (sem
+            # perdas) — o Android já fazia assim; aqui sempre reencodava.
+            copiar = extract_can_copy(media, extension, rate, channels, has_trim=has_trim)
             command = [str(self._ffmpeg()), "-hide_banner", "-y"]
             if has_trim and start is not None:
                 command += ["-ss", self._fmt_seconds(start)]
             command += ["-i", str(source)]
             if has_trim and start is not None and effective_end is not None:
                 command += ["-t", self._fmt_seconds(effective_end - start)]
-            command += ["-vn", "-map", "0:a:0?", "-ar", rate, "-ac", channels, *self._audio_codec_args(extension, bitrate), str(output)]
+            if copiar:
+                self._append_log(
+                    f"{source.name}: cópia sem reencodar (mesmo codec, taxa e canais do original)."
+                )
+                command += ["-vn", "-map", "0:a:0?", "-c:a", "copy", str(output)]
+            else:
+                command += ["-vn", "-map", "0:a:0?", "-ar", rate, "-ac", channels, *self._audio_codec_args(extension, bitrate), str(output)]
             target_duration = (effective_end - start) if has_trim and start is not None and effective_end is not None else media.duration
-            self._execute(command, f"Extraindo {source.name}", index, total, max(0.0, target_duration))
+            rotulo = "Copiando áudio sem reencodar" if copiar else f"Extraindo {source.name}"
+            self._execute(command, rotulo, index, total, max(0.0, target_duration))
             processed += 1
         if processed == 0:
             if audio_candidates:
