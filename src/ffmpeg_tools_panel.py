@@ -5193,6 +5193,8 @@ class FfmpegToolsPanel:
         media: MediaProfile,
         codec_family: str,
         reencode: bool,
+        # F5: mantido por compatibilidade de chamada — o áudio do SmartCut não é
+        # mais montado por trecho (vem de uma passagem única no mux final).
         audio_precise: bool = True,
         encoder: VideoAcceleration | None = None,
     ) -> list[str]:
@@ -5204,10 +5206,10 @@ class FfmpegToolsPanel:
         arquivo final. O encoder também segue a família do codec de origem
         (`_smart_join_acceleration_for_codec`), nunca o combo por acaso.
 
-        Áudio: com `audio_precise` (política "Precisão máxima (AAC)") o áudio é
-        reencodado em TODOS os trechos — assim o `-t` fecha exato e o arquivo não
-        sai mais longo (o áudio copiado escorrega até o pacote seguinte). Na
-        política "Copiar áudio", a cópia é mantida e essa folga é esperada.
+        Áudio: o trecho é SÓ VÍDEO (`-an`). Desde o F5 o áudio do SmartCut vem
+        de uma passagem ÚNICA sobre a fonte, no mux final: costurar o áudio por
+        trecho acumulava ~20 ms por emenda (medido: +60 ms num corte de duas
+        emendas), porque cada segmento começava numa fronteira de pacote AAC.
 
         Seek: input seek em todos os trechos. Com OUTPUT seek o `-c:v copy` recua
         até o keyframe ANTERIOR (o miolo saía ~1 s deslocado, com o áudio fora de
@@ -5218,8 +5220,10 @@ class FfmpegToolsPanel:
         args = [str(self._ffmpeg()), "-hide_banner", "-y", "-noautorotate", "-display_rotation:v:0", "0"]
         args += ["-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration)]
         args += ["-map", "0:v:0"]
-        if media.has_audio:
-            args += ["-map", "0:a?"]
+        # F5: o áudio NÃO é mais montado por trecho (acumulava ~20 ms por emenda
+        # na costura dos segmentos). Os trechos saem só com vídeo; o áudio entra
+        # numa passagem única sobre a fonte, no mux final.
+        args += ["-an"]
         if reencode:
             escolhido = encoder or self._smartcut_edge_encoder(codec_family) or self._smart_join_acceleration_for_codec(codec_family)
             args += self._video_args(escolhido, media.video_bitrate)
@@ -5231,14 +5235,6 @@ class FfmpegToolsPanel:
                 args += ["-r", media.fps]
         else:
             args += ["-c:v", "copy"]
-        if not media.has_audio:
-            args += ["-an"]
-        elif audio_precise:
-                    # Reencoda o áudio com o perfil de cada faixa (as bordas espelham
-                    # o miolo copiado faixa a faixa).
-                    args += self._precise_audio_args(media)
-        else:
-            args += ["-c:a", "copy"]
         args += [
             "-bsf:v", self._smart_join_ts_bitstream(codec_family),
             "-avoid_negative_ts", "make_zero",
@@ -5310,6 +5306,11 @@ class FfmpegToolsPanel:
                 f"SmartCut: {copiado:.2f}s copiados sem reencode e "
                 f"{total - copiado:.2f}s reencodados ({len(trechos)} trechos)."
             )
+            if media.has_audio:
+                self._append_log(
+                    "SmartCut: o áudio vai numa passagem única sobre a fonte "
+                    "(sem emendas de áudio); a política de cópia de áudio não se aplica aqui."
+                )
             passos = len(trechos) + 1
             for indice, (segmento, trecho_inicio, duracao, reencode, rotulo) in enumerate(trechos, start=1):
                 self._execute(
@@ -5328,12 +5329,17 @@ class FfmpegToolsPanel:
                 "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path, *_resto in trechos),
                 encoding="utf-8",
             )
+            # F5: áudio CONTÍNUO. Entrada 0 = a fonte com seek no início pedido
+            # (com reencode o seek é exato, por amostra); entrada 1 = o vídeo já
+            # concatenado. Assim o áudio não tem emenda nenhuma — some o atraso
+            # que se acumulava (~20 ms por emenda; medido +60 ms num corte só).
             concat = [
                 str(self._ffmpeg()), "-hide_banner", "-y",
+                "-ss", self._fmt_seconds(start), "-i", str(source),
                 "-display_rotation:v:0", str(media.rotation or 0),
                 "-fflags", "+genpts",
                 "-f", "concat", "-safe", "0", "-i", str(manifest),
-                "-map", "0:v:0",
+                "-map", "1:v:0",
             ]
             if media.has_audio:
                 concat += ["-map", "0:a?"]
@@ -5341,11 +5347,8 @@ class FfmpegToolsPanel:
             if not media.has_audio:
                 concat += ["-an"]
             else:
-                # Todos os trechos já saíram com o MESMO áudio (copiado ou
-                # reencodado), então o mux final só copia.
-                concat += ["-c:a", "copy"]
-                if audio_precise or media.audio_codec == "aac":
-                    concat += ["-bsf:a", "aac_adtstoasc"]
+                # AAC por faixa (mesmo perfil da fonte, um passe só).
+                concat += self._precise_audio_args(media)
             if codec_family == "hevc":
                 concat += ["-tag:v", "hvc1"]
             concat += [

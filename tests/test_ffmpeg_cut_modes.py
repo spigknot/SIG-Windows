@@ -127,18 +127,22 @@ class SmartCutArgumentsTests(unittest.TestCase):
         self.assertEqual(comando[comando.index("-pix_fmt") + 1], "yuv420p")
         self.assertEqual(comando[comando.index("-r") + 1], "30000/1001")
         self.assertIn("setsar=4/3", comando)
-        # áudio reencodado com os mesmos parâmetros do miolo copiado
-        self.assertEqual(comando[comando.index("-c:a") + 1], "aac")
-        self.assertEqual(comando[comando.index("-ar") + 1], "48000")
-        self.assertEqual(comando[comando.index("-ac") + 1], "2")
+        # F5: o trecho é SÓ VÍDEO — o áudio do SmartCut vem de uma passagem única
+        # sobre a fonte, no mux final (costurar áudio por trecho acumulava atraso).
+        self.assertIn("-an", comando)
+        self.assertNotIn("-c:a", comando)
+        self.assertNotIn("-ar", comando)
 
-    def test_audio_copiado_quando_a_politica_manda(self):
+    def test_trecho_do_smartcut_nao_leva_audio(self):
         panel = painel_smartcut()
         comando = panel._smartcut_segment_arguments(
             Path("entrada.mp4"), Path("saida.ts"), 2.0, 2.0, midia(), "h264", reencode=False,
             audio_precise=False,
         )
-        self.assertEqual(comando[comando.index("-c:a") + 1], "copy")
+        # F5: a política de áudio não se aplica mais aos trechos do SmartCut — o
+        # trecho sai mudo e o áudio entra contínuo no mux final (sem emendas).
+        self.assertIn("-an", comando)
+        self.assertNotIn("-c:a", comando)
 
     def test_video_sem_audio_nao_mapeia_audio(self):
         panel = painel_smartcut()
@@ -203,6 +207,24 @@ class SmartCutFlowTests(unittest.TestCase):
         self.assertIn("-t", final)
         self.assertEqual(final[final.index("-t") + 1], FfmpegToolsPanel._fmt_seconds(3.2))
         self.assertTrue(any("SmartCut:" in str(chamada) for chamada in panel._append_log.call_args_list))
+
+    def test_concat_do_smartcut_pega_o_audio_da_fonte(self):
+        # F5: o mux final monta o vídeo concatenado (entrada 1) com o áudio da
+        # FONTE (entrada 0, com seek no início pedido) — uma passagem única, sem
+        # emenda de áudio. Antes o áudio vinha dos trechos e acumulava ~20 ms por
+        # emenda (medido: +60 ms num corte de duas emendas).
+        panel = painel_smartcut()
+        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia())
+
+        final = panel._execute.call_args_list[-1][0][0]
+        self.assertEqual(final[final.index("-ss") + 1], FfmpegToolsPanel._fmt_seconds(1.4))
+        self.assertIn("1:v:0", final)          # vídeo: o concat dos trechos
+        self.assertIn("0:a?", final)           # áudio: a fonte, de uma vez
+        # reencodado em AAC (o midia() deste arquivo não traz inventário por
+        # faixa, então vale o fallback de faixa única; com inventário saem os
+        # especificadores -c:a:0/-b:a:0, como no app)
+        self.assertEqual(final[final.index("-c:a") + 1], "aac")
+        self.assertNotIn("aac_adtstoasc", final)  # não há mais TS de áudio para costurar
 
     def test_sem_borda_quando_o_tempo_cai_no_keyframe(self):
         panel = painel_smartcut()
