@@ -1131,6 +1131,47 @@ class FfmpegToolsPanel:
         ("Squared half sine wave (hsin2)", "hsin2"),
         ("No fade (nofade)", "nofade"),
     )
+
+    @classmethod
+    def insert_transition_labels(cls, smart: bool) -> tuple[str, ...]:
+        """Rótulos do Inserir, por MODO — o mesmo par (rótulo, curva) tem efeito
+        diferente em cada um.
+
+        Smart Insert: cada curva suaviza apenas o trecho INSERIDO (afade).
+        Reencode Completo: as curvas viram CROSSFADE nas emendas (o
+        "Fade in/out" continua sendo afade no inserido).
+
+        Medido (T08): "Linear" 0,2 s no Smart = 12,03 s (fade só no inserido)
+        contra 11,60 s no integral (crossfade). O rótulo diz o EFEITO, não só a
+        curva — era o defeito: o mesmo nome prometia efeitos diferentes.
+        """
+        rotulos: list[str] = []
+        for label, _valor in cls.AUDIO_TRANSITIONS:
+            if label in ("Sem transição", "Fade in/out"):
+                rotulos.append(label)
+            elif smart:
+                rotulos.append(f"{label} (fade só no trecho inserido)")
+            else:
+                rotulos.append(f"Crossfade {label.lower()}")
+        return tuple(rotulos)
+
+    @classmethod
+    def insert_transition_code(cls, label: str) -> str:
+        """Curva a partir do rótulo do combo (aceita os rótulos NOVOS e os
+        antigos, para uma preferência já salva continuar valendo)."""
+        if not label or label == "Sem transição":
+            return "none"
+        if label == "Fade in/out":
+            return "fade"
+        base = label
+        if base.startswith("Crossfade "):
+            base = base[len("Crossfade "):]
+        base = base.replace(" (fade só no trecho inserido)", "").strip()
+        for nome, valor in cls.AUDIO_TRANSITIONS:
+            if nome.lower() == base.lower():
+                return valor
+        return "none"
+
     VORBIS_VALID_BITRATES = {
         1: {
             8000: ("32k",),
@@ -2364,7 +2405,7 @@ class FfmpegToolsPanel:
         self.insert_transition_combo = ttk.Combobox(
             transition_row,
             textvariable=self.insert_transition_var,
-            values=tuple(label for label, _value in self.AUDIO_TRANSITIONS),
+            values=self.insert_transition_labels(True),
             state="disabled",
             width=30,
         )
@@ -2926,17 +2967,17 @@ class FfmpegToolsPanel:
         if smart:
             # Smart Insert: todas as curvas disponíveis — cada uma suaviza
             # apenas o áudio inserido (afade com a curva escolhida).
-            choices = tuple(label for label, _value in self.AUDIO_TRANSITIONS)
+            choices = self.insert_transition_labels(True)
             self.insert_transition_combo.configure(values=choices)
             if self.insert_transition_var.get() not in choices:
                 self.insert_transition_var.set("Fade in/out")
         elif reencode:
             # Reencode Completo: mesmo conjunto do Smart (inclui "Fade in/out",
             # aplicado com afade; as demais curvas usam acrossfade).
-            choices = tuple(label for label, _value in self.AUDIO_TRANSITIONS)
+            choices = self.insert_transition_labels(False)
             self.insert_transition_combo.configure(values=choices)
             if self.insert_transition_var.get() not in choices:
-                self.insert_transition_var.set("Linear")
+                self.insert_transition_var.set("Crossfade linear")
         else:
             self.insert_transition_var.set("Sem transição")
 
@@ -3238,7 +3279,7 @@ class FfmpegToolsPanel:
         if not main or not inserted:
             return False
         transition_label = self.insert_transition_var.get()
-        transition_code = dict(self.AUDIO_TRANSITIONS).get(transition_label, "none")
+        transition_code = self.insert_transition_code(transition_label)
         try:
             requested = float(self.insert_seconds_var.get().replace(",", ".")) if transition_code != "none" else 0.0
         except ValueError:
@@ -6954,7 +6995,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("Os dois arquivos precisam conter áudio")
         insertion = max(0.0, min(self.insert_timeline.insertion, main_profile.duration))
         transition_label = str(self._worker_value("insert_transition", self.insert_transition_var))
-        transition_code = dict(self.AUDIO_TRANSITIONS).get(transition_label, "none")
+        transition_code = self.insert_transition_code(transition_label)
         if transition_code == "none":
             transition_seconds = 0.0
         else:

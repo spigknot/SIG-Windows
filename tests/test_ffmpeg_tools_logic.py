@@ -180,9 +180,11 @@ class FfmpegToolsLogicTests(unittest.TestCase):
 
         panel._on_toggle_insert_smart()
         panel.insert_reencode_var.set.assert_called_with(False)
-        # Smart Insert oferece TODAS as transições (Fade in/out + curvas).
+        # Smart Insert oferece TODAS as curvas, com o EFEITO no rótulo
+        # (fade só no trecho inserido — T08).
         args, kwargs = panel.insert_transition_combo.configure.call_args_list[-1]
-        self.assertEqual(kwargs.get("values", ()), all_labels)
+        self.assertEqual(kwargs.get("values", ()), FfmpegToolsPanel.insert_transition_labels(True))
+        self.assertNotEqual(kwargs.get("values", ()), all_labels)
 
         # Marcando Reencode Completo desmarca Smart Insert
         panel.insert_smart_var.get.return_value = False
@@ -191,10 +193,43 @@ class FfmpegToolsLogicTests(unittest.TestCase):
 
         panel._on_toggle_insert_reencode()
         panel.insert_smart_var.set.assert_called_with(False)
-        # Reencode Completo também libera o "Fade in/out" (mesmo conjunto).
+        # Reencode Completo também libera o "Fade in/out", mas as demais curvas
+        # se chamam "Crossfade ..." (são crossfades nas emendas).
         args, kwargs = panel.insert_transition_combo.configure.call_args_list[-1]
-        self.assertEqual(kwargs.get("values", ()), all_labels)
+        self.assertEqual(kwargs.get("values", ()), FfmpegToolsPanel.insert_transition_labels(False))
         self.assertIn("Fade in/out", kwargs.get("values", ()))
+        self.assertIn("Crossfade linear", kwargs.get("values", ()))
+
+    def test_insert_transition_labels_dizem_o_efeito_por_modo(self):
+        # T08: no Smart Insert cada curva suaviza SÓ o trecho inserido (afade);
+        # no Reencode Completo as curvas viram crossfade nas emendas. O rótulo
+        # diz o efeito — era o defeito: o mesmo "Linear" prometia efeitos
+        # diferentes nos dois modos.
+        smart = FfmpegToolsPanel.insert_transition_labels(True)
+        reencode = FfmpegToolsPanel.insert_transition_labels(False)
+
+        self.assertIn("Linear (fade só no trecho inserido)", smart)
+        self.assertIn("Crossfade linear", reencode)
+        self.assertNotIn("Linear", list(smart))
+        self.assertNotIn("Linear", list(reencode))
+        self.assertEqual(len(smart), len(reencode))
+        for rotulos in (smart, reencode):
+            self.assertIn("Sem transição", rotulos)
+            self.assertIn("Fade in/out", rotulos)
+
+    def test_insert_transition_code_aceita_rotulo_novo_e_antigo(self):
+        # Uma preferência salva com o rótulo antigo continua valendo.
+        casos = {
+            "Linear": "tri",
+            "Linear (fade só no trecho inserido)": "tri",
+            "Crossfade linear": "tri",
+            "Fade in/out": "fade",
+            "Sem transição": "none",
+            "": "none",
+            "Curva inventada": "none",
+        }
+        for rotulo, esperado in casos.items():
+            self.assertEqual(FfmpegToolsPanel.insert_transition_code(rotulo), esperado, rotulo)
 
     def test_wma_audio_codec_args(self):
         panel = object.__new__(FfmpegToolsPanel)
