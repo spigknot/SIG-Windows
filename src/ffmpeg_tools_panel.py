@@ -503,6 +503,26 @@ def selection_crop_filter(crop: tuple[int, int, int, int]) -> str:
     return f"crop={largura}:{altura}:{x}:{y}"
 
 
+def color_depth_warning(pixel_format: str) -> str | None:
+    """Aviso quando a fonte tem mais de 8 bits por componente.
+
+    Reencodar 10/12 bits (yuv420p10le, p010le, …) para yuv420p reduz a
+    profundidade de cor — e sem aviso isso acontece em SILÊNCIO. O padrão desta
+    rodada é avisar (bloquear fica para quando houver suporte real a 10 bits).
+    """
+    formato = (pixel_format or "").lower()
+    if not formato:
+        return None
+    marcadores = ("10le", "10be", "12le", "12be", "16le", "16be", "p010", "p016",
+                  "y210", "y410", "x2rgb10", "rgb48", "rgba64")
+    if any(marcador in formato for marcador in marcadores):
+        return (
+            f"Fonte em {pixel_format}: o reencode grava em 8 bits (yuv420p) e a "
+            "profundidade de cor será reduzida — o modo Sem Reencode preserva o original."
+        )
+    return None
+
+
 def copy_effective_start_seconds(start: float, keyframes: list[float]) -> float:
     """Início EFETIVO de um corte em stream copy: o último keyframe <= início.
 
@@ -5046,6 +5066,10 @@ class FfmpegToolsPanel:
             extension = self._audio_only_output_extension(source)
         output = self._safe_output(self.output_dir, f"{source.stem}_cortado", extension)
 
+        if not fast_copy and is_video:
+            aviso_cor = color_depth_warning(getattr(media, "pix_fmt", ""))
+            if aviso_cor:
+                self._append_log(aviso_cor)
         if fast_copy:
             self._append_log(
                 "Corte rápido: codecs preservados; os limites são aproximados ao keyframe/pacote disponível."
@@ -5493,6 +5517,9 @@ class FfmpegToolsPanel:
         except ValueError as exc:
             raise RuntimeError("Selecione um giro válido") from exc
         media = self._probe_media(source)
+        aviso_cor = color_depth_warning(getattr(media, "pix_fmt", ""))
+        if aviso_cor:
+            self._append_log(aviso_cor)
         if not media.has_video:
             raise RuntimeError("O arquivo selecionado não possui uma faixa de vídeo.")
         start = self._seconds(str(self._worker_value("rotate_start", self.rotate_start_var)), "Início") or 0.0
@@ -6207,6 +6234,11 @@ class FfmpegToolsPanel:
         if any(not path.exists() for path in self.join_inputs):
             raise RuntimeError("Uma das mídias selecionadas não foi encontrada")
         clips = [self._probe_media(path) for path in self.join_inputs]
+        for clip in clips:
+            aviso_cor = color_depth_warning(getattr(clip, "pix_fmt", ""))
+            if aviso_cor:
+                self._append_log(aviso_cor)
+                break
         if all(not item.has_video and item.has_audio for item in clips):
             self._join_audio_worker(clips)
             return
