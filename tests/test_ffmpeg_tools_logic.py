@@ -1174,12 +1174,13 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertIs(FfmpegToolsPanel._select_join_base([small, large], "Maior resolução"), large)
         self.assertIs(FfmpegToolsPanel._select_join_base([small, large], "Menor resolução (sem upscale)"), small)
 
-    def test_clean_preserve_profile_keeps_source_rate_and_channels(self):
+    def test_clean_keeps_source_rate_and_channels(self):
+        # F9: o Limpar nao tem mais escolha de saida — ela SEMPRE preserva a taxa
+        # e os canais da fonte (reduzir canais/taxa e outra decisao, nao "limpar").
         panel = object.__new__(FfmpegToolsPanel)
         source = MagicMock(); source.exists.return_value = True; source.stem = "audio"
         panel.clean_input = source
         panel.clean_mode_var = MagicMock(); panel.clean_mode_var.get.return_value = "equilibrado"
-        panel.clean_output_profile_var = MagicMock(); panel.clean_output_profile_var.get.return_value = "Preservar taxa e canais da fonte"
         panel._probe_media = lambda _path: MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 44100, 2, "stereo")
         panel.output_dir = Path(".")
         panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
@@ -1304,7 +1305,6 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         source = MagicMock(); source.exists.return_value = True; source.stem = "audio"
         panel.clean_input = source
         panel.clean_mode_var = MagicMock(); panel.clean_mode_var.get.return_value = "forte"
-        panel.clean_output_profile_var = MagicMock(); panel.clean_output_profile_var.get.return_value = "Transcrição (mono, 16 kHz)"
         panel._probe_media = lambda _path: MediaProfile(4.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo")
         panel.output_dir = Path(".")
         panel._safe_output = lambda _directory, stem, extension: Path(f"{stem}{extension}")
@@ -1313,6 +1313,33 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._clean_worker()
         command = panel._execute.call_args[0][0]
         self.assertEqual(command[command.index("-af") + 1], "afftdn=nr=18:nf=-35:tn=1")
+        # F9: a saida preserva a fonte (48000/2), nao força 16 kHz mono.
+        self.assertEqual(command[command.index("-ar") + 1], "48000")
+        self.assertEqual(command[command.index("-ac") + 1], "2")
+
+    def test_clean_strong_asks_for_confirmation(self):
+        # F9: o Windows passou a confirmar o modo forte, como o Android ja fazia.
+        from unittest.mock import patch
+
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.active_tool_var = MagicMock(); panel.active_tool_var.get.return_value = "Limpar áudio"
+        panel.clean_mode_var = MagicMock(); panel.clean_mode_var.get.return_value = "forte"
+        with patch("ffmpeg_tools_panel.messagebox.askokcancel", return_value=False) as aviso:
+            self.assertFalse(panel._confirm_clean_strong())
+            aviso.assert_called_once()
+        with patch("ffmpeg_tools_panel.messagebox.askokcancel", return_value=True):
+            self.assertTrue(panel._confirm_clean_strong())
+
+        # equilibrado e outra ferramenta não perguntam nada
+        panel.clean_mode_var.get.return_value = "equilibrado"
+        with patch("ffmpeg_tools_panel.messagebox.askokcancel") as aviso:
+            self.assertTrue(panel._confirm_clean_strong())
+            aviso.assert_not_called()
+        panel.active_tool_var.get.return_value = "Cortar vídeo"
+        panel.clean_mode_var.get.return_value = "forte"
+        with patch("ffmpeg_tools_panel.messagebox.askokcancel") as aviso:
+            self.assertTrue(panel._confirm_clean_strong())
+            aviso.assert_not_called()
 
     def _video_join_policy_panel(self, directory: str, audio_policy: str):
         panel = object.__new__(FfmpegToolsPanel)

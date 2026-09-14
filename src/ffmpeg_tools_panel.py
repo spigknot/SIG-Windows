@@ -1409,7 +1409,6 @@ class FfmpegToolsPanel:
         self.clean_input: Path | None = None
         self.clean_input_var = StringVar(value="Nenhum áudio selecionado")
         self.clean_mode_var = StringVar(value="equilibrado")
-        self.clean_output_profile_var = StringVar(value="Transcrição (mono, 16 kHz)")
         self.preview_player = EmbeddedMediaPlayer()
         self.preview_context: dict | None = None
         self.preview_playing = False
@@ -2562,14 +2561,9 @@ class FfmpegToolsPanel:
         row.pack(fill=X)
         ttk.Label(row, text="Filtro:").pack(side=LEFT)
         ttk.Combobox(row, textvariable=self.clean_mode_var, values=("equilibrado", "forte"), state="readonly", width=15).pack(side=LEFT, padx=(6, 0))
-        ttk.Label(row, text="Saída:").pack(side=LEFT, padx=(18, 0))
-        ttk.Combobox(
-            row,
-            textvariable=self.clean_output_profile_var,
-            values=("Transcrição (mono, 16 kHz)", "Preservar taxa e canais da fonte"),
-            state="readonly",
-            width=32,
-        ).pack(side=LEFT, padx=(6, 0))
+        # F9: a saída SEMPRE preserva a taxa e os canais da fonte — limpar ruído
+        # não deve reduzir canais nem taxa de amostragem (decisão do usuário).
+        ttk.Label(row, text="Saída: WAV PCM com a taxa e os canais da fonte").pack(side=LEFT, padx=(18, 0))
         self._output_buttons(row)
         self._output_path_row(self.clean_tab)
 
@@ -4484,6 +4478,23 @@ class FfmpegToolsPanel:
         )
         return bool(messagebox.askokcancel("sig", message))
 
+    def _confirm_clean_strong(self) -> bool:
+        """F9: o modo forte altera mais o áudio — confirmar antes de rodar.
+
+        Mesma regra do SIG Android (que já confirma), agora também aqui.
+        """
+        if self.active_tool_var.get() != "Limpar áudio":
+            return True
+        if str(self.clean_mode_var.get()) != "forte":
+            return True
+        return bool(
+            messagebox.askokcancel(
+                "sig",
+                "Limpeza forte: o filtro é bem mais agressivo e pode alterar um pouco a voz.\n"
+                "Deseja continuar?",
+            )
+        )
+
     def run_current_tool(self) -> None:
         if self.running:
             return
@@ -4496,6 +4507,8 @@ class FfmpegToolsPanel:
         if tool == "Juntar áudios/vídeos" and not self._ask_join_rotation():
             return
         if not self._confirm_preview_selection(tool):
+            return
+        if not self._confirm_clean_strong():
             return
         selection_crops = self._selection_crops()
         # Capture Tk state on the UI thread. Workers use only plain Python values.
@@ -4524,7 +4537,7 @@ class FfmpegToolsPanel:
             "join_orientation_reference": str(rotation_answer.get("reference") or ""),
             "insert_reencode": self.insert_reencode_var.get(), "insert_smart": self.insert_smart_var.get(),
             "insert_transition": self.insert_transition_var.get(), "insert_seconds": self.insert_seconds_var.get(),
-            "clean_mode": self.clean_mode_var.get(), "clean_output_profile": self.clean_output_profile_var.get(),
+            "clean_mode": self.clean_mode_var.get(),
             "cut_crop": selection_crops["cut_crop"], "rotate_crop": selection_crops["rotate_crop"],
             "encoder_path": self._encoder_path(),
             "encoder_advanced": self._advanced_key(),
@@ -7468,10 +7481,9 @@ class FfmpegToolsPanel:
             raise RuntimeError("O arquivo selecionado não possui trilha de áudio.")
         clean_mode = str(self._worker_value("clean_mode", self.clean_mode_var))
         filter_value = "afftdn=nf=-25" if clean_mode == "equilibrado" else "afftdn=nr=18:nf=-35:tn=1"
-        output_profile = str(self._worker_value_default(
-            "clean_output_profile", "clean_output_profile_var", "Transcrição (mono, 16 kHz)"
-        ))
         output = self._safe_output(self.output_dir, f"{source.stem}_limpo", ".wav")
-        format_args = ["-ar", "16000", "-ac", "1"] if output_profile.startswith("Transcrição") else ["-ar", str(media.audio_rate), "-ac", str(media.audio_channels)]
+        # F9: a saída preserva a taxa e os canais da FONTE (o perfil que forçava
+        # 16 kHz mono saiu; reduzir canais/taxa é outra decisão, não "limpar").
+        format_args = ["-ar", str(media.audio_rate), "-ac", str(media.audio_channels)]
         command = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(source), "-vn", "-map", "0:a:0", "-af", filter_value, "-c:a", "pcm_s16le", *format_args, "-f", "wav", str(output)]
         self._execute(command, "Limpando áudio", 1, 1, media.duration)
