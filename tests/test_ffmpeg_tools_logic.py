@@ -1300,7 +1300,10 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertIn("afade=t=out", graph)
         self.assertIn("concat=n=3:v=0:a=1[aout]", graph)
 
-    def test_clean_strong_uses_benchmarked_afftdn_preset(self):
+    def test_clean_strong_uses_the_agreed_afftdn_filter(self):
+        # T17 do roteiro: o nome antigo ("benchmarked") prometia um benchmark que
+        # nunca existiu — o que há é o filtro acordado com o usuário (o mesmo nos
+        # dois apps desde o F9).
         panel = object.__new__(FfmpegToolsPanel)
         source = MagicMock(); source.exists.return_value = True; source.stem = "audio"
         panel.clean_input = source

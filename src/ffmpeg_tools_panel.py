@@ -503,6 +503,53 @@ def selection_crop_filter(crop: tuple[int, int, int, int]) -> str:
     return f"crop={largura}:{altura}:{x}:{y}"
 
 
+def audio_offset_warning(
+    audio_start_seconds: float,
+    container_start_seconds: float = 0.0,
+    tolerance_ms: float = 60.0,
+) -> str | None:
+    """Aviso quando o áudio da fonte começa deslocado do vídeo (T12).
+
+    A comparação é com o início do CONTÊINER (o começo do vídeo), não com zero:
+    um arquivo com PTS inicial deslocado tem os dois streams juntos e não é um
+    offset de A/V. Um offset pequeno é ancoragem de pacote; um grande costuma ser
+    intencional — e a saída deste app normaliza os dois streams no início.
+    Medido: fonte com o áudio 176 ms depois do vídeo saiu com os dois em 0.000.
+    """
+    try:
+        atraso_ms = (float(audio_start_seconds) - float(container_start_seconds)) * 1000.0
+    except (TypeError, ValueError):
+        return None
+    if abs(atraso_ms) <= tolerance_ms:
+        return None
+    return (
+        f"Na fonte, o áudio começa {atraso_ms:.0f} ms depois do vídeo: a saída "
+        "normaliza os dois streams no início e o deslocamento não é mantido."
+    )
+
+
+def variable_rate_warning(fps: str, average_rate: str) -> str | None:
+    """Aviso quando a fonte tem taxa de quadros VARIÁVEL (T12).
+
+    O banner do ffmpeg mostra 'r_frame_rate fps' e 'tbr' (a taxa média). Quando
+    diferem, a fonte é VFR — e reencodar converte para taxa fixa. Medido: uma
+    fonte de avg 18,7 fps saiu com avg 21,3 fps sem nenhum aviso.
+    """
+    try:
+        fixa = float(str(fps).replace(",", "."))
+        media = float(str(average_rate).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    if fixa <= 0 or media <= 0:
+        return None
+    if abs(fixa - media) / fixa <= 0.02:
+        return None
+    return (
+        f"Fonte com taxa de quadros variável ({fps} fps médios, {average_rate} tbr nominais): "
+        "a saída reencodada sai em taxa fixa. Para preservar a taxa original, use o modo Sem Reencode."
+    )
+
+
 def color_depth_warning(pixel_format: str) -> str | None:
     """Aviso quando a fonte tem mais de 8 bits por componente.
 
@@ -690,6 +737,15 @@ class MediaProfile:
     subtitle_streams: int = 0
     data_streams: int = 0
     audio_tracks: tuple["AudioTrackProfile", ...] = ()
+    # F-roteiro (T12): taxa media (`tbr`) da fonte. Quando difere do `fps`
+    # (r_frame_rate), a fonte tem taxa VARIAVEL — e reencodar a converte em taxa
+    # fixa; isso precisa ser avisado, nunca silencioso.
+    average_rate: str = ""
+    # F-roteiro (T12): atraso do audio em relacao ao video na FONTE (o banner
+    # mostra "start X" na linha do audio). Um offset intencional nao pode
+    # desaparecer sem aviso quando a saida normaliza os dois streams.
+    audio_start_seconds: float = 0.0
+    container_start_seconds: float = 0.0
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -5083,6 +5139,17 @@ class FfmpegToolsPanel:
             aviso_cor = color_depth_warning(getattr(media, "pix_fmt", ""))
             if aviso_cor:
                 self._append_log(aviso_cor)
+            aviso_vfr = variable_rate_warning(
+                getattr(media, "fps", ""), getattr(media, "average_rate", "")
+            )
+            if aviso_vfr:
+                self._append_log(aviso_vfr)
+            aviso_offset = audio_offset_warning(
+                getattr(media, "audio_start_seconds", 0.0),
+                getattr(media, "container_start_seconds", 0.0),
+            )
+            if aviso_offset:
+                self._append_log(aviso_offset)
         if fast_copy:
             self._append_log(
                 "Corte rápido: codecs preservados; os limites são aproximados ao keyframe/pacote disponível."
@@ -5384,7 +5451,10 @@ class FfmpegToolsPanel:
             action = "copiadas nos limites de pacote" if copy_audio else "preservadas e reencodadas em AAC"
             self._append_log(f"{source.name} possui {media.audio_streams} faixas de áudio; todas serão {action}.")
         if media.subtitle_streams or media.data_streams:
-            self._append_log("Legendas, anexos e streams de dados não são preservados no corte MP4.")
+            self._append_log(
+                "Legendas, anexos e streams de dados não são preservados no corte MP4. "
+                "Os capítulos também são omitidos: a timeline de origem não vale mais depois do corte."
+            )
         if copy_audio and media.has_audio and media.audio_codec not in self._MP4_SAFE_AUDIO_CODECS:
             raise RuntimeError(
                 f"O codec de áudio '{media.audio_codec}' não pode ser copiado para MP4. "
@@ -5833,6 +5903,8 @@ class FfmpegToolsPanel:
         self._record_ffmpeg_command(command, probe=True)
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         text = result.stderr + result.stdout
+        container_start_match = re.search(r"Duration: [^,]+, start: (\d+(?:\.\d+)?)", text)
+        container_start = float(container_start_match.group(1)) if container_start_match else 0.0
         duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
         duration = 0.0
         if duration_match:
@@ -5852,6 +5924,8 @@ class FfmpegToolsPanel:
             fps = fps_match.group(1) if fps_match else "30"
 
         video_rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", video_line)
+        audio_start_match = re.search(r"start\s+(\d+(?:\.\d+)?)", audio_line)
+        audio_start = float(audio_start_match.group(1)) if audio_start_match else 0.0
         audio_rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", audio_line)
         audio_bitrate = f"{float(audio_rates[-1]):g}k" if audio_rates and float(audio_rates[-1]) > 0 else "128k"
         if video_rates and float(video_rates[-1]) > 0:
@@ -5892,6 +5966,8 @@ class FfmpegToolsPanel:
         pix_fmt_match = re.search(r"Video:\s*[^,]+,\s*([a-zA-Z0-9_]+)", video_line)
         pix_fmt = pix_fmt_match.group(1).lower() if pix_fmt_match else ""
 
+        tbr_match = re.search(r"(\d+(?:\.\d+)?)\s*tbr", video_line)
+        average_rate = tbr_match.group(1) if tbr_match else ""
         tbn_match = re.search(r"(\d+(?:\.\d+)?k?)\s*tbn", video_line)
         timebase = tbn_match.group(1).lower() if tbn_match else ""
         sar_match = re.search(r"SAR\s+(\d+[:/]\d+)", video_line, re.IGNORECASE)
@@ -5908,8 +5984,11 @@ class FfmpegToolsPanel:
             bool(video_line), rotation, audio_codec,
             video_codec, pix_fmt, timebase, sar,
             audio_streams, subtitle_streams, data_streams,
-                        audio_tracks=self._parse_audio_tracks(text),
-                    )
+            audio_tracks=self._parse_audio_tracks(text),
+            average_rate=average_rate,
+            audio_start_seconds=audio_start,
+            container_start_seconds=container_start,
+        )
 
     def _max_audio_transition(self, clips) -> float:
         # Clipes internos recebem duas transições (uma em cada extremidade); os das
