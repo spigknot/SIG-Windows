@@ -1174,6 +1174,32 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertIs(FfmpegToolsPanel._select_join_base([small, large], "Maior resolução"), large)
         self.assertIs(FfmpegToolsPanel._select_join_base([small, large], "Menor resolução (sem upscale)"), small)
 
+    def test_video_speed_selects_the_cpu_preset(self):
+        # T18: qualidade (CRF) e velocidade (preset) são eixos separados — o plano
+        # recomendou "fast" como equilíbrio comum, com o controle na mão do usuário.
+        from ffmpeg_tools_panel import VIDEO_SPEED_PRESETS
+        panel = object.__new__(FfmpegToolsPanel)
+        panel.selected_video_quality = "Alta"
+        panel.video_quality_var = MagicMock(); panel.video_quality_var.get.return_value = "Alta"
+        panel.video_speed_var = MagicMock()
+        panel.encoder_help = {}
+
+        for rotulo, preset in VIDEO_SPEED_PRESETS.items():
+            panel.selected_video_speed = rotulo
+            args = FfmpegToolsPanel._video_args(panel, VideoAcceleration("cpu", "CPU (libx264)", "libx264"), "1M")
+            self.assertIn("-preset", args)
+            self.assertEqual(args[args.index("-preset") + 1], preset, rotulo)
+
+        # e o equilíbrio recomendado pelo plano é o "fast" (default da tela)
+        self.assertEqual(VIDEO_SPEED_PRESETS["Equilibrada"], "fast")
+        self.assertEqual(len(VIDEO_SPEED_PRESETS), 3)
+        # o hardware não usa preset de CPU (tem os próprios) — o mapa é só p/ CPU
+        args_hw = FfmpegToolsPanel._video_args(
+            panel, VideoAcceleration("nvenc", "NVENC", "h264_nvenc"), "1M"
+        )
+        self.assertNotIn("veryfast", args_hw)
+        self.assertNotIn("fast", args_hw)
+
     def test_clean_keeps_source_rate_and_channels(self):
         # F9: o Limpar nao tem mais escolha de saida — ela SEMPRE preserva a taxa
         # e os canais da fonte (reduzir canais/taxa e outra decisao, nao "limpar").

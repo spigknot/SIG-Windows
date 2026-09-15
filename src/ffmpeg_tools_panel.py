@@ -70,6 +70,15 @@ from video_encoders import (
 
 
 VIDEO_QUALITY_LEVELS = ("Máxima", "Muito alta", "Alta", "Média", "Econômica")
+# T18: velocidade e qualidade são eixos SEPARADOS (regra do plano). O preset do
+# x264/x265 troca tamanho por tempo sem mexer na escala de qualidade (CRF).
+VIDEO_SPEED_LEVELS = ("Rápida", "Equilibrada", "Máxima qualidade")
+VIDEO_SPEED_PRESETS = {"Rápida": "veryfast", "Equilibrada": "fast", "Máxima qualidade": "medium"}
+VIDEO_SPEED_MENU_LABELS = {
+    "Rápida": "Rápida (arquivos maiores, processa antes)",
+    "Equilibrada": "Equilibrada (recomendada)",
+    "Máxima qualidade": "Máxima qualidade (arquivos menores, mais lenta)",
+}
 
 
 VIDEO_QUALITY_MENU_LABELS = {
@@ -1391,6 +1400,7 @@ class FfmpegToolsPanel:
         self.worker_acceleration: VideoAcceleration | None = None
         self.encoder_help: dict[str, str] = {}
         self.video_quality_var = StringVar(value="Alta")
+        self.video_speed_var = StringVar(value="Equilibrada")
         self.output_dir = app_base_dir() / "temp" / "ffmpeg"
         self.output_dir_var = StringVar(value=str(self.output_dir))
         self.status_var = StringVar(value="Escolha uma ferramenta e os arquivos de entrada.")
@@ -1562,6 +1572,20 @@ class FfmpegToolsPanel:
         self.quality_menu_button.pack(side=RIGHT, pady=(2, 0))
         self.quality_label = ttk.Label(tool_tab_bar, text="Qualidade:", style="Muted.TLabel")
         self.quality_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
+        self.speed_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_speed_help)
+        self.speed_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
+        self.speed_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_speed_var, width=16)
+        self.speed_menu = self.tk.Menu(self.speed_menu_button, tearoff=False)
+        for speed in VIDEO_SPEED_LEVELS:
+            self.speed_menu.add_radiobutton(
+                label=VIDEO_SPEED_MENU_LABELS[speed],
+                value=speed,
+                variable=self.video_speed_var,
+            )
+        self.speed_menu_button.configure(menu=self.speed_menu)
+        self.speed_menu_button.pack(side=RIGHT, pady=(2, 0))
+        self.speed_label = ttk.Label(tool_tab_bar, text="Velocidade:", style="Muted.TLabel")
+        self.speed_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
 
         self.ffmpeg_tab_buttons = {}
         ffmpeg_tab_width = len("Inserir") + 1
@@ -2905,6 +2929,21 @@ class FfmpegToolsPanel:
         if len(rotulos) > 1 and not combo.winfo_ismapped():
             combo.pack(side=RIGHT, padx=(6, 0), pady=(2, 0))
             rotulo.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
+
+    @staticmethod
+    def _show_video_speed_help(self) -> None:
+        messagebox.showinfo(
+            "Velocidade",
+            "Velocidade e qualidade são eixos separados: a Qualidade manda no CRF "
+            "(quanto de detalhe se preserva), a Velocidade manda no esforço que o encoder "
+            "faz para chegar lá.\n\n"
+            "Rápida: processa antes e gera arquivos maiores.\n\n"
+            "Equilibrada (recomendada): o melhor equilíbrio entre tempo e tamanho nos "
+            "encoders de CPU (x264/x265).\n\n"
+            "Máxima qualidade: arquivos menores para o mesmo CRF, processando mais lento.\n\n"
+            "Nos encoders por hardware (NVENC/QSV/AMF) a velocidade não se aplica: eles têm "
+            "os próprios presets.",
+        )
 
     @staticmethod
     def _show_video_quality_help() -> None:
@@ -4571,6 +4610,7 @@ class FfmpegToolsPanel:
         self.worker_acceleration = self._resolve_task_encoder(tool)
         self.selected_acceleration_label = self.acceleration_var.get()
         self.selected_video_quality = self.video_quality_var.get()
+        self.selected_video_speed = self.video_speed_var.get()
         self.worker_tool_uses_video_encoder = self._current_tool_uses_video_encoder()
         rotation_answer = self._join_rotation_answer or {}
         self.join_orientation_mode_var.set(str(rotation_answer.get("mode") or "bake"))
@@ -4870,12 +4910,16 @@ class FfmpegToolsPanel:
         hardware_scale = {"Máxima": 1.60, "Muito alta": 1.25, "Alta": 1.00, "Média": 0.70, "Econômica": 0.45}[quality]
         target_bitrate = self._scaled_bitrate(bitrate, hardware_scale)
         rate_control = ["-b:v", target_bitrate, "-maxrate", target_bitrate, "-bufsize", self._buffer_for_bitrate(target_bitrate)]
+        speed = getattr(self, "selected_video_speed", None)
+        if not speed:
+            speed = self.video_speed_var.get() if hasattr(self, "video_speed_var") else "Equilibrada"
+        preset = VIDEO_SPEED_PRESETS.get(speed, "fast")
         if profile.encoder == "libx264":
             crf = {"Máxima": 16, "Muito alta": 18, "Alta": 20, "Média": 23, "Econômica": 26}[quality]
-            return ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
+            return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf)]
         if profile.encoder == "libx265":
             crf = {"Máxima": 18, "Muito alta": 20, "Alta": 22, "Média": 25, "Econômica": 28}[quality]
-            return ["-c:v", "libx265", "-preset", "medium", "-crf", str(crf)]
+            return ["-c:v", "libx265", "-preset", preset, "-crf", str(crf)]
         if profile.key == "nvenc":
             if self._encoder_supports(profile, "-cq") and self._encoder_supports(profile, "-rc"):
                 cq = {"Máxima": 16, "Muito alta": 19, "Alta": 22, "Média": 25, "Econômica": 28}[quality]
