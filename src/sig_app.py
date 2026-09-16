@@ -84,6 +84,7 @@ from assistant_prompts import (
     statement_prompt,
     statement_user_prompt,
 )
+import diarias_protocolo
 import qr_encoder
 import smart_join_planner
 import stt_provider_rules
@@ -494,7 +495,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260914_003"
+APP_VERSION = "20260916_002"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -1289,6 +1290,17 @@ class SigApp:
         self.qrcode_shorten_var = BooleanVar(value=False)
         self.qrcode_alias_var = StringVar()
         self.qrcode_shortened_var = StringVar()
+        self.diarias_protocolo_path = ""
+        self.diarias_talao_path = ""
+        self.diarias_protocolo_file_var = StringVar(master=self.root, value="")
+        self.diarias_talao_file_var = StringVar(master=self.root, value="")
+        self.diarias_req_var = StringVar(master=self.root, value="")
+        self.diarias_mapa_var = StringVar(master=self.root, value="")
+        self.diarias_data_var = StringVar(master=self.root, value="")
+        self.diarias_abertura_data_var = StringVar(master=self.root, value="")
+        self.diarias_abertura_hora_var = StringVar(master=self.root, value="")
+        self.diarias_fechamento_data_var = StringVar(master=self.root, value="")
+        self.diarias_fechamento_hora_var = StringVar(master=self.root, value="")
         self.qrcode_alias_entry = None
         self.qrcode_shortened_row = None
         self.qrcode_shortened_entry = None
@@ -2286,11 +2298,17 @@ class SigApp:
         return f"{formatted} {units[unit_index]}"
 
     def _start_update_check(self) -> None:
+        # A verificação automática do startup loga igual à manual (o log
+        # mostra "Verificando atualizações" como se o usuário tivesse
+        # clicado): abre a etapa e roda o worker em modo manual, então o
+        # "Não tem!" e os erros também aparecem no log.
         if self.update_check_thread and self.update_check_thread.is_alive():
             return
+        self._begin_activity_step("update:check", "Verificando atualizações")
+        self._update_check_started = time.perf_counter()
         self.update_check_thread = threading.Thread(
             target=self._update_check_worker,
-            args=(False,),
+            args=(True,),
             daemon=True,
         )
         self.update_check_thread.start()
@@ -2700,11 +2718,7 @@ class SigApp:
         self.qualification_tab = ttk.Frame(self.tab_content, padding=14)
         self.diarias_tab = ttk.Frame(self.tab_content, padding=14)
         self.qrcode_tab = ttk.Frame(self.tab_content, padding=14)
-        ttk.Label(
-            self.diarias_tab,
-            text="Diárias — conteúdo em desenvolvimento.",
-            style="Muted.TLabel",
-        ).pack(anchor="w")
+        self._build_diarias_section()
 
         # The live workflow intentionally keeps transcript, history and statement together,
         # matching the Android screen.  The old assistant frame remains internal only.
@@ -4444,6 +4458,181 @@ class SigApp:
             self.diarias_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.root.after_idle(self._position_live_parts_button)
+
+    # --- Aba Diárias: protocolo (mapa x requerimento) + talão (abertura x fechamento)
+    def _build_diarias_section(self):
+        """Duas linhas compactas: seletor do PDF + campos editáveis + reload."""
+        protocolo_row = ttk.Frame(self.diarias_tab)
+        protocolo_row.pack(fill=X, anchor="w")
+        protocolo_button = ttk.Button(
+            protocolo_row,
+            text="Protocolo.",
+            width=10,
+            command=lambda: self._select_diarias_pdf("protocolo"),
+        )
+        protocolo_button.pack(side=LEFT)
+        create_tooltip(protocolo_button, "Selecionar o PDF do protocolo da diária")
+        ttk.Label(
+            protocolo_row,
+            textvariable=self.diarias_protocolo_file_var,
+            style="Muted.TLabel",
+            width=14,
+            anchor="w",
+        ).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(protocolo_row, text="Protocolo do requerimento").pack(
+            side=LEFT, padx=(8, 2)
+        )
+        ttk.Entry(protocolo_row, textvariable=self.diarias_req_var, width=12).pack(
+            side=LEFT
+        )
+        ttk.Label(protocolo_row, text="Protocolo do mapa").pack(side=LEFT, padx=(8, 2))
+        ttk.Entry(protocolo_row, textvariable=self.diarias_mapa_var, width=12).pack(
+            side=LEFT
+        )
+        ttk.Label(protocolo_row, text="Data do protocolo").pack(side=LEFT, padx=(8, 2))
+        ttk.Entry(protocolo_row, textvariable=self.diarias_data_var, width=11).pack(
+            side=LEFT
+        )
+        protocolo_reload = tk.Button(
+            protocolo_row,
+            text="⟳",
+            fg="#1565d8",
+            relief="flat",
+            cursor="hand2",
+            font=("", 11, "bold"),
+            command=lambda: self._reload_diarias_pdf("protocolo"),
+        )
+        protocolo_reload.pack(side=LEFT, padx=(4, 0))
+        create_tooltip(protocolo_reload, "Extrair novamente os protocolos do PDF")
+
+        talao_row = ttk.Frame(self.diarias_tab)
+        talao_row.pack(fill=X, anchor="w", pady=(6, 0))
+        talao_button = ttk.Button(
+            talao_row,
+            text="Talão.",
+            width=10,
+            command=lambda: self._select_diarias_pdf("talao"),
+        )
+        talao_button.pack(side=LEFT)
+        create_tooltip(talao_button, "Selecionar o PDF do talão da viatura")
+        ttk.Label(
+            talao_row,
+            textvariable=self.diarias_talao_file_var,
+            style="Muted.TLabel",
+            width=14,
+            anchor="w",
+        ).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(talao_row, text="Abertura").pack(side=LEFT, padx=(8, 2))
+        ttk.Entry(
+            talao_row, textvariable=self.diarias_abertura_data_var, width=11
+        ).pack(side=LEFT)
+        ttk.Entry(talao_row, textvariable=self.diarias_abertura_hora_var, width=6).pack(
+            side=LEFT, padx=(2, 0)
+        )
+        ttk.Label(talao_row, text="Fechamento").pack(side=LEFT, padx=(8, 2))
+        ttk.Entry(
+            talao_row, textvariable=self.diarias_fechamento_data_var, width=11
+        ).pack(side=LEFT)
+        ttk.Entry(
+            talao_row, textvariable=self.diarias_fechamento_hora_var, width=6
+        ).pack(side=LEFT, padx=(2, 0))
+        talao_reload = tk.Button(
+            talao_row,
+            text="⟳",
+            fg="#1565d8",
+            relief="flat",
+            cursor="hand2",
+            font=("", 11, "bold"),
+            command=lambda: self._reload_diarias_pdf("talao"),
+        )
+        talao_reload.pack(side=LEFT, padx=(4, 0))
+        create_tooltip(talao_reload, "Extrair novamente os dados do talão")
+
+        vazio = ttk.Frame(self.diarias_tab)
+        vazio.pack(fill=BOTH, expand=True)
+        ttk.Label(vazio, text="em construção", style="Muted.TLabel").place(
+            relx=0.5, rely=0.5, anchor="center"
+        )
+
+    def _select_diarias_pdf(self, kind):
+        """Abre o seletor de PDF e já preenche os campos na hora."""
+        titulos = {
+            "protocolo": "Selecionar o PDF do protocolo",
+            "talao": "Selecionar o PDF do talão",
+        }
+        selecionado = filedialog.askopenfilename(
+            parent=self.root,
+            title=titulos[kind],
+            filetypes=(
+                ("Arquivos PDF", "*.pdf"),
+                ("Todos os arquivos", "*.*"),
+            ),
+        )
+        if not selecionado:
+            return
+        if kind == "talao":
+            self.diarias_talao_path = selecionado
+            self.diarias_talao_file_var.set(Path(selecionado).name)
+        else:
+            self.diarias_protocolo_path = selecionado
+            self.diarias_protocolo_file_var.set(Path(selecionado).name)
+        self._reload_diarias_pdf(kind)
+
+    def _reload_diarias_pdf(self, kind):
+        """Reextrai do PDF e preenche os campos imediatamente."""
+        caminho = (
+            self.diarias_talao_path if kind == "talao" else self.diarias_protocolo_path
+        )
+        if not caminho:
+            messagebox.showwarning(
+                "Diárias",
+                "Selecione primeiro o PDF.",
+                parent=self.root,
+            )
+            return
+        try:
+            if kind == "talao":
+                data_abertura, hora_abertura, data_fechamento, hora_fechamento = (
+                    diarias_protocolo.extract_talao_pdf(caminho)
+                )
+                self.diarias_abertura_data_var.set(data_abertura)
+                self.diarias_abertura_hora_var.set(hora_abertura)
+                self.diarias_fechamento_data_var.set(data_fechamento)
+                self.diarias_fechamento_hora_var.set(hora_fechamento)
+                valores = (
+                    ("a data de abertura", data_abertura),
+                    ("o horário de abertura", hora_abertura),
+                    ("a data de fechamento", data_fechamento),
+                    ("o horário de fechamento", hora_fechamento),
+                )
+            else:
+                mapa, requerimento, data = diarias_protocolo.extract_protocolo_completo(
+                    caminho
+                )
+                self.diarias_req_var.set(requerimento)
+                self.diarias_mapa_var.set(mapa)
+                self.diarias_data_var.set(data)
+                valores = (
+                    ("o requerimento", requerimento),
+                    ("o mapa", mapa),
+                    ("a data do protocolo", data),
+                )
+        except Exception as exc:
+            messagebox.showerror(
+                "Diárias",
+                f"Não foi possível ler o PDF:\n{exc}",
+                parent=self.root,
+            )
+            return
+        faltando = [rotulo for rotulo, valor in valores if not valor]
+        if faltando:
+            messagebox.showwarning(
+                "Diárias",
+                "Não encontrei "
+                + " e ".join(faltando)
+                + " no PDF — confira o arquivo ou digite manualmente.",
+                parent=self.root,
+            )
 
     def _update_imei_inputs(self):
         if self.imei_formatting:
