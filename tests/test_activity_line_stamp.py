@@ -159,5 +159,99 @@ class HorarioDaLinhaVivaTest(unittest.TestCase):
         self.assertEqual("01:46:16", SigApp._live_line_birth_stamp(self.caixa, "phase:zip"))
 
 
+class _RootFalso:
+    """Só o que o `finally` do `_poll_ui_queue` usa."""
+
+    def __init__(self) -> None:
+        self.reagendamentos: list[tuple] = []
+
+    def after(self, _ms, callback) -> None:
+        self.reagendamentos.append((_ms, callback))
+
+
+class EscopoPorExecucaoTest(unittest.TestCase):
+    """Linhas vivas de execuções diferentes não podem se misturar (correção 16/09).
+
+    O caso relatado: na SEGUNDA execução do mesmo lote a linha "Transcrevendo
+    arquivos" nascia com o horário da PRIMEIRA (a tag `phase:transcribe` era
+    reusada e o horário lido do texto antigo) e ainda apagava a linha anterior do
+    lugar — o log ficava fora de ordem cronológica.
+    """
+
+    def setUp(self) -> None:
+        self.app = object.__new__(SigApp)
+        self.caixa = _CaixaDeLogFalsa()
+        self.app.activity_log = self.caixa
+        self.chamadas: list[int] = []
+
+    def _relogio(self, *horarios):
+        def falso(_formato=None):
+            self.chamadas.append(1)
+            indice = min(len(self.chamadas) - 1, len(horarios) - 1)
+            return horarios[indice]
+
+        return falso
+
+    def test_segunda_execucao_do_mesmo_lote_nao_herda_o_horario(self):
+        with mock.patch("time.strftime", self._relogio("15:15:36", "15:18:12")):
+            self.app._run_sequence = 601
+            self.app._update_activity_line(
+                self.app._run_scoped_activity_key("transcribe"),
+                "Transcrevendo arquivos: 0/1 (0%)",
+            )
+            self.app._run_sequence = 602
+            self.app._update_activity_line(
+                self.app._run_scoped_activity_key("transcribe"),
+                "Transcrevendo arquivos: 0/1 (0%)",
+            )
+        self.assertEqual(
+            "15:15:36  Transcrevendo arquivos: 0/1 (0%)\n",
+            self.caixa.linhas.get("phase:r601:transcribe"),
+            "a linha da PRIMEIRA execução continua no log como histórico",
+        )
+        self.assertEqual(
+            "15:18:12  Transcrevendo arquivos: 0/1 (0%)\n",
+            self.caixa.linhas.get("phase:r602:transcribe"),
+            "a linha da segunda execução nasce com o horário DELA",
+        )
+
+    def test_linha_do_download_tambem_congela_o_horario(self):
+        """Nenhuma linha de log troca o horário: vale para o "Baixando ... N%"."""
+        self.app._sync_file_marks = {}
+        with mock.patch("time.strftime", self._relogio("07:10:00", "07:11:30")):
+            self.app._render_sync_file_line("sig.exe", "42%", None)
+            self.app._render_sync_file_line("sig.exe", "100%", "vad_total")
+        self.assertEqual(
+            "07:10:00  Baixando sig.exe\n",
+            self.caixa.linhas.get("syncfile:sig.exe"),
+            "a atualização de porcentagem não pode reescrever o horário",
+        )
+
+    def test_dispatch_da_fila_escopa_a_linha_pela_execucao(self):
+        """A fila da UI é quem escopa: o produtor continua mandando 'convert'."""
+        import queue as queue_module
+
+        self.app.ui_queue = queue_module.Queue()
+        self.app.root = _RootFalso()
+        with mock.patch("time.strftime", self._relogio("10:00:01", "10:00:02")):
+            self.app._run_sequence = 701
+            self.app._queue("activity_line", "convert", "Convertendo arquivos: 1/1 (2.4s)")
+            self.app._poll_ui_queue()
+            self.app._run_sequence = 702
+            self.app._queue(
+                "activity_line", "transcribe", "Transcrevendo arquivos: 1/1 (1min 32s)"
+            )
+            self.app._poll_ui_queue()
+        self.assertEqual(
+            "10:00:01  Convertendo arquivos: 1/1 (2.4s)\n",
+            self.caixa.linhas.get("phase:r701:convert"),
+            "a fila tem de escopar a chave com o número da execução",
+        )
+        self.assertEqual(
+            "10:00:02  Transcrevendo arquivos: 1/1 (1min 32s)\n",
+            self.caixa.linhas.get("phase:r702:transcribe"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,10 @@ from urllib.parse import urlencode
 # qualquer linha do bloco copia todos os comandos, nao apenas a linha clicada.
 FFMPEG_COMMAND_BLOCK_TAG = "ffmpeg_command_block"
 
+# Separador do bloco final do lote no log (Total de arquivos / Total áudio /
+# Tamanho total / Eficiência / Servidor) — pedido do usuário, 16/09.
+BATCH_SUMMARY_SEPARATOR = "=" * 10
+
 
 def format_process_command(command: list[object]) -> str:
     """Renderiza a linha de comando exatamente como os argumentos do processo."""
@@ -368,6 +372,59 @@ def format_audio_total(seconds: float) -> str:
 def format_total_size(size: int) -> str:
     """Tamanho para as linhas de resumo: sem ",0" quando o valor é inteiro (325 MB)."""
     return format_bytes(size).replace(".0 ", " ")
+
+
+def format_efficiency_line(label: str, speed: float, seconds: float | None = None) -> str:
+    """Linha de eficiência do bloco final: `Eficiência geral: 30.2x (1min 32s)`.
+
+    `speed` = segundos de áudio ÷ segundos do período correspondente; `seconds`
+    é esse período (entre parênteses, quando conhecido). O bloco mostra três:
+    geral (clique → HTML), do servidor (a sessão dele inteira) e da GPU (só o
+    processamento/inferência) — pedido do usuário, 16/09.
+    """
+    try:
+        valor = max(0.0, float(speed))
+    except (TypeError, ValueError):
+        valor = 0.0
+    texto = f"{label}: {valor:.1f}x"
+    try:
+        periodo = max(0.0, float(seconds or 0.0))
+    except (TypeError, ValueError):
+        periodo = 0.0
+    if periodo > 0:
+        texto += f" ({format_duration(periodo)})"
+    return texto
+
+
+def format_server_progress(
+    completed: int,
+    total: int,
+    audio_seconds: float,
+    speed: float | None = None,
+) -> str:
+    """Linha VIVA do processamento no servidor: `Servidor: 12/830 arquivos · 2h18m57s de áudio · 46.7x`.
+
+    Alimentada por `GET /sessions` do servidor Granite NAR (ele só responde no
+    fim do job, então sem essa consulta o log fica mudo durante horas no ZIP).
+    """
+    try:
+        feitos = max(0, int(completed or 0))
+    except (TypeError, ValueError):
+        feitos = 0
+    try:
+        alvo = max(0, int(total or 0))
+    except (TypeError, ValueError):
+        alvo = 0
+    partes = [f"{feitos}/{alvo} arquivos" if alvo else f"{feitos} arquivos"]
+    try:
+        audio = max(0.0, float(audio_seconds or 0.0))
+    except (TypeError, ValueError):
+        audio = 0.0
+    if audio > 0:
+        partes.append(f"{format_audio_total(audio)} de áudio")
+    if speed:
+        partes.append(f"{float(speed):.1f}x")
+    return "Servidor: " + " · ".join(partes)
 
 
 def mode_label_from_value(mode: str) -> str:

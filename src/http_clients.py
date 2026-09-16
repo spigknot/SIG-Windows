@@ -209,6 +209,51 @@ class GraniteUploader:
                 self._connections.discard(conn)
 
 
+def granite_sessions(base_url: str, *, timeout: float = 5.0) -> tuple[str, dict | None]:
+    """Sessão do PRÓPRIO cliente no servidor Granite NAR (`GET /sessions`).
+
+    O servidor identifica a sessão pelo IP de origem; o IP aqui é lido do socket
+    DESTA conexão (sem request extra) — é o mesmo que o servidor usa como chave.
+    A sessão traz `completed_files`, `total_audio_seconds`,
+    `total_processing_seconds`, `elapsed_seconds`, `status`, `is_zip` e
+    `zip_total` AO VIVO durante o processamento (medido em 16/09 no servidor
+    real) — é o que permite mostrar progresso enquanto o socket fica mudo.
+
+    Devolve `(nosso_ip, sessão|None)`; erro de rede sobe para quem chamou (o
+    poller do app trata em silêncio). Nada aqui é específico de um provedor de
+    API: o endpoint existe só no servidor local, então o chamador decide quando
+    usar.
+    """
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise RuntimeError("Servidor precisa começar com http:// ou https://")
+    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = connection_cls(parsed.netloc, timeout=timeout)
+    try:
+        conn.connect()
+        local_ip = ""
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            try:
+                local_ip = str(sock.getsockname()[0])
+            except OSError:
+                local_ip = ""
+        conn.request("GET", "/sessions", headers={"accept": "application/json"})
+        response = conn.getresponse()
+        raw = response.read()
+        if response.status != 200:
+            return local_ip, None
+        payload = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    clients = payload.get("clients") if isinstance(payload, dict) else None
+    session = clients.get(local_ip) if isinstance(clients, dict) and local_ip else None
+    return local_ip, session if isinstance(session, dict) else None
+
+
 class TextModelClient:
 
     def _count_input_tokens(self, url: str, fallback_url: str, model: str, system_prompt: str, material: str) -> int:

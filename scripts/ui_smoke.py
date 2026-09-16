@@ -1724,8 +1724,22 @@ def _check_batch_log_lines(app, root) -> None:
         conteudo_final = log.get("1.0", "end").splitlines()
         if any("activity_step_error" in linha or "phase:" in linha for linha in conteudo_final):
             raise RuntimeError(f"nome de tag vazou como texto no log: {conteudo_final}")
-        if len([linha for linha in conteudo_final if linha.strip()]) != 4:
-            raise RuntimeError(f"o log ganhou/perdeu linhas: {conteudo_final}")
+        # Só as linhas DO LOTE entram na contagem: o app continua escrevendo
+        # sozinho durante os `root.update()` deste check (ex.: "Verificando
+        # atualizações", que nasce de um `after` do proprio app) — exigir o log
+        # inteiro com 4 linhas era uma corrida que falhava de vez em quando.
+        do_lote = [
+            linha
+            for linha in conteudo_final
+            if linha.strip()
+            and (
+                "arquivo(s)" in linha
+                or "arquivos já estavam prontos" in linha
+                or "Convertendo arquivos" in linha
+            )
+        ]
+        if len(do_lote) != 4:
+            raise RuntimeError(f"o log ganhou/perdeu linhas do lote: {conteudo_final}")
         if not any("Convertendo arquivos: 4/10" in linha for linha in conteudo_final):
             raise RuntimeError("a linha de progresso nao foi atualizada")
 
@@ -1744,6 +1758,164 @@ def _check_batch_log_lines(app, root) -> None:
         app._batch_error_entries = {}
         app._error_line_raw = {}
         app._prep_counts = {}
+        app._activity_log_tail_following = True
+    finally:
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
+def _check_live_line_chronology(app, root) -> None:
+    """Vacina do pedido de 16/09: linha viva NAO herda o horario da execucao anterior.
+
+    O caso relatado: numa segunda execucao a linha "Transcrevendo arquivos"
+    nascia com o horario da PRIMEIRA (a tag `phase:transcribe` era reusada) e
+    ainda apagava a linha anterior do lugar — o log ficava fora de ordem
+    cronologica. Aqui a fila da UI e drenada com o Tk de verdade entre as duas
+    execucoes, com o relogio congelado para o horario de cada linha ser
+    verificavel.
+    """
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    horarios = ["10:00:01", "10:00:02"]
+    try:
+        root.deiconify()
+        root.update()
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_log_tail_following = True
+
+        def relogio(*_args, **_kwargs):
+            return horarios.pop(0) if horarios else "10:00:03"
+
+        with patch("time.strftime", side_effect=relogio):
+            app._run_sequence = 901
+            app._queue("activity_line", "convert", "Convertendo arquivos: 1/1 (2.4s)")
+            app._poll_ui_queue()
+            app._run_sequence = 902
+            app._queue(
+                "activity_line", "transcribe", "Transcrevendo arquivos: 1/1 (1min 32s)"
+            )
+            app._poll_ui_queue()
+        root.update()
+
+        linhas = [
+            linha
+            for linha in log.get("1.0", "end").splitlines()
+            if "Convertendo arquivos" in linha or "Transcrevendo arquivos" in linha
+        ]
+        if linhas != [
+            "10:00:01  Convertendo arquivos: 1/1 (2.4s)",
+            "10:00:02  Transcrevendo arquivos: 1/1 (1min 32s)",
+        ]:
+            raise RuntimeError(
+                "linhas vivas fora de ordem ou com horario da execucao anterior: "
+                f"{linhas}"
+            )
+        conteudo = log.get("1.0", "end").splitlines()
+        if any("phase:" in linha for linha in conteudo):
+            raise RuntimeError(f"nome de tag vazou como texto no log: {conteudo}")
+
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._run_sequence = 0
+        app._activity_log_tail_following = True
+    finally:
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
+def _check_batch_summary_block(app, root) -> None:
+    """Vacina do pedido de 16/09: o bloco final do lote sai entre separadores.
+
+        Iniciando envio:                    (no comeco do envio)
+        ==========
+        Total de arquivos: 1
+        Total audio: 1s
+        Tamanho total: <bytes>
+        Eficiencia geral: 0.5x (2.0s)       (clique -> HTML)
+        Eficiencia do servidor: 25.0x (12.0s)
+        Eficiencia da GPU: 30.0x (10.0s)
+        ==========
+
+    Verifica a ORDEM, as cores (estatisticas verdes, separadores sem cor) e que
+    o "Concluido." do app vem depois (aqui o bloco e o ultimo escrito pelo
+    check).
+    """
+    import tempfile
+    import wave
+
+    from domain_models import AudioJob
+
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    try:
+        root.deiconify()
+        root.update()
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_log_tail_following = True
+
+        with tempfile.TemporaryDirectory() as pasta:
+            wav = Path(pasta) / "a.wav"
+            with wave.open(str(wav), "wb") as destino:
+                destino.setnchannels(1)
+                destino.setsampwidth(2)
+                destino.setframerate(16000)
+                destino.writeframes(b"\0" * 32000)  # 1 segundo
+            job = AudioJob(
+                original_path=wav,
+                original_name="a.wav",
+                stem="a",
+                mode="ready",
+                upload_path=wav,
+            )
+            app._run_sequence = 903
+            app._begin_batch_send([job])
+            app._report_batch_summary([job], elapsed=2.0, server=(300.0, 10.0, 12.0))
+        app._poll_ui_queue()
+        root.update()
+
+        linhas = [linha for linha in log.get("1.0", "end").splitlines() if linha.strip()]
+        inicio = next(
+            (n for n, linha in enumerate(linhas, start=1) if linha.endswith("Iniciando envio:")),
+            0,
+        )
+        if not inicio:
+            raise RuntimeError(f"o marcador do inicio do envio nao saiu: {linhas}")
+        esperado_prefixos = [
+            "==========",
+            "Total de arquivos: 1",
+            "Total áudio: 1s",
+            "Tamanho total: ",
+            "Eficiência geral: 0.5x (2.0s)",
+            "Eficiência do servidor: 25.0x (12.0s)",
+            "Eficiência da GPU: 30.0x (10.0s)",
+            "==========",
+        ]
+        bloco = linhas[inicio : inicio + len(esperado_prefixos)]
+        if len(bloco) != len(esperado_prefixos) or any(
+            not linha[10:].startswith(prefixo)
+            for linha, prefixo in zip(bloco, esperado_prefixos)
+        ):
+            raise RuntimeError(f"bloco final fora do formato pedido: {bloco}")
+
+        for numero, _prefixo in enumerate(esperado_prefixos, start=inicio + 1):
+            tags = log.tag_names(f"{numero}.0")
+            if numero in (inicio + 1, inicio + len(esperado_prefixos)):
+                if "vad_total" in tags:
+                    raise RuntimeError("o separador nao pode sair verde")
+            elif "vad_total" not in tags:
+                raise RuntimeError(f"linha {numero} do bloco nao ficou verde")
+
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._run_sequence = 0
         app._activity_log_tail_following = True
     finally:
         if not mapeado:
@@ -1896,6 +2068,12 @@ def run(*, quiet: bool = False) -> int:
             # Vacina do pedido de 13/09: erros do lote em UMA linha por tipo (com
             # contagem) e a linha de arquivos ja prontos, sem embaralhar a ordem.
             _check_batch_log_lines(app, root)
+            # Vacina do pedido de 16/09: linha viva de uma execucao NAO herda o
+            # horario da anterior (o "Transcrevendo arquivos" aparecia fora de
+            # ordem no log) e o bloco final do lote sai entre separadores,
+            # verde, antes do "Concluido.".
+            _check_live_line_chronology(app, root)
+            _check_batch_summary_block(app, root)
             # Vacina do pedido de 13/09: "N arquivo(s) na fila." sai verde no log
             # assim que aparece (mesmo caminho: status_var -> trace -> log).
             _check_queue_count_line_color(app, root)

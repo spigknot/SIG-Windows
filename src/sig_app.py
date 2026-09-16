@@ -330,6 +330,7 @@ from stt_clients import (  # noqa: F401
 from http_clients import (  # noqa: F401
     GraniteUploader,
     TextModelClient,
+    granite_sessions,
 )
 
 
@@ -468,6 +469,7 @@ from app_env import (  # noqa: F401
 # Implementacao real em src/log_formatting.py (codigo movido verbatim).
 from log_formatting import (  # noqa: F401
     FFMPEG_COMMAND_BLOCK_TAG,
+    BATCH_SUMMARY_SEPARATOR,
     format_process_command,
     _log_path_basename,
     _NUMERIC_LOG_ARG_RE,
@@ -483,6 +485,8 @@ from log_formatting import (  # noqa: F401
     format_duration,
     format_audio_total,
     format_total_size,
+    format_efficiency_line,
+    format_server_progress,
     mode_label_from_value,
     format_ws_params_block,
     params_block_single_line,
@@ -495,7 +499,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260916_002"
+APP_VERSION = "20260916_003"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -1970,6 +1974,20 @@ class SigApp:
         self._scroll_activity_log_tail(self.activity_log, follow)
         self.activity_log.configure(state="disabled")
 
+    def _run_scoped_activity_key(self, key: str) -> str:
+        """Escopa a linha viva de fase pela EXECUÇÃO atual (correção de 16/09).
+
+        As linhas vivas usam a tag `phase:<key>`; sem escopo, uma segunda
+        execução do mesmo lote reusa a tag da anterior e o
+        `_live_line_birth_stamp` lê o horário do texto ANTIGO: a linha nova
+        nasce com o horário velho e a linha da execução anterior é apagada do
+        lugar (é o bug do "Transcrevendo arquivos" fora de ordem cronológica no
+        log). Com o escopo, cada execução tem as suas linhas — as antigas ficam
+        no log como histórico, o mesmo princípio das linhas de erro/preparação
+        (`r{n}err{m}`/`r{n}prep:{kind}`).
+        """
+        return f"r{int(getattr(self, '_run_sequence', 0))}:{key}"
+
     def _update_activity_line(
         self,
         key: str,
@@ -2146,10 +2164,14 @@ class SigApp:
         if "vad_total" not in box.tag_names():
             box.tag_configure("vad_total", foreground="#0a7a2f")
         line_tag = f"syncfile:{path}"
+        # O HORÁRIO é o do NASCIMENTO da linha e não muda nas atualizações de
+        # porcentagem (regra do usuário, 16/09: nenhuma linha de log troca o
+        # HH:MM:SS depois de aparecer).
+        horario = self._live_line_birth_stamp(box, line_tag) or time.strftime("%H:%M:%S")
         if display == "100%":
-            line = f"{time.strftime('%H:%M:%S')}  Baixando {path}\n"
+            line = f"{horario}  Baixando {path}\n"
         else:
-            line = f"{time.strftime('%H:%M:%S')}  Baixando {path} - {display}\n"
+            line = f"{horario}  Baixando {path} - {display}\n"
         follow = self._activity_log_follow_tail(box)
         try:
             box.delete(f"{line_tag}.first", f"{line_tag}.last")
@@ -13217,6 +13239,9 @@ try {
         self._batch_error_entries = {}
         self._error_line_raw = {}
         self._prep_counts = {}
+        # Resumo do envio (bloco final do log): zerado a cada execução — o do
+        # pipeline é medido no fim, e o das demais execuções no começo do envio.
+        self._batch_totals = None
         self.uploader = create_transcription_uploader(self.cancel_event, workflow_settings)
         self.uploaders = [self.uploader]
         self.running = True
@@ -13357,6 +13382,8 @@ try {
 
         try:
             zip_stats = None
+            # Estado do poller do servidor Granite NAR (linha viva + resumo final).
+            progresso_servidor: dict | None = None
             needs_conversion = any(job.converted_path for job in jobs)
             if (
                 needs_conversion
@@ -13367,6 +13394,11 @@ try {
                 and not is_grok_transcription(settings)
                 and not settings.get("_multi_transcription")
             ):
+                # No pipeline a transcrição começa JUNTO com a conversão: o
+                # marcador do envio sai antes das linhas vivas do lote (os
+                # números do resumo são medidos no fim, quando a conversão já
+                # terminou).
+                self._queue("activity", "Iniciando envio:", "vad_total")
                 self._run_pipelined_conversions_and_transcriptions(jobs, settings)
             elif needs_conversion:
                 self._run_conversions(jobs, settings, next_stage_vad=(use_vad or vad_only))
@@ -13386,13 +13418,17 @@ try {
                     self._queue("progress", 100)
                     self._show_folder_button(visible=True)
                     return
-                # Resumo do que vai ser enviado (pedido do usuário, 13/09) — logo
-                # antes do envio, depois de conversão/VAD.
-                self._report_batch_totals(jobs)
-                if send_zip:
-                    zip_stats = self._run_zip_transcription(jobs, settings, temp_dir, raw_dir, zip_level)
-                else:
-                    self._run_transcriptions(jobs, settings)
+                # "Iniciando envio:" marca o começo do envio; o bloco de resumo
+                # fecha o log no fim (pedido do usuário, 16/09).
+                self._begin_batch_send(jobs)
+                progresso_servidor = self._start_server_progress(settings, self._batch_totals[0])
+                try:
+                    if send_zip:
+                        zip_stats = self._run_zip_transcription(jobs, settings, temp_dir, raw_dir, zip_level)
+                    else:
+                        self._run_transcriptions(jobs, settings)
+                finally:
+                    self._finish_server_progress(progresso_servidor)
             else:
                 if self.cancel_event.is_set():
                     raise Cancelled()
@@ -13404,17 +13440,28 @@ try {
                     self._queue("progress", 100)
                     self._show_folder_button(visible=True)
                     return
-                self._report_batch_totals(jobs)
-                if send_zip:
-                    zip_stats = self._run_zip_transcription(jobs, settings, temp_dir, raw_dir, zip_level)
-                else:
-                    self._run_transcriptions(jobs, settings)
+                self._begin_batch_send(jobs)
+                progresso_servidor = self._start_server_progress(settings, self._batch_totals[0])
+                try:
+                    if send_zip:
+                        zip_stats = self._run_zip_transcription(jobs, settings, temp_dir, raw_dir, zip_level)
+                    else:
+                        self._run_transcriptions(jobs, settings)
+                finally:
+                    self._finish_server_progress(progresso_servidor)
             if self.cancel_event.is_set():
                 raise Cancelled()
             html_path = temp_dir / "transcricoes.html"
             stats = self._batch_report_stats(jobs, mode, settings, process_started, send_zip, zip_level, zip_stats)
             write_html_report(jobs, html_path, stats)
             self._queue("html_ready", str(html_path))
+            # Bloco final (separador + estatísticas + separador) ANTES do
+            # "Concluído" (pedido do usuário, 16/09).
+            self._report_batch_summary(
+                jobs,
+                elapsed=time.perf_counter() - getattr(self, "_prepare_started", process_started),
+                server=(progresso_servidor or {}).get("resumo"),
+            )
             self._queue("status", f"Concluído. HTML gerado em {html_path}")
             self._queue("progress", 100)
             self._show_folder_button(visible=True)
@@ -13556,18 +13603,50 @@ try {
                     resultados[chave] = float(segundos)
         return resultados
 
-    def _report_batch_totals(self, jobs: list[AudioJob], *, iniciando_envio: bool = True) -> None:
-        """Linhas de resumo antes do envio (pedido do usuário, 13/09).
+    def _begin_batch_send(self, jobs: list[AudioJob]) -> None:
+        """Marca o INÍCIO do envio e mede o resumo que fecha o log no fim (16/09).
 
-            Total de arquivos: 830
-            Total áudio: 1h27m32s
-            Tamanho total: 325 MB
-            Iniciando envio:
-
-        Verde quando o cálculo fecha; a linha afetada sai em AMARELO com a
-        contagem quando algum arquivo não pode ser medido.
+        O bloco de resumo (Total de arquivos / Total áudio / Tamanho total /
+        Eficiência) passou a ser emitido DEPOIS da transcrição, entre
+        separadores (pedido do usuário, 16/09) — aqui fica só o marcador
+        "Iniciando envio:". Os números continuam sendo medidos aqui (arquivos JÁ
+        convertidos, duração pelo cabeçalho do WAV) para a sonda de duração não
+        atrasar o fecho do log no fim.
         """
-        total, segundos, tamanho, sem_duracao, sem_tamanho = self._batch_send_totals(jobs)
+        self._batch_totals = self._batch_send_totals(jobs)
+        self._queue("activity", "Iniciando envio:", "vad_total")
+
+    def _report_batch_summary(
+        self,
+        jobs: list[AudioJob],
+        *,
+        elapsed: float,
+        server: tuple[float, float] | None = None,
+    ) -> None:
+        """Bloco final do lote, entre separadores (pedido do usuário, 16/09).
+
+            ==========
+            Total de arquivos: 1
+            Total áudio: 46m19s
+            Tamanho total: 84.8 MB
+            Eficiência geral: 30.2x (1min 32s)
+            Eficiência do servidor: 46.2x (1min 0s)
+            Eficiência da GPU: 46.6x (59.7s)
+            ==========
+
+        As três eficiências (segundos de áudio ÷ período):
+        - geral    → tempo decorrido do clique no botão até o HTML pronto;
+        - servidor → a sessão do servidor inteira (recebimento + processamento);
+        - GPU      → só o processamento/inferência.
+        As duas últimas só aparecem quando o modelo é o servidor Granite NAR e
+        ele reportou os tempos reais (`GET /sessions`).
+        """
+        totais = getattr(self, "_batch_totals", None)
+        if totais is None:
+            # Pipeline (conversão e transcrição juntas) ou fallback: mede agora.
+            totais = self._batch_send_totals(jobs)
+        total, segundos, tamanho, sem_duracao, sem_tamanho = totais
+        self._queue("activity", BATCH_SUMMARY_SEPARATOR, None)
         self._queue("activity", f"Total de arquivos: {total}", "vad_total")
         texto_audio = f"Total áudio: {format_audio_total(segundos)}"
         if sem_duracao:
@@ -13587,8 +13666,145 @@ try {
             )
         else:
             self._queue("activity", texto_tamanho, "vad_total")
-        if iniciando_envio:
-            self._queue("activity", "Iniciando envio:", "vad_total")
+        eficiencia = (segundos / elapsed) if (elapsed and elapsed > 0) else 0.0
+        self._queue(
+            "activity", format_efficiency_line("Eficiência geral", eficiencia, elapsed), "vad_total"
+        )
+        if server:
+            audio_servidor, proc_servidor, sessao_servidor = (
+                tuple(server) + (0.0, 0.0, 0.0)
+            )[:3]
+            if audio_servidor > 0 and sessao_servidor > 0:
+                self._queue(
+                    "activity",
+                    format_efficiency_line(
+                        "Eficiência do servidor", audio_servidor / sessao_servidor, sessao_servidor
+                    ),
+                    "vad_total",
+                )
+            if audio_servidor > 0 and proc_servidor > 0:
+                self._queue(
+                    "activity",
+                    format_efficiency_line(
+                        "Eficiência da GPU", audio_servidor / proc_servidor, proc_servidor
+                    ),
+                    "vad_total",
+                )
+        self._queue("activity", BATCH_SUMMARY_SEPARATOR, None)
+
+    # ── Progresso real do servidor Granite NAR (GET /sessions) ───────────────
+
+    # O servidor só responde no fim do job (no ZIP, horas de socket mudo) e o
+    # log ficava parado; o /sessions devolve o progresso REAL ao vivo (medido em
+    # 16/09: arquivos concluídos, áudio processado e tempo de GPU crescendo
+    # durante o processamento). Nada disso existe nos provedores de API.
+    SERVER_PROGRESS_INTERVAL = 5.0
+    SERVER_PROGRESS_TIMEOUT = 5.0
+
+    def _start_server_progress(self, settings: dict, total: int) -> dict | None:
+        """Liga a consulta ao /sessions durante o envio; None quando não se aplica.
+
+        Só o servidor STT local (Granite NAR) tem o endpoint — em qualquer outro
+        provedor a função devolve None: nenhuma linha nova e nenhuma requisição
+        extra.
+        """
+        try:
+            if not is_local_granite_transcription_server(settings.get("transcription_server")):
+                return None
+            url = transcribe_url(settings)
+        except Exception:
+            return None
+        estado = {
+            "url": url,
+            "total": max(0, int(total or 0)),
+            "stop": threading.Event(),
+            "session_id": "",
+            "baseline": [0, 0.0, 0.0],
+            "linha": "",
+            "publicada": False,
+            "resumo": None,
+            "thread": None,
+        }
+        thread = threading.Thread(
+            target=self._server_progress_loop,
+            args=(estado,),
+            daemon=True,
+            name="sig-server-progress",
+        )
+        estado["thread"] = thread
+        thread.start()
+        return estado
+
+    def _server_progress_loop(self, estado: dict) -> None:
+        """Loop do poller (thread de trabalho): nunca derruba o lote."""
+        while not estado["stop"].is_set():
+            try:
+                _ip, sessao = granite_sessions(estado["url"], timeout=self.SERVER_PROGRESS_TIMEOUT)
+            except Exception:
+                sessao = None
+            if sessao:
+                try:
+                    self._update_server_progress(estado, sessao)
+                except Exception:
+                    pass
+            if estado["stop"].wait(self.SERVER_PROGRESS_INTERVAL):
+                return
+
+    def _update_server_progress(self, estado: dict, sessao: dict, *, final: bool = False) -> None:
+        """Traduz a sessão do servidor na linha viva e guarda o resumo do fim."""
+        session_id = str(sessao.get("session_id") or "")
+        if session_id != estado["session_id"]:
+            # Sessão nova (a da execução anterior já tinha terminado): zera a base.
+            estado["session_id"] = session_id
+            estado["baseline"] = [0, 0.0, 0.0]
+        baseline_completos, baseline_audio, baseline_proc = estado["baseline"]
+        try:
+            completos = max(0, int(sessao.get("completed_files") or 0) - baseline_completos)
+            audio = max(0.0, float(sessao.get("total_audio_seconds") or 0.0) - baseline_audio)
+            proc = max(0.0, float(sessao.get("total_processing_seconds") or 0.0) - baseline_proc)
+        except (TypeError, ValueError):
+            return
+        total = int(sessao.get("zip_total") or 0) or estado["total"]
+        velocidade = (audio / proc) if (proc > 0 and audio > 0) else None
+        try:
+            sessao_segundos = max(0.0, float(sessao.get("elapsed_seconds") or 0.0))
+        except (TypeError, ValueError):
+            sessao_segundos = 0.0
+        # (áudio, processamento da GPU, duração da sessão no servidor) — as duas
+        # últimas alimentam as linhas "do servidor"/"da GPU" do bloco final.
+        estado["resumo"] = (audio, proc, sessao_segundos)
+        texto = format_server_progress(completos, total, audio, velocidade)
+        if not final and texto == estado["linha"]:
+            return
+        estado["linha"] = texto
+        estado["publicada"] = True
+        self._queue("activity_line", "server", texto, "vad_total" if final else None)
+
+    def _finish_server_progress(self, estado: dict | None) -> None:
+        """Encerra o poller e fecha a linha viva em VERDE com os números finais.
+
+        Faz UMA última leitura (o lote recém-terminado ainda é a nossa sessão) —
+        é dela que sai a linha "Servidor:" do bloco de resumo, mesmo em lotes
+        curtos que terminaram antes da primeira sondagem.
+        """
+        if not estado:
+            return
+        estado["stop"].set()
+        thread = estado.get("thread")
+        if thread is not None:
+            thread.join(timeout=1.0)
+        sessao = None
+        try:
+            _ip, sessao = granite_sessions(estado["url"], timeout=self.SERVER_PROGRESS_TIMEOUT)
+        except Exception:
+            sessao = None
+        if sessao and (
+            not estado["session_id"]
+            or str(sessao.get("session_id") or "") == estado["session_id"]
+        ):
+            self._update_server_progress(estado, sessao, final=True)
+        elif estado["publicada"]:
+            self._queue("activity_line", "server", estado["linha"], "vad_total")
 
     # ── VAD ──────────────────────────────────────────────────────────
 
@@ -15018,7 +15234,7 @@ try {
                     )
                 elif kind == "activity_line":
                     key, text, tag = message[1], message[2], message[3] if len(message) > 3 else None
-                    self._update_activity_line(key, text, tag)
+                    self._update_activity_line(self._run_scoped_activity_key(key), text, tag)
                 elif kind == "batch_error":
                     label = message[1]
                     item = message[2] if len(message) > 2 else ""
