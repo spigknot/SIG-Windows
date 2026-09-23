@@ -19,6 +19,7 @@ from providers import (
     IA_PROXY_NAME,
     PARTS_EXTRACTION_LABELS,
     SERVER_GEMMA_NAME,
+    SERVER_QWEN_NAME,
     TEXT_TASK_KEYS,
     fallback_transcription_server_for_missing_api_key,
     is_realtime_only_transcription_server,
@@ -218,6 +219,7 @@ def normalize_settings(data: dict) -> dict:
         if parts_model in {
             IA_PROXY_NAME,
             SERVER_GEMMA_NAME,
+            SERVER_QWEN_NAME,
             GROK_NON_REASONING_TEXT_NAME,
             GROK_TEXT_NAME,
             DEEPSEEK_TEXT_NAME,

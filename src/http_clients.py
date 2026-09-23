@@ -371,12 +371,19 @@ class TextModelClient:
                 {"role": "user", "content": material},
             ]
             payload.pop("input", None)
-            payload["max_tokens"] = self._count_input_tokens(
-                str(model_config.get("url") or ""),
-                str(model_config.get("fallback_url") or ""),
-                str(payload.get("model") or SERVER_GEMMA_MODEL),
-                system_prompt,
-                material,
+            # Teto declarado no catálogo (ex.: qwen_2.5_3b = 16384) prevalece;
+            # sem teto (gemma4) o limite é MEDIDO no /tokenize a cada chamada.
+            declared_max_tokens = payload.get("max_tokens")
+            payload["max_tokens"] = (
+                declared_max_tokens
+                if isinstance(declared_max_tokens, int) and declared_max_tokens > 0
+                else self._count_input_tokens(
+                    str(model_config.get("url") or ""),
+                    str(model_config.get("fallback_url") or ""),
+                    str(payload.get("model") or SERVER_GEMMA_MODEL),
+                    system_prompt,
+                    material,
+                )
             )
         elif "/api/generate" in parsed.path.lower():
             payload["system"] = system_prompt

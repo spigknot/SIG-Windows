@@ -405,6 +405,11 @@ from providers import (  # noqa: F401
     SERVER_GEMMA_MODEL,
     SERVER_GEMMA_URL,
     SERVER_GEMMA_NAMES,
+    SERVER_QWEN_NAME,
+    SERVER_QWEN_MODEL,
+    SERVER_QWEN_URL,
+    SERVER_QWEN_NAMES,
+    SERVER_QWEN_MAX_TOKENS,
     GROK_TEXT_API_NAMES,
     DEEPSEEK_API_NAMES,
     PARTS_EXTRACTION_LABELS,
@@ -499,7 +504,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260916_003"
+APP_VERSION = "20260923_001"
 
 
 def _audio_file_size(path: Path) -> int | None:

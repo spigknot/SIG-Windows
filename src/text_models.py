@@ -10,9 +10,11 @@ from providers import (
     GROK_NON_REASONING_TEXT_NAME,
     GROK_TEXT_NAME,
     IA_PROXY_NAME,
-    SERVER_GEMMA_MODEL,
-    SERVER_GEMMA_NAMES,
+    LOCAL_SERVER_MODEL_BY_NAME,
+    LOCAL_SERVER_NAMES,
     TEXT_TASK_KEYS,
+    local_server_max_tokens,
+    local_server_parameters,
     selected_text_model_config,
 )
 
@@ -34,11 +36,11 @@ def selected_text_model(
         if is_proxy
         else config["name"]
     )
-    if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME} | SERVER_GEMMA_NAMES:
+    if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME} | LOCAL_SERVER_NAMES:
         request_model = GROK_TEXT_NAME
     provider = "deepseek" if request_model == DEEPSEEK_TEXT_NAME else "xai"
-    if request_model in SERVER_GEMMA_NAMES:
-        request_model = SERVER_GEMMA_MODEL
+    if request_model in LOCAL_SERVER_NAMES:
+        request_model = LOCAL_SERVER_MODEL_BY_NAME.get(request_model, request_model)
         provider = "servidor"
     reasoning = str(settings.get(reasoning_key) or settings.get(reasoning_fallback) or "").casefold()
     if is_proxy:
@@ -58,14 +60,9 @@ def selected_text_model(
             "max_output_tokens": 10000,
         }
     elif provider == "servidor":
-        parameters = {
-            "model": SERVER_GEMMA_MODEL,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0.0,
-            "seed": 1,
-            "top_k": 1,
-            "top_p": 1,
-        }
+        parameters = local_server_parameters(
+            request_model, local_server_max_tokens(request_model)
+        )
     else:
         reasoning = reasoning if reasoning in {"low", "medium", "high", "xhigh"} else "low"
         parameters = {
@@ -120,7 +117,7 @@ def assistant_request_model_label(model_config: dict) -> str:
     ).strip()
     provider = str(model_config.get("provider") or "").casefold()
 
-    if provider == "servidor" or request_model in SERVER_GEMMA_NAMES | {SERVER_GEMMA_MODEL}:
+    if provider == "servidor" or request_model in LOCAL_SERVER_NAMES:
         destination = "servidor"
     else:
         destination = {

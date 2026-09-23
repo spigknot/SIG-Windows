@@ -220,16 +220,82 @@ IA_PROXY_NAME = "IA-Proxy"
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
 
 
+# Servidor de texto LOCAL (llama.cpp na porta 8400). O mesmo host serve vários
+# modelos carregados; o que muda por entrada é o `model` (e o teto de saída).
+LOCAL_SERVER_BASE_URL = "http://servidor:8400"
+
+
+LOCAL_SERVER_CHAT_URL = f"{LOCAL_SERVER_BASE_URL}/v1/chat/completions"
+
+
 SERVER_GEMMA_NAME = "servidor (gemma-4-26B-A4B-abliterated)"
 
 
 SERVER_GEMMA_MODEL = "gemma4"
 
 
-SERVER_GEMMA_URL = "http://servidor:8400/v1/chat/completions"
+SERVER_GEMMA_URL = LOCAL_SERVER_CHAT_URL
 
 
 SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
+
+
+# Segundo modelo do servidor local, numa INSTÂNCIA PRÓPRIA (porta 8402): o
+# llama.cpp da 8400 ignora o `model` do pedido e responde com o modelo
+# carregado ali (gemma4) — medido em teste real.
+SERVER_QWEN_NAME = "servidor (qwen-2.5-3B-Instruct-Abliterated)"
+
+
+SERVER_QWEN_MODEL = "qwen_2.5_3b"
+
+
+SERVER_QWEN_URL = "http://servidor:8402/v1/chat/completions"
+
+
+SERVER_QWEN_NAMES = {SERVER_QWEN_NAME, SERVER_QWEN_MODEL}
+
+
+# Teto de saída FIXO autorizado para o Qwen (regra do usuário). O Gemma
+# continua sem `max_tokens` declarado: o TextModelClient mede o dele no
+# /tokenize a cada requisição.
+SERVER_QWEN_MAX_TOKENS = 16384
+
+
+# Nomes aceitos para QUALQUER modelo do servidor local (nome exibido ou id).
+LOCAL_SERVER_NAMES = SERVER_GEMMA_NAMES | SERVER_QWEN_NAMES
+
+
+# Nome exibido -> `model` enviado na requisição.
+LOCAL_SERVER_MODEL_BY_NAME = {
+    SERVER_GEMMA_NAME: SERVER_GEMMA_MODEL,
+    SERVER_QWEN_NAME: SERVER_QWEN_MODEL,
+}
+
+
+def local_server_parameters(model: str, max_tokens: int | None = None) -> dict:
+    """Parâmetros de texto do servidor local — fonte única dos modelos.
+
+    Regra do usuário: os parâmetros do Qwen são IDÊNTICOS aos do Gemma; só o
+    `model` muda (e o `max_tokens`, quando o modelo tem teto próprio). Ter uma
+    fonte única evita que os dois dicts (catálogo e `selected_text_model`)
+    divirjam.
+    """
+    parameters = {
+        "model": model,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0.0,
+        "seed": 1,
+        "top_k": 1,
+        "top_p": 1,
+    }
+    if max_tokens:
+        parameters["max_tokens"] = int(max_tokens)
+    return parameters
+
+
+def local_server_max_tokens(model: str) -> int | None:
+    """Teto fixo de `max_tokens` do modelo, ou None = medir no /tokenize."""
+    return SERVER_QWEN_MAX_TOKENS if model == SERVER_QWEN_MODEL else None
 
 
 GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
@@ -342,14 +408,19 @@ def read_text_models() -> list[dict]:
         {
             "name": SERVER_GEMMA_NAME,
             "url": SERVER_GEMMA_URL,
-            "parameters": {
-                "model": SERVER_GEMMA_MODEL,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "temperature": 0.0,
-                "seed": 1,
-                "top_k": 1,
-                "top_p": 1,
-            },
+            "parameters": local_server_parameters(SERVER_GEMMA_MODEL),
+            "selected": False,
+            "provider": "servidor",
+            "is_grok_api": False,
+            "is_deepseek_api": False,
+            "is_xai_proxy": False,
+        },
+        {
+            "name": SERVER_QWEN_NAME,
+            "url": SERVER_QWEN_URL,
+            "parameters": local_server_parameters(
+                SERVER_QWEN_MODEL, local_server_max_tokens(SERVER_QWEN_MODEL)
+            ),
             "selected": False,
             "provider": "servidor",
             "is_grok_api": False,

@@ -56,6 +56,15 @@ Endpoint: http://servidor:8400/v1/chat/completions
 Porta: 8400
 Modelo interno: gemma4
 
+Nome exibido: servidor (qwen-2.5-3B-Instruct-Abliterated)
+Endpoint: http://servidor:8402/v1/chat/completions
+Porta: 8402
+Modelo interno: qwen_2.5_3b
+max_tokens: 16384 (fixo; o gemma4 continua medindo no /tokenize)
+Demais parametros: identicos aos do gemma4
+OBS.: porta DIFERENTE da do gemma4: o llama.cpp da 8400 ignora o `model`
+      do pedido e responde com o modelo carregado ali (gemma4).
+
 Nome exibido: grok-4.6
 Endpoint: https://api.x.ai/v1/responses
 Porta: 443
