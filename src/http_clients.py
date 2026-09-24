@@ -371,8 +371,9 @@ class TextModelClient:
                 {"role": "user", "content": material},
             ]
             payload.pop("input", None)
-            # Teto declarado no catálogo (ex.: qwen_2.5_3b = 16384) prevalece;
-            # sem teto (gemma4) o limite é MEDIDO no /tokenize a cada chamada.
+            # Teto declarado no catálogo (quando houver) prevalece;
+            # sem teto (hoje: gemma4 E qwen2.5) o limite é MEDIDO no
+            # /tokenize x1.5 a cada chamada.
             declared_max_tokens = payload.get("max_tokens")
             payload["max_tokens"] = (
                 declared_max_tokens

@@ -31,22 +31,22 @@ DEFAULT_SETTINGS = {
     "stt_keyword_profile": "",
     "text_model": "IA-Proxy",
     "text_reasoning": "low",
-    "ia_proxy_model": "grok-4.6",
+    "ia_proxy_model": "grok-latest",
     "ia_proxy_provider": "grok",
     "history_model": "IA-Proxy",
     "history_reasoning": "low",
-    "history_proxy_model": "grok-4.6",
+    "history_proxy_model": "grok-latest",
     "statement_model": "IA-Proxy",
     "statement_reasoning": "low",
-    "statement_proxy_model": "grok-4.6",
+    "statement_proxy_model": "grok-latest",
     "parts_extraction": "uppercase",
     "parts_model": "IA-Proxy",
-    "parts_proxy_model": "grok-4.6",
+    "parts_proxy_model": "grok-latest",
     "parts_proxy_provider": "grok",
     "parts_reasoning": "low",
     "qualification_model": "IA-Proxy",
     "qualification_reasoning": "low",
-    "qualification_proxy_model": "grok-4.6",
+    "qualification_proxy_model": "grok-latest",
     "grok_api_key": "",
     "deepseek_api_key": "",
     "deepgram_api_key": "",
@@ -174,7 +174,10 @@ GROK_TEXT_URL = "https://api.x.ai/v1/responses"
 DEEPSEEK_TEXT_URL = "https://api.deepseek.com/chat/completions"
 
 
-GROK_TEXT_NAME = "grok-4.6"
+# Alias GENÉRICO do Grok (regra do usuário, 23/09): substitui o antigo
+# "grok-4.6" em TODAS as requisições e em todas as referências de interface.
+# O modelo non-reasoning (grok-4.20...) permanece igual.
+GROK_TEXT_NAME = "grok-latest"
 
 
 GROK_NON_REASONING_TEXT_NAME = "grok-4.20-0309-non-reasoning"
@@ -200,18 +203,21 @@ DEEPSEEK_LEGACY_NAMES = {
 
 
 def migrate_text_model_name(value: str) -> str:
-    """Nome de modelo de texto com os legados do DeepSeek já convertidos.
+    """Nome de modelo de texto com os legados JÁ convertidos.
 
     Necessário antes de comparar com o catálogo (`read_text_models`): sem isto,
-    um `history_model` antigo = "deepseek-v4-flash" deixaria de casar com o
-    catálogo e cairia silenciosamente no `text_model` geral (IA-Proxy) —
-    trocando o provedor que o usuário tinha escolhido.
+    um `history_model` antigo deixaria de casar com o catálogo e cairia
+    silenciosamente no `text_model` geral (IA-Proxy) — trocando o provedor que
+    o usuário tinha escolhido. Cobre o DeepSeek aposentado e os renomes de
+    23/09 (`grok-4.6` → `grok-latest`; nomes longos dos servidores locais →
+    `servidor (gemma4)` / `servidor (qwen2.5)`), guardados em
+    `TEXT_MODEL_LEGACY_NAMES` — definido mais abaixo, junto das constantes.
     """
     candidate = str(value or "").strip()
     folded = candidate.casefold()
     if folded in DEEPSEEK_LEGACY_NAMES or folded.startswith("deepseek-v4-") or folded.startswith("deepseek v4"):
         return DEEPSEEK_TEXT_NAME
-    return candidate
+    return TEXT_MODEL_LEGACY_NAMES.get(folded, candidate)
 
 
 IA_PROXY_NAME = "IA-Proxy"
@@ -228,7 +234,9 @@ LOCAL_SERVER_BASE_URL = "http://servidor:8400"
 LOCAL_SERVER_CHAT_URL = f"{LOCAL_SERVER_BASE_URL}/v1/chat/completions"
 
 
-SERVER_GEMMA_NAME = "servidor (gemma-4-26B-A4B-abliterated)"
+# Nomes EXIBIDOS dos servidores locais (regra do usuário, 23/09): curtos, só o
+# apelido do modelo — as requisições continuam usando SERVER_*_MODEL abaixo.
+SERVER_GEMMA_NAME = "servidor (gemma4)"
 
 
 SERVER_GEMMA_MODEL = "gemma4"
@@ -243,22 +251,16 @@ SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
 # Segundo modelo do servidor local, numa INSTÂNCIA PRÓPRIA (porta 8402): o
 # llama.cpp da 8400 ignora o `model` do pedido e responde com o modelo
 # carregado ali (gemma4) — medido em teste real.
-SERVER_QWEN_NAME = "servidor (qwen-2.5-3B-Instruct-Abliterated)"
+SERVER_QWEN_NAME = "servidor (qwen2.5)"
 
 
-SERVER_QWEN_MODEL = "qwen_2.5_3b"
+SERVER_QWEN_MODEL = "qwen2.5-7b"
 
 
 SERVER_QWEN_URL = "http://servidor:8402/v1/chat/completions"
 
 
 SERVER_QWEN_NAMES = {SERVER_QWEN_NAME, SERVER_QWEN_MODEL}
-
-
-# Teto de saída FIXO autorizado para o Qwen (regra do usuário). O Gemma
-# continua sem `max_tokens` declarado: o TextModelClient mede o dele no
-# /tokenize a cada requisição.
-SERVER_QWEN_MAX_TOKENS = 16384
 
 
 # Nomes aceitos para QUALQUER modelo do servidor local (nome exibido ou id).
@@ -272,13 +274,25 @@ LOCAL_SERVER_MODEL_BY_NAME = {
 }
 
 
+# Nomes ANTIGOS que ainda existem em settings.json gravadas. Sem migrar, o
+# valor velho não casa com o catálogo e a seleção cai silenciosamente no
+# text_model geral (mesma família do bug do deepseek-v4-flash). Chave em
+# casefold, porque `migrate_text_model_name` compara assim.
+TEXT_MODEL_LEGACY_NAMES = {
+    "grok-4.6": GROK_TEXT_NAME,
+    "servidor (gemma-4-26b-a4b-abliterated)": SERVER_GEMMA_NAME,
+    "servidor (qwen-2.5-3b-instruct-abliterated)": SERVER_QWEN_NAME,
+}
+
+
 def local_server_parameters(model: str, max_tokens: int | None = None) -> dict:
     """Parâmetros de texto do servidor local — fonte única dos modelos.
 
     Regra do usuário: os parâmetros do Qwen são IDÊNTICOS aos do Gemma; só o
-    `model` muda (e o `max_tokens`, quando o modelo tem teto próprio). Ter uma
-    fonte única evita que os dois dicts (catálogo e `selected_text_model`)
-    divirjam.
+    `model` muda. NENHUM dos dois declara `max_tokens` no catálogo (o teto
+    fixo de 16384 foi retirado em 23/09): o TextModelClient mede em cada
+    chamada no `/tokenize` × 1.5. Ter uma fonte única evita que os dois dicts
+    (catálogo e `selected_text_model`) divirjam.
     """
     parameters = {
         "model": model,
@@ -291,11 +305,6 @@ def local_server_parameters(model: str, max_tokens: int | None = None) -> dict:
     if max_tokens:
         parameters["max_tokens"] = int(max_tokens)
     return parameters
-
-
-def local_server_max_tokens(model: str) -> int | None:
-    """Teto fixo de `max_tokens` do modelo, ou None = medir no /tokenize."""
-    return SERVER_QWEN_MAX_TOKENS if model == SERVER_QWEN_MODEL else None
 
 
 GROK_TEXT_API_NAMES = {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME}
@@ -418,9 +427,7 @@ def read_text_models() -> list[dict]:
         {
             "name": SERVER_QWEN_NAME,
             "url": SERVER_QWEN_URL,
-            "parameters": local_server_parameters(
-                SERVER_QWEN_MODEL, local_server_max_tokens(SERVER_QWEN_MODEL)
-            ),
+            "parameters": local_server_parameters(SERVER_QWEN_MODEL),
             "selected": False,
             "provider": "servidor",
             "is_grok_api": False,
@@ -483,6 +490,27 @@ def selected_text_model_config(settings: dict, name_key: str = "text_model") -> 
         or next((model for model in models if model["selected"]), None)
         or models[0]
     )
+
+
+def text_model_label(model: dict) -> str:
+    """Rótulo EXIBIDO de um modelo de texto nos menus (Configurações/Status).
+
+    Regra do usuário (23/09): os servidores locais aparecem só com o apelido
+    (`servidor (gemma4)`, `servidor (qwen2.5)`), sem repetir o `model` entre
+    parênteses. Modelos cujo nome Já é o identificador da requisição
+    (IA-Proxy, Grok, DeepSeek) também saem limpos; o resto mantém o formato
+    `nome (model)`. FONTE ÚNICA: os menus montam o rótulo por aqui.
+    """
+    name = str(model.get("name") or "")
+    if (
+        name == IA_PROXY_NAME
+        or name in GROK_TEXT_API_NAMES
+        or name in DEEPSEEK_API_NAMES
+        or name in LOCAL_SERVER_NAMES
+    ):
+        return name
+    request_model = (model.get("parameters") or {}).get("model") or "modelo não informado"
+    return f"{name} ({request_model})"
 
 
 def selected_transcription_server(settings: dict) -> dict:

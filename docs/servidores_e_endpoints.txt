@@ -47,25 +47,35 @@ Nome exibido: IA-Proxy
 Endpoint: http://servidor:8500
 Porta: 8500
 Modelos encaminhados atualmente:
-- grok-4.6
+- grok-latest
 - grok-4.20-0309-non-reasoning
 - deepseek-flash
 
-Nome exibido: servidor (gemma-4-26B-A4B-abliterated)
+Nome exibido: servidor (gemma4)
 Endpoint: http://servidor:8400/v1/chat/completions
 Porta: 8400
 Modelo interno: gemma4
 
-Nome exibido: servidor (qwen-2.5-3B-Instruct-Abliterated)
+Nome exibido: servidor (qwen2.5)
 Endpoint: http://servidor:8402/v1/chat/completions
 Porta: 8402
-Modelo interno: qwen_2.5_3b
-max_tokens: 16384 (fixo; o gemma4 continua medindo no /tokenize)
+Modelo interno: qwen2.5-7b
+max_tokens: medido no /tokenize x1.5 a cada requisicao (igual ao gemma4;
+      nenhum dos dois declara teto no catalogo)
 Demais parametros: identicos aos do gemma4
 OBS.: porta DIFERENTE da do gemma4: o llama.cpp da 8400 ignora o `model`
       do pedido e responde com o modelo carregado ali (gemma4).
 
-Nome exibido: grok-4.6
+OBS. renomes (23/09): o alias `grok-latest` substituiu o `grok-4.6` em TODAS
+      as requisicoes e referencias de interface. Medido em teste real, o
+      IA-Proxy aceita `model=grok-latest` e responde `model=grok-4.7` (a chave
+      e inserida pelo proxy; o app nao manda Authorization).
+      O IA-Proxy NAO roteia os modelos locais: `model=gemma4` e
+      `model=qwen2.5-7b` retornam HTTP 400 ("Provedor nao suportado ... o campo
+      'model' deve conter 'xAI' (ou 'grok') ou 'deepseek'") — os dois seguem
+      direto nas portas 8400 e 8402.
+
+Nome exibido: grok-latest
 Endpoint: https://api.x.ai/v1/responses
 Porta: 443
 

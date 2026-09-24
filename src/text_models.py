@@ -13,7 +13,6 @@ from providers import (
     LOCAL_SERVER_MODEL_BY_NAME,
     LOCAL_SERVER_NAMES,
     TEXT_TASK_KEYS,
-    local_server_max_tokens,
     local_server_parameters,
     selected_text_model_config,
 )
@@ -60,9 +59,7 @@ def selected_text_model(
             "max_output_tokens": 10000,
         }
     elif provider == "servidor":
-        parameters = local_server_parameters(
-            request_model, local_server_max_tokens(request_model)
-        )
+        parameters = local_server_parameters(request_model)
     else:
         reasoning = reasoning if reasoning in {"low", "medium", "high", "xhigh"} else "low"
         parameters = {
@@ -121,7 +118,7 @@ def assistant_request_model_label(model_config: dict) -> str:
         destination = "servidor"
     else:
         destination = {
-            GROK_TEXT_NAME: "Grok-4.6",
+            GROK_TEXT_NAME: "grok-latest",
             GROK_NON_REASONING_TEXT_NAME: "Grok-4.20",
             GROK_NON_REASONING_LEGACY_NAME: "Grok-4.20",
             DEEPSEEK_TEXT_NAME: DEEPSEEK_TEXT_NAME,

@@ -64,7 +64,7 @@ class AssistantPromptTests(unittest.TestCase):
             assistant_request_model_label(
                 {"request_model": GROK_TEXT_NAME, "provider": "xai"}
             ),
-            "Grok-4.6",
+            "grok-latest",
         )
         self.assertEqual(
             assistant_request_model_label(
@@ -94,7 +94,7 @@ class AssistantPromptTests(unittest.TestCase):
                     "is_xai_proxy": True,
                 }
             ),
-            "IA-Proxy/Grok-4.6",
+            "IA-Proxy/grok-latest",
         )
         self.assertEqual(
             assistant_request_model_label(
@@ -152,11 +152,11 @@ class AssistantPromptTests(unittest.TestCase):
         _FakeConnection.requests = []
         config = {
             "url": "https://api.x.ai/v1/responses",
-            "parameters": {"model": "grok-4.6", "max_output_tokens": 32},
+            "parameters": {"model": "grok-latest", "max_output_tokens": 32},
             "provider": "xai",
             "is_grok_api": True,
             "api_key": "xai-test",
-            "request_model": "grok-4.6",
+            "request_model": "grok-latest",
         }
         with patch("sig_app.http.client.HTTPSConnection", _FakeConnection):
             output = TextModelClient(threading.Event()).post(
@@ -192,10 +192,10 @@ class AssistantPromptTests(unittest.TestCase):
         _FakeConnection.requests = []
         config = {
             "url": "http://servidor:8500",
-            "parameters": {"model": "grok-4.6", "max_output_tokens": 32},
+            "parameters": {"model": "grok-latest", "max_output_tokens": 32},
             "provider": "xai",
             "is_xai_proxy": True,
-            "request_model": "grok-4.6",
+            "request_model": "grok-latest",
         }
         with patch("sig_app.http.client.HTTPConnection", _FakeConnection):
             output = TextModelClient(threading.Event()).post(

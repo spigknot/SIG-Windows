@@ -409,7 +409,8 @@ from providers import (  # noqa: F401
     SERVER_QWEN_MODEL,
     SERVER_QWEN_URL,
     SERVER_QWEN_NAMES,
-    SERVER_QWEN_MAX_TOKENS,
+    LOCAL_SERVER_NAMES,
+    TEXT_MODEL_LEGACY_NAMES,
     GROK_TEXT_API_NAMES,
     DEEPSEEK_API_NAMES,
     PARTS_EXTRACTION_LABELS,
@@ -419,6 +420,7 @@ from providers import (  # noqa: F401
     read_transcription_servers,
     read_text_models,
     selected_text_model_config,
+    text_model_label,
     selected_transcription_server,
     transcription_server_label,
     parse_api_keys_text,
@@ -504,7 +506,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260923_001"
+APP_VERSION = "20260924_001"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -9557,14 +9559,11 @@ try {
                     )
                 ]
                 model_labels_holder.clear()
+                # Rótulo vem de providers.text_model_label (fonte única): os
+                # servidores locais aparecem como "servidor (gemma4)" e
+                # "servidor (qwen2.5)", sem repetir o `model` entre parênteses.
                 model_labels_holder.update({
-                    (
-                        model["name"]
-                        if model["name"] == IA_PROXY_NAME
-                        or model["name"] in GROK_TEXT_API_NAMES
-                        or model["name"] in DEEPSEEK_API_NAMES
-                        else f"{model['name']} ({model['parameters'].get('model', 'modelo não informado')})"
-                    ): model["name"]
+                    text_model_label(model): model["name"]
                     for model in available_models
                 })
                 model_combo.configure(values=list(model_labels_holder))
