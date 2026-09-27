@@ -1912,11 +1912,12 @@ def _check_batch_send_totals_block(app, root) -> None:
 
 
 def _check_server_line_without_audio(app, root) -> None:
-    """Vacina do pedido de 27/09: a linha viva do servidor e so a contagem.
+    """Vacina do pedido de 27/09: a linha viva do servidor sem o tempo de audio.
 
-    Antes: `Servidor: 1011/4004 arquivos · 40m53s de áudio · 14.3x` — audio e
-    eficiencia repetidos com outra unidade (o bloco final ja traz `Total
-    audio` e as tres eficiencias). Agora: `Servidor: 1011/4004 arquivos`.
+    Antes: `Servidor: 1011/4004 arquivos · 40m53s de áudio · 14.3x` — o tempo
+    repetia com outra unidade o `Total áudio` do bloco final. Agora (lote de UM
+    modelo): `Server-side: 1011/4004 - 17.3x`. No multi esta linha nao sai
+    (o Granite NAR ja tem a linha do modelo 1).
     """
     import threading
 
@@ -1959,9 +1960,9 @@ def _check_server_line_without_audio(app, root) -> None:
         if len(linhas) != 1:
             raise RuntimeError(f"a linha viva do servidor nao saiu (ou saiu repetida): {linhas}")
         texto = linhas[0][10:]
-        if texto != "Servidor: 1011/4004 arquivos":
+        if texto != "Server-side: 1011/4004 - 14.3x":
             raise RuntimeError(f"a linha viva do servidor mudou de formato: {texto!r}")
-        for proibido in (" de audio", " de áudio", "14.3x"):
+        for proibido in (" de audio", " de áudio", "de arquivos"):
             if proibido in texto:
                 raise RuntimeError(f"a linha viva voltou a trazer {proibido!r}: {texto!r}")
 

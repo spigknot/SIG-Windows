@@ -73,20 +73,38 @@ def _estado(**campos) -> dict:
 
 
 class FormatosTest(unittest.TestCase):
-    def test_linha_viva_so_com_a_contagem_de_arquivos(self):
-        """27/09: áudio e eficiência saíram da linha viva (ficam no bloco final)."""
+    def test_linha_viva_com_eficiencia(self):
+        """27/09: `Server-side: 1011/4004 - 17.3x` (contagem + eficiência)."""
         self.assertEqual(
-            format_server_progress(12, 830),
-            "Servidor: 12/830 arquivos",
+            format_server_progress(1011, 4004, 17.3),
+            "Server-side: 1011/4004 - 17.3x",
         )
 
-    def test_linha_viva_sem_total(self):
-        self.assertEqual(format_server_progress(3, 0), "Servidor: 3 arquivos")
+    def test_linha_viva_sem_eficiencia_ainda_medivel(self):
+        """Sem GPU medida (ZIPE em curso) a linha sai só com a contagem."""
+        self.assertEqual(format_server_progress(12, 830), "Server-side: 12/830")
+        self.assertEqual(format_server_progress(12, 830, 0.0), "Server-side: 12/830")
+        self.assertEqual(format_server_progress(12, 830, None), "Server-side: 12/830")
 
-    def test_linha_viva_nao_aceita_audio_nem_eficiencia(self):
-        """Vacina: os números removidos não podem voltar por argumento extra."""
+    def test_linha_viva_sem_total(self):
+        self.assertEqual(format_server_progress(3, 0), "Server-side: 3")
+        self.assertEqual(format_server_progress(3, 0, 9.0), "Server-side: 3 - 9.0x")
+
+    def test_linha_viva_nao_aceita_o_tempo_de_audio(self):
+        """Vacina: o `40m53s de áudio` saiu e não pode voltar por argumento extra.
+
+        A eficiência (3º argumento) é legítima; o áudio processado foi removido
+        de propósito (repetia o `Total áudio` do bloco final com outra unidade).
+        """
         with self.assertRaises(TypeError):
-            format_server_progress(12, 830, 8337.21, 46.7)  # type: ignore[call-arg]
+            format_server_progress(12, 830, 46.7, 8337.21)  # type: ignore[call-arg]
+
+    def test_linha_viva_ignora_eficiencia_zerada_ou_invalida(self):
+        self.assertEqual(format_server_progress(5, 10, -1.0), "Server-side: 5/10")
+        self.assertEqual(
+            format_server_progress(5, 10, "lixo"),  # type: ignore[arg-type]
+            "Server-side: 5/10",
+        )
 
     def test_linha_do_bloco_final(self):
         self.assertEqual(
@@ -175,7 +193,8 @@ class GatePorProvedorTest(unittest.TestCase):
         primeiro = app.fila[0]
         self.assertEqual(primeiro[0], "activity_line")
         self.assertEqual(primeiro[1], "server")
-        self.assertIn("1/3 arquivos", primeiro[2])
+        self.assertIn("1/3", primeiro[2])
+        self.assertIn("30.0x", primeiro[2])
         fechamento = app.fila[-1]
         self.assertEqual(fechamento[3], "vad_total", "o fechamento tem de ser verde")
         self.assertEqual(
@@ -195,10 +214,7 @@ class LinhaVivaTest(unittest.TestCase):
         app._update_server_progress(estado, dados)
         app._update_server_progress(estado, dict(dados))
         self.assertEqual(len(app.fila), 1, "texto repetido não pode gerar nova linha")
-        self.assertIn("2/10 arquivos", app.fila[0][2])
-        self.assertEqual(
-            app.fila[0][2], "Servidor: 2/10 arquivos", "a linha viva é só a contagem"
-        )
+        self.assertEqual(app.fila[0][2], "Server-side: 2/10 - 50.0x")
         # O áudio e a eficiência continuam no RESUMO (alimentam o bloco final),
         # mesmo fora da linha viva.
         self.assertEqual(estado["resumo"], (600.0, 12.0, 12.0))
@@ -216,7 +232,8 @@ class LinhaVivaTest(unittest.TestCase):
                 total_processing_seconds=40.0,
             ),
         )
-        self.assertIn("12/830 arquivos", app.fila[0][2])
+        self.assertIn("12/830", app.fila[0][2])
+        self.assertIn("30.0x", app.fila[0][2])
 
     def test_sessao_nova_nao_herda_numeros_da_anterior(self):
         app = _app()
@@ -243,7 +260,7 @@ class LinhaVivaTest(unittest.TestCase):
             ),
         )
         self.assertEqual(len(app.fila), 1)
-        self.assertIn("1/3 arquivos", app.fila[0][2])
+        self.assertIn("1/3", app.fila[0][2])
         self.assertEqual(estado["resumo"], (300.0, 10.0, 12.0))
 
     def test_sessao_ilegivel_nao_derruba_o_lote(self):
@@ -273,7 +290,8 @@ class FechamentoTest(unittest.TestCase):
             app._finish_server_progress(estado)
         self.assertEqual(app.fila[-1][0], "activity_line")
         self.assertEqual(app.fila[-1][3], "vad_total")
-        self.assertIn("3/10 arquivos", app.fila[-1][2])
+        self.assertIn("3/10", app.fila[-1][2])
+        self.assertIn("46.6x", app.fila[-1][2])
         self.assertEqual(estado["resumo"], (2779.0, 59.658, 12.0))
 
     def test_sem_rede_no_fim_a_ultima_linha_e_que_fecha(self):

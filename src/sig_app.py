@@ -13820,9 +13820,9 @@ try {
         # (áudio, processamento da GPU, duração da sessão no servidor) — as duas
         # últimas alimentam as linhas "do servidor"/"da GPU" do bloco final.
         estado["resumo"] = (audio, proc, sessao_segundos)
-        # Só a contagem de arquivos vai para a linha viva (27/09): o áudio
-        # processado e a eficiência ficaram no bloco final do lote.
-        texto = format_server_progress(completos, total)
+        # A linha viva leva a contagem + a eficiência, sem o tempo de áudio
+        # (que repetiria o `Total áudio` do bloco final com outra unidade).
+        texto = format_server_progress(completos, total, (audio / proc) if (proc > 0 and audio > 0) else None)
         if not final and texto == estado["linha"]:
             return
         estado["linha"] = texto

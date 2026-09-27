@@ -396,16 +396,21 @@ def format_efficiency_line(label: str, speed: float, seconds: float | None = Non
     return texto
 
 
-def format_server_progress(completed: int, total: int) -> str:
-    """Linha VIVA do processamento no servidor: `Servidor: 1011/4004 arquivos`.
+def format_server_progress(completed: int, total: int, speed: float | None = None) -> str:
+    """Linha VIVA do processamento no servidor: `Server-side: 1011/4004 - 17.3x`.
 
     Alimentada por `GET /sessions` do servidor Granite NAR (ele só responde no
     fim do job, então sem essa consulta o log fica mudo durante horas no ZIP).
 
-    Só a contagem de arquivos (pedido do usuário, 27/09): o áudio processado e
-    a eficiência (`· 40m53s de áudio · 14.3x`) saíram daqui porque o bloco
-    final do lote já traz `Total áudio` e as três eficiências — na linha viva
-    eram números repetidos com outra unidade. A barra de progresso e o resumo
+    Aparece SÓ no lote de UM modelo (pedido do usuário, 27/09): no multi o
+    Granite NAR já tem a linha viva do modelo 1, e o poller repetiria o mesmo
+    servidor com contadores diferentes dos do app.
+
+    O tempo de áudio processado saiu daqui (era `· 40m53s de áudio`, repetindo
+    com outra unidade o `Total áudio` do bloco final), mas a eficiência ficou
+    (`17.3x`, áudio ÷ processamento da GPU) por pedido do usuário: enquanto o
+    lote roda ela mostra o acúmulo até agora, e no fecho o bloco final mostra a
+    `Eficiência da GPU` da sessão inteira. A barra de progresso e o `resumo`
     do `/sessions` continuam intactos internamente.
     """
     try:
@@ -416,7 +421,14 @@ def format_server_progress(completed: int, total: int) -> str:
         alvo = max(0, int(total or 0))
     except (TypeError, ValueError):
         alvo = 0
-    return f"Servidor: {feitos}/{alvo} arquivos" if alvo else f"Servidor: {feitos} arquivos"
+    partes = [f"{feitos}/{alvo}" if alvo else f"{feitos}"]
+    try:
+        valor = float(speed or 0.0)
+    except (TypeError, ValueError):
+        valor = 0.0
+    if valor > 0:
+        partes.append(f"{valor:.1f}x")
+    return "Server-side: " + " - ".join(partes)
 
 
 def mode_label_from_value(mode: str) -> str:
