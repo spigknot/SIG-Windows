@@ -13618,7 +13618,48 @@ try {
         atrasar o fecho do log no fim.
         """
         self._batch_totals = self._batch_send_totals(jobs)
+        # Os MESMOS números do bloco final saem AQUI, antes do marcador: o
+        # usuário vê o que vai ser enviado (quantos arquivos válidos, quanto de
+        # áudio, quantos bytes) enquanto o envio só está começando — antes eles
+        # só apareciam no fecho do log, com o lote já inteiro (27/09).
+        self._queue_batch_totals_lines(self._batch_totals)
         self._queue("activity", "Iniciando envio:", "vad_total")
+
+    def _queue_batch_totals_lines(self, totais: tuple[int, float, int, int, int]) -> None:
+        """As 3 linhas de totais do envio, no formato do bloco final (27/09).
+
+            Total de arquivos: 4004
+            Total áudio: 9h18m02s
+            Tamanho total: 1022.2 MB
+
+        `totais` vem de `_batch_send_totals`: só os arquivos VÁLIDOS (com erro
+        de conversão ficam de fora), com a duração de cada áudio válido e o
+        tamanho do que será ENVIADO (o WAV/OGG convertido, nunca o original).
+
+        Mesma função nos dois lugares onde os totais aparecem (antes do envio e
+        no fecho do log): o bloco final e estas linhas não podem divergir de
+        formato — daí virarem uma função só.
+        """
+        total, segundos, tamanho, sem_duracao, sem_tamanho = totais
+        self._queue("activity", f"Total de arquivos: {total}", "vad_total")
+        texto_audio = f"Total áudio: {format_audio_total(segundos)}"
+        if sem_duracao:
+            self._queue(
+                "activity",
+                f"{texto_audio} ({sem_duracao} arquivo(s) sem duração medível)",
+                "warning",
+            )
+        else:
+            self._queue("activity", texto_audio, "vad_total")
+        texto_tamanho = f"Tamanho total: {format_total_size(tamanho)}"
+        if sem_tamanho:
+            self._queue(
+                "activity",
+                f"{texto_tamanho} ({sem_tamanho} arquivo(s) sem leitura)",
+                "warning",
+            )
+        else:
+            self._queue("activity", texto_tamanho, "vad_total")
 
     def _report_batch_summary(
         self,
@@ -13649,27 +13690,11 @@ try {
         if totais is None:
             # Pipeline (conversão e transcrição juntas) ou fallback: mede agora.
             totais = self._batch_send_totals(jobs)
-        total, segundos, tamanho, sem_duracao, sem_tamanho = totais
+        _total, segundos, _tamanho, _sem_duracao, _sem_tamanho = totais
         self._queue("activity", BATCH_SUMMARY_SEPARATOR, None)
-        self._queue("activity", f"Total de arquivos: {total}", "vad_total")
-        texto_audio = f"Total áudio: {format_audio_total(segundos)}"
-        if sem_duracao:
-            self._queue(
-                "activity",
-                f"{texto_audio} ({sem_duracao} arquivo(s) sem duração medível)",
-                "warning",
-            )
-        else:
-            self._queue("activity", texto_audio, "vad_total")
-        texto_tamanho = f"Tamanho total: {format_total_size(tamanho)}"
-        if sem_tamanho:
-            self._queue(
-                "activity",
-                f"{texto_tamanho} ({sem_tamanho} arquivo(s) sem leitura)",
-                "warning",
-            )
-        else:
-            self._queue("activity", texto_tamanho, "vad_total")
+        # As 3 linhas de totais saem pela MESMA função do início do envio: um
+        # formato só para os mesmos números, mesmo aparecendo duas vezes.
+        self._queue_batch_totals_lines(totais)
         eficiencia = (segundos / elapsed) if (elapsed and elapsed > 0) else 0.0
         self._queue(
             "activity", format_efficiency_line("Eficiência geral", eficiencia, elapsed), "vad_total"
@@ -13705,13 +13730,32 @@ try {
     SERVER_PROGRESS_INTERVAL = 5.0
     SERVER_PROGRESS_TIMEOUT = 5.0
 
+    @staticmethod
+    def _is_multi_transcription(settings: dict) -> bool:
+        """True quando o lote vai para DOIS OU MAIS modelos ao mesmo tempo.
+
+        Fonte única da condição: `_workflow`, `_run_transcriptions` e
+        `_start_server_progress` precisam concordar. Quando discordaram, o
+        poller do `/sessions` ligou no lote multi e imprimiu o progresso do
+        Granite NAR como uma LINHA SEPARADA da linha do modelo 1 — o mesmo
+        servidor duas vezes, com contadores diferentes do app (relatado pelo
+        usuário, 27/09).
+        """
+        if not settings.get("_multi_transcription"):
+            return False
+        return len(settings.get("_multi_transcription_models") or []) >= 2
+
     def _start_server_progress(self, settings: dict, total: int) -> dict | None:
         """Liga a consulta ao /sessions durante o envio; None quando não se aplica.
 
         Só o servidor STT local (Granite NAR) tem o endpoint — em qualquer outro
         provedor a função devolve None: nenhuma linha nova e nenhuma requisição
-        extra.
+        extra. No lote MULTI-MODELO também não liga: cada modelo já tem a sua
+        linha viva ("servidor 1012/4004 (25%)") e o `/sessions` repetiria o
+        Granite NAR com áudio e eficiência em outra linha (27/09).
         """
+        if self._is_multi_transcription(settings):
+            return None
         try:
             if not is_local_granite_transcription_server(settings.get("transcription_server")):
                 return None
@@ -13769,7 +13813,6 @@ try {
         except (TypeError, ValueError):
             return
         total = int(sessao.get("zip_total") or 0) or estado["total"]
-        velocidade = (audio / proc) if (proc > 0 and audio > 0) else None
         try:
             sessao_segundos = max(0.0, float(sessao.get("elapsed_seconds") or 0.0))
         except (TypeError, ValueError):
@@ -13777,7 +13820,9 @@ try {
         # (áudio, processamento da GPU, duração da sessão no servidor) — as duas
         # últimas alimentam as linhas "do servidor"/"da GPU" do bloco final.
         estado["resumo"] = (audio, proc, sessao_segundos)
-        texto = format_server_progress(completos, total, audio, velocidade)
+        # Só a contagem de arquivos vai para a linha viva (27/09): o áudio
+        # processado e a eficiência ficaram no bloco final do lote.
+        texto = format_server_progress(completos, total)
         if not final and texto == estado["linha"]:
             return
         estado["linha"] = texto

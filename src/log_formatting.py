@@ -396,16 +396,17 @@ def format_efficiency_line(label: str, speed: float, seconds: float | None = Non
     return texto
 
 
-def format_server_progress(
-    completed: int,
-    total: int,
-    audio_seconds: float,
-    speed: float | None = None,
-) -> str:
-    """Linha VIVA do processamento no servidor: `Servidor: 12/830 arquivos · 2h18m57s de áudio · 46.7x`.
+def format_server_progress(completed: int, total: int) -> str:
+    """Linha VIVA do processamento no servidor: `Servidor: 1011/4004 arquivos`.
 
     Alimentada por `GET /sessions` do servidor Granite NAR (ele só responde no
     fim do job, então sem essa consulta o log fica mudo durante horas no ZIP).
+
+    Só a contagem de arquivos (pedido do usuário, 27/09): o áudio processado e
+    a eficiência (`· 40m53s de áudio · 14.3x`) saíram daqui porque o bloco
+    final do lote já traz `Total áudio` e as três eficiências — na linha viva
+    eram números repetidos com outra unidade. A barra de progresso e o resumo
+    do `/sessions` continuam intactos internamente.
     """
     try:
         feitos = max(0, int(completed or 0))
@@ -415,16 +416,7 @@ def format_server_progress(
         alvo = max(0, int(total or 0))
     except (TypeError, ValueError):
         alvo = 0
-    partes = [f"{feitos}/{alvo} arquivos" if alvo else f"{feitos} arquivos"]
-    try:
-        audio = max(0.0, float(audio_seconds or 0.0))
-    except (TypeError, ValueError):
-        audio = 0.0
-    if audio > 0:
-        partes.append(f"{format_audio_total(audio)} de áudio")
-    if speed:
-        partes.append(f"{float(speed):.1f}x")
-    return "Servidor: " + " · ".join(partes)
+    return f"Servidor: {feitos}/{alvo} arquivos" if alvo else f"Servidor: {feitos} arquivos"
 
 
 def mode_label_from_value(mode: str) -> str:

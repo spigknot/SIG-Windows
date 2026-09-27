@@ -207,13 +207,47 @@ class InicioDoEnvioTest(unittest.TestCase):
             app, jobs = self._cenario(Path(pasta))
             app._begin_batch_send(jobs)
         self.assertEqual(
-            [(item[1], item[2]) for item in app.fila],
-            [("Iniciando envio:", "vad_total")],
-            "o início do envio é só o marcador — as estatísticas vão para o fim",
+            [item[1] for item in app.fila],
+            [
+                "Total de arquivos: 3",
+                "Total áudio: 3s (1 arquivo(s) sem duração medível)",
+                "Tamanho total: 93.9 KB",
+                "Iniciando envio:",
+            ],
+            "os totais saem ANTES do marcador, e o início do envio continua sendo o marcador",
+        )
+        self.assertEqual(
+            [item[2] for item in app.fila],
+            ["vad_total", "warning", "vad_total", "vad_total"],
+            "os totais do início do envio são verdes; a contagem de não medidos fica em amarelo",
         )
         total, segundos, _tamanho, _sem_duracao, _sem_tamanho = app._batch_totals
         self.assertEqual(total, 3, "a, b e c (mp3) entram no envio; só o que falha sai")
         self.assertAlmostEqual(segundos, 3.0, places=3, msg="só os WAV são medíveis")
+
+    def test_totais_antes_do_envio_sao_os_mesmos_do_bloco_final(self):
+        """Vacina de 27/09: mesmo formato e mesmos números nos dois lugares."""
+        with tempfile.TemporaryDirectory() as pasta:
+            app, jobs = self._cenario(Path(pasta))
+            app._begin_batch_send(jobs)
+            inicio = [item[1] for item in app.fila][:3]
+            app.fila.clear()
+            app._report_batch_summary(jobs, elapsed=3.0)
+            fecho = [item[1] for item in app.fila]
+        # No fecho as mesmas 3 linhas ficam entre os separadores (índices 1..3).
+        self.assertEqual(fecho[0], "==========")
+        self.assertEqual(inicio, fecho[1:4], "os totais do envio e do fecho não podem divergir")
+
+    def test_arquivo_com_erro_nao_entra_nos_totais(self):
+        """Só os VÁLIDOS: mídia sem áudio (erro de conversão) fica de fora."""
+        with tempfile.TemporaryDirectory() as pasta:
+            app, jobs = self._cenario(Path(pasta))
+            jobs.append(_job("sem_audio.mp4", None, erro="ERRO conversão: sem faixa de áudio"))
+            app._probe_durations = lambda pendentes: {}
+            app._begin_batch_send(jobs)
+        textos = [item[1] for item in app.fila]
+        self.assertIn("Total de arquivos: 3", textos, "o arquivo com erro não pode contar")
+        self.assertTrue(textos.index("Total de arquivos: 3") < textos.index("Iniciando envio:"))
 
 
 class BlocoFinalTest(unittest.TestCase):

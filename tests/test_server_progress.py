@@ -73,17 +73,20 @@ def _estado(**campos) -> dict:
 
 
 class FormatosTest(unittest.TestCase):
-    def test_linha_viva(self):
+    def test_linha_viva_so_com_a_contagem_de_arquivos(self):
+        """27/09: áudio e eficiência saíram da linha viva (ficam no bloco final)."""
         self.assertEqual(
-            format_server_progress(12, 830, 8337.21, 46.7),
-            "Servidor: 12/830 arquivos · 2h18m57s de áudio · 46.7x",
+            format_server_progress(12, 830),
+            "Servidor: 12/830 arquivos",
         )
 
-    def test_linha_viva_sem_velocidade_e_sem_total(self):
-        self.assertEqual(format_server_progress(3, 0, 0.0), "Servidor: 3 arquivos")
-        self.assertEqual(
-            format_server_progress(3, 0, 0.0, 12.34), "Servidor: 3 arquivos · 12.3x"
-        )
+    def test_linha_viva_sem_total(self):
+        self.assertEqual(format_server_progress(3, 0), "Servidor: 3 arquivos")
+
+    def test_linha_viva_nao_aceita_audio_nem_eficiencia(self):
+        """Vacina: os números removidos não podem voltar por argumento extra."""
+        with self.assertRaises(TypeError):
+            format_server_progress(12, 830, 8337.21, 46.7)  # type: ignore[call-arg]
 
     def test_linha_do_bloco_final(self):
         self.assertEqual(
@@ -114,6 +117,43 @@ class GatePorProvedorTest(unittest.TestCase):
         self.assertEqual(app.fila, [])
         app._finish_server_progress(None)  # None é aceito sem efeito
         self.assertEqual(app.fila, [])
+
+    def test_multi_modelo_nao_liga_o_poller_do_servidor(self):
+        """Vacina do bug de 27/09: o Granite NAR aparecia DUAS vezes no log.
+
+        No lote multi (Granite NAR + Deepgram + AssemblyAI) a linha do modelo 1
+        ("servidor 1012/4004 (25%)") é a do servidor; o poller do `/sessions`
+        publicava OUTRA linha ("Servidor: 1011/4004 arquivos · 40m53s de áudio")
+        com contadores diferentes do app. No multi, o poller não pode ligar.
+        """
+        app = _app()
+        settings = {
+            "transcription_server": "servidor",
+            "_multi_transcription": True,
+            "_multi_transcription_models": ["servidor", "Deepgram Nova 3", "AssemblyAI Universal-3.5 Pro"],
+        }
+        with mock.patch.object(sig_app_module, "granite_sessions") as falso:
+            estado = app._start_server_progress(settings, 4004)
+        self.assertIsNone(estado, "no multi o /sessions duplicaria a linha do modelo 1")
+        falso.assert_not_called()
+        self.assertEqual(app.fila, [])
+        app._finish_server_progress(estado)
+        self.assertEqual(app.fila, [])
+
+    def test_multi_modelo_incompleto_ainda_liga(self):
+        """`_multi_transcription` sem 2+ modelos NÃO é multi: o poller normal."""
+        app = _app()
+        settings = {
+            "transcription_server": "servidor",
+            "_multi_transcription": True,
+            "_multi_transcription_models": ["servidor"],
+        }
+        with mock.patch.object(
+            sig_app_module, "granite_sessions", lambda *a, **k: ("100.76.246.13", None)
+        ):
+            estado = app._start_server_progress(settings, 3)
+            self.assertIsNotNone(estado, "com um modelo só é o fluxo normal do servidor")
+            app._finish_server_progress(estado)
 
     def test_servidor_local_liga_o_poller_e_fecha_verde(self):
         app = _app()
@@ -156,8 +196,12 @@ class LinhaVivaTest(unittest.TestCase):
         app._update_server_progress(estado, dict(dados))
         self.assertEqual(len(app.fila), 1, "texto repetido não pode gerar nova linha")
         self.assertIn("2/10 arquivos", app.fila[0][2])
-        self.assertIn("10m00s de áudio", app.fila[0][2])
-        self.assertIn("50.0x", app.fila[0][2])
+        self.assertEqual(
+            app.fila[0][2], "Servidor: 2/10 arquivos", "a linha viva é só a contagem"
+        )
+        # O áudio e a eficiência continuam no RESUMO (alimentam o bloco final),
+        # mesmo fora da linha viva.
+        self.assertEqual(estado["resumo"], (600.0, 12.0, 12.0))
 
     def test_zip_usa_o_total_do_servidor(self):
         app = _app()
@@ -200,8 +244,7 @@ class LinhaVivaTest(unittest.TestCase):
         )
         self.assertEqual(len(app.fila), 1)
         self.assertIn("1/3 arquivos", app.fila[0][2])
-        self.assertIn("5m00s de áudio", app.fila[0][2])
-        self.assertIn("30.0x", app.fila[0][2])
+        self.assertEqual(estado["resumo"], (300.0, 10.0, 12.0))
 
     def test_sessao_ilegivel_nao_derruba_o_lote(self):
         app = _app()

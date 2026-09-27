@@ -1828,6 +1828,153 @@ def _check_live_line_chronology(app, root) -> None:
         root.update_idletasks()
 
 
+def _check_batch_send_totals_block(app, root) -> None:
+    """Vacina do pedido de 27/09: os totais do envio ANTES do "Iniciando envio:".
+
+    O bloco de totais saía só no FIM do lote; com miles de arquivos o usuario
+    nao tinha ideia do tamanho da fila enquanto o envio começava. Agora:
+
+        Convertendo arquivos: 3994/3994 (52.8s)
+        Total de arquivos: 4004        <- só os válidos (sem erro de conversão)
+        Total áudio: 9h18m02s          <- soma das durações dos áudios válidos
+        Tamanho total: 1022.2 MB       <- soma dos CONVERTIDOS, não dos originais
+        Iniciando envio:
+
+    E a linha viva do servidor local perdeu áudio/eficiência (o mesmo Granite
+    NAR ja tem a sua linha de modelo no lote multi).
+    """
+    import tempfile
+    import wave
+
+    from domain_models import AudioJob
+
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    try:
+        root.deiconify()
+        root.update()
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_log_tail_following = True
+
+        with tempfile.TemporaryDirectory() as pasta:
+            wav = Path(pasta) / "a.wav"
+            with wave.open(str(wav), "wb") as destino:
+                destino.setnchannels(1)
+                destino.setsampwidth(2)
+                destino.setframerate(16000)
+                destino.writeframes(b"\0" * 32000)  # 1 segundo
+            valido = AudioJob(
+                original_path=wav, original_name="a.wav", stem="a", mode="ready", upload_path=wav
+            )
+            sem_audio = AudioJob(
+                original_path=wav,
+                original_name="sem_audio.mp4",
+                stem="sem_audio",
+                mode="ready",
+                error="ERRO conversão: sem faixa de áudio",
+            )
+            app._run_sequence = 904
+            app._begin_batch_send([valido, sem_audio])
+
+        app._poll_ui_queue()
+        root.update()
+
+        linhas = [linha for linha in log.get("1.0", "end").splitlines() if linha.strip()]
+        esperado = [
+            "Total de arquivos: 1",
+            "Total áudio: 1s",
+            "Tamanho total: 31.3 KB",
+            "Iniciando envio:",
+        ]
+        if len(linhas) != len(esperado) or any(
+            not linha[10:].startswith(prefixo)
+            for linha, prefixo in zip(linhas, esperado)
+        ):
+            raise RuntimeError(f"os totais do envio nao sairam no formato pedido: {linhas}")
+        for numero in range(1, len(esperado) + 1):
+            if "vad_total" not in log.tag_names(f"{numero}.0"):
+                raise RuntimeError(f"a linha {numero} dos totais do envio nao ficou verde")
+        # O arquivo SEM AUDIO nao pode entrar na contagem (so os validos).
+        if any("Total de arquivos: 2" in linha for linha in linhas):
+            raise RuntimeError(f"a media sem audio entrou nos totais: {linhas}")
+
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._run_sequence = 0
+        app._activity_log_tail_following = True
+    finally:
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
+def _check_server_line_without_audio(app, root) -> None:
+    """Vacina do pedido de 27/09: a linha viva do servidor e so a contagem.
+
+    Antes: `Servidor: 1011/4004 arquivos · 40m53s de áudio · 14.3x` — audio e
+    eficiencia repetidos com outra unidade (o bloco final ja traz `Total
+    audio` e as tres eficiencias). Agora: `Servidor: 1011/4004 arquivos`.
+    """
+    import threading
+
+    log = app.activity_log
+    mapeado = bool(root.winfo_ismapped())
+    try:
+        root.deiconify()
+        root.update()
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_log_tail_following = True
+
+        estado = {
+            "url": "http://servidor:8100",
+            "total": 4004,
+            "stop": threading.Event(),
+            "session_id": "sess_1",
+            "baseline": [0, 0.0, 0.0],
+            "linha": "",
+            "publicada": False,
+            "resumo": None,
+            "thread": None,
+        }
+        app._update_server_progress(
+            estado,
+            {
+                "session_id": "sess_1",
+                "completed_files": 1011,
+                "total_audio_seconds": 2453.0,
+                "total_processing_seconds": 171.0,
+                "elapsed_seconds": 900.0,
+                "zip_total": 0,
+            },
+        )
+        app._poll_ui_queue()
+        root.update()
+
+        linhas = [linha for linha in log.get("1.0", "end").splitlines() if linha.strip()]
+        if len(linhas) != 1:
+            raise RuntimeError(f"a linha viva do servidor nao saiu (ou saiu repetida): {linhas}")
+        texto = linhas[0][10:]
+        if texto != "Servidor: 1011/4004 arquivos":
+            raise RuntimeError(f"a linha viva do servidor mudou de formato: {texto!r}")
+        for proibido in (" de audio", " de áudio", "14.3x"):
+            if proibido in texto:
+                raise RuntimeError(f"a linha viva voltou a trazer {proibido!r}: {texto!r}")
+
+        log.configure(state="normal")
+        log.delete("1.0", "end")
+        log.configure(state="disabled")
+        app._activity_log_tail_following = True
+    finally:
+        if not mapeado:
+            root.withdraw()
+        root.update_idletasks()
+
+
 def _check_batch_summary_block(app, root) -> None:
     """Vacina do pedido de 16/09: o bloco final do lote sai entre separadores.
 
@@ -2074,6 +2221,12 @@ def run(*, quiet: bool = False) -> int:
             # verde, antes do "Concluido.".
             _check_live_line_chronology(app, root)
             _check_batch_summary_block(app, root)
+            # Vacina do pedido de 27/09: os totais do envio (arquivos validos,
+            # audio total, tamanho dos convertidos) saem ANTES do "Iniciando
+            # envio:", e a linha viva do servidor local perdeu audio/eficiencia
+            # (no lote multi o Granite NAR ja tem a sua linha de modelo).
+            _check_batch_send_totals_block(app, root)
+            _check_server_line_without_audio(app, root)
             # Vacina do pedido de 13/09: "N arquivo(s) na fila." sai verde no log
             # assim que aparece (mesmo caminho: status_var -> trace -> log).
             _check_queue_count_line_color(app, root)
