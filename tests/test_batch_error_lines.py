@@ -171,7 +171,7 @@ class LinhaAgregadaTest(unittest.TestCase):
             "2 arquivo(s) com erro no VAD\na.mp4\nb.wav",
         )
 
-    def test_arquivos_prontos_em_linha_normal(self):
+    def test_arquivos_prontos_em_linha_verde(self):
         contagem = _ContagemApp()
         app = contagem.app
         app._register_preparation("pronto", 50)
@@ -179,8 +179,11 @@ class LinhaAgregadaTest(unittest.TestCase):
         app._register_preparation("compactado", 50)
         prontos = contagem.linhas("r1prep:pronto")
         self.assertEqual(prontos[-1][1], "2/50 arquivos já estavam prontos")
-        self.assertIsNone(prontos[-1][2], "a linha de arquivos prontos não é vermelha")
-        self.assertEqual(contagem.linhas("r1prep:compactado")[-1][1], "1/50 arquivos já estavam compactados")
+        self.assertEqual(prontos[-1][2], "activity_step_done")
+        self.assertNotEqual(prontos[-1][2], "activity_step_error", "a linha de arquivos prontos não é vermelha")
+        compactados = contagem.linhas("r1prep:compactado")
+        self.assertEqual(compactados[-1][1], "1/50 arquivos já estavam compactados")
+        self.assertEqual(compactados[-1][2], "activity_step_done")
 
     def test_tipo_desconhecido_nao_cria_linha(self):
         contagem = _ContagemApp()

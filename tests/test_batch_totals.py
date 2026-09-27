@@ -14,7 +14,7 @@ passaram a fechar o log, entre separadores:
     Eficiência do servidor: 46.2x (1min 0s)     (só no servidor local, com tempos reais)
     Eficiência da GPU: 46.6x (59.7s)
     ==========
-    Concluído. HTML gerado em ...
+    Concluído. HTML gerado.
 
 - "Total áudio" = soma das durações do que SERÁ ENVIADO;
 - "Tamanho total" = soma dos arquivos JÁ CONVERTIDOS que serão enviados (não os
@@ -30,6 +30,7 @@ passaram a fechar o log, entre separadores:
 
 from __future__ import annotations
 
+import ast
 import sys
 import tempfile
 import unittest
@@ -209,16 +210,18 @@ class InicioDoEnvioTest(unittest.TestCase):
         self.assertEqual(
             [item[1] for item in app.fila],
             [
+                "==========",
                 "Total de arquivos: 3",
                 "Total áudio: 3s (1 arquivo(s) sem duração medível)",
                 "Tamanho total: 93.9 KB",
+                "==========",
                 "Iniciando envio:",
             ],
-            "os totais saem ANTES do marcador, e o início do envio continua sendo o marcador",
+            "os totais saem ANTES do marcador, entre separadores (27/09)",
         )
         self.assertEqual(
             [item[2] for item in app.fila],
-            ["vad_total", "warning", "vad_total", "vad_total"],
+            [None, "vad_total", "warning", "vad_total", None, "vad_total"],
             "os totais do início do envio são verdes; a contagem de não medidos fica em amarelo",
         )
         total, segundos, _tamanho, _sem_duracao, _sem_tamanho = app._batch_totals
@@ -230,13 +233,27 @@ class InicioDoEnvioTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as pasta:
             app, jobs = self._cenario(Path(pasta))
             app._begin_batch_send(jobs)
-            inicio = [item[1] for item in app.fila][:3]
+            inicio = app.fila[:]
             app.fila.clear()
             app._report_batch_summary(jobs, elapsed=3.0)
-            fecho = [item[1] for item in app.fila]
-        # No fecho as mesmas 3 linhas ficam entre os separadores (índices 1..3).
-        self.assertEqual(fecho[0], "==========")
-        self.assertEqual(inicio, fecho[1:4], "os totais do envio e do fecho não podem divergir")
+            fecho = app.fila
+        # O bloco de TOTAIS é o mesmo nos dois lugares (separador + 3 linhas);
+        # o que vem DEPOIS diverge por desenho — no envio fecha o bloco, no
+        # fecho entram as eficiências antes do último separador.
+        self.assertEqual(fecho[0][1], "==========")
+        self.assertEqual(
+            [item[1] for item in inicio[:4]],
+            [item[1] for item in fecho[:4]],
+            "os totais do envio e do fecho não podem divergir",
+        )
+        self.assertEqual(
+            [item[2] for item in inicio[:4]],
+            [item[2] for item in fecho[:4]],
+            "as cores das linhas de totais também não podem divergir",
+        )
+        self.assertEqual(
+            inicio[4][1], "==========", "no início do envio o bloco de totais é fechado"
+        )
 
     def test_arquivo_com_erro_nao_entra_nos_totais(self):
         """Só os VÁLIDOS: mídia sem áudio (erro de conversão) fica de fora."""
@@ -359,6 +376,99 @@ class BlocoFinalTest(unittest.TestCase):
         self.assertEqual(
             linhas[texto_audio], "warning", "sem medição a linha não pode ficar verde"
         )
+
+
+class AudioComVadTest(unittest.TestCase):
+    """Vacina do pedido de 27/09: `Total áudio` mostra o ANTES e o DEPOIS do VAD.
+
+    Com o VAD ligado, o total medido JÁ é o do WAV filtrado (o `upload_path`
+    passa a apontar para a saída do VAD antes da medição), então a linha deixa
+    de ser enganosa: `Total áudio: 12m15s (VAD -> 10m40s)`.
+    """
+
+    def _cenario(self, pasta: Path, *, filtrado: bool = True, erro_vad: bool = False):
+        raiz = Path(pasta)
+        # Original com 3s; o VAD deixa só 2s de voz (reduz 1s).
+        convertido = _wav(raiz / "conv.wav", 3.0)
+        saida_vad = _wav(raiz / "vad.wav", 2.0)
+        job = _job("a.wav", saida_vad if filtrado else convertido)
+        job.vad_output_path = saida_vad
+        job.vad_total_duration = 3.0
+        job.vad_speech_duration = 2.0
+        if erro_vad:
+            # Arquivo em que o VAD falhou: segue SEM filtrar, então não entra
+            # na conta do que o VAD removeu.
+            job.vad_error = "vazio depois do filtro"
+            job.upload_path = convertido
+        return _app(), [job]
+
+    def test_linha_mostra_o_antes_e_o_depois(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            app, jobs = self._cenario(Path(pasta))
+            app._begin_batch_send(jobs)
+        textos = [item[1] for item in app.fila]
+        self.assertIn("Total áudio: 3s (VAD -> 2s)", textos)
+        self.assertEqual(app._batch_audio_before_vad, 3.0)
+
+    def test_sem_vad_a_linha_fica_como_esta(self):
+        """Sem VAD aplicado, a linha NÃO ganha o sufixo."""
+        with tempfile.TemporaryDirectory() as pasta:
+            app, jobs = self._cenario(Path(pasta), filtrado=False)
+            app._begin_batch_send(jobs)
+        textos = [item[1] for item in app.fila]
+        self.assertIn("Total áudio: 3s", textos)
+        self.assertFalse(
+            any("VAD ->" in texto for texto in textos), f"o sufixo do VAD apareceu sem VAD: {textos}"
+        )
+        self.assertIsNone(app._batch_audio_before_vad)
+
+    def test_arquivo_com_erro_de_vad_nao_conta_como_reduzido(self):
+        """O VAD que falhou não pode inflar o total como se tivesse removido áudio."""
+        with tempfile.TemporaryDirectory() as pasta:
+            app, jobs = self._cenario(Path(pasta), erro_vad=True)
+            app._begin_batch_send(jobs)
+        textos = [item[1] for item in app.fila]
+        self.assertIn("Total áudio: 3s", textos)
+        self.assertIsNone(app._batch_audio_before_vad)
+
+    def test_vad_que_nao_reduziu_nao_mostra_o_sufixo(self):
+        """VAD ligado mas sem ganho (só silêncio removido) não polui a linha."""
+        with tempfile.TemporaryDirectory() as pasta:
+            app, jobs = self._cenario(Path(pasta))
+            jobs[0].vad_total_duration = 2.0  # igual ao filtrado: nada removido
+            app._begin_batch_send(jobs)
+        textos = [item[1] for item in app.fila]
+        self.assertFalse(any("VAD ->" in texto for texto in textos), textos)
+        self.assertIsNone(app._batch_audio_before_vad)
+
+
+class LinhaDeConclusaoTest(unittest.TestCase):
+    """Vacina do pedido de 27/09: a linha final não mostra o caminho do HTML.
+
+    O caminho continua indo para a fila pelo `html_ready` (é o que alimenta o
+    botão "Salvar HTML"); ele só não aparece mais no texto do log.
+    """
+
+    def test_status_final_e_sem_caminho(self):
+        tree = ast.parse((ROOT / "src" / "sig_app.py").read_text(encoding="utf-8"))
+        workflow = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_workflow"
+        )
+        envios = [
+            ast.unparse(no)
+            for no in ast.walk(workflow)
+            if isinstance(no, ast.Call)
+            and ast.unparse(no.func).endswith("self._queue")
+            and no.args
+            and isinstance(no.args[0], ast.Constant)
+            and no.args[0].value == "status"
+        ]
+        concluidos = [texto for texto in envios if "Concluído" in texto]
+        self.assertEqual(len(concluidos), 1, envios)
+        self.assertEqual(concluidos[0], "self._queue('status', 'Concluído. HTML gerado.')")
+        self.assertNotIn("html_path", concluidos[0], "o caminho do HTML voltou para o log")
 
 
 if __name__ == "__main__":

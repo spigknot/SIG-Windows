@@ -1691,6 +1691,11 @@ def _check_batch_log_lines(app, root) -> None:
             raise RuntimeError("a linha de erro agregada perdeu a cor vermelha")
         if "activity_step_error" in log.tag_names(f"{numero_prontos}.0"):
             raise RuntimeError("a linha de arquivos prontos ficou vermelha")
+        if "activity_step_done" not in log.tag_names(f"{numero_prontos}.0"):
+            raise RuntimeError(
+                "a linha de arquivos prontos nao saiu verde: "
+                f"{log.tag_names(f'{numero_prontos}.0')}"
+            )
         horario = texto_sem_audio.split("  ", 1)[0]
 
         # Atualizacoes em ordem DIFERENTE da criacao: com o comportamento antigo
@@ -1835,9 +1840,11 @@ def _check_batch_send_totals_block(app, root) -> None:
     nao tinha ideia do tamanho da fila enquanto o envio começava. Agora:
 
         Convertendo arquivos: 3994/3994 (52.8s)
+        ==========
         Total de arquivos: 4004        <- só os válidos (sem erro de conversão)
         Total áudio: 9h18m02s          <- soma das durações dos áudios válidos
         Tamanho total: 1022.2 MB       <- soma dos CONVERTIDOS, não dos originais
+        ==========
         Iniciando envio:
 
     E a linha viva do servidor local perdeu áudio/eficiência (o mesmo Granite
@@ -1883,9 +1890,11 @@ def _check_batch_send_totals_block(app, root) -> None:
 
         linhas = [linha for linha in log.get("1.0", "end").splitlines() if linha.strip()]
         esperado = [
+            "==========",
             "Total de arquivos: 1",
             "Total áudio: 1s",
             "Tamanho total: 31.3 KB",
+            "==========",
             "Iniciando envio:",
         ]
         if len(linhas) != len(esperado) or any(
@@ -1893,9 +1902,16 @@ def _check_batch_send_totals_block(app, root) -> None:
             for linha, prefixo in zip(linhas, esperado)
         ):
             raise RuntimeError(f"os totais do envio nao sairam no formato pedido: {linhas}")
-        for numero in range(1, len(esperado) + 1):
+        # Separadores sem cor; os totais verdes.
+        for numero, separador in ((1, True), (5, True)):
+            tags = log.tag_names(f"{numero}.0")
+            if separador and "vad_total" in tags:
+                raise RuntimeError(f"o separador da linha {numero} nao pode sair verde")
+        for numero in (2, 3, 4):
             if "vad_total" not in log.tag_names(f"{numero}.0"):
                 raise RuntimeError(f"a linha {numero} dos totais do envio nao ficou verde")
+        if "vad_total" not in log.tag_names("6.0"):
+            raise RuntimeError("a linha do inicio do envio nao ficou verde")
         # O arquivo SEM AUDIO nao pode entrar na contagem (so os validos).
         if any("Total de arquivos: 2" in linha for linha in linhas):
             raise RuntimeError(f"a media sem audio entrou nos totais: {linhas}")

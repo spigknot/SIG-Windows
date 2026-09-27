@@ -2020,6 +2020,11 @@ class SigApp:
         box.configure(state="normal")
         if "vad_total" not in box.tag_names():
             box.tag_configure("vad_total", foreground="#0a7a2f")
+        # A linha viva também pode receber a cor de sucesso: sem garantir a
+        # tag aqui, a primeira linha do lote já nasceria sem cor (a tag só era
+        # criada por `_append_activity_log`/`_begin_activity_step`).
+        if "activity_step_done" not in box.tag_names():
+            box.tag_configure("activity_step_done", foreground="#16833a")
         line_tag = f"phase:{key}"
         if timestamp is None:
             timestamp = self._live_line_birth_stamp(box, line_tag) or time.strftime("%H:%M:%S")
@@ -2130,10 +2135,12 @@ class SigApp:
         )
 
     def _register_preparation(self, kind: str, total: int) -> None:
-        """Linha NORMAL (sem vermelho): "13/50 arquivos já estavam prontos".
+        """Linha VERDE: "13/50 arquivos já estavam prontos".
 
         Só aparece quando existe algum arquivo já no formato pedido (regra do
-        usuário, 13/09). O total é o da fila do lote.
+        usuário, 13/09). O total é o da fila do lote. A cor é a de sucesso
+        (`activity_step_done`, pedido do usuário, 27/09): arquivo já no formato
+        pedido é um resultado bom, não um aviso.
         """
         if kind not in PREPARATION_LABELS:
             return
@@ -2151,7 +2158,7 @@ class SigApp:
         self._update_activity_line(
             f"r{getattr(self, '_run_sequence', 0)}prep:{kind}",
             preparation_text(kind, entry["count"], entry["total"]),
-            None,
+            "activity_step_done",
             timestamp=entry["started_at"],
             in_place=True,
         )
@@ -13466,7 +13473,10 @@ try {
                 elapsed=time.perf_counter() - getattr(self, "_prepare_started", process_started),
                 server=(progresso_servidor or {}).get("resumo"),
             )
-            self._queue("status", f"Concluído. HTML gerado em {html_path}")
+            # Sem o caminho no log (pedido do usuário, 27/09): a pasta já é a
+            # do temp e polui a leitura da linha final. O `html_ready` acima
+            # continua guardando o caminho para o botão "Salvar HTML".
+            self._queue("status", "Concluído. HTML gerado.")
             self._queue("progress", 100)
             self._show_folder_button(visible=True)
         except Cancelled:
@@ -13546,6 +13556,7 @@ try {
         sem_duracao = 0
         sem_tamanho = 0
         pendentes: list[AudioJob] = []
+        medido_por_job: dict[int, float] = {}
         for job in candidatos:
             caminho = job.upload_path
             if caminho is None:
@@ -13561,14 +13572,31 @@ try {
                 pendentes.append(job)
             else:
                 segundos += duracao
+                medido_por_job[id(job)] = duracao
         if pendentes:
             medidos = (probe or self._probe_durations)(pendentes)
             for job in pendentes:
                 duracao = medidos.get(id(job))
                 if duracao:
                     segundos += duracao
+                    medido_por_job[id(job)] = float(duracao)
                 else:
                     sem_duracao += 1
+        # Áudio ANTES do VAD (pedido do usuário, 27/09). O total medido acima já
+        # é o PÓS-VAD — com VAD ligado, `upload_path` passa a apontar para o WAV
+        # filtrado (ver `accept_result`) — então o que o VAD removeu é
+        # reconstituído a partir da duração original que o worker reportou.
+        # Entra só o arquivo em que o VAD valeu de fato (o `upload_path` é a
+        # saída do VAD): arquivo com erro/filtro vazio continua indo completo
+        # e não pode ser contado como reduzido.
+        removido_vad = 0.0
+        for job in candidatos:
+            if job.vad_output_path is None or job.upload_path != job.vad_output_path:
+                continue
+            duracao = medido_por_job.get(id(job))
+            if duracao is not None and job.vad_total_duration > duracao:
+                removido_vad += job.vad_total_duration - duracao
+        self._batch_audio_before_vad = segundos + removido_vad if removido_vad > 0 else None
         return len(candidatos), segundos, total_bytes, sem_duracao, sem_tamanho
 
     def _probe_durations(self, jobs: list[AudioJob]) -> dict[int, float]:
@@ -13625,12 +13653,16 @@ try {
         self._queue_batch_totals_lines(self._batch_totals)
         self._queue("activity", "Iniciando envio:", "vad_total")
 
-    def _queue_batch_totals_lines(self, totais: tuple[int, float, int, int, int]) -> None:
-        """As 3 linhas de totais do envio, no formato do bloco final (27/09).
+    def _queue_batch_totals_lines(
+        self, totais: tuple[int, float, int, int, int], *, fechar: bool = True
+    ) -> None:
+        """As linhas de totais do envio, entre separadores (27/09).
 
+            ==========
             Total de arquivos: 4004
             Total áudio: 9h18m02s
             Tamanho total: 1022.2 MB
+            ==========
 
         `totais` vem de `_batch_send_totals`: só os arquivos VÁLIDOS (com erro
         de conversão ficam de fora), com a duração de cada áudio válido e o
@@ -13638,11 +13670,28 @@ try {
 
         Mesma função nos dois lugares onde os totais aparecem (antes do envio e
         no fecho do log): o bloco final e estas linhas não podem divergir de
-        formato — daí virarem uma função só.
+        formato — daí virarem uma função só. O separador de ABERTURA sai sempre
+        daqui; o de FECHAMENTO é do chamador (`fechar`) porque no bloco final
+        as eficiências vêm logo depois de "Tamanho total" e o separador delas
+        só pode vir no fim (senão o bloco final, que já existia, mudava).
+
+        Com o VAD ligado, o total de áudio medido já é o do WAV FILTRADO: a
+        linha passa a mostrar o antes -> depois para deixar isso explícito
+        (`Total áudio: 12m15s (VAD -> 10m40s)`). Sem VAD, nada muda.
         """
         total, segundos, tamanho, sem_duracao, sem_tamanho = totais
+        self._queue("activity", BATCH_SUMMARY_SEPARATOR, None)
         self._queue("activity", f"Total de arquivos: {total}", "vad_total")
-        texto_audio = f"Total áudio: {format_audio_total(segundos)}"
+        antes_vad = getattr(self, "_batch_audio_before_vad", None)
+        if antes_vad is not None and antes_vad > segundos:
+            # O total do VAD é o do WAV FILTRADO: o número antes da seta é o
+            # áudio que ENTROU no lote e o depois é o que vai ser transcrito.
+            texto_audio = (
+                f"Total áudio: {format_audio_total(antes_vad)} "
+                f"(VAD -> {format_audio_total(segundos)})"
+            )
+        else:
+            texto_audio = f"Total áudio: {format_audio_total(segundos)}"
         if sem_duracao:
             self._queue(
                 "activity",
@@ -13660,6 +13709,8 @@ try {
             )
         else:
             self._queue("activity", texto_tamanho, "vad_total")
+        if fechar:
+            self._queue("activity", BATCH_SUMMARY_SEPARATOR, None)
 
     def _report_batch_summary(
         self,
@@ -13691,10 +13742,11 @@ try {
             # Pipeline (conversão e transcrição juntas) ou fallback: mede agora.
             totais = self._batch_send_totals(jobs)
         _total, segundos, _tamanho, _sem_duracao, _sem_tamanho = totais
-        self._queue("activity", BATCH_SUMMARY_SEPARATOR, None)
-        # As 3 linhas de totais saem pela MESMA função do início do envio: um
-        # formato só para os mesmos números, mesmo aparecendo duas vezes.
-        self._queue_batch_totals_lines(totais)
+        # As linhas de totais saem pela MESMA função do início do envio: um
+        # formato só para os mesmos números, mesmo aparecendo duas vezes. Sem o
+        # `fechar` porque aqui as eficiências vêm logo depois de "Tamanho
+        # total" — o separador que fecha o bloco FINAL sai no fim, abaixo.
+        self._queue_batch_totals_lines(totais, fechar=False)
         eficiencia = (segundos / elapsed) if (elapsed and elapsed > 0) else 0.0
         self._queue(
             "activity", format_efficiency_line("Eficiência geral", eficiencia, elapsed), "vad_total"
