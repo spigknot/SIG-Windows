@@ -271,7 +271,31 @@ class VadFanOutTest(unittest.TestCase):
             self.assertEqual(job.vad_output_path, job.upload_path)
             self.assertGreater(job.vad_output_bytes, 0)
         linhas = [item[2] for item in self.eventos if item[0] == "activity_line"]
-        self.assertIn("Aplicando VAD: 6/6", linhas[-1])
+        self.assertIn("Aplicando Silero VAD (1): 6/6", linhas[-1])
+
+    def test_a_linha_diz_o_vad_e_o_nivel_escolhido(self):
+        """Vacina do pedido de 27/09: a fase identifica o VAD e a agressividade.
+
+        `Silero - 1` na tela = motor Silero com nível 1; o log tinha só
+        "Aplicando VAD", que não dizia qual VAD nem com que agressividade.
+        """
+        for modo, esperado in (
+            ("Silero - 0", "Aplicando Silero VAD (0): 6/6"),
+            ("WebRTC - 3", "Aplicando WebRTC VAD (3): 6/6"),
+        ):
+            with self.subTest(modo=modo):
+                self.eventos.clear()
+                jobs = self._jobs(
+                    ("a", 5000), ("b", 4000), ("c", 3000), ("d", 2000), ("e", 1000), ("f", 500)
+                )
+                popen = _PopenFalso([_resultado_ok] * 3)
+                with mock.patch.object(sig_app.subprocess, "Popen", popen), mock.patch.object(
+                    sig_app.shutil, "which", lambda _nome: "python"
+                ), mock.patch.object(sig_app, "app_base_dir", lambda: self.base):
+                    self.app._run_vad_on_jobs(jobs, modo, {"vad_parallel": 3})
+                linhas = [item[2] for item in self.eventos if item[0] == "activity_line"]
+                self.assertTrue(linhas, "a fase do VAD não escreveu a linha viva")
+                self.assertIn(esperado, linhas[-1])
 
     def test_a_divisao_equilibra_o_peso_dos_ramos(self):
         jobs = self._jobs(("a", 5000), ("b", 4000), ("c", 3000), ("d", 2000))
@@ -450,7 +474,7 @@ class VadFanOutRealTest(unittest.TestCase):
                     f"{job.original_name} ficou sem resultado (aplicado ou problema)",
                 )
             linhas = [item[2] for item in eventos if item[0] == "activity_line"]
-            self.assertIn("Aplicando VAD: 4/4", linhas[-1])
+            self.assertIn("Aplicando Silero VAD (1): 4/4", linhas[-1])
             self.assertEqual(set(), app.active_processes)
 
 

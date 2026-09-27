@@ -506,7 +506,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260927_001"
+APP_VERSION = "20260927_002"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -13933,6 +13933,12 @@ try {
         else:
             return
         level = vad_mode.split("-")[-1].strip()
+        # Nome legível da fase: a linha do log passa a dizer QUAL VAD e com
+        # que agressividade (pedido do usuário, 27/09) — "Aplicando VAD: 80/100"
+        # não dizia nada disso. `vad_type` é o nome interno do motor; aqui vai
+        # o nome da TELA ("Silero"/"WebRTC") e o nível escolhido (0 a 3).
+        nome_vad = "Silero" if vad_type == "silero" else "WebRTC"
+        rotulo_vad = f"Aplicando {nome_vad} VAD ({level})"
 
         eligible = [
             job for job in jobs
@@ -14047,7 +14053,7 @@ try {
             else:
                 self._note_vad_problem(job, str(item.get("error", "erro não informado pelo worker")))
             completed += 1
-            self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
+            self._queue_phase_progress(rotulo_vad, completed, len(eligible), "vad", vad_started)
 
         def encerrar(process):
             """Encerra um worker do VAD: termina e, se preciso, mata."""
@@ -14107,7 +14113,7 @@ try {
             detail = detalhe or f"worker encerrado sem resultado (código {codigo})"
             self._note_vad_problem(job, detail)
             completed += 1
-            self._queue_phase_progress("Aplicando VAD", completed, len(eligible), "vad", vad_started)
+            self._queue_phase_progress(rotulo_vad, completed, len(eligible), "vad", vad_started)
         if eligible and all(job.vad_error for job in eligible):
             # VAD é filtro, não requisito: os arquivos seguem para a transcrição
             # sem VAD (regra do usuário, 13/09) — antes a fila inteira abortava.

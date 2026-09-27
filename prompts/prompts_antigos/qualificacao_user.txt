@@ -1,0 +1,5 @@
+nome, nascimento, rg, cpf, naturalidade, sexo, estado_civil, profissao, altura, pele, olhos, cabelo, pai, mae, instrucao, endereco, bairro, cidade, telefone{{{INSERIR_AQUI_OUTROS_DADOS_FORNECIDOS_PELO_USUARIO_SEPARANDO_POR_VIRGULA+ESPAÇO}}}
+
+Aqui vai o texto bruto de onde você vai extrair as informações para construir o JSON:
+
+{{{TEXTO_DA_CAIXA_AQUI}}}
