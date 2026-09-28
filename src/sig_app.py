@@ -509,7 +509,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260928_002"
+APP_VERSION = "20260928_003"
 
 
 def _audio_file_size(path: Path) -> int | None:
