@@ -343,6 +343,9 @@ from text_models import (  # noqa: F401
     extract_text_model_output,
     extract_content_text,
 )
+from text_tools import (  # noqa: F401
+    ajustar_texto_oitiva,
+)
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
@@ -506,7 +509,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260928_001"
+APP_VERSION = "20260928_002"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -1327,6 +1330,8 @@ class SigApp:
         self.gear_icon = self._make_gear_icon()
         self.recover_icon = self._make_recover_icon()
         self.recover_audio_icon = self._make_recover_icon("#d39b00")
+        # Botão de ajuste da oitiva (uma linha só, "; " padrão).
+        self.magic_wand_icon = self._make_magic_wand_icon()
         # PhotoImage dos ícones PNG dos botões da aba Ocorrência (o Tk não segura
         # a referência sozinho: o cache mantém as imagens vivas).
         self._live_icon_photos = {}
@@ -1571,6 +1576,33 @@ class SigApp:
         draw = ImageDraw.Draw(image)
         draw.arc((2, 2, 15, 15), start=45, end=315, fill=color, width=2)
         draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
+        return ImageTk.PhotoImage(image, master=self.root)
+
+    def _make_magic_wand_icon(self, color="#16833a"):
+        """Varinha mágica em traços verdes (mesma espessura dos demais ícones).
+
+        É o botão de ajuste da oitiva: reúne as sentenças numa linha só.
+
+        A ponta é uma ESTRELA de quatro pontas em traço fino (1px) de propósito:
+        medida no tamanho real (20x20), a versão com traço grosso vira um bloco
+        sólido e lê como "+"; a diagonal vira "X/fechar". Só a estrela fina tem
+        as quatro pontas visíveis e ainda lê como magia.
+        """
+        image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        # haste: diagonal de baixo-esquerda para cima-direita
+        draw.line((4, 16, 12, 8), fill=color, width=2)
+        # ponta: estrela de quatro pontas (traço fino, 1px)
+        center_x, center_y = 14, 6
+        for delta_x, delta_y in ((5, 0), (0, 5), (-5, 0), (0, -5)):
+            draw.line(
+                (center_x - delta_x, center_y - delta_y, center_x + delta_x, center_y + delta_y),
+                fill=color,
+                width=1,
+            )
+        # faíscas: dois traços curtos ao redor da estrela
+        draw.line((17, 1, 18, 2), fill=color, width=1)
+        draw.line((18, 10, 19, 11), fill=color, width=1)
         return ImageTk.PhotoImage(image, master=self.root)
 
     def _make_api_key_visibility_icon(self, crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE):
@@ -3107,6 +3139,20 @@ class SigApp:
             )
             recover_button.place(x=0, y=0)
             create_tooltip(recover_button, "Recuperar oitiva")
+            # Varinha mágica: ajusta o texto da oitiva em uma linha só, com um
+            # único espaço depois de cada ponto e vírgula. Fica alinhada na
+            # mesma faixa dos botões de ação (Histórico/Oitiva).
+            adjust_button = ttk.Button(
+                actions,
+                image=self.magic_wand_icon,
+                style="Recover.TButton",
+                command=lambda kind=suffix: self.ajustar_live_statement_text(kind),
+            )
+            adjust_button.place(x=0, y=0)
+            create_tooltip(
+                adjust_button,
+                "Ajustar a oitiva em uma linha (tira as quebras e padroniza '; ')",
+            )
             self._make_editor_icon_button(
                 actions, self.paste_icon, "Colar", lambda: self.paste_live_editor(suffix)
             ).pack(side=RIGHT)
@@ -3120,6 +3166,17 @@ class SigApp:
                 ttk.Label(
                     actions, textvariable=self.live_assistant_progress_var, style="Muted.TLabel"
                 ).pack(side=RIGHT)
+            if suffix == "statement":
+                self.live_statement_adjust_button = adjust_button
+                self.live_statement_actions = actions
+            else:
+                self.live_statement_adjust_button_2 = adjust_button
+                self.live_statement_actions_2 = actions
+            actions.bind(
+                "<Configure>",
+                lambda _event: self.root.after_idle(self._position_live_statement_actions),
+                add="+",
+            )
             return recover_button
 
         self.live_statement_recover_button = build_statement_actions(
@@ -4920,6 +4977,8 @@ class SigApp:
                 getattr(self, "live_assistant_part_var", None),
                 getattr(self, "live_statement_button", None),
                 getattr(self, "live_history_clear_button", None),
+                "live_statement_actions",
+                "live_statement_adjust_button",
             ),
             (
                 getattr(self, "live_history_recover_button_2", None),
@@ -4928,6 +4987,8 @@ class SigApp:
                 getattr(self, "live_assistant_part_var_2", None),
                 getattr(self, "live_statement_button_2", None),
                 getattr(self, "live_history_clear_button_2", None),
+                "live_statement_actions_2",
+                "live_statement_adjust_button_2",
             ),
         )
         for (
@@ -4937,6 +4998,8 @@ class SigApp:
             part_var,
             statement_button,
             clear_button,
+            actions_key,
+            adjust_key,
         ) in pairs:
             if (
                 not recover_button
@@ -4956,7 +5019,17 @@ class SigApp:
             # não mapeado para compatibilidade com estados antigos.
             parts_button.place_forget()
             recover_button.place(x=0, y=0)
+            # A varinha mágica da oitiva fica à direita do Recuperar; a borda
+            # esquerda do "Oitiva" precisa contar com ela para o botão continuar
+            # centrado entre os ícones da esquerda e o Limpar.
+            self._position_live_statement_actions()
+            adjust_button = getattr(self, adjust_key, None)
             left_edge = recover_button.winfo_x() + recover_button.winfo_width()
+            if adjust_button is not None and adjust_button.winfo_exists():
+                left_edge = max(
+                    left_edge,
+                    adjust_button.winfo_x() + adjust_button.winfo_width(),
+                )
             right_edge = clear_button.winfo_x()
             statement_half = statement_button.winfo_reqwidth() / 2
             midpoint = (left_edge + right_edge) / 2
@@ -4979,6 +5052,28 @@ class SigApp:
             history_button.place(x=history_center, y=0, anchor="n")
         self._position_live_document_controls()
         self._position_live_document_preview()
+
+    def _position_live_statement_actions(self):
+        """Alinha a varinha mágica na mesma faixa dos botões Histórico/Oitiva.
+
+        Recuperar e varinha ficam à ESQUERDA (x=0, lado a lado); o botão
+        "Oitiva" é centrado no espaço que sobra, como já é feito com o
+        Histórico. Sem isto os dois botões da esquerda ficariam sobrepostos
+        em x=0.
+        """
+        for suffix in ("", "_2"):
+            actions = getattr(self, f"live_statement_actions{suffix}", None)
+            adjust_button = getattr(self, f"live_statement_adjust_button{suffix}", None)
+            recover_button = getattr(self, f"live_statement_recover_button{suffix}", None)
+            if not actions or not adjust_button or not recover_button:
+                continue
+            if not actions.winfo_exists() or not adjust_button.winfo_exists():
+                continue
+            actions.update_idletasks()
+            recover_button.place(x=0, y=0)
+            adjust_x = recover_button.winfo_x() + recover_button.winfo_width()
+            adjust_button.place_forget()
+            adjust_button.place(x=adjust_x, y=0, anchor="nw")
 
     def _position_live_document_controls(self):
         actions = getattr(self, "live_qualification_actions", None)
@@ -6608,6 +6703,30 @@ class SigApp:
                     self.live_secondary_committed_text = pasted
                     self.live_secondary_draft_text = ""
             self._set_activity_status(f"Texto colado em {self._live_editor_label(kind)}.", log=False)
+
+    def adjust_live_statement_text(self, kind: str):
+        """Ajusta a oitiva em uma linha só (varinha mágica).
+
+        Remove as quebras de linha e garante um único espaço depois de cada
+        ponto e vírgula. Não reescreve, não resume e não inventa texto: só
+        junta o que o modelo devolveu, que é o que o Termo de Declarações
+        exige (um parágrafo corrido).
+        """
+        if self.live_state != "idle" or self.assistant_busy:
+            return
+        atual = self._live_editor_value(kind)
+        if not atual:
+            return
+        ajustado, mudou = ajustar_texto_oitiva(atual)
+        if not mudou:
+            self._set_activity_status(
+                "A oitiva já está em uma linha (ajuste desnecessário).",
+                log=False,
+            )
+            return
+        self._set_live_editor(kind, ajustado)
+        rotulo = self._live_editor_label(kind)
+        self._set_activity_status(f"{rotulo} ajustada em uma linha só.", log=False)
 
     def recover_live_assistant_text(self, kind: str):
         saved = getattr(self, f"last_live_{kind}_text", "")
