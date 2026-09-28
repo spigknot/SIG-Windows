@@ -19,6 +19,7 @@ nao repete comandos, versoes, hashes, caminhos de maquina ou estado de release.
 | Diagnosticar migracao de instalacao antiga | `docs/maintenance/release-history.md` | Abrir somente quando o caso depender da transicao historica |
 | Preparar handoff de release | `prompt_update.txt` | Usar apenas como ponteiro para as fontes canonicas |
 | Alterar `prompts/qualificacao_system.txt` | `scripts/check_qualification_prompt.py` | Rodar antes de fechar a alteracao: chama o modelo de verdade e reprova se o prompt deixar de cumprir uma regra |
+| Alterar `prompts/oitiva_system.txt` | `scripts/check_oitiva_prompt.py` | Rodar antes de fechar a alteracao: chama o modelo de verdade e reprova quebra de linha, abertura/regras violadas ou dado probatorio perdido |
 
 ## Regra de cache
 
