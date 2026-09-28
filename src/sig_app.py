@@ -576,6 +576,13 @@ LIVE_INTERVAL_VALUES_MS = (
 # slot da coluna vermelha abriga o botão de reenvio do áudio integral por
 # REST, sempre centralizado na mesma coluna do microfone vermelho.
 LIVE_RECOVERY_SLOT_HEIGHT = 26
+# Tamanho (em pixels) do botao de icone QUADRADO da oitiva (varinha magica), so
+# como FALLBACK: o tamanho real e medido em tela a cada posicionamento (ver
+# `_position_live_statement_actions`). Medir em vez de fixar e obrigatorio: o
+# `ttk` em pixels muda com o DPI/escala e o `width`/`height` sao em CARACTERES,
+# entao um valor fixo fica torto em parte das maquinas. Sem rede, o menor valor
+# plausivel (24 px) e usado so quando ainda nao ha botao de icone medido.
+EDITOR_ICON_BUTTON_SIZE = 24
 # Ícones (PNG em assets/) dos botões da linha de controles da aba Ocorrência:
 # microfone vermelho (WS), microfone branco (REST) e pausar. Substituem os
 # desenhos vetoriais que existiam no lugar (pedido do usuário, 12/09).
@@ -1454,6 +1461,9 @@ class SigApp:
         style.configure("Action.TButton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
         style.configure("Action.TMenubutton", foreground="#16833a", font=("Segoe UI Semibold", 10), padding=(2, -1))
         style.configure("Recover.TButton", padding=(0, -1))
+        # Botão quadrado da oitiva (varinha mágica): sem padding, para que
+        # `-width`/`-height` em pixels caiam no quadrado exato 24x24.
+        style.configure("SquareIcon.TButton", padding=0)
         style.configure(
             "DocumentAction.TButton",
             foreground="#1d2b2a",
@@ -1663,6 +1673,30 @@ class SigApp:
     @staticmethod
     def _make_editor_icon_button(parent, image, tooltip, command):
         button = ttk.Button(parent, image=image, width=3, command=command)
+        create_tooltip(button, tooltip)
+        return button
+
+    @staticmethod
+    def _make_square_icon_button(parent, image, tooltip, command):
+        """Botao de icone QUADRADO, do mesmo tamanho dos botoes de icone.
+
+        Medido em tela: os botoes Colar/Copiar/Limpar da faixa sao 42x24 px, e
+        o `ttk::button` nao aceita `-height` (so `-width`, em pixels, e
+        `-padding`). O quadrado e fechado por: `-width` em pixels, padding 0 e
+        o `place` com `relheight`/altura imposta pelo chamador. Sem isto o
+        botao sai 28x28 (icone de 20px + bordas), mais alto que a faixa.
+        """
+        size = EDITOR_ICON_BUTTON_SIZE
+        button = ttk.Button(
+            parent,
+            image=image,
+            style="SquareIcon.TButton",
+            padding=0,
+            command=command,
+        )
+        # `-width` em pixels: o ttk aceita valor inteiro como pixel.
+        button.tk.call(button._w, "configure", "-width", size)
+        button.configure(width=-size)
         create_tooltip(button, tooltip)
         return button
 
@@ -3140,19 +3174,15 @@ class SigApp:
             recover_button.place(x=0, y=0)
             create_tooltip(recover_button, "Recuperar oitiva")
             # Varinha mágica: ajusta o texto da oitiva em uma linha só, com um
-            # único espaço depois de cada ponto e vírgula. Fica alinhada na
-            # mesma faixa dos botões de ação (Histórico/Oitiva).
-            adjust_button = ttk.Button(
+            # único espaço depois de cada ponto e vírgula. Vai alinhada no CENTRO
+            # da faixa, na mesma linha (mesma altura) dos botões Histórico/Oitiva.
+            adjust_button = self._make_square_icon_button(
                 actions,
-                image=self.magic_wand_icon,
-                style="Recover.TButton",
-                command=lambda kind=suffix: self.ajustar_live_statement_text(kind),
+                self.magic_wand_icon,
+                "Ajustar a oitiva em uma linha (tira as quebras e padroniza '; ')",
+                lambda kind=suffix: self.adjust_live_statement_text(kind),
             )
             adjust_button.place(x=0, y=0)
-            create_tooltip(
-                adjust_button,
-                "Ajustar a oitiva em uma linha (tira as quebras e padroniza '; ')",
-            )
             self._make_editor_icon_button(
                 actions, self.paste_icon, "Colar", lambda: self.paste_live_editor(suffix)
             ).pack(side=RIGHT)
@@ -4977,8 +5007,6 @@ class SigApp:
                 getattr(self, "live_assistant_part_var", None),
                 getattr(self, "live_statement_button", None),
                 getattr(self, "live_history_clear_button", None),
-                "live_statement_actions",
-                "live_statement_adjust_button",
             ),
             (
                 getattr(self, "live_history_recover_button_2", None),
@@ -4987,8 +5015,6 @@ class SigApp:
                 getattr(self, "live_assistant_part_var_2", None),
                 getattr(self, "live_statement_button_2", None),
                 getattr(self, "live_history_clear_button_2", None),
-                "live_statement_actions_2",
-                "live_statement_adjust_button_2",
             ),
         )
         for (
@@ -4998,8 +5024,6 @@ class SigApp:
             part_var,
             statement_button,
             clear_button,
-            actions_key,
-            adjust_key,
         ) in pairs:
             if (
                 not recover_button
@@ -5019,17 +5043,11 @@ class SigApp:
             # não mapeado para compatibilidade com estados antigos.
             parts_button.place_forget()
             recover_button.place(x=0, y=0)
-            # A varinha mágica da oitiva fica à direita do Recuperar; a borda
-            # esquerda do "Oitiva" precisa contar com ela para o botão continuar
-            # centrado entre os ícones da esquerda e o Limpar.
-            self._position_live_statement_actions()
-            adjust_button = getattr(self, adjust_key, None)
+            # A varinha mágica é CENTRADA na própria faixa da oitiva, na MESMA
+            # linha (y) e altura dos botões Colar/Copiar/Limpar. Ela não
+            # disputa espaço com o botão "Oitiva", que vive na faixa de cima
+            # (ao lado do "Histórico") e é posicionado por outro método.
             left_edge = recover_button.winfo_x() + recover_button.winfo_width()
-            if adjust_button is not None and adjust_button.winfo_exists():
-                left_edge = max(
-                    left_edge,
-                    adjust_button.winfo_x() + adjust_button.winfo_width(),
-                )
             right_edge = clear_button.winfo_x()
             statement_half = statement_button.winfo_reqwidth() / 2
             midpoint = (left_edge + right_edge) / 2
@@ -5054,12 +5072,20 @@ class SigApp:
         self._position_live_document_preview()
 
     def _position_live_statement_actions(self):
-        """Alinha a varinha mágica na mesma faixa dos botões Histórico/Oitiva.
+        """Centra a varinha mágica na faixa da oitiva, quadrada e nivelada.
 
-        Recuperar e varinha ficam à ESQUERDA (x=0, lado a lado); o botão
-        "Oitiva" é centrado no espaço que sobra, como já é feito com o
-        Histórico. Sem isto os dois botões da esquerda ficariam sobrepostos
-        em x=0.
+        A geometria e MEDIDA, nunca fixa: os botoes de icone da faixa
+        (Colar/Copiar/Limpar) sao a referencia de tamanho, e o Tk em pixels muda
+        com o DPI/escala (medido: 24 px num processo, 30 px na suíte completa
+        -- por isso o valor e lido do proprio botao vizinho a cada
+        posicionamento). A varinha fica:
+          - quadrada, com o LADO igual à altura do botão de ícone da faixa;
+          - no CENTRO horizontal da faixa;
+          - na MESMA linha (topo e base) dos ícones: `anchor="n"` com `y=0`,
+            que é onde os botões empacotados se apoiam (com `anchor="nw"` a
+            varinha descia alguns pixels e ficava visivelmente abaixo).
+        O botão "Oitiva" NÃO é competidor: vive na faixa de cima (junto do
+        "Histórico") e é posicionado por `_position_live_parts_buttons`.
         """
         for suffix in ("", "_2"):
             actions = getattr(self, f"live_statement_actions{suffix}", None)
@@ -5070,10 +5096,33 @@ class SigApp:
             if not actions.winfo_exists() or not adjust_button.winfo_exists():
                 continue
             actions.update_idletasks()
-            recover_button.place(x=0, y=0)
-            adjust_x = recover_button.winfo_x() + recover_button.winfo_width()
+            width = max(1, actions.winfo_width())
+            # Recuperar na extrema esquerda (comportamento antigo preservado).
+            recover_button.place_forget()
+            recover_button.place(x=0, y=0, anchor="nw")
+            # Lado quadrado = altura REAL de um botão de ícone da própria faixa.
+            lado = self._live_icon_button_side(actions, adjust_button)
             adjust_button.place_forget()
-            adjust_button.place(x=adjust_x, y=0, anchor="nw")
+            adjust_button.place(x=width / 2, y=0, width=lado, height=lado, anchor="n")
+
+    @staticmethod
+    def _live_icon_button_side(actions, adjust_button) -> int:
+        """Lado (px) do quadrado: a altura medida de um botão de ícone vizinho.
+
+        A busca ignora a própria varinha e o rótulo de progresso, e cai no
+        `EDITOR_ICON_BUTTON_SIZE` quando nenhum botão de ícone está realizado
+        (coluna recolhida, por exemplo).
+        """
+        melhor = 0
+        for child in actions.winfo_children():
+            if child is adjust_button or child.winfo_class() != "TButton":
+                continue
+            if child.winfo_manager() != "pack":
+                continue  # só os ícones da direita servem de referência
+            altura = child.winfo_height()
+            if altura > melhor:
+                melhor = altura
+        return melhor if melhor > 0 else EDITOR_ICON_BUTTON_SIZE
 
     def _position_live_document_controls(self):
         actions = getattr(self, "live_qualification_actions", None)
