@@ -1588,31 +1588,34 @@ class SigApp:
         draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
         return ImageTk.PhotoImage(image, master=self.root)
 
-    def _make_magic_wand_icon(self, color="#16833a"):
-        """Varinha mágica em traços verdes (mesma espessura dos demais ícones).
+    def _make_magic_wand_icon(self, color="#16833a", star_color="#f2c200"):
+        """Varinha mágica: haste VERDE com estrelinha AMARELA na ponta.
 
         É o botão de ajuste da oitiva: reúne as sentenças numa linha só.
 
-        A ponta é uma ESTRELA de quatro pontas em traço fino (1px) de propósito:
-        medida no tamanho real (20x20), a versão com traço grosso vira um bloco
-        sólido e lê como "+"; a diagonal vira "X/fechar". Só a estrela fina tem
-        as quatro pontas visíveis e ainda lê como magia.
+        Os dois pedidos do usuário (20260928_004):
+          1. ícone ESPELHADO horizontalmente — a haste vai de baixo-DIREITA para
+             cima-ESQUERDA (antes subia da esquerda para a direita);
+          2. a luz da ponta virou ESTRELINHA AMARELA de 5 pontas, preenchida.
+
+        A estrela de 5 pontas PREENCHIDA foi escolhida por comparação em tela
+        (6 variantes renderizadas): no tamanho real de 20x20 a estrela de
+        4 pontas em traço fino vira um "+" e a de 5 pontas só com contorno
+        some. Preenchida e de 5 pontas é a única que continua legível como
+        "varinha com estrela na ponta" no pixel real.
         """
         image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        # haste: diagonal de baixo-esquerda para cima-direita
-        draw.line((4, 16, 12, 8), fill=color, width=2)
-        # ponta: estrela de quatro pontas (traço fino, 1px)
-        center_x, center_y = 14, 6
-        for delta_x, delta_y in ((5, 0), (0, 5), (-5, 0), (0, -5)):
-            draw.line(
-                (center_x - delta_x, center_y - delta_y, center_x + delta_x, center_y + delta_y),
-                fill=color,
-                width=1,
-            )
-        # faíscas: dois traços curtos ao redor da estrela
-        draw.line((17, 1, 18, 2), fill=color, width=1)
-        draw.line((18, 10, 19, 11), fill=color, width=1)
+        # haste: diagonal de baixo-DIREITA para cima-ESQUERDA (espelhada)
+        draw.line((16, 17, 9, 7), fill=color, width=2)
+        # ponta: estrelinha AMARELA de 5 pontas, preenchida, encostada na haste
+        cx, cy, raio = 6, 5, 6
+        pontos = []
+        for indice in range(10):
+            angulo = math.radians(-90 + indice * 36)
+            alcance = raio if indice % 2 == 0 else raio * 0.42
+            pontos.append((cx + math.cos(angulo) * alcance, cy + math.sin(angulo) * alcance))
+        draw.polygon(pontos, fill=star_color)
         return ImageTk.PhotoImage(image, master=self.root)
 
     def _make_api_key_visibility_icon(self, crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE):
