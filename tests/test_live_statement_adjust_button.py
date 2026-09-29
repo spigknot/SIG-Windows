@@ -215,6 +215,77 @@ class VarinhaMagicaTest(unittest.TestCase):
                         f"icone ({wand.winfo_rooty()} contra {vizinho.winfo_rooty()})",
                     )
 
+    def test_varinha_tem_a_distancia_pedida_do_recuperar(self):
+        """Folga de 24 px entre as BORDAS dos dois (pedido literal do usuário).
+
+        Antes colavam: o cálculo somava meia-largura duas vezes e a folga saía
+        de 1 px, e depois de 12 px quando o `place` do "Recuperar" passou a
+        `anchor="w"` (o `x` do place deixou de ser o centro). O teste mede a
+        distância real entre as bordas, que é o que o usuário pediu.
+        """
+        from sig_app import LIVE_WAND_RECOVER_GAP
+
+        for rotulo, _kind, wand_nome, recover_nome, _area in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                wand = self._wand(wand_nome)
+                recover = getattr(self.app, recover_nome)
+                self._settle(3)
+                wand.update_idletasks()
+                recover.update_idletasks()
+                folga = wand.winfo_rootx() - (
+                    recover.winfo_rootx() + recover.winfo_width()
+                )
+                self.assertGreaterEqual(
+                    folga,
+                    LIVE_WAND_RECOVER_GAP - 2,
+                    f"{rotulo}: a varinha colou no Recuperar ({folga}px de "
+                    f"folga, o pedido e {LIVE_WAND_RECOVER_GAP}px)",
+                )
+                self.assertLessEqual(
+                    folga,
+                    LIVE_WAND_RECOVER_GAP + 2,
+                    f"{rotulo}: a varinha ficou longe demais do Recuperar "
+                    f"({folga}px de folga, o pedido e {LIVE_WAND_RECOVER_GAP}px)",
+                )
+
+    def test_recuperar_tem_a_mesma_dimensao_da_varinha(self):
+        """Pedido literal: "use exatamente as mesmas dimensões".
+
+        Antes media 23x21 contra 24x24 da varinha — dois tamanhos na mesma
+        linha. A altura vem por `place` (o `ttk::button` não aceita `-height`).
+        """
+        for rotulo, _kind, wand_nome, recover_nome, _area in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                wand = self._wand(wand_nome)
+                recover = getattr(self.app, recover_nome)
+                self._settle(3)
+                wand.update_idletasks()
+                recover.update_idletasks()
+                self.assertEqual(
+                    (recover.winfo_width(), recover.winfo_height()),
+                    (wand.winfo_width(), wand.winfo_height()),
+                    f"{rotulo}: o Recuperar mede "
+                    f"{recover.winfo_width()}x{recover.winfo_height()} e a "
+                    f"varinha {wand.winfo_width()}x{wand.winfo_height()}",
+                )
+
+    def test_recuperar_continua_no_canto_esquerdo_da_faixa(self):
+        """O `place` do "Recuperar" foi refeito com `anchor="w"`; ele não pode
+        ter saído do lugar."""
+        for rotulo, _kind, wand_nome, recover_nome, _area in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                wand = self._wand(wand_nome)
+                recover = getattr(self.app, recover_nome)
+                self._settle(3)
+                faixa = wand.master
+                faixa.update_idletasks()
+                recover.update_idletasks()
+                self.assertLessEqual(
+                    abs(recover.winfo_x()),
+                    2,
+                    f"{rotulo}: o Recuperar saiu do canto esquerdo da faixa",
+                )
+
     # ---------------------------------------------------------------
     # 3) quadrada e do tamanho certo
     # ---------------------------------------------------------------

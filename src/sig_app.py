@@ -586,19 +586,11 @@ LIVE_RECOVERY_SLOT_HEIGHT = 26
 # entao um valor fixo fica torto em parte das maquinas. Sem rede, o menor valor
 # plausivel (24 px) e usado so quando ainda nao ha botao de icone medido.
 EDITOR_ICON_BUTTON_SIZE = 24
-# Caixas de texto que recebem o botão da varinha mágica à ESQUERDA, na metade
-# da altura (pedido do usuário, 29/09). Todas as três caixas da aba Ocorrência
-# (transcrição, histórico e oitiva), porque a função — juntar o texto em uma
-# linha só — vale para qualquer uma delas. A caixa de QUALIFICAÇÃO fica de
-# fora: ela é usada para colar texto livre e não é saída de modelo.
-# As colunas "2" entram também, senão a função existiria só numa delas.
-_LIVE_WAND_EDITOR_KINDS = frozenset(
-    {
-        "transcript", "transcript2",
-        "history", "history2",
-        "statement", "statement2",
-    }
-)
+# Distância, em pixels, entre a BORDA DIREITA do botão "Recuperar" e a BORDA
+# ESQUERDA da varinha mágica (pedido do usuário, 29/09: "distancie eles um
+# pouco... tente usar 24 pixels"). Com a folga colada (o que o cálculo
+# anterior fazia) os dois botões pareciam um só.
+LIVE_WAND_RECOVER_GAP = 24
 # Ícones (PNG em assets/) dos botões da linha de controles da aba Ocorrência:
 # microfone vermelho (WS), microfone branco (REST) e pausar. Substituem os
 # desenhos vetoriais que existiam no lugar (pedido do usuário, 12/09).
@@ -1712,6 +1704,31 @@ class SigApp:
         # o mouse (pedido do usuário), e os demais botões continuam com a dica.
         if tooltip:
             create_tooltip(button, tooltip)
+        return button
+
+    @staticmethod
+    def _size_recover_button(button, lado: int):
+        """Deixa o botão "Recuperar" com a MESMA largura da varinha mágica.
+
+        Pedido do usuário (29/09): "redimensiona os botões de recuperar
+        transcrição/histórico/oitiva, use exatamente as mesmas dimensões dos
+        botões de varinha mágica". Medido antes: o "Recuperar" saía 23x21 e a
+        varinha 24x24 — dois tamanhos diferentes na mesma linha.
+
+        O `ttk::button` só aceita `-width` (em pixels, quando inteiro) e
+        `-padding`; a altura vem do `place`/layout. Por isso a largura vai por
+        `-width` e a altura por `place` explícito, que o chamador aplica
+        (aqui, em `_position_live_statement_actions`, que já posiciona a
+        varinha na mesma linha).
+
+        `lado` é MEDIDO (a altura real de um botão de ícone da faixa), nunca
+        fixo: em pixels o Tk muda com o DPI/escala.
+        """
+        try:
+            button.tk.call(button._w, "configure", "-width", lado)
+            button.configure(width=-lado)
+        except Exception:
+            pass
         return button
 
     def _build_menu(self):
@@ -5178,17 +5195,29 @@ class SigApp:
                 continue
             faixa.update_idletasks()
             recover.update_idletasks()
-            # `place_info` é a fonte da coordenada de CENTRO do "Recuperar".
-            recuperar_x = float(recover.place_info().get("x", 0) or 0)
             lado = self._live_icon_button_side(faixa, wand)
-            # centro da varinha = borda direita do Recuperar + metade da varinha
-            x = recuperar_x + (recover.winfo_width() / 2) + lado
-            # CENTRO VERTICAL: pela ALTURA da faixa, e não pela do "Recuperar".
-            # O "Recuperar" tem 21 px (medido) enquanto os botões de ícone têm
-            # 24, então ancorar nele (`anchor="center"`, y=0) levantava a
-            # varinha ~11 px acima da linha dos Colar/Copiar/Limpar. A faixa é
-            # a referência certa: `y = altura/2` com `anchor="center"` põe a
-            # varinha no meio da linha, que é onde as outras faixas a mostram.
+            # ITEM 2 do pedido (29/09): o "Recuperar" passa a ter as MESMAS
+            # dimensões da varinha. Antes media 23x21 contra 24x24 da varinha.
+            # A altura também é fixada por `place`, porque o `ttk::button` não
+            # aceita `-height`; e o `place` do "Recuperar" é refeito aqui (ele
+            # era `place(x=0, y=0, anchor="nw")`, no canto da faixa).
+            self._size_recover_button(recover, lado)
+            recover.update_idletasks()
+            recover.place_forget()
+            recover.place(x=0, y=faixa.winfo_height() / 2, width=lado, height=lado, anchor="w")
+            recover.update_idletasks()
+            # POSIÇÃO do "Recuperar": o `place` usa `anchor="w"`, então o `x`
+            # é a BORDA ESQUERDA (0) e `place_info()["x"]` devolve esse 0 — não
+            # o centro. Somar `largura/2` a ele dava 12 px de folga em vez de
+            # 24. A referência correta é a posição JÁ MEDIDA do widget
+            # (`winfo_x`, relativo à faixa, que é a mesma origem do `place`).
+            # Deriva-se a borda direita e só então se aplica a folga.
+            lado_recuperar = max(1, recover.winfo_width())
+            borda_direita = recover.winfo_x() + lado_recuperar
+            # DISTÂNCIA entre a BORDA DIREITA do "Recuperar" e a BORDA ESQUERDA
+            # da varinha (pedido do usuário, 29/09: 24 px). Antes colavam
+            # (folga de 1 px) e os dois botões pareciam um só.
+            x = borda_direita + LIVE_WAND_RECOVER_GAP + (lado / 2)
             y = faixa.winfo_height() / 2
             wand.update_idletasks()
             wand.place_forget()
