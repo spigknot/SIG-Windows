@@ -31,24 +31,91 @@ MAGIC_WAND_ASSET = "assets/varinha_magica.png"
 # cabe inteiro apenas se for REDUZIDO. Nunca ampliar: um PNG de 64 px esticado
 # para cima seria pior que o desenho vetorial.
 MAGIC_WAND_ASSET_SIZE = 20
+# Pedido do usuário (28/09): a estrela e os raios estavam dificeis de ver, e
+# ele APLICOU a troca do AMARELO pela MESMA cor da haste — gostou da estrela
+# verde. Feito em tempo de CARREGAMENTO, sem alterar o arquivo do usuário: o
+# asset segue sendo a cópia fiel do desenho original, e trocar a cor de destino
+# abaixo já produz outra variante.
+#
+# O que o MEDIR mostrou: pintar a estrela com o verde da haste (23,95,36) tira
+# a separação de cor entre haste e estrela, e a silhueta do desenho é feita
+# justamente por esse contraste — a estrela fica mais difícil de ler. Como o
+# usuário gostou do verde, o alvo padrão passou a ser um verde CLARO, que dá
+# unidade de cor (tudo verde) e mantém a separação por LUMINOSIDADE.
+#
+# Faixa do amarelo no PNG (medida): hue 49-50, saturacao 1.00 -> o criterio e
+# "hue entre 40 e 70 e saturacao alta", que pega o amarelo e nao toca no verde
+# da haste (hue 131) nem no transparente.
+MAGIC_WAND_RECOLOR = True
+MAGIC_WAND_YELLOW_HUE_MIN = 40.0
+MAGIC_WAND_YELLOW_HUE_MAX = 70.0
+MAGIC_WAND_YELLOW_SAT_MIN = 0.35
+# Alvo padrao: verde claro, bem acima da luminancia da haste (23,95,36) para a
+# estrela e os raios se destacarem sem sair da paleta verde.
+MAGIC_WAND_TARGET_COLOR = (120, 210, 90)
+# Verde da haste, mantido para as variantes (o desenho em si ja e esse tom).
+MAGIC_WAND_SHAFT_GREEN = (23, 95, 36)
+# Amarelo original do PNG, para voltar ao desenho como o usuario fez.
+MAGIC_WAND_ORIGINAL_YELLOW = (255, 212, 0)
+
+
+def _recolore_amarelo(image: Image.Image, cor: tuple[int, int, int]) -> Image.Image:
+    """Troca o amarelo do ícone por `cor`, preservando o alfa.
+
+    Só os pixels na faixa de hue do amarelo sao trocados (o verde da haste, hue
+    131, fica intacto). O alfa e preservado pixel a pixel, entao a
+    transparencia do desenho -- e o que faz ele caber inteiro no botao -- nao
+    muda. A conversao usa HSV para nao depender do RGB exato: o PNG tem 1009
+    cores unicas (variacoes de alpha e antialiasing) e casar por igualdade
+    deixaria quase tudo amarelo para tras.
+    """
+    import colorsys
+
+    r_alvo, g_alvo, b_alvo = cor
+    alterado = image.copy()
+    destino = alterado.load()
+    for y in range(image.height):
+        for x in range(image.width):
+            r, g, b, a = destino[x, y]
+            if a == 0:
+                continue
+            hue, sat, _val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            graus = hue * 360
+            if (
+                MAGIC_WAND_YELLOW_HUE_MIN <= graus <= MAGIC_WAND_YELLOW_HUE_MAX
+                and sat >= MAGIC_WAND_YELLOW_SAT_MIN
+            ):
+                destino[x, y] = (r_alvo, g_alvo, b_alvo, a)
+    return alterado
 
 
 def magic_wand_asset_image(
     caminho,
     size: int = MAGIC_WAND_ASSET_SIZE,
+    recolorir: bool | None = None,
+    cor: tuple[int, int, int] | None = None,
 ) -> Image.Image | None:
     """Ícone da varinha do usuário, reduzido para caber inteiro no botão.
 
     O desenho é REDUZIDO (nunca ampliado) para `size`, preservando o alfa e
     mantendo a proporção: o PNG é quadrado e o conteúdo encosta nas bordas, logo
-    ele aparece inteiro. Devolve `None` se o arquivo não existir, para o
-    chamador cair no desenho vetorial (`magic_wand_image`) sem quebrar o app.
+    ele aparece inteiro. Com `recolorir` (padrão = a constante do módulo) o
+    amarelo é repintado com `cor` (padrão = `MAGIC_WAND_TARGET_COLOR`). Com
+    `recolorir=False` volta ao amarelo original do desenho. Devolve `None` se o
+    arquivo não existir, para o chamador cair no desenho vetorial
+    (`magic_wand_image`) sem quebrar o app.
     """
     try:
         with Image.open(caminho) as origem:
             image = origem.convert("RGBA")
     except (OSError, ValueError):
         return None
+    if recolorir is None:
+        recolorir = MAGIC_WAND_RECOLOR
+    if recolorir:
+        image = _recolore_amarelo(
+            image, cor if cor is not None else MAGIC_WAND_TARGET_COLOR
+        )
     if image.size[0] > size or image.size[1] > size:
         image = image.resize((size, size), Image.LANCZOS)
     return image
