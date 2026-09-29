@@ -5071,42 +5071,76 @@ class SigApp:
             )
             history_button.place_forget()
             history_button.place(x=history_center, y=0, anchor="n")
+        # A varinha se alinha ao "Oitiva", então só pode ser posicionada DEPOIS
+        # que o "Oitiva" tem o seu `x` definitivo: o `place` e assíncrono e o
+        # `winfo_x()` só vale depois do `update_idletasks`. Rodar aqui (e não
+        # dentro do loop) cobre as duas colunas de uma vez.
+        self._position_live_statement_actions()
         self._position_live_document_controls()
         self._position_live_document_preview()
 
     def _position_live_statement_actions(self):
-        """Centra a varinha mágica na faixa da oitiva, quadrada e nivelada.
+        """Alinha a varinha mágica com o botão "Oitiva" da MESMA coluna.
 
-        A geometria e MEDIDA, nunca fixa: os botoes de icone da faixa
-        (Colar/Copiar/Limpar) sao a referencia de tamanho, e o Tk em pixels muda
-        com o DPI/escala (medido: 24 px num processo, 30 px na suíte completa
-        -- por isso o valor e lido do proprio botao vizinho a cada
-        posicionamento). A varinha fica:
-          - quadrada, com o LADO igual à altura do botão de ícone da faixa;
-          - no CENTRO horizontal da faixa;
-          - na MESMA linha (topo e base) dos ícones: `anchor="n"` com `y=0`,
-            que é onde os botões empacotados se apoiam (com `anchor="nw"` a
-            varinha descia alguns pixels e ficava visivelmente abaixo).
-        O botão "Oitiva" NÃO é competidor: vive na faixa de cima (junto do
-        "Histórico") e é posicionado por `_position_live_parts_buttons`.
+        O botão "Oitiva" e o "Histórico" NAO estao na faixa de icones (Colar/
+        Copiar/Limpar): cada um tem a SUA faixa, acima da caixa de texto. A
+        varinha fica na faixa de icones da oitiva, que e mais LARGA que a
+        faixa do "Oitiva" (que tem Recuperar/Limpar nas pontas e o "Oitiva"
+        no meio), por isso centralizar na faixa de icones a deixava ~54 px a
+        DIREITA do "Oitiva" (medido: centro 781 contra 726).
+
+        A posicao passa a ser COPIADA do botão "Oitiva": mesma regra de centro
+        da coluna, mesmo `x`. A varinha fica assim na MESMA linha visual e no
+        MESMO eixo horizontal do "Oitiva" e do "Histórico", como o usuario
+        pediu, e continua na linha dos ícones da sua propria faixa.
         """
         for suffix in ("", "_2"):
             actions = getattr(self, f"live_statement_actions{suffix}", None)
             adjust_button = getattr(self, f"live_statement_adjust_button{suffix}", None)
-            recover_button = getattr(self, f"live_statement_recover_button{suffix}", None)
-            if not actions or not adjust_button or not recover_button:
+            statement_button = getattr(self, f"live_statement_button{suffix}", None)
+            if not actions or not adjust_button or not statement_button:
                 continue
             if not actions.winfo_exists() or not adjust_button.winfo_exists():
+                continue
+            if not statement_button.winfo_exists():
                 continue
             actions.update_idletasks()
             width = max(1, actions.winfo_width())
             # Recuperar na extrema esquerda (comportamento antigo preservado).
-            recover_button.place_forget()
-            recover_button.place(x=0, y=0, anchor="nw")
+            recover_button = getattr(self, f"live_statement_recover_button{suffix}", None)
+            if recover_button is not None and recover_button.winfo_exists():
+                recover_button.place_forget()
+                recover_button.place(x=0, y=0, anchor="nw")
             # Lado quadrado = altura REAL de um botão de ícone da própria faixa.
             lado = self._live_icon_button_side(actions, adjust_button)
+            # Alinhamento: a MESMA coluna do botão "Oitiva". O "Oitiva" e o
+            # "Histórico" vivem em faixas PRÓPRIAS (acima da caixa de texto) e
+            # são centralizados nelas; a faixa de ícones da oitiva e mais larga
+            # (Recuperar/Limpar nas pontas), então centralizar aqui punha a
+            # varinha uns 54 px à DIREITA do "Oitiva".
+            #
+            # DETALHE que custa uma medição (medido em tela): o "Oitiva" é
+            # posicionado por `place(x=694, anchor="n")` — o `x` do place é a
+            # posição do CENTRO, enquanto `winfo_x()` devolve a BORDA
+            # esquerda (658 = 694 - 73/2). Usar `winfo_x()` como `x` do place
+            # da varinha errava o centro em meia largura; o certo é repassar o
+            # MESMO `x` do place (694), com o mesmo `anchor="n"`, e assim os
+            # centros coincidem exatamente. `place_info()` é a fonte dessa
+            # coordenada de centro.
+            # `update_idletasks` é obrigatório: o `place` do "Oitiva" é
+            # assíncrono e sem ele a posição ainda é a anterior.
+            statement_button.update_idletasks()
+            place_info = statement_button.place_info()
+            statement_x = float(place_info.get("x", 0) or 0)
+            adjust_button.update_idletasks()
             adjust_button.place_forget()
-            adjust_button.place(x=width / 2, y=0, width=lado, height=lado, anchor="n")
+            adjust_button.place(
+                x=statement_x,
+                y=0,
+                width=lado,
+                height=lado,
+                anchor="n",
+            )
 
     @staticmethod
     def _live_icon_button_side(actions, adjust_button) -> int:

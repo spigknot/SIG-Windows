@@ -233,26 +233,27 @@ class VarinhaMagicaTest(unittest.TestCase):
 
     # -- defeito 1: alinhada no CENTRO ------------------------------------
     def test_varinha_esta_centralizada_na_faixa(self):
-        """A varinha fica no CENTRO da faixa da oitiva.
+        """A varinha fica no MESMO EIXO HORIZONTAL do botão "Oitiva".
 
-        Só a coluna 1 é medida: a coluna 2 fica recolhida (o container reporta
-        1x1) enquanto o modo de dois modelos está desligado, e medir um
-        container não realizado produziria uma medição inventada.
+        Ela NÃO é centralizada na faixa de ícones (Colar/Copiar/Limpar): essa
+        faixa é mais larga que a do "Oitiva" (que tem Recuperar/Limpar nas
+        pontas), e centralizar nela punha a varinha ~54 px à direita do
+        "Oitiva" — exatamente o defeito reportado pelo usuário. O
+        alinhamento exigido é com o "Oitiva" e o "Histórico".
         """
         for suffix in self._colunas_visiveis():
-            actions = getattr(self.app, f"live_statement_actions{suffix}")
             varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
+            oitiva = getattr(self.app, f"live_statement_button{suffix}")
             self._settle()
-            largura_faixa = actions.winfo_width()
-            self.assertGreater(largura_faixa, 1, "a faixa não tem largura")
-            centro_varinha = varinha.winfo_x() + varinha.winfo_width() / 2
-            self.assertAlmostEqual(
-                centro_varinha,
-                largura_faixa / 2,
-                delta=max(2, varinha.winfo_width() / 2),
-                msg=(
-                    f"a varinha {suffix!r} não está no centro da faixa: "
-                    f"centro={centro_varinha:.1f} vs metade={largura_faixa / 2:.1f}"
+            centro_varinha = varinha.winfo_rootx() + varinha.winfo_width() / 2
+            centro_oitiva = oitiva.winfo_rootx() + oitiva.winfo_width() / 2
+            self.assertLessEqual(
+                abs(centro_varinha - centro_oitiva),
+                2,
+                (
+                    f"a varinha {suffix!r} não está alinhada com o botão Oitiva: "
+                    f"centro={centro_varinha:.1f} vs {centro_oitiva:.1f} "
+                    f"(diferença de {centro_varinha - centro_oitiva:+.1f} px)"
                 ),
             )
 
@@ -303,19 +304,25 @@ class VarinhaMagicaTest(unittest.TestCase):
                     f"a varinha {suffix!r} não tem a mesma base que os botões de ícone",
                 )
 
-    def test_varinha_nao_sobrepoe_o_botao_oitiva(self):
-        """O botão Oitiva vive na faixa de cima (junto do Histórico); a varinha
-        fica na faixa da oitiva. As duas não podem se sobrepor na tela."""
+    def test_varinha_esta_abaixo_do_botao_oitiva(self):
+        """A varinha fica na faixa DEBAIXO do "Oitiva", sem cobri-lo.
+
+        Os dois NÃO dividem a mesma faixa: o "Oitiva" fica na faixa acima da
+        caixa de texto e a varinha na faixa de ícones, logo abaixo dela. Por
+        isso o teste compara o eixo X (mesma coluna, ver
+        `test_varinha_esta_centralizada_na_faixa`) e a SEPARAÇÃO vertical.
+        """
         for suffix in self._colunas_visiveis():
             varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
             oitiva = getattr(self.app, f"live_statement_button{suffix}")
             self._settle()
-            faixam = varinha.winfo_rooty() + varinha.winfo_height()
-            faixo = oitiva.winfo_rooty() + oitiva.winfo_height()
-            self.assertLessEqual(
-                min(faixam, faixo),
-                max(varinha.winfo_rooty(), oitiva.winfo_rooty()),
-                msg=f"a varinha {suffix!r} se sobrepõe verticalmente ao botão Oitiva",
+            self.assertGreater(
+                varinha.winfo_rooty(),
+                oitiva.winfo_rooty() + oitiva.winfo_height(),
+                msg=(
+                    f"a varinha {suffix!r} deveria ficar numa faixa ABAIXO do "
+                    f"botão Oitiva, mas está acima/sobreposto"
+                ),
             )
 
     # -- defeitos 2 e 3: quadrada e com a mesma altura da faixa -----------
