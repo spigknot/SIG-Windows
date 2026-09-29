@@ -134,6 +134,76 @@ class VarinhaMagicaTest(unittest.TestCase):
         self._settle()
         self.assertEqual(self.app._live_editor_value("statement"), TEXTO_CORRETO)
 
+    def test_varinha_nao_tem_tooltip(self):
+        """A varinha não mostra dica ao passar o mouse (pedido do usuário).
+
+        Vacina testada pelo COMPORTAMENTO, não pelo nome do binding: o
+        `create_tooltip` liga funções anônimas (`show`/`hide`) em
+        `<Enter>`/`<Leave>`/`<ButtonPress>`, então o nome do script do binding
+        NÃO contém "tooltip". O jeito certo é gerar o evento `<Enter>` e ver
+        se nasceu uma janela `Toplevel` (que é o que a dica cria).
+        """
+        for suffix in self._colunas_visiveis():
+            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
+            self._settle()
+            self._assert_sem_tooltip(varinha, suffix)
+
+    def test_botoes_de_icone_mantem_o_tooltip(self):
+        """Só a varinha perdeu a dica: Colar/Copiar/Limpar seguem com ela."""
+        for suffix in self._colunas_visiveis():
+            actions = getattr(self.app, f"live_statement_actions{suffix}")
+            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
+            self._settle()
+            botoes_icone = [
+                child
+                for child in actions.winfo_children()
+                if child is not varinha and child.winfo_class() == "TButton"
+            ]
+            self.assertTrue(botoes_icone, "não achei os botões de ícone da faixa")
+            for botao in botoes_icone:
+                botao.event_generate("<Enter>", x=5, y=5)
+                self._settle()
+                # a dica cria uma Toplevel, e ela some no <Leave>
+                self.assertTrue(
+                    self._toplevels_de(botao),
+                    "os botões de ícone não podem perder a dica junto com a varinha",
+                )
+                botao.event_generate("<Leave>", x=5, y=5)
+                self._settle()
+
+    # -- helpers de tooltip ----------------------------------------------
+    @staticmethod
+    def _toplevels_de(widget):
+        """Janelas de dica filhas de `widget`.
+
+        O `create_tooltip` faz `Toplevel(widget)`: a dica é filha do PRÓPRIO
+        botão, não da janela principal. Procurar no root dava lista vazia
+        sempre — o que tornava o teste da varinha um falso verde.
+        """
+        try:
+            filhos = widget.winfo_children()
+        except Exception:
+            return []
+        return [w for w in filhos if w.winfo_class() == "Toplevel"]
+
+    def _assert_sem_tooltip(self, widget, rotulo):
+        """Falha se passar o mouse sobre `widget` abrir uma janela de dica."""
+        widget.event_generate("<Enter>", x=5, y=5)
+        self._settle()
+        toplevels = self._toplevels_de(widget)
+        widget.event_generate("<Leave>", x=5, y=5)
+        self._settle()
+        for janela in toplevels:
+            try:
+                janela.destroy()
+            except Exception:
+                pass
+        self.assertEqual(
+            [],
+            toplevels,
+            f"{rotulo!r} abriu uma janela de tooltip ao passar o mouse",
+        )
+
     def test_coluna_da_oitiva_2_tambem_tem_botao(self):
         button = self._button("live_statement_adjust_button_2")
         self.assertTrue(

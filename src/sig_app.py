@@ -1697,7 +1697,10 @@ class SigApp:
         # `-width` em pixels: o ttk aceita valor inteiro como pixel.
         button.tk.call(button._w, "configure", "-width", size)
         button.configure(width=-size)
-        create_tooltip(button, tooltip)
+        # `tooltip` é OPCIONAL: a varinha mágica foi criada SEM dica ao passar
+        # o mouse (pedido do usuário), e os demais botões continuam com a dica.
+        if tooltip:
+            create_tooltip(button, tooltip)
         return button
 
     def _build_menu(self):
@@ -3179,7 +3182,7 @@ class SigApp:
             adjust_button = self._make_square_icon_button(
                 actions,
                 self.magic_wand_icon,
-                "Ajustar a oitiva em uma linha (tira as quebras e padroniza '; ')",
+                None,
                 lambda kind=suffix: self.adjust_live_statement_text(kind),
             )
             adjust_button.place(x=0, y=0)
