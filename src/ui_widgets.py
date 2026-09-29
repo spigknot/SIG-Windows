@@ -21,6 +21,37 @@ MAGIC_WAND_STAR_CENTER = (6, 5)
 MAGIC_WAND_STAR_RADIUS = 5.5
 MAGIC_WAND_COLOR = "#16833a"
 MAGIC_WAND_STAR_COLOR = "#f2c200"
+# Ícone do USUÁRIO (assets/varinha_magica.png, cópia de
+# D:\Projetos\Icones\varinha_03.png). Preferido ao desenho vetorial acima
+# (pedido de 28/09): é o traço do próprio usuário, com a estrela de 5 pontas e
+# os 8 raios de brilho. `ui_widgets` nao importa `resource_path` para não
+# depender do empacotamento; quem monta o caminho passa o `Path`/`str` pronto.
+MAGIC_WAND_ASSET = "assets/varinha_magica.png"
+# O botão tem 24 px; o PNG é quadrado e o desenho já encosta nas bordas, então
+# cabe inteiro apenas se for REDUZIDO. Nunca ampliar: um PNG de 64 px esticado
+# para cima seria pior que o desenho vetorial.
+MAGIC_WAND_ASSET_SIZE = 20
+
+
+def magic_wand_asset_image(
+    caminho,
+    size: int = MAGIC_WAND_ASSET_SIZE,
+) -> Image.Image | None:
+    """Ícone da varinha do usuário, reduzido para caber inteiro no botão.
+
+    O desenho é REDUZIDO (nunca ampliado) para `size`, preservando o alfa e
+    mantendo a proporção: o PNG é quadrado e o conteúdo encosta nas bordas, logo
+    ele aparece inteiro. Devolve `None` se o arquivo não existir, para o
+    chamador cair no desenho vetorial (`magic_wand_image`) sem quebrar o app.
+    """
+    try:
+        with Image.open(caminho) as origem:
+            image = origem.convert("RGBA")
+    except (OSError, ValueError):
+        return None
+    if image.size[0] > size or image.size[1] > size:
+        image = image.resize((size, size), Image.LANCZOS)
+    return image
 
 
 def _desenha_mascara(escala, desenhar) -> Image.Image:

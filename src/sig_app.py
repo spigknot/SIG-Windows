@@ -182,6 +182,8 @@ from ui_widgets import (  # noqa: F401
     create_tooltip,
     describe_parallel_values,
     describe_step_values,
+    MAGIC_WAND_ASSET,
+    magic_wand_asset_image,
     magic_wand_image,
     nearest_value,
     NodeSlider,
@@ -1590,29 +1592,26 @@ class SigApp:
         return ImageTk.PhotoImage(image, master=self.root)
 
     def _make_magic_wand_icon(self, color="#16833a", star_color="#f2c200", escala=8):
-        """Varinha mágica: haste VERDE a 45° com estrelinha AMARELA na ponta.
+        """Varinha mágica da oitiva: o ÍCONE DO USUÁRIO, reduzido ao botão.
 
-        É o botão de ajuste da oitiva: reúne as sentenças numa linha só.
+        Pedido de 28/09: usar o desenho dele
+        (`D:\\Projetos\\Icones\\varinha_03.png`, copiado para
+        `assets/varinha_magica.png`), expondo o desenho INTEIRO dentro do botão
+        e sem o ampliar.
 
-        Os três pedidos do usuário (20260928_004), na ordem:
-          1. ícone ESPELHADO horizontalmente — a haste vai de baixo-DIREITA para
-             cima-ESQUERDA;
-          2. a luz da ponta virou ESTRELINHA AMARELA de 5 pontas, preenchida;
-          3. haste a 45 graus e SEM SERRILHADO.
-
-        SERRILHADO (item 3): desenhar a diagonal direto em 20x20 dá degraus de
-        1px visíveis. O desenho é feito em `escala`x (8x) e reduzido com
-        LANCZOS, o que produz a mesma diagonal com borda suave. O fator 8 foi
-        escolhido comparando 4x/8x/16x em tela: 16x embaça (fica borrado) e 4x
-        mantém degraus. As pontas da haste recebem um círculo do mesmo raio da
-        meia-espessura, para as duas pontas ficarem arredondadas em vez de
-        quadradas (o `joint="curve"` só arredonda os vãos internos, não as
-        pontas).
+        Como cabe inteiro: o botão tem 24 px e o PNG é quadrado com o desenho
+        encostando nas bordas, então a imagem é só REDUZIDA
+        (`magic_wand_asset_image`, que nunca amplia) e exibida sem corte. Se o
+        arquivo faltar, cai no desenho vetorial (`magic_wand_image`) para o app
+        não quebrar.
         """
-        return ImageTk.PhotoImage(
-            magic_wand_image(color=color, star_color=star_color, escala=escala),
-            master=self.root,
-        )
+        imagem = magic_wand_asset_image(resource_path(MAGIC_WAND_ASSET))
+        if imagem is None:
+            return ImageTk.PhotoImage(
+                magic_wand_image(color=color, star_color=star_color, escala=escala),
+                master=self.root,
+            )
+        return ImageTk.PhotoImage(imagem, master=self.root)
 
     def _make_api_key_visibility_icon(self, crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE):
         """PhotoImage do olho aberto (`crossed=False`) / cortado (`True`)."""

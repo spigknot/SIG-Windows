@@ -31,6 +31,10 @@ a = Analysis(
         ('assets/mic_vermelho.png', 'assets'),
         ('assets/mic_branco.png', 'assets'),
         ('assets/mic_pause.png', 'assets'),
+        # Ícone da varinha mágica da oitiva (desenho do usuário,
+        # D:\Projetos\Icones\varinha_03.png). Sem esta linha o app cairia no
+        # desenho vetorial de reserva, porque o PNG não viajaria no pacote.
+        ('assets/varinha_magica.png', 'assets'),
         ('prompts/*.txt', 'prompts'),
     ] + sounddevice_datas + pdfium_datas,
     hiddenimports=[
