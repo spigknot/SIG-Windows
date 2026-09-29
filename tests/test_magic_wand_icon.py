@@ -229,34 +229,31 @@ class IconeVarinhaDoUsuarioTest(unittest.TestCase):
         )
         self.assertTrue(MAGIC_WAND_RECOLOR, "a recoloracao padrao esta desligada")
 
-    def test_estrela_verde_e_mais_claro_que_a_haste(self):
-        """A estrela tem de se destacar da haste — o ponto do pedido.
+    def test_estrela_usa_o_verde_da_haste(self):
+        """A estrela e o brilho ficam na MESMA cor da haste — escolha do usuario.
 
-        Pintar a estrela com o MESMO verde da haste (23,95,36) foi medido como
-        pior: a silhueta do desenho e feita pelo contraste entre haste e
-        estrela, entao cores iguais a fundem. O alvo padrao por isso e um verde
-        claro, acima da luminancia da haste.
+        O verde claro (120,210,90) foi mostrado como alternativa (daria
+        separacao por luminosidade, e uma analise automatica de legibilidade o
+        prefere), mas o usuario ESCOLHEU o verde escuro e pediu para colocar
+        esta. Este teste trava essa escolha: a estrela tem de estar no verde da
+        haste, nao em um tom mais claro.
         """
-        import colorsys
-
-        from ui_widgets import MAGIC_WAND_TARGET_COLOR
-
-        def luminancia(cor):
-            r, g, b = cor
-            return colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[2]
-
-        haste = luminancia((23, 95, 36))
-        estrela = luminancia(MAGIC_WAND_TARGET_COLOR)
-        self.assertGreater(
-            estrela,
-            haste + 0.15,
-            f"a estrela (val={estrela:.2f}) precisa ser bem mais clara que a "
-            f"haste (val={haste:.2f}), senao o desenho vira um borrao so",
+        from ui_widgets import (
+            MAGIC_WAND_ORIGINAL_YELLOW,
+            MAGIC_WAND_SHAFT_GREEN,
+            MAGIC_WAND_TARGET_COLOR,
         )
-        # e continua sendo verde (o usuario gostou da estrela verde)
+
+        self.assertEqual(
+            tuple(MAGIC_WAND_TARGET_COLOR),
+            tuple(MAGIC_WAND_SHAFT_GREEN),
+            "a estrela saiu do verde da haste; o usuario pediu verde escuro",
+        )
+        # e continua sendo verde (e nao o amarelo original do desenho)
         r, g, b = MAGIC_WAND_TARGET_COLOR
         self.assertGreater(g, r, "a cor da estrela deixou de ser verde")
         self.assertGreater(g, b, "a cor da estrela deixou de ser verde")
+        self.assertNotEqual(tuple(MAGIC_WAND_TARGET_COLOR), tuple(MAGIC_WAND_ORIGINAL_YELLOW))
 
     def test_alfa_da_recoloracao_e_identico(self):
         """A transparencia e o que faz o desenho caber inteiro no botao."""

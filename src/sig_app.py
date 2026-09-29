@@ -586,6 +586,19 @@ LIVE_RECOVERY_SLOT_HEIGHT = 26
 # entao um valor fixo fica torto em parte das maquinas. Sem rede, o menor valor
 # plausivel (24 px) e usado so quando ainda nao ha botao de icone medido.
 EDITOR_ICON_BUTTON_SIZE = 24
+# Caixas de texto que recebem o botão da varinha mágica à ESQUERDA, na metade
+# da altura (pedido do usuário, 29/09). Todas as três caixas da aba Ocorrência
+# (transcrição, histórico e oitiva), porque a função — juntar o texto em uma
+# linha só — vale para qualquer uma delas. A caixa de QUALIFICAÇÃO fica de
+# fora: ela é usada para colar texto livre e não é saída de modelo.
+# As colunas "2" entram também, senão a função existiria só numa delas.
+_LIVE_WAND_EDITOR_KINDS = frozenset(
+    {
+        "transcript", "transcript2",
+        "history", "history2",
+        "statement", "statement2",
+    }
+)
 # Ícones (PNG em assets/) dos botões da linha de controles da aba Ocorrência:
 # microfone vermelho (WS), microfone branco (REST) e pausar. Substituem os
 # desenhos vetoriais que existiam no lugar (pedido do usuário, 12/09).
@@ -3174,16 +3187,11 @@ class SigApp:
             )
             recover_button.place(x=0, y=0)
             create_tooltip(recover_button, "Recuperar oitiva")
-            # Varinha mágica: ajusta o texto da oitiva em uma linha só, com um
-            # único espaço depois de cada ponto e vírgula. Vai alinhada no CENTRO
-            # da faixa, na mesma linha (mesma altura) dos botões Histórico/Oitiva.
-            adjust_button = self._make_square_icon_button(
-                actions,
-                self.magic_wand_icon,
-                None,
-                lambda kind=suffix: self.adjust_live_statement_text(kind),
-            )
-            adjust_button.place(x=0, y=0)
+            # A varinha mágica NÃO é criada aqui: ela vive dentro da própria
+            # caixa de texto (à esquerda, na metade da altura), criada em
+            # `_make_live_editor` para as caixas de transcrição/histórico/
+            # oitiva. Antes ela ficava nesta faixa, acima da caixa.
+            adjust_button = None
             self._make_editor_icon_button(
                 actions, self.paste_icon, "Colar", lambda: self.paste_live_editor(suffix)
             ).pack(side=RIGHT)
@@ -5078,67 +5086,18 @@ class SigApp:
         self._position_live_document_preview()
 
     def _position_live_statement_actions(self):
-        """Alinha a varinha mágica com o botão "Oitiva" da MESMA coluna.
+        """A varinha da oitiva não precisa de posicionamento manual.
 
-        O botão "Oitiva" e o "Histórico" NAO estao na faixa de icones (Colar/
-        Copiar/Limpar): cada um tem a SUA faixa, acima da caixa de texto. A
-        varinha fica na faixa de icones da oitiva, que e mais LARGA que a
-        faixa do "Oitiva" (que tem Recuperar/Limpar nas pontas e o "Oitiva"
-        no meio), por isso centralizar na faixa de icones a deixava ~54 px a
-        DIREITA do "Oitiva" (medido: centro 781 contra 726).
+        Pedido do usuário (29/09): o botão saiu da faixa de botões e passou a
+        ficar DENTRO da caixa de texto, à esquerda e na metade da altura, onde
+        o `pack`+`place` da `_make_live_editor` já o posicionam corretamente e
+        o acompanham em qualquer redimensionamento.
 
-        A posicao passa a ser COPIADA do botão "Oitiva": mesma regra de centro
-        da coluna, mesmo `x`. A varinha fica assim na MESMA linha visual e no
-        MESMO eixo horizontal do "Oitiva" e do "Histórico", como o usuario
-        pediu, e continua na linha dos ícones da sua propria faixa.
+        O método é mantido como no-op porque `_position_live_parts_buttons` (e
+        o `<Configure>` das faixas) ainda o chamam, e o `_position_live_parts_buttons`
+        cuida do "Oitiva"/"Histórico" — que continuam nas faixas de cima.
         """
-        for suffix in ("", "_2"):
-            actions = getattr(self, f"live_statement_actions{suffix}", None)
-            adjust_button = getattr(self, f"live_statement_adjust_button{suffix}", None)
-            statement_button = getattr(self, f"live_statement_button{suffix}", None)
-            if not actions or not adjust_button or not statement_button:
-                continue
-            if not actions.winfo_exists() or not adjust_button.winfo_exists():
-                continue
-            if not statement_button.winfo_exists():
-                continue
-            actions.update_idletasks()
-            width = max(1, actions.winfo_width())
-            # Recuperar na extrema esquerda (comportamento antigo preservado).
-            recover_button = getattr(self, f"live_statement_recover_button{suffix}", None)
-            if recover_button is not None and recover_button.winfo_exists():
-                recover_button.place_forget()
-                recover_button.place(x=0, y=0, anchor="nw")
-            # Lado quadrado = altura REAL de um botão de ícone da própria faixa.
-            lado = self._live_icon_button_side(actions, adjust_button)
-            # Alinhamento: a MESMA coluna do botão "Oitiva". O "Oitiva" e o
-            # "Histórico" vivem em faixas PRÓPRIAS (acima da caixa de texto) e
-            # são centralizados nelas; a faixa de ícones da oitiva e mais larga
-            # (Recuperar/Limpar nas pontas), então centralizar aqui punha a
-            # varinha uns 54 px à DIREITA do "Oitiva".
-            #
-            # DETALHE que custa uma medição (medido em tela): o "Oitiva" é
-            # posicionado por `place(x=694, anchor="n")` — o `x` do place é a
-            # posição do CENTRO, enquanto `winfo_x()` devolve a BORDA
-            # esquerda (658 = 694 - 73/2). Usar `winfo_x()` como `x` do place
-            # da varinha errava o centro em meia largura; o certo é repassar o
-            # MESMO `x` do place (694), com o mesmo `anchor="n"`, e assim os
-            # centros coincidem exatamente. `place_info()` é a fonte dessa
-            # coordenada de centro.
-            # `update_idletasks` é obrigatório: o `place` do "Oitiva" é
-            # assíncrono e sem ele a posição ainda é a anterior.
-            statement_button.update_idletasks()
-            place_info = statement_button.place_info()
-            statement_x = float(place_info.get("x", 0) or 0)
-            adjust_button.update_idletasks()
-            adjust_button.place_forget()
-            adjust_button.place(
-                x=statement_x,
-                y=0,
-                width=lado,
-                height=lado,
-                anchor="n",
-            )
+        return None
 
     @staticmethod
     def _live_icon_button_side(actions, adjust_button) -> int:
@@ -6504,7 +6463,42 @@ class SigApp:
         frame = ttk.Frame(parent, width=width, height=height)
         frame.pack(fill=X, expand=True, pady=vertical_padding)
         frame.pack_propagate(False)
+        # Botão da varinha mágica (ajustar o texto em uma linha só) à ESQUERDA
+        # da caixa, na METADE da altura (pedido do usuário, 29/09). Ele é criado
+        # AQUI, dentro do frame da caixa, e não na faixa de botões de cima.
+        # O truque é o CONTAINER: o Tk não deixa um mesmo widget ser gerenciado
+        # por `pack` e `place` ao mesmo tempo, e `pack` não centraliza na
+        # vertical. Então a `holder` é empacotada à esquerda (reservando a
+        # largura, para o texto não cobrir o botão) e o botão é `place`d no
+        # CENTRO dela, que é o meio da altura da caixa.
+        if _kind in _LIVE_WAND_EDITOR_KINDS:
+            # A `holder` reserva a LARGURA e ocupa toda a altura; o botão dentro
+            # dela é `place`d com largura=altura explícitas, senão o `fill=Y` do
+            # pack esticaria a altura do botão (medido: saía 26x150) e ele não
+            # ficaria quadrado nem no meio da caixa.
+            holder = ttk.Frame(frame, width=EDITOR_ICON_BUTTON_SIZE + 6)
+            wand = self._make_square_icon_button(
+                holder, self.magic_wand_icon, None,
+                lambda kind=_kind: self.adjust_live_statement_text(kind),
+            )
+            wand.place(
+                relx=0.5,
+                rely=0.5,
+                anchor="center",
+                width=EDITOR_ICON_BUTTON_SIZE,
+                height=EDITOR_ICON_BUTTON_SIZE,
+            )
+            # A `holder` é empacotada AQUI (antes do `text.pack`, que vem mais
+            # abaixo): o `pack` reserva a largura da faixa da varinha e o
+            # `fill=Y` faz ela atravessar a altura da caixa, para o `place`
+            # relativo (`rely=0.5`) cair no meio vertical.
+            holder.pack(side=LEFT, fill=Y, padx=(2, 2))
+            holder.pack_propagate(False)  # largura fixa, independente do conteúdo
+            text_wand = wand
+        else:
+            text_wand = None
         text = Text(frame, width=1, height=8, wrap="word", undo=True, font=("Segoe UI", 10), background="#ffffff", foreground="#10201f", relief="solid", borderwidth=1, padx=8, pady=7)
+        text._wand_button = text_wand
         placeholder_text = {
             "transcript": "A transcrição da entrevista será gerada aqui.",
             "transcript2": "A transcrição da entrevista será gerada aqui.",
@@ -6518,8 +6512,15 @@ class SigApp:
         text._placeholder_text = placeholder_text
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set)
-        text.pack(side=LEFT, fill=BOTH, expand=True)
-        scroll.pack(side=RIGHT, fill=Y)
+        if text_wand is None:
+            text.pack(side=LEFT, fill=BOTH, expand=True)
+            scroll.pack(side=RIGHT, fill=Y)
+        else:
+            # O botão já foi `place`d dentro da `holder` (para ficar no centro
+            # da altura). Aqui só se empacota a `holder`, e o `pack` do texto
+            # vem DEPOIS para o texto ocupar o que sobra.
+            text.pack(side=LEFT, fill=BOTH, expand=True)
+            scroll.pack(side=RIGHT, fill=Y)
         text._editor_frame = frame
         text.bind("<FocusIn>", lambda _event, widget=text: self._clear_live_placeholder(widget), add="+")
         text.bind("<FocusOut>", lambda _event, widget=text: self._restore_live_placeholder(widget), add="+")
@@ -6789,12 +6790,15 @@ class SigApp:
             self._set_activity_status(f"Texto colado em {self._live_editor_label(kind)}.", log=False)
 
     def adjust_live_statement_text(self, kind: str):
-        """Ajusta a oitiva em uma linha só (varinha mágica).
+        """Ajusta o texto da caixa em uma linha só (varinha mágica).
 
         Remove as quebras de linha e garante um único espaço depois de cada
         ponto e vírgula. Não reescreve, não resume e não inventa texto: só
         junta o que o modelo devolveu, que é o que o Termo de Declarações
         exige (um parágrafo corrido).
+
+        O botão existe na transcrição, no histórico e na oitiva (pedido de
+        29/09) — a função é a mesma, o que muda é o rótulo da mensagem.
         """
         if self.live_state != "idle" or self.assistant_busy:
             return
@@ -6802,15 +6806,15 @@ class SigApp:
         if not atual:
             return
         ajustado, mudou = ajustar_texto_oitiva(atual)
+        rotulo = self._live_editor_label(kind)
         if not mudou:
             self._set_activity_status(
-                "A oitiva já está em uma linha (ajuste desnecessário).",
+                f"A {rotulo} já está em uma linha (ajuste desnecessário).",
                 log=False,
             )
             return
         self._set_live_editor(kind, ajustado)
-        rotulo = self._live_editor_label(kind)
-        self._set_activity_status(f"{rotulo} ajustada em uma linha só.", log=False)
+        self._set_activity_status(f"{rotulo.capitalize()} ajustada em uma linha só.", log=False)
 
     def recover_live_assistant_text(self, kind: str):
         saved = getattr(self, f"last_live_{kind}_text", "")

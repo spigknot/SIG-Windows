@@ -32,16 +32,17 @@ MAGIC_WAND_ASSET = "assets/varinha_magica.png"
 # para cima seria pior que o desenho vetorial.
 MAGIC_WAND_ASSET_SIZE = 20
 # Pedido do usuário (28/09): a estrela e os raios estavam dificeis de ver, e
-# ele APLICOU a troca do AMARELO pela MESMA cor da haste — gostou da estrela
-# verde. Feito em tempo de CARREGAMENTO, sem alterar o arquivo do usuário: o
-# asset segue sendo a cópia fiel do desenho original, e trocar a cor de destino
-# abaixo já produz outra variante.
+# ele trocou o AMARELO pela MESMA cor da haste — gostou da estrela verde.
+# Feito em tempo de CARREGAMENTO, sem alterar o arquivo do usuário: o asset
+# segue sendo a cópia fiel do desenho original.
 #
-# O que o MEDIR mostrou: pintar a estrela com o verde da haste (23,95,36) tira
-# a separação de cor entre haste e estrela, e a silhueta do desenho é feita
-# justamente por esse contraste — a estrela fica mais difícil de ler. Como o
-# usuário gostou do verde, o alvo padrão passou a ser um verde CLARO, que dá
-# unidade de cor (tudo verde) e mantém a separação por LUMINOSIDADE.
+# IMPORTANTE (decisão do usuário, 28/09, mantida mesmo com medição contrária):
+# foi mostrado um verde CLARO (120,210,90) como alternativa, mas ele AWARDOU a
+# versão de verde ESCURO e pediu para colocar esta. O verde da haste
+# (23,95,36) é o alvo; a estrela e o brilho ficam nesse mesmo tom. Uma análise
+# automática de legibilidade preferia o verde claro (dá separação por
+# luminosidade entre haste e estrela), mas a preferência é do usuário e vale
+# mais: o que ele pediu foi verde escuro na estrela e no brilho.
 #
 # Faixa do amarelo no PNG (medida): hue 49-50, saturacao 1.00 -> o criterio e
 # "hue entre 40 e 70 e saturacao alta", que pega o amarelo e nao toca no verde
@@ -50,11 +51,10 @@ MAGIC_WAND_RECOLOR = True
 MAGIC_WAND_YELLOW_HUE_MIN = 40.0
 MAGIC_WAND_YELLOW_HUE_MAX = 70.0
 MAGIC_WAND_YELLOW_SAT_MIN = 0.35
-# Alvo padrao: verde claro, bem acima da luminancia da haste (23,95,36) para a
-# estrela e os raios se destacarem sem sair da paleta verde.
-MAGIC_WAND_TARGET_COLOR = (120, 210, 90)
-# Verde da haste, mantido para as variantes (o desenho em si ja e esse tom).
+# Verde da haste, medido no proprio PNG do usuario. E o alvo da estrela e dos
+# raios: mesma cor da haste, por escolha do usuario.
 MAGIC_WAND_SHAFT_GREEN = (23, 95, 36)
+MAGIC_WAND_TARGET_COLOR = MAGIC_WAND_SHAFT_GREEN
 # Amarelo original do PNG, para voltar ao desenho como o usuario fez.
 MAGIC_WAND_ORIGINAL_YELLOW = (255, 212, 0)
 

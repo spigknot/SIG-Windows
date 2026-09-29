@@ -1,17 +1,19 @@
-"""Vacina da UI: a varinha magica da oitiva (geometria + funcionamento).
+"""Vacina da UI: a varinha magica nas caixas de texto (geometria + funcionamento).
 
-O usuario encontrou QUATRO defeitos no botão entregue em 20260928_002:
-  1. ficou na esquerda, devia ficar alinhada no CENTRO com Histórico/Oitiva;
-  2. com altura diferente dos botões Colar/Copiar/Limpar;
-  3. nao quadrada (largura != altura);
+HISTORICO DOS DEFEITOS (cada um virou um teste aqui):
+  1. o botão ficava na faixa de botoes ACIMA da caixa; o usuario pediu para ir
+     para o LADO ESQUERDO da caixa, na METADE da altura (29/09);
+  2. com altura diferente dos botoes Colar/Copiar/Limpar;
+  3. nao quadrada (largura != altura) — e o `place` era silenciosamente
+     sobreposto pelo `pack` do proprio widget: um widget tem UM gerenciador de
+     geometria, e o ultimo aplicado ganha (medido: 26x150 em vez de 24x24);
   4. NAO FUNCIONAVA: o botao chamava `ajustar_live_statement_text` e o metodo
-     real e `adjust_live_statement_text` -> AttributeError em tempo de clique
-     (o build/pytest nao pegam nada disso: o nome so e resolvido no clique).
+     real e `adjust_live_statement_text` -> AttributeError no clique (o
+     build/pytest nao pegam nada disso: o nome so e resolvido no clique).
 
-Por isso este arquivo mede a geometria REAL (winfo_width/height/rootx/rooty,
-depois de update_idletasks + os `after` de posicionamento do app) e EXECUTA o
-botao de verdade, num app instanciado em memoria. E o mesmo espinha dorsal do
-`scripts/ui_smoke.py` (que tambem roda no preflight), sem depender do smokes.
+Por que medir a geometria REAL e nao um valor fixo: com a janela `withdraw`,
+os containers reportam 1x1 e qualquer medicao de alinhamento e mentira (foi
+assim que o botão passou nos testes e apareceu torto na tela do usuario).
 """
 from __future__ import annotations
 
@@ -37,6 +39,13 @@ TEXTO_CORRETO = (
     "que não identificou o autor."
 )
 
+# (atributo do editor, kind, rotulo legivel) — as tres caixas pedidas em 29/09.
+CAIXAS = (
+    ("live_text", "transcript", "transcricao"),
+    ("live_history_text", "history", "historico"),
+    ("live_statement_text", "statement", "oitiva"),
+)
+
 
 class VarinhaMagicaTest(unittest.TestCase):
     root: tk.Tk | None = None
@@ -51,319 +60,209 @@ class VarinhaMagicaTest(unittest.TestCase):
             sig_app.FfmpegToolsPanel, "_load_available_accelerations", lambda _self: None
         ):
             cls.app = sig_app.SigApp(cls.root)
-        # A geometria dos filhos só é calculada com a janela REALIZADA: com a
-        # janela withdrawn, os containers reportam 1x1 e qualquer medição de
-        # alinhamento é mentira (foi assim que o botão passou nos testes e
-        # apareceu torto na tela do usuário).
         cls.root.geometry("1400x900")
         cls.root.deiconify()
         cls._settle(10)
 
     @classmethod
-    def _settle(cls, rounds: int = 6):
-        for _ in range(rounds):
-            cls.root.update_idletasks()
-            cls.root.update()
-
-    @classmethod
     def tearDownClass(cls):
         try:
-            if cls.app is not None:
-                cls.app.root.destroy()
+            cls.root.destroy()
         except Exception:
             pass
 
-    # -- helpers ---------------------------------------------------------
-    def _button(self, name: str):
-        button = getattr(self.app, name, None)
-        self.assertIsNotNone(button, f"o app não tem o atributo {name}")
-        self.assertTrue(button.winfo_exists(), f"{name} não existe na tela")
-        self._settle()
-        return button
+    @classmethod
+    def _settle(cls, vezes: int = 6):
+        for _ in range(vezes):
+            cls.root.update_idletasks()
+            cls.root.update()
 
-    def _colunas_visiveis(self):
-        """Só as colunas cujo container está realizado (largura > 1)."""
-        visiveis = []
-        for suffix in ("", "_2"):
-            actions = getattr(self.app, f"live_statement_actions{suffix}", None)
-            if actions is not None and actions.winfo_exists() and actions.winfo_width() > 1:
-                visiveis.append(suffix)
-        self.assertTrue(visiveis, "nenhuma coluna da oitiva está realizada")
-        return visiveis
+    def _editor(self, nome: str):
+        return getattr(self.app, nome)
 
-    # -- defeito 4: o botao realmente funciona ---------------------------
-    def test_botao_existe_e_tem_comando_valido(self):
-        """O defeito do nome do metodo so aparece no clique: o comando tem que
-        ser um metodo REAL do app, nao um nome inventado."""
-        button = self._button("live_statement_adjust_button")
-        command = button.cget("command")
-        self.assertTrue(command, "o botão não tem command")
-        # `command` vem como string no ttk; no lugar, garanta o método.
-        self.assertTrue(
-            callable(getattr(self.app, "adjust_live_statement_text", None)),
-            "SigApp.adjust_live_statement_text não existe (nome do método)",
+    def _varinha(self, editor):
+        """A varinha da caixa; AssertionError se o botão não existir."""
+        botao = getattr(editor, "_wand_button", None)
+        self.assertIsNotNone(
+            botao, "a caixa de texto não tem botão da varinha mágica"
         )
+        return botao
 
-    def test_clique_ajusta_o_texto_em_uma_linha(self):
-        self._settle()
-        # `_set_live_editor` e o caminho que o proprio app usa; `insert` direto
-        # seria ignorado enquanto o editor mostra o placeholder.
-        self.app._set_live_editor("statement", TEXTO_QUEBRADO)
-        self._settle()
-        self.assertEqual(
-            self.app._live_editor_value("statement"),
-            TEXTO_QUEBRADO.strip(),
-            "o texto de teste não entrou na caixa",
-        )
+    # ---------------------------------------------------------------
+    # 1) existe nas tres caixas, à esquerda, na metade da altura
+    # ---------------------------------------------------------------
+    def test_as_tres_caixas_tem_varinha(self):
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                self.assertTrue(self._varinha(self._editor(nome)).winfo_exists())
 
-        # dispara pelo MESMO caminho do clique do usuário
-        self.app.live_statement_adjust_button.invoke()
-        self._settle()
-
-        ajustado = self.app._live_editor_value("statement")
-        self.assertEqual(ajustado, TEXTO_CORRETO)
-        self.assertNotIn("\n", ajustado)
-        for sentenca in ajustado.split(";"):
-            self.assertTrue(sentenca.strip().lower().startswith("que"))
-
-    def test_segundo_clique_nao_altera_o_texto(self):
-        self._settle()
-        self.app._set_live_editor("statement", TEXTO_CORRETO)
-        self._settle()
-        self.app.live_statement_adjust_button.invoke()
-        self._settle()
-        self.assertEqual(self.app._live_editor_value("statement"), TEXTO_CORRETO)
-
-    def test_varinha_nao_tem_tooltip(self):
-        """A varinha não mostra dica ao passar o mouse (pedido do usuário).
-
-        Vacina testada pelo COMPORTAMENTO, não pelo nome do binding: o
-        `create_tooltip` liga funções anônimas (`show`/`hide`) em
-        `<Enter>`/`<Leave>`/`<ButtonPress>`, então o nome do script do binding
-        NÃO contém "tooltip". O jeito certo é gerar o evento `<Enter>` e ver
-        se nasceu uma janela `Toplevel` (que é o que a dica cria).
-        """
-        for suffix in self._colunas_visiveis():
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            self._settle()
-            self._assert_sem_tooltip(varinha, suffix)
-
-    def test_botoes_de_icone_mantem_o_tooltip(self):
-        """Só a varinha perdeu a dica: Colar/Copiar/Limpar seguem com ela."""
-        for suffix in self._colunas_visiveis():
-            actions = getattr(self.app, f"live_statement_actions{suffix}")
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            self._settle()
-            botoes_icone = [
-                child
-                for child in actions.winfo_children()
-                if child is not varinha and child.winfo_class() == "TButton"
-            ]
-            self.assertTrue(botoes_icone, "não achei os botões de ícone da faixa")
-            for botao in botoes_icone:
-                botao.event_generate("<Enter>", x=5, y=5)
-                self._settle()
-                # a dica cria uma Toplevel, e ela some no <Leave>
-                self.assertTrue(
-                    self._toplevels_de(botao),
-                    "os botões de ícone não podem perder a dica junto com a varinha",
+    def test_varinha_fica_a_esquerda_da_caixa(self):
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                editor = self._editor(nome)
+                botao = self._varinha(editor)
+                self._settle(3)
+                editor.update_idletasks()
+                botao.update_idletasks()
+                self.assertLess(
+                    botao.winfo_rootx(),
+                    editor.winfo_rootx(),
+                    f"{rotulo}: a varinha tem de ficar à ESQUERDA do texto",
                 )
-                botao.event_generate("<Leave>", x=5, y=5)
-                self._settle()
 
-    # -- helpers de tooltip ----------------------------------------------
-    @staticmethod
-    def _toplevels_de(widget):
-        """Janelas de dica filhas de `widget`.
-
-        O `create_tooltip` faz `Toplevel(widget)`: a dica é filha do PRÓPRIO
-        botão, não da janela principal. Procurar no root dava lista vazia
-        sempre — o que tornava o teste da varinha um falso verde.
-        """
-        try:
-            filhos = widget.winfo_children()
-        except Exception:
-            return []
-        return [w for w in filhos if w.winfo_class() == "Toplevel"]
-
-    def _assert_sem_tooltip(self, widget, rotulo):
-        """Falha se passar o mouse sobre `widget` abrir uma janela de dica."""
-        widget.event_generate("<Enter>", x=5, y=5)
-        self._settle()
-        toplevels = self._toplevels_de(widget)
-        widget.event_generate("<Leave>", x=5, y=5)
-        self._settle()
-        for janela in toplevels:
-            try:
-                janela.destroy()
-            except Exception:
-                pass
-        self.assertEqual(
-            [],
-            toplevels,
-            f"{rotulo!r} abriu uma janela de tooltip ao passar o mouse",
-        )
-
-    def test_coluna_da_oitiva_2_tambem_tem_botao(self):
-        button = self._button("live_statement_adjust_button_2")
-        self.assertTrue(
-            callable(getattr(self.app, "adjust_live_statement_text", None)),
-            "a segunda coluna usa o mesmo método",
-        )
-        self.assertIsNotNone(button)
-
-    def test_lado_da_varinha_igual_a_altura_do_botao_de_icone(self):
-        """O quadrado usa a ALTURA medida do botão de ícone da faixa.
-
-        Auto-referenciado de propósito: o Tk em pixels muda com o DPI/escala
-        (medido 24 px num processo e 30 px na suíte completa), então fixar um
-        número no código deixaria o botão torto em parte das máquinas.
-        """
-        for suffix in self._colunas_visiveis():
-            actions = getattr(self.app, f"live_statement_actions{suffix}")
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            self._settle()
-            lado = self.app._live_icon_button_side(actions, varinha)
-            self.assertLessEqual(
-                abs(varinha.winfo_width() - lado),
-                1,
-                f"a largura da varinha {suffix!r} ({varinha.winfo_width()}) não é "
-                f"a altura do botão de ícone ({lado})",
-            )
-
-    # -- defeito 1: alinhada no CENTRO ------------------------------------
-    def test_varinha_esta_centralizada_na_faixa(self):
-        """A varinha fica no MESMO EIXO HORIZONTAL do botão "Oitiva".
-
-        Ela NÃO é centralizada na faixa de ícones (Colar/Copiar/Limpar): essa
-        faixa é mais larga que a do "Oitiva" (que tem Recuperar/Limpar nas
-        pontas), e centralizar nela punha a varinha ~54 px à direita do
-        "Oitiva" — exatamente o defeito reportado pelo usuário. O
-        alinhamento exigido é com o "Oitiva" e o "Histórico".
-        """
-        for suffix in self._colunas_visiveis():
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            oitiva = getattr(self.app, f"live_statement_button{suffix}")
-            self._settle()
-            centro_varinha = varinha.winfo_rootx() + varinha.winfo_width() / 2
-            centro_oitiva = oitiva.winfo_rootx() + oitiva.winfo_width() / 2
-            self.assertLessEqual(
-                abs(centro_varinha - centro_oitiva),
-                2,
-                (
-                    f"a varinha {suffix!r} não está alinhada com o botão Oitiva: "
-                    f"centro={centro_varinha:.1f} vs {centro_oitiva:.1f} "
-                    f"(diferença de {centro_varinha - centro_oitiva:+.1f} px)"
-                ),
-            )
-
-    def test_varinha_esta_na_mesma_linha_dos_botoes(self):
-        """Mesma ALTURA e mesmo TOPO dos botões de ícone da própria faixa.
-
-        O desalinhamento vertical (topo e base diferentes) é o defeito que a
-        inspeção visual pegou: a varinha aparecia alguns pixels ABAIXO dos
-        ícones. Comparar só a altura não bastava.
-        """
-        for suffix in self._colunas_visiveis():
-            actions = getattr(self.app, f"live_statement_actions{suffix}")
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            recuperar = getattr(self.app, f"live_statement_recover_button{suffix}")
-            self._settle()
-            self.assertEqual(
-                varinha.winfo_y(),
-                recuperar.winfo_y(),
-                msg=f"a varinha {suffix!r} não está na mesma linha do Recuperar",
-            )
-            for child in actions.winfo_children():
-                if child is varinha or child.winfo_manager() != "pack":
-                    continue
-                if child.winfo_class() != "TButton":
-                    continue  # o rótulo de progresso não é botão de ícone
-                self.assertLessEqual(
-                    abs(varinha.winfo_height() - child.winfo_height()),
-                    2,
-                    f"a varinha {suffix!r} tem altura {varinha.winfo_height()} "
-                    f"e um botão de ícone tem {child.winfo_height()}",
-                )
-                # mesmo TOPO e mesma BASE na tela (coordenadas absolutas)
-                self.assertLessEqual(
-                    abs(varinha.winfo_rooty() - child.winfo_rooty()),
-                    2,
-                    (
-                        f"a varinha {suffix!r} está deslocada na vertical: topo "
-                        f"{varinha.winfo_rooty()} vs {child.winfo_rooty()} de um "
-                        f"botão de ícone da mesma faixa"
+    def test_varinha_esta_na_metade_da_altura(self):
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                editor = self._editor(nome)
+                botao = self._varinha(editor)
+                self._settle(3)
+                editor.update_idletasks()
+                botao.update_idletasks()
+                centro_caixa = editor.winfo_rooty() + editor.winfo_height() / 2
+                centro_botao = botao.winfo_rooty() + botao.winfo_height() / 2
+                self.assertAlmostEqual(
+                    centro_caixa,
+                    centro_botao,
+                    delta=2,
+                    msg=(
+                        f"{rotulo}: a varinha tem de ficar na METADE da altura "
+                        f"da caixa (caixa={centro_caixa:.1f}, "
+                        f"botao={centro_botao:.1f})"
                     ),
                 )
+
+    def test_varinha_dentro_da_caixa(self):
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                editor = self._editor(nome)
+                botao = self._varinha(editor)
+                self._settle(3)
+                frame = editor._editor_frame
+                frame.update_idletasks()
+                botao.update_idletasks()
+                self.assertGreaterEqual(botao.winfo_rootx(), frame.winfo_rootx())
                 self.assertLessEqual(
-                    abs(
-                        (varinha.winfo_rooty() + varinha.winfo_height())
-                        - (child.winfo_rooty() + child.winfo_height())
-                    ),
-                    2,
-                    f"a varinha {suffix!r} não tem a mesma base que os botões de ícone",
+                    botao.winfo_rootx() + botao.winfo_width(),
+                    frame.winfo_rootx() + frame.winfo_width(),
+                    f"{rotulo}: a varinha saiu para fora da caixa",
                 )
 
-    def test_varinha_esta_abaixo_do_botao_oitiva(self):
-        """A varinha fica na faixa DEBAIXO do "Oitiva", sem cobri-lo.
+    def test_texto_nao_cobre_a_varinha(self):
+        """A caixa de texto precisa ceder a largura ao botão.
 
-        Os dois NÃO dividem a mesma faixa: o "Oitiva" fica na faixa acima da
-        caixa de texto e a varinha na faixa de ícones, logo abaixo dela. Por
-        isso o teste compara o eixo X (mesma coluna, ver
-        `test_varinha_esta_centralizada_na_faixa`) e a SEPARAÇÃO vertical.
+        Sem isso o `Text` cobre o botão e ele fica invisível e inclicável.
         """
-        for suffix in self._colunas_visiveis():
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            oitiva = getattr(self.app, f"live_statement_button{suffix}")
-            self._settle()
-            self.assertGreater(
-                varinha.winfo_rooty(),
-                oitiva.winfo_rooty() + oitiva.winfo_height(),
-                msg=(
-                    f"a varinha {suffix!r} deveria ficar numa faixa ABAIXO do "
-                    f"botão Oitiva, mas está acima/sobreposto"
-                ),
-            )
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                editor = self._editor(nome)
+                botao = self._varinha(editor)
+                self._settle(3)
+                editor.update_idletasks()
+                botao.update_idletasks()
+                self.assertGreaterEqual(
+                    editor.winfo_rootx(),
+                    botao.winfo_rootx() + botao.winfo_width(),
+                    f"{rotulo}: o texto esta por cima da varinha",
+                )
 
-    # -- defeitos 2 e 3: quadrada e com a mesma altura da faixa -----------
+    # ---------------------------------------------------------------
+    # 2) quadrada e do tamanho certo
+    # ---------------------------------------------------------------
     def test_varinha_e_quadrada(self):
-        """A varinha é quadrada na TELA (largura == altura)."""
-        for suffix in self._colunas_visiveis():
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            self._settle()
-            largura = varinha.winfo_width()
-            altura = varinha.winfo_height()
-            self.assertGreater(altura, 1, "a varinha não foi realizada")
-            self.assertLessEqual(
-                abs(largura - altura),
-                2,
-                f"a varinha {suffix!r} não é quadrada na tela: {largura}x{altura}",
-            )
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                botao = self._varinha(self._editor(nome))
+                botao.update_idletasks()
+                self.assertEqual(
+                    botao.winfo_width(),
+                    botao.winfo_height(),
+                    f"{rotulo}: a varinha tem de ser quadrada "
+                    f"({botao.winfo_width()}x{botao.winfo_height()})",
+                )
 
-    def test_altura_da_varinha_igual_a_dos_botoes_de_icone(self):
-        """Mesma altura dos botões Colar/Copiar/Limpar da mesma faixa."""
-        for suffix in self._colunas_visiveis():
-            actions = getattr(self.app, f"live_statement_actions{suffix}")
-            self._settle()
-            varinha = getattr(self.app, f"live_statement_adjust_button{suffix}")
-            altura_varinha = varinha.winfo_height()
-            altitudes = [
-                child.winfo_height()
-                for child in actions.winfo_children()
-                if child is not varinha
-                and child.winfo_class() == "TButton"
-                and child.winfo_manager() == "pack"
-                and child.winfo_height() > 0
-            ]
-            self.assertTrue(altitudes, "não achei os botões de ícone da faixa")
-            for altura in altitudes:
-                self.assertLessEqual(
-                    abs(altura_varinha - altura),
-                    2,
-                    (
-                        f"a varinha {suffix!r} tem altura {altura_varinha} e um botão "
-                        f"de ícone da faixa tem {altura}"
-                    ),
+    def test_varinha_tem_o_tamanho_do_botao_de_icone(self):
+        from sig_app import EDITOR_ICON_BUTTON_SIZE
+
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                botao = self._varinha(self._editor(nome))
+                botao.update_idletasks()
+                self.assertEqual(EDITOR_ICON_BUTTON_SIZE, botao.winfo_width())
+
+    def test_place_do_botao_nao_e_sobrescrito_pelo_pack(self):
+        """Um widget tem UM gerenciador; o `pack` do botao o apagaria.
+
+        Foi o que aconteceu: o botao media 26x150 (esticado pelo `fill=Y` do
+        pack) em vez de 24x24. O botao tem de estar em `place`.
+        """
+        for nome, _kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                self.assertEqual(
+                    "place",
+                    self._varinha(self._editor(nome)).winfo_manager(),
+                    f"{rotulo}: o botao precisa estar em `place` (o place foi "
+                    f"sobrescrito pelo pack)",
+                )
+
+    # ---------------------------------------------------------------
+    # 3) FUNCIONA (o defeito 4 do usuario: AttributeError no clique)
+    # ---------------------------------------------------------------
+    def test_clique_na_varinha_ajusta_a_caixa(self):
+        for nome, kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                self.app._set_live_editor(kind, TEXTO_QUEBRADO)
+                self._varinha(self._editor(nome)).invoke()
+                self.assertEqual(
+                    TEXTO_CORRETO,
+                    self.app._live_editor_value(kind),
+                    f"{rotulo}: o clique nao juntou o texto em uma linha so",
+                )
+
+    def test_varinha_e_idempotente(self):
+        """Clicar duas vezes nao pode falhar nem duplicar espacos."""
+        for nome, kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                self.app._set_live_editor(kind, TEXTO_QUEBRADO)
+                botao = self._varinha(self._editor(nome))
+                botao.invoke()
+                primeira = self.app._live_editor_value(kind)
+                botao.invoke()
+                self.assertEqual(
+                    primeira,
+                    self.app._live_editor_value(kind),
+                    f"{rotulo}: o segundo clique alterou o texto",
+                )
+
+    def test_caixa_vazia_nao_quebra(self):
+        for nome, kind, rotulo in CAIXAS:
+            with self.subTest(caixa=rotulo):
+                self.app._set_live_editor(kind, "")
+                self._varinha(self._editor(nome)).invoke()
+
+    # ---------------------------------------------------------------
+    # 4) as demais caixas
+    # ---------------------------------------------------------------
+    def test_qualificacao_nao_tem_varinha(self):
+        """A caixa de qualificacao fica de fora (nao e saida de modelo)."""
+        self.assertIsNone(
+            getattr(self.app.live_qualification_text, "_wand_button", None)
+        )
+
+    def test_colunas_2_tambem_tem_varinha(self):
+        """A funcao nao pode existir so na coluna 1."""
+        for nome in ("live_text_2", "live_history_text_2", "live_statement_text_2"):
+            with self.subTest(caixa=nome):
+                self.assertIsNotNone(
+                    getattr(self.app, nome)._wand_button, f"{nome} ficou sem a varinha"
+                )
+
+    def test_sem_varinha_antiga_na_faixa_de_botoes(self):
+        """O botao saiu da faixa de cima; nao pode sobrar la."""
+        for nome in ("live_statement_adjust_button", "live_statement_adjust_button_2"):
+            with self.subTest(btn=nome):
+                self.assertIsNone(
+                    getattr(self.app, nome, None),
+                    "ainda existe o botao antigo na faixa de botoes da oitiva",
                 )
 
 
