@@ -11,6 +11,121 @@ from tkinter import Canvas, Toplevel, ttk
 
 import math
 
+from PIL import Image, ImageDraw
+
+MAGIC_WAND_SIZE = 20
+MAGIC_WAND_SCALE = 8
+MAGIC_WAND_SHAFT = (16, 17, 8, 9)
+MAGIC_WAND_SHAFT_WIDTH = 2
+MAGIC_WAND_STAR_CENTER = (6, 5)
+MAGIC_WAND_STAR_RADIUS = 5.5
+MAGIC_WAND_COLOR = "#16833a"
+MAGIC_WAND_STAR_COLOR = "#f2c200"
+
+
+def _desenha_mascara(escala, desenhar) -> Image.Image:
+    """Máscara em escala `escala`x, reduzida com LANCZOS (alpha suavizado).
+
+    Por que máscara e não desenho direto no RGBA: o PIL NÃO faz
+    premultiplicação de alpha no `resize`, então reduzir um desenho
+    transparente faz a BORDA ESCURECER (o RGB sangra para o preto do fundo) em
+    vez de ficar suave — medido: zero pixel de antialiasing no resultado, ou
+    seja, a suavização não acontecia. Reduzindo a MASCARA (cinza, sem cor) o
+    LANCZOS interpola a cobertura de verdade, e a cor é aplicada depois sobre
+    pixels já com alpha correto.
+    """
+    ALTO = MAGIC_WAND_SIZE * escala
+    mascara = Image.new("L", (ALTO, ALTO), 0)
+    desenhar(ImageDraw.Draw(mascara))
+    if escala == 1:
+        return mascara
+    return mascara.resize((MAGIC_WAND_SIZE, MAGIC_WAND_SIZE), Image.LANCZOS)
+
+
+def magic_wand_image(
+    color: str = MAGIC_WAND_COLOR,
+    star_color: str = MAGIC_WAND_STAR_COLOR,
+    escala: int = MAGIC_WAND_SCALE,
+) -> Image.Image:
+    """Icone da varinha magica (ajuste da oitiva), em RGBA 20x20.
+
+    Haste VERDE a 45 graus (mesmo deslocamento em X e em Y), de baixo-DIREITA
+    para cima-ESQUERDA, com estrelinha AMARELA de 5 pontas preenchida na ponta.
+
+    SEM SERRILHADO: as duas peças (haste e estrela) são desenhadas em
+    `escala`x como MASCARA e reduzidas com LANCZOS, e só então recebem cor.
+    Desenhar a diagonal direto em 20x20 produz degraus de 1px visiveis. O fator
+    8 foi escolhido comparando 4x/8x/16x em tela: 16x embaca (fica borrado) e
+    4x mantem degraus. As pontas da haste recebem um circulo do mesmo raio da
+    meia-espessura, para ficarem arredondadas em vez de quadradas (o
+    `joint="curve"` so arredonda os vaos internos, nao as pontas).
+    """
+    x_baixo, y_baixo, x_cima, y_cima = MAGIC_WAND_SHAFT
+    largura = MAGIC_WAND_SHAFT_WIDTH
+    centro_x, centro_y = MAGIC_WAND_STAR_CENTER
+    alcance = MAGIC_WAND_STAR_RADIUS
+
+    def desenha_haste(draw):
+        draw.line(
+            (x_baixo * escala, y_baixo * escala, x_cima * escala, y_cima * escala),
+            fill=255,
+            width=largura * escala,
+            joint="curve",
+        )
+        # pontas arredondadas: a diagonal crua terminava em bloco serrilhado
+        raio = largura * escala / 2
+        for px, py in ((x_baixo, y_baixo), (x_cima, y_cima)):
+            draw.ellipse(
+                (px * escala - raio, py * escala - raio, px * escala + raio, py * escala + raio),
+                fill=255,
+            )
+
+    def desenha_estrela(draw):
+        pontos = []
+        for indice in range(10):
+            angulo = math.radians(-90 + indice * 36)
+            distancia = (alcance if indice % 2 == 0 else alcance * 0.42) * escala
+            pontos.append(
+                (
+                    centro_x * escala + math.cos(angulo) * distancia,
+                    centro_y * escala + math.sin(angulo) * distancia,
+                )
+            )
+        draw.polygon(pontos, fill=255)
+
+    mascara_haste = _desenha_mascara(escala, desenha_haste)
+    mascara_estrela = _desenha_mascara(escala, desenha_estrela)
+
+    cor_haste = Image.new("RGBA", (MAGIC_WAND_SIZE, MAGIC_WAND_SIZE), color)
+    cor_estrela = Image.new("RGBA", (MAGIC_WAND_SIZE, MAGIC_WAND_SIZE), star_color)
+    return _aplica_alpha(cor_haste, cor_estrela, mascara_haste, mascara_estrela)
+
+
+def _aplica_alpha(
+    cor_haste: Image.Image,
+    cor_estrela: Image.Image,
+    mascara_haste: Image.Image,
+    mascara_estrela: Image.Image,
+) -> Image.Image:
+    """Une as duas máscaras num RGBA: a estrela fica por cima da haste."""
+    tamanho = MAGIC_WAND_SIZE
+    pixels_haste = cor_haste.load()
+    pixels_estrela = cor_estrela.load()
+    alpha_haste = mascara_haste.load()
+    alpha_estrela = mascara_estrela.load()
+    saida = Image.new("RGBA", (tamanho, tamanho), (0, 0, 0, 0))
+    destino = saida.load()
+    for y in range(tamanho):
+        for x in range(tamanho):
+            a_haste = alpha_haste[x, y]
+            a_estrela = alpha_estrela[x, y]
+            if a_estrela >= a_haste:
+                if a_estrela:
+                    destino[x, y] = (*pixels_estrela[x, y][:3], a_estrela)
+            elif a_haste:
+                destino[x, y] = (*pixels_haste[x, y][:3], a_haste)
+    return saida
+
 
 # ---------------- Slider de nós (visual do TurboCore) ----------------
 

@@ -182,6 +182,7 @@ from ui_widgets import (  # noqa: F401
     create_tooltip,
     describe_parallel_values,
     describe_step_values,
+    magic_wand_image,
     nearest_value,
     NodeSlider,
     parallel_values,
@@ -1588,35 +1589,30 @@ class SigApp:
         draw.polygon(((14, 3), (14, 7), (11, 4)), fill=color)
         return ImageTk.PhotoImage(image, master=self.root)
 
-    def _make_magic_wand_icon(self, color="#16833a", star_color="#f2c200"):
-        """Varinha mágica: haste VERDE com estrelinha AMARELA na ponta.
+    def _make_magic_wand_icon(self, color="#16833a", star_color="#f2c200", escala=8):
+        """Varinha mágica: haste VERDE a 45° com estrelinha AMARELA na ponta.
 
         É o botão de ajuste da oitiva: reúne as sentenças numa linha só.
 
-        Os dois pedidos do usuário (20260928_004):
+        Os três pedidos do usuário (20260928_004), na ordem:
           1. ícone ESPELHADO horizontalmente — a haste vai de baixo-DIREITA para
-             cima-ESQUERDA (antes subia da esquerda para a direita);
-          2. a luz da ponta virou ESTRELINHA AMARELA de 5 pontas, preenchida.
+             cima-ESQUERDA;
+          2. a luz da ponta virou ESTRELINHA AMARELA de 5 pontas, preenchida;
+          3. haste a 45 graus e SEM SERRILHADO.
 
-        A estrela de 5 pontas PREENCHIDA foi escolhida por comparação em tela
-        (6 variantes renderizadas): no tamanho real de 20x20 a estrela de
-        4 pontas em traço fino vira um "+" e a de 5 pontas só com contorno
-        some. Preenchida e de 5 pontas é a única que continua legível como
-        "varinha com estrela na ponta" no pixel real.
+        SERRILHADO (item 3): desenhar a diagonal direto em 20x20 dá degraus de
+        1px visíveis. O desenho é feito em `escala`x (8x) e reduzido com
+        LANCZOS, o que produz a mesma diagonal com borda suave. O fator 8 foi
+        escolhido comparando 4x/8x/16x em tela: 16x embaça (fica borrado) e 4x
+        mantém degraus. As pontas da haste recebem um círculo do mesmo raio da
+        meia-espessura, para as duas pontas ficarem arredondadas em vez de
+        quadradas (o `joint="curve"` só arredonda os vãos internos, não as
+        pontas).
         """
-        image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        # haste: diagonal de baixo-DIREITA para cima-ESQUERDA (espelhada)
-        draw.line((16, 17, 9, 7), fill=color, width=2)
-        # ponta: estrelinha AMARELA de 5 pontas, preenchida, encostada na haste
-        cx, cy, raio = 6, 5, 6
-        pontos = []
-        for indice in range(10):
-            angulo = math.radians(-90 + indice * 36)
-            alcance = raio if indice % 2 == 0 else raio * 0.42
-            pontos.append((cx + math.cos(angulo) * alcance, cy + math.sin(angulo) * alcance))
-        draw.polygon(pontos, fill=star_color)
-        return ImageTk.PhotoImage(image, master=self.root)
+        return ImageTk.PhotoImage(
+            magic_wand_image(color=color, star_color=star_color, escala=escala),
+            master=self.root,
+        )
 
     def _make_api_key_visibility_icon(self, crossed: bool, size: int = API_KEY_VISIBILITY_ICON_SIZE):
         """PhotoImage do olho aberto (`crossed=False`) / cortado (`True`)."""
