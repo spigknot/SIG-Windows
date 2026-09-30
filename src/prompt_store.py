@@ -498,6 +498,54 @@ class PromptStore:
         _write_atomic(target, text)
         return None
 
+    def delete_custom(self, slot: PromptSlot, raw_id: str) -> str | None:
+        """Apaga um prompt do usuario. `None` quando apagou, senao o motivo.
+
+        O `Padrao` e recusado: ele pertence ao aplicativo e volta pelo download
+        do R2 ou por uma instalacao nova, e o usuario nao tem como recria-lo.
+
+        Apagar o prompt EM USO tambem e recusado — o app ficaria sem prompt no
+        slot. Como tocar na lista ja torna o prompt em uso, quem apaga e o
+        `auto_ativo`: a tela desmarca o `ativo.json` e so entao chama este
+        metodo, assim o slot cai no `Padrao` em vez de ficar sem prompt.
+        """
+        if is_default_id(raw_id):
+            return (
+                "O prompt Padrão não pode ser apagado; "
+                "ele faz parte do aplicativo."
+            )
+        id = sanitize_id(raw_id)
+        if not id:
+            return "Escolha um prompt da lista."
+        target = self._custom_file(slot, id)
+        if not target.is_file():
+            return f"O prompt '{id}' não existe em {slot.label}."
+        if self.active_id(slot) == raw_id:
+            return (
+                f"'{id}' está em uso em {slot.label}. "
+                "Escolha outro prompt antes de apagar este."
+            )
+        try:
+            target.unlink()
+        except OSError as exc:
+            return f"Não foi possível apagar '{id}': {exc}"
+        return None
+
+    def unset_active(self, slot: PromptSlot) -> None:
+        """Faz o slot voltar a usar o `Padrao`, sem apagar prompt nenhum.
+
+        Usado antes de apagar o prompt que estava em uso: com o `ativo.json`
+        apontando para um id removido, o slot cairia no `Padrao` por queda
+        livre, e o app ficaria um instante sem prompt definido.
+        """
+        actives = self._read_actives()
+        if actives.pop(slot.key, None) is None:
+            return
+        if actives:
+            self._write_actives(actives)
+        elif self._active_file.is_file():
+            self._active_file.unlink()
+
     def save_as(self, slot: PromptSlot, raw_id: str, text: str) -> str | None:
         """Cria um id novo com o texto da caixa (botao SALVAR COMO)."""
         return self.save_custom(slot, raw_id, text, overwrite=False)

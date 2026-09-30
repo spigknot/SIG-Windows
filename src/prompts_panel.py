@@ -126,10 +126,12 @@ class PromptsPanel:
         ttk.Button(barra, text="Importar .txt", command=self._importar).grid(
             row=1, column=4, sticky="w", padx=(8, 0)
         )
+        self._apagar = ttk.Button(barra, text="Apagar", command=self._apagar_prompt)
+        self._apagar.grid(row=1, column=5, sticky="w", padx=(8, 0))
         self._baixar = ttk.Button(
             barra, text="Baixar prompts atualizados", command=self._baixar_prompts
         )
-        self._baixar.grid(row=1, column=5, sticky="e", padx=(8, 0))
+        self._baixar.grid(row=1, column=6, sticky="e", padx=(8, 0))
 
         self._status_label = ttk.Label(
             barra, textvariable=self._status, style="Settings.TLabel", wraplength=700
@@ -139,10 +141,10 @@ class PromptsPanel:
         ajuda = ttk.Label(
             self.parent,
             text=(
-                "O prompt Padrão é o do aplicativo e não pode ser sobrescrito: para alterá-lo, "
-                "use Salvar como (outro nome) ou importe outro .txt. Baixar prompts atualizados "
-                "traz a versão mais nova do padrão sem instalar o aplicativo de novo e preserva "
-                "os prompts que você criou."
+                "O prompt Padrão é o do aplicativo e não pode ser sobrescrito nem apagado: "
+                "para alterá-lo, use Salvar como (outro nome) ou importe outro .txt. "
+                "Baixar prompts atualizados traz a versão mais nova do padrão sem instalar o "
+                "aplicativo de novo e preserva os prompts que você criou."
             ),
             style="Settings.TLabel",
             wraplength=760,
@@ -212,9 +214,14 @@ class PromptsPanel:
     def _atualiza_botoes(self) -> None:
         entry = self._entry_atual()
         protegido = bool(entry and entry.is_default)
-        # Salvar fica desabilitado no Padrao: e a regra que o app nao quebra.
+        # Salvar e Apagar ficam desabilitados no Padrao: e a regra que o app
+        # nao quebra. O prompt em uso tambem nao pode ser apagado (o app ficaria
+        # sem prompt no slot), entao ele segue habilitado aqui e o motivo
+        # aparece so se o usuario clicar.
         if self._salvar is not None:
             self._salvar.configure(state="disabled" if protegido else "normal")
+        if self._apagar is not None:
+            self._apagar.configure(state="disabled" if protegido else "normal")
 
     # ── acoes ──────────────────────────────────────────────────────────
 
@@ -252,6 +259,55 @@ class PromptsPanel:
         self._recarregar()
         self._avisa_consumidor()
         self._status.set(f"Criado: {nome}")
+
+    def _apagar_prompt(self) -> None:
+        """Apaga o prompt selecionado, depois de confirmar com o usuario.
+
+        O `Padrao` nunca chega aqui pelo botao (fica desabilitado) e o
+        `prompt_store` recusa de novo — a regra esta nos dois lados, para que
+        a tela nao dependa so de desabilitar botao.
+
+        Tocar na lista ja torna o prompt em uso, entao apagar quase sempre
+        seria recusado pelo proprio app. Por isso, quando o prompt apagado e o
+        que esta em uso, o slot volta para o `Padrao` ANTES da exclusao: o
+        usuario ve o prompt_padrao assumir e o arquivo some da lista.
+        """
+        entry = self._entry_atual()
+        if entry is None:
+            return
+        if entry.is_default:
+            self._status.set("O prompt Padrão não pode ser apagado.")
+            return
+        era_ativo = entry.active
+        confirmar = messagebox.askyesno(
+            "sig",
+            f"Apagar o prompt '{entry.id}' de {entry.slot.label}?\n\n"
+            "O arquivo é removido e não dá para desfazer.\n"
+            "Se quiser guardar o texto antes, copie-o da caixa acima.\n\n"
+            + (
+                "Este prompt está em uso: depois de apagado, "
+                f"{entry.slot.label} volta a usar o Padrão."
+                if era_ativo
+                else ""
+            ),
+            parent=self.parent.winfo_toplevel(),
+        )
+        if not confirmar:
+            self._status.set("Apagamento cancelado.")
+            return
+        if era_ativo:
+            self.store.unset_active(entry.slot)
+        erro = self.store.delete_custom(entry.slot, entry.id)
+        if erro:
+            messagebox.showerror("sig", erro, parent=self.parent.winfo_toplevel())
+            self._status.set(erro)
+            return
+        self._recarregar()
+        self._avisa_consumidor()
+        self._status.set(
+            f"Apagado: {entry.id}."
+            + (f" {entry.slot.label} voltou a usar o Padrão." if era_ativo else "")
+        )
 
     def _importar(self) -> None:
         entry = self._entry_atual()

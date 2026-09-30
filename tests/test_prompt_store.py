@@ -420,6 +420,80 @@ class EscopoDoDownloadTest(StoreTestCase):
         self.assertNotIn("prompts_antigos/historico_system.txt", self.store.read_origins())
 
 
+class ApagarTest(StoreTestCase):
+    """O `Padrao` nao pode ser apagado, e apagar o prompt em uso tambem nao."""
+
+    def test_apagar_padrao_e_recusado(self):
+        slot = PROMPT_SLOTS[0]
+        for variante in (PROMPT_DEFAULT_ID, "padrao", "Padrão", "PADRÃO"):
+            erro = self.store.delete_custom(slot, variante)
+            self.assertIsNotNone(erro, variante)
+            self.assertIn("não pode ser apagado", erro)
+        # O arquivo do padrao continua no lugar.
+        self.assertTrue((self.root / "padrao" / slot.file).is_file())
+        self.assertEqual(self.store.read(slot, PROMPT_DEFAULT_ID), VALID[slot.file])
+
+    def test_apagar_prompt_em_uso_e_recusado(self):
+        """Se o slot ficasse sem prompt, a proxima requisicao quebraria."""
+        slot = PROMPT_SLOTS[1]
+        self.store.save_custom(slot, "em_uso", VALID["historico_user.txt"])
+        self.store.set_active(slot, "em_uso")
+        erro = self.store.delete_custom(slot, "em_uso")
+        self.assertIsNotNone(erro)
+        self.assertIn("está em uso", erro)
+        self.assertTrue((self.root / "custom" / slot.key / "em_uso.txt").is_file())
+
+    def test_apagar_prompt_customizado_apaga_e_some_da_lista(self):
+        slot = PROMPT_SLOTS[1]
+        self.store.save_custom(slot, "descartavel", VALID["historico_user.txt"])
+        self.assertIn("descartavel", [e.id for e in self.store.entries() if e.slot is slot])
+        self.assertIsNone(self.store.delete_custom(slot, "descartavel"))
+        self.assertNotIn("descartavel", [e.id for e in self.store.entries() if e.slot is slot])
+        self.assertFalse((self.root / "custom" / slot.key / "descartavel.txt").exists())
+
+    def test_apagar_prompt_inexistente_recusa_sem_erro(self):
+        erro = self.store.delete_custom(PROMPT_SLOTS[0], "nao_existe")
+        self.assertIsNotNone(erro)
+        self.assertIn("não existe", erro)
+
+    def test_unset_active_devolve_o_padrao_sem_apagar_arquivo(self):
+        """O caminho que a tela usa antes de apagar o prompt em uso."""
+        slot = PROMPT_SLOTS[2]
+        self.store.save_custom(slot, "sai", "SISTEMA QUE SAI")
+        self.store.set_active(slot, "sai")
+        self.store.unset_active(slot)
+        self.assertEqual(self.store.active_id(slot), PROMPT_DEFAULT_ID)
+        self.assertEqual(self.store.read_active(slot), VALID["oitiva_system.txt"])
+        # O arquivo continua existindo: unset_active nao apaga nada.
+        self.assertTrue((self.root / "custom" / slot.key / "sai.txt").is_file())
+        # E agora ele pode ser apagado.
+        self.assertIsNone(self.store.delete_custom(slot, "sai"))
+
+    def test_unset_active_preserva_o_ativo_dos_outros_slots(self):
+        um, dois = PROMPT_SLOTS[0], PROMPT_SLOTS[2]
+        self.store.save_custom(um, "a", "A")
+        self.store.save_custom(dois, "b", "B")
+        self.store.set_active(um, "a")
+        self.store.set_active(dois, "b")
+        self.store.unset_active(dois)
+        self.assertEqual(self.store.active_id(um), "a")
+        self.assertEqual(self.store.active_id(dois), PROMPT_DEFAULT_ID)
+
+    def test_unset_active_em_slot_ja_padrao_nao_faz_nada(self):
+        self.store.unset_active(PROMPT_SLOTS[0])
+        self.assertEqual(self.store.active_id(PROMPT_SLOTS[0]), PROMPT_DEFAULT_ID)
+
+    def test_apagar_outro_slot_nao_derruba_o_ativo_deste(self):
+        """Apagar em um slot nao mexe no prompt em uso de outro."""
+        um, dois = PROMPT_SLOTS[0], PROMPT_SLOTS[2]
+        self.store.save_custom(um, "guardar", "MEU")
+        self.store.set_active(um, "guardar")
+        self.store.save_custom(dois, "sai", "OUTRO")
+        self.assertIsNone(self.store.delete_custom(dois, "sai"))
+        self.assertEqual(self.store.active_id(um), "guardar")
+        self.assertEqual(self.store.read_active(um), "MEU")
+
+
 class CaminhoTest(unittest.TestCase):
     """Regra 11: grava em %APPDATA%, nunca em `C:\\Program Files`."""
 
