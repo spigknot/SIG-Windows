@@ -1,0 +1,9 @@
+{
+  "endpoint": "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
+  "account_id": "<ACCOUNT_ID>",
+  "access_key_id": "<R2_PROMPTS_ACCESS_KEY_ID>",
+  "secret_access_key": "<R2_PROMPTS_SECRET_ACCESS_KEY>",
+  "api_token": "<R2_API_TOKEN>",
+  "bucket": "prompts",
+  "public_base": "https://pub-<HASH>.r2.dev"
+}

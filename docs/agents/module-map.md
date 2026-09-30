@@ -7,22 +7,23 @@ edite o modulo dono — nunca duplique logica em `sig_app.py`.
 ## Camadas (dependencia so aponta para baixo)
 
 ```
-UI ............ sig_app.py, ffmpeg_tools_panel.py, ui_widgets.py
+UI ............ sig_app.py, ffmpeg_tools_panel.py, ui_widgets.py, prompts_panel.py
 Orquestracao .. sig_app.py (classe SigApp), vad_worker.py, batch_execution.py
 Integracoes ... stt_clients.py, http_clients.py, text_models.py, imei_lookup.py
 Processamento . transcription_parsing.py, log_formatting.py, documents.py,
                 reporting.py, qualification.py, name_database.py, audio_io.py,
                 batch_errors.py, media_probe.py
-Config ........ providers.py, settings_store.py
+Config ........ providers.py, settings_store.py, prompt_store.py
 Dominio ....... domain_models.py
 Ambiente ...... app_env.py
 ```
 
-`domain_models`, `providers`, `settings_store`, `transcription_parsing`,
-`text_models`, `http_clients`, `stt_clients`, `log_formatting`, `reporting`,
-`qualification`, `name_database`, `imei_lookup`, `documents`, `media_files`,
-`audio_io`, `batch_errors`, `batch_execution` e `app_env` **nao podem** importar
-`tkinter` nem `sig_app` (testado em `tests/test_modularizacao_contrato.py`).
+`domain_models`, `providers`, `settings_store`, `prompt_store`,
+`transcription_parsing`, `text_models`, `http_clients`, `stt_clients`,
+`log_formatting`, `reporting`, `qualification`, `name_database`, `imei_lookup`,
+`documents`, `media_files`, `audio_io`, `batch_errors`, `batch_execution` e
+`app_env` **nao podem** importar `tkinter` nem `sig_app` (testado em
+`tests/test_modularizacao_contrato.py`).
 
 ## Tabela de responsabilidades
 
@@ -32,6 +33,7 @@ Ambiente ...... app_env.py
 | `domain_models.py` | `AudioJob`, `Cancelled` e acessores do job (`job_transcript_text`, `audio_job_attr`...) | Regras de UI, rede |
 | `providers.py` | Catalogo de provedores STT/texto (nomes, URLs, modelos), `DEFAULT_SETTINGS`, `API_KEY_IMPORT_FIELDS`, selecao atual (`selected_*`), fallbacks e validacao de chaves | Persistencia em disco, Tkinter |
 | `settings_store.py` | Persistencia de `settings.json`: `load_settings`, `normalize_settings`, `save_settings`, `clamp_int` | Catalogo de provedores (importa de `providers`) |
+| `prompt_store.py` | Regra dos prompts de historico/oitiva/qualificacao: slots, layout em `%APPDATA%\sig\Prompts`, `Padrao` protegido, importacao e download do padrao no R2 (all-or-nothing, so grava se mudar) | Tkinter, widgets, rede do app (o download usa `urllib` direto) |
 | `transcription_parsing.py` | `ParsedTranscription` e parsing de respostas STT (JSON/texto/timestamps) | Chamadas de rede |
 | `text_models.py` | Selecao e parsing de modelos de texto de IA (`selected_text_model*`, `extract_*`) | HTTP (usa `http_clients`) |
 | `http_clients.py` | `GraniteUploader` e `TextModelClient` (transporte HTTP, cancelamento) | Formato de cada provedor STT |
@@ -49,6 +51,7 @@ Ambiente ...... app_env.py
 | `qualification.py` | Qualificacao de ocorrencias: parsing de JSON, labels, status | UI |
 | `ui_widgets.py` | Widgets reutilizaveis (`create_tooltip`, `PreviewIconButton`) | Regra de negocio |
 | `ffmpeg_tools_panel.py` | Aba FFmpeg: conversao, corte, juncao, aceleracao, player, linha do tempo | STT/transcricao |
+| `prompts_panel.py` | Aba Prompts: lista de selecao com id, caixa de texto, Salvar / Salvar como / Importar .txt / Baixar atualizados | A regra dos prompts (esta em `prompt_store`), rede |
 | `sig_app.py` | UI principal (`SigApp`), abas/dialogs e orquestracao; `main()` | Implementacao de dominio (reexporta dos modulos) |
 
 ## Receitas rapidas
@@ -62,6 +65,9 @@ Ambiente ...... app_env.py
 - **Mudar formato de log de comando FFmpeg**: `log_formatting.py`.
 - **Mudar texto de relatorio/status**: `reporting.py`.
 - **Mudar modelo Word / PDF**: `documents.py` (+ pasta `modelos/`).
+- **Mudar os prompts do app** (slot, marcador, protecao do `Padrao`, download
+  do R2): `prompt_store.py`; a tela e `prompts_panel.py`; a escolha e lida em
+  `SigApp._prompt_ativo` (`sig_app.py`).
 - **Onde esta o estado da UI**: atributos de `SigApp` em `sig_app.py`; o
   estado dos jobs em `domain_models.AudioJob`; tarefas em lote em
   `ffmpeg_tools_panel.FfmpegTaskTracker`.
@@ -88,3 +94,6 @@ adicionar re-export, rodar a suite completa.
   linhas; 18 modulos extraidos verbatim. Relatorio em linguagem simples (o que
   mudou, vantagens, provas e pendencias):
   `docs/maintenance/refatoracao-2026-09.md`.
+- **2026-09**: aba Prompts — `prompt_store.py` (regra) e `prompts_panel.py`
+  (tela) entram no mapa; o app le o prompt escolhido por
+  `SigApp._prompt_ativo`. Design: `docs/agents/design-aba-prompts.md`.

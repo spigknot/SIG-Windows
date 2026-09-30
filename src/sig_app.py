@@ -85,9 +85,12 @@ from assistant_prompts import (
     statement_user_prompt,
 )
 import diarias_protocolo
+import prompt_store
 import qr_encoder
 import smart_join_planner
 import stt_provider_rules
+from prompts_panel import PromptsPanel
+from prompt_store import PROMPT_CONSTANTE_POR_SLOT as _PROMPT_CONSTANTE_POR_SLOT
 from stt_provider_rules import (
     alibaba_language_hints,
     apply_transcription_language_option,
@@ -1355,6 +1358,11 @@ class SigApp:
         self.document_view_icon = self._make_document_action_icon("preview")
         self._build_menu()
         self._build_ui()
+        # Área dos prompts do usuário (%APPDATA%\sig\Prompts). Criada antes de
+        # qualquer requisição para que `ensure_layout` semeie o padrão e a aba
+        # Prompts já abra com a lista completa.
+        self.prompt_store = prompt_store.default_store()
+        self.prompt_store.ensure_layout()
         self.status_var.trace_add("write", lambda *_args: self._on_status_var_changed())
         self._refresh_server_label()
         self.root.after(100, self._poll_ui_queue)
@@ -1730,6 +1738,40 @@ class SigApp:
         except Exception:
             pass
         return button
+
+    def _reload_prompts(self):
+        """Faz o app passar a usar o prompt escolhido na aba Prompts.
+
+        `assistant_prompts` guarda os prompts como constantes lidas no
+        import; aqui elas sao atualizadas no lugar, para que a escolha (e o
+        download do R2) valham na próxima requisição sem reiniciar o SIG. As
+        funções que montam o prompt por slot leem a constante do módulo a cada
+        chamada, entao a troca vale imediatamente.
+        """
+        import assistant_prompts
+
+        for slot in prompt_store.PROMPT_SLOTS:
+            texto = self.prompt_store.read_active(slot).strip()
+            if not texto:
+                continue
+            setattr(assistant_prompts, _PROMPT_CONSTANTE_POR_SLOT[slot.key], texto)
+        return True
+
+    def _prompt_ativo(self, slot_key: str, padrao: str) -> str:
+        """Texto em uso de um slot de prompt, já com a escolha da aba aplicada.
+
+        Lê do store a cada uso para que trocar o prompt na aba valha na próxima
+        requisição; o argumento `padrao` é a constante do módulo, usada como
+        reserva quando ainda não há nada gravado.
+        """
+        slot = prompt_store.SLOTS_BY_KEY.get(slot_key)
+        if slot is None:
+            return padrao
+        try:
+            texto = self.prompt_store.read_active(slot).strip()
+        except Exception:  # noqa: BLE001 - nunca quebrar a requisição por causa do prompt
+            return padrao
+        return texto or padrao
 
     def _build_menu(self):
         menubar = ttk.Frame(self.root)
@@ -4510,7 +4552,7 @@ class SigApp:
         try:
             result = client.post(
                 selected_text_model_for(settings, "qualification"),
-                DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+                self._prompt_ativo("qualificacao_system", DEFAULT_QUALIFICATION_SYSTEM_PROMPT),
                 qualification_user_prompt(field_ids, raw_text),
             )
             self._queue(
@@ -6045,7 +6087,7 @@ class SigApp:
             try:
                 history = client.post(
                     model_config,
-                    DEFAULT_HISTORY_SYSTEM_PROMPT,
+                    self._prompt_ativo("historico_system", DEFAULT_HISTORY_SYSTEM_PROMPT),
                     history_request,
                 )
                 history_elapsed = time.monotonic() - history_started
@@ -6074,7 +6116,7 @@ class SigApp:
                     executor.submit(
                         client.post,
                         model,
-                        DEFAULT_HISTORY_SYSTEM_PROMPT,
+                        self._prompt_ativo("historico_system", DEFAULT_HISTORY_SYSTEM_PROMPT),
                         history_request,
                     ): index
                     for index, model in enumerate(models, start=1)
@@ -7415,7 +7457,7 @@ try {
         try:
             result = client.post(
                 selected_text_model_for(settings, "qualification"),
-                DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+                self._prompt_ativo("qualificacao_system", DEFAULT_QUALIFICATION_SYSTEM_PROMPT),
                 qualification_user_prompt(list(LIVE_QUALIFICATION_FIELD_IDS), raw_text),
             )
             self._queue(
@@ -8743,7 +8785,7 @@ try {
         settings_tab_content.columnconfigure(0, weight=1)
         settings_tab_content.rowconfigure(0, weight=1)
 
-        settings_tab_names = ("Modelos", "Policial", "Chaves API", "Avançado")
+        settings_tab_names = ("Modelos", "Policial", "Chaves API", "Prompts", "Avançado")
         settings_tab_buttons = {}
         settings_tab_pages = {}
         settings_active_bg = "#ffffff"
@@ -8808,6 +8850,7 @@ try {
         models_tab = settings_tab_pages["Modelos"]
         police_tab = settings_tab_pages["Policial"]
         api_tab = settings_tab_pages["Chaves API"]
+        prompts_tab = settings_tab_pages["Prompts"]
         advanced_tab = settings_tab_pages["Avançado"]
         select_settings_tab("Modelos")
 
@@ -9237,7 +9280,24 @@ try {
         )
         parallel_scale(2, "VAD", vad_var, vad_valores, vad_help)
 
-        # ── Seção de Keywords (aba Avançado, abaixo de Paralelismo) ──────
+        # ── Aba Prompts (entre Chaves API e Avançado) ────────────────────
+        # O usuario escolhe, edita e baixa os prompts de histórico,
+        # oitiva e qualificação. A regra vive em `prompt_store.py`; o painel é
+        # só a interface. `_reload_prompts` recarrega as constantes do app para
+        # que a escolha valha na próxima requisição, sem reiniciar o SIG.
+        prompts_frame = ttk.LabelFrame(
+            prompts_tab,
+            text="Prompts do aplicativo",
+            padding=(12, 8),
+            style="Settings.TLabelframe",
+        )
+        prompts_frame.pack(fill=BOTH, expand=True, anchor="n")
+        prompts_panel = PromptsPanel(
+            prompts_frame,
+            self.prompt_store,
+            reload_consumer=self._reload_prompts,
+        )
+
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
         # seletores "Keywords" das telas de Transcrição e Ocorrência. Cada
         # modelo continua montando o próprio parâmetro na requisição.
@@ -10465,6 +10525,7 @@ try {
             police_frame,
             api_models_frame,
             api_imei_frame,
+            prompts_frame,
             keywords_page,
         ]
         for section in all_settings_sections:

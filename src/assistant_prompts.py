@@ -48,6 +48,9 @@ DEFAULT_PARTS_PROMPT = _read_prompt("partes_system.txt")
 DEFAULT_PARTS_USER_HISTORY_TEMPLATE = _read_prompt("partes_user_botao_historico.txt")
 DEFAULT_PARTS_USER_DETECT_TEMPLATE = _read_prompt("partes_user_botao_detectar.txt")
 DEFAULT_QUALIFICATION_SYSTEM_PROMPT = _read_prompt("qualificacao_system.txt")
+#: Mantido como constante (e nao lido dentro da funcao) para que a aba Prompts
+#: consiga trocar o template em memoria pela aba, sem reiniciar o app.
+QUALIFICATION_USER_TEMPLATE = _read_prompt("qualificacao_user.txt")
 DEFAULT_HISTORY_SYSTEM_PROMPT = _read_prompt("historico_system.txt")
 DEFAULT_HISTORY_USER_TEMPLATE = _read_prompt("historico_user.txt")
 DEFAULT_STATEMENT_TEMPLATE = _read_prompt("oitiva_system.txt")
@@ -78,7 +81,7 @@ QUALIFICATION_BASE_FIELD_IDS = {
 
 def qualification_user_prompt(field_ids: list[str], raw_text: str) -> str:
     """Preenche o texto bruto e somente os IDs extras do prompt de qualificação."""
-    template = _read_prompt("qualificacao_user.txt")
+    template = QUALIFICATION_USER_TEMPLATE
     extra_ids = []
     for field_id in field_ids:
         normalized = str(field_id).strip()

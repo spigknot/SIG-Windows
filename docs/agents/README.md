@@ -20,6 +20,7 @@ nao repete comandos, versoes, hashes, caminhos de maquina ou estado de release.
 | Preparar handoff de release | `prompt_update.txt` | Usar apenas como ponteiro para as fontes canonicas |
 | Alterar `prompts/qualificacao_system.txt` | `scripts/check_qualification_prompt.py` | Rodar antes de fechar a alteracao: chama o modelo de verdade e reprova se o prompt deixar de cumprir uma regra |
 | Alterar `prompts/oitiva_system.txt` | `scripts/check_oitiva_prompt.py` | Rodar antes de fechar a alteracao: chama o modelo de verdade e reprova quebra de linha, abertura/regras violadas ou dado probatorio perdido |
+| Alterar prompts e publicar no bucket `prompts` | `docs/agents/design-aba-prompts.md` | Editar `prompts/` e publicar com o script de sincronizacao descrito no documento; os arquivos privados ficam fora do Git |
 
 ## Regra de cache
 
