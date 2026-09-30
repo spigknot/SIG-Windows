@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import prompt_store  # noqa: E402
+import prompt_store as ps  # noqa: E402
 from prompt_store import (  # noqa: E402
     HISTORY_TRANSCRIPT_MARKER,
     PROMPT_DEFAULT_ID,
@@ -418,6 +419,103 @@ class EscopoDoDownloadTest(StoreTestCase):
         )
         self.assertFalse((self.root / "padrao" / "prompts_antigos").exists())
         self.assertNotIn("prompts_antigos/historico_system.txt", self.store.read_origins())
+
+
+class EscolhaUsadaNaRequisicaoTest(StoreTestCase):
+    """Regressao do bug real: escolher um prompt e o app continuar no Padrao.
+
+    O usuario selecionava um prompt customizado e a requisicao saia com o
+    padrao. Duas causas somadas:
+
+    1. os prompts de USUARIO (historico_user, oitiva_user, qualificacao_user)
+       eram montados pelas funcoes de `assistant_prompts`, que leem a
+       constante do modulo — e essa so era reescrita quando a aba Prompts
+       era mexida;
+    2. depois de um REINICIO do app, mesmo as constantes de sistema voltavam
+       ao padrao, porque ninguem recarregava o `ativo.json` no startup.
+    """
+
+    def _app(self):
+        """SigApp com apenas o que este teste usa (sem Tk nem janela)."""
+        import sig_app
+
+        return sig_app.SigApp
+
+    def _escolher(self, store, **escolhas):
+        for key, (id_texto, texto) in escolhas.items():
+            slot = ps.SLOTS_BY_KEY[key]
+            self.assertIsNone(store.save_custom(slot, id_texto, texto))
+            self.assertIsNone(store.set_active(slot, id_texto))
+
+    def test_escolha_dos_seis_slots_chega_na_requisicao(self):
+        M, SM, QM = (
+            ps.HISTORY_TRANSCRIPT_MARKER,
+            ps.STATEMENT_HISTORY_MARKER,
+            ps.QUALIFICATION_RAW_MARKER,
+        )
+        self._escolher(
+            self.store,
+            historico_system=("meu_hs", "MEU HISTORICO SYSTEM"),
+            historico_user=("meu_hu", f"MEU HISTORICO USER {M}"),
+            oitiva_system=("meu_os", "MEU OITIVA SYSTEM"),
+            oitiva_user=("meu_ou", f"MEU OITIVA USER {SM}"),
+            qualificacao_system=("meu_qs", "MEU QUALIFICACAO SYSTEM"),
+            qualificacao_user=("meu_qu", f"MEU QUALIFICACAO USER {QM}"),
+        )
+        app = self._app()
+        fake = app.__new__(app)
+        fake.prompt_store = self.store
+        fake._reload_prompts()
+
+        # Sistema: os tres.
+        self.assertEqual(fake._prompt_ativo("historico_system", "PADRAO"), "MEU HISTORICO SYSTEM")
+        self.assertEqual(fake._prompt_ativo("oitiva_system", "PADRAO"), "MEU OITIVA SYSTEM")
+        self.assertEqual(
+            fake._prompt_ativo("qualificacao_system", "PADRAO"), "MEU QUALIFICACAO SYSTEM"
+        )
+        # Usuario: o material tem de entrar no template escolhido.
+        self.assertIn("MEU HISTORICO USER", fake._prompt_user_ativo("historico_user", "TEXTO"))
+        self.assertIn("TEXTO", fake._prompt_user_ativo("historico_user", "TEXTO"))
+        oitiva = fake._prompt_oitiva_user_ativo("FULANO", "HISTORICO AQUI")
+        self.assertIn("MEU OITIVA USER", oitiva)
+        self.assertIn("HISTORICO AQUI", oitiva)
+        qual = fake._prompt_qualificacao_ativo(["nome", "idade"], "BRUTO")
+        self.assertIn("MEU QUALIFICACAO USER", qual)
+        self.assertIn("BRUTO", qual)
+        # Nenhum pedido de qualificacao pode mandar o marcador cru.
+        self.assertNotIn(QM, qual)
+
+    def test_escolha_vale_apos_reiniciar_o_app_sem_abrir_a_aba(self):
+        """O startup tem de ler o `ativo.json` sozinho."""
+        M = ps.HISTORY_TRANSCRIPT_MARKER
+        self._escolher(
+            self.store,
+            historico_system=("meu_hs", "MEU HISTORICO SYSTEM"),
+            historico_user=("meu_hu", f"MEU HISTORICO USER {M}"),
+        )
+        # Um "processo novo": `assistant_prompts` volta a ler do executavel.
+        import assistant_prompts
+        import importlib
+        importlib.reload(assistant_prompts)
+        self.assertFalse(assistant_prompts.DEFAULT_HISTORY_SYSTEM_PROMPT.startswith("MEU"))
+
+        # O startup do app recarrega, sem ninguem abrir a aba.
+        app = self._app()
+        fake = app.__new__(app)
+        fake.prompt_store = self.store
+        fake._reload_prompts()
+        self.assertEqual(assistant_prompts.DEFAULT_HISTORY_SYSTEM_PROMPT, "MEU HISTORICO SYSTEM")
+        self.assertEqual(fake._prompt_ativo("historico_system", "PADRAO"), "MEU HISTORICO SYSTEM")
+
+    def test_sem_escolha_usa_o_padrao_do_app(self):
+        app = self._app()
+        fake = app.__new__(app)
+        fake.prompt_store = self.store
+        fake._reload_prompts()
+        self.assertEqual(
+            fake._prompt_ativo("historico_system", "PADRAO"),
+            VALID["historico_system.txt"].strip(),
+        )
 
 
 class ApagarTest(StoreTestCase):

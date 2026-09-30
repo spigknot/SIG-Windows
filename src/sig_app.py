@@ -79,6 +79,7 @@ import pypdfium2 as pdfium
 from assistant_prompts import (
     DEFAULT_HISTORY_SYSTEM_PROMPT,
     DEFAULT_QUALIFICATION_SYSTEM_PROMPT,
+    DEFAULT_STATEMENT_TEMPLATE,
     history_user_prompt,
     qualification_user_prompt,
     statement_prompt,
@@ -1360,9 +1361,12 @@ class SigApp:
         self._build_ui()
         # Área dos prompts do usuário (%APPDATA%\sig\Prompts). Criada antes de
         # qualquer requisição para que `ensure_layout` semeie o padrão e a aba
-        # Prompts já abra com a lista completa.
+        # Prompts já abra com a lista completa. `_reload_prompts` vem logo
+        # atrás: a escolha do usuário tem de valer na PRIMEIRA requisição,
+        # mesmo que ele nunca abra a aba Prompts nesta sessao.
         self.prompt_store = prompt_store.default_store()
         self.prompt_store.ensure_layout()
+        self._reload_prompts()
         self.status_var.trace_add("write", lambda *_args: self._on_status_var_changed())
         self._refresh_server_label()
         self.root.after(100, self._poll_ui_queue)
@@ -1740,13 +1744,15 @@ class SigApp:
         return button
 
     def _reload_prompts(self):
-        """Faz o app passar a usar o prompt escolhido na aba Prompts.
+        """Faz o app usar o prompt escolhido na aba Prompts.
 
         `assistant_prompts` guarda os prompts como constantes lidas no
-        import; aqui elas sao atualizadas no lugar, para que a escolha (e o
-        download do R2) valham na próxima requisição sem reiniciar o SIG. As
-        funções que montam o prompt por slot leem a constante do módulo a cada
-        chamada, entao a troca vale imediatamente.
+        import. Esta funcao as reescreve no lugar, para que a escolha (e o
+        download do R2) valham na próxima requisicao sem reiniciar o SIG.
+
+        E o que garante que a escolha valha depois de um REINICIO do app: o
+        painel so chama isto quando o usuario mexe na tela. Por isso o
+        startup do app tambem chama este metodo, e nao o painel.
         """
         import assistant_prompts
 
@@ -1758,20 +1764,63 @@ class SigApp:
         return True
 
     def _prompt_ativo(self, slot_key: str, padrao: str) -> str:
-        """Texto em uso de um slot de prompt, já com a escolha da aba aplicada.
+        """Texto em uso de um slot de prompt, com a escolha da aba aplicada.
 
-        Lê do store a cada uso para que trocar o prompt na aba valha na próxima
-        requisição; o argumento `padrao` é a constante do módulo, usada como
-        reserva quando ainda não há nada gravado.
+        Le do store a cada uso: e a unica fonte que sobrevive a um reinicio do
+        app (o `ativo.json`), enquanto a constante do modulo so e atualizada
+        por `_reload_prompts`. O argumento `padrao` e a reserva para quando o
+        store ainda nao tem nada gravado.
         """
         slot = prompt_store.SLOTS_BY_KEY.get(slot_key)
         if slot is None:
             return padrao
         try:
             texto = self.prompt_store.read_active(slot).strip()
-        except Exception:  # noqa: BLE001 - nunca quebrar a requisição por causa do prompt
+        except Exception:  # noqa: BLE001 - nunca quebrar a requisicao por causa do prompt
             return padrao
         return texto or padrao
+
+    def _prompt_oitiva_user_ativo(self, selected_name: str | None, material: str) -> str:
+        """Prompt de USUARIO da oitiva, com o nome da parte e o historico."""
+        import assistant_prompts
+
+        template = self._prompt_ativo("oitiva_user", "")
+        if not template:
+            return assistant_prompts.statement_user_prompt(selected_name, material)
+        name = (selected_name or "").strip() or "parte selecionada"
+        return (
+            template.replace("{{NOME_SELECIONADO}}", name)
+            .replace(prompt_store.STATEMENT_HISTORY_MARKER, material.strip())
+            .replace(prompt_store.STATEMENT_HISTORY_LEGACY_MARKER, material.strip())
+            .strip()
+        )
+
+    def _prompt_user_ativo(self, slot_key: str, material: str) -> str:
+        """Prompt de USUARIO do `historico_user`, com a transcricao atual.
+
+        O template vem do store (a escolha da aba), nunca da constante do
+        modulo: assim a escolha vale tambem depois de um reinicio do app.
+        """
+        import assistant_prompts
+
+        template = self._prompt_ativo(slot_key, "")
+        if not template:
+            # Reserva: sem nada gravado, usa o que veio no executavel.
+            return assistant_prompts.history_user_prompt(material)
+        return assistant_prompts._fill_prompt_markers(
+            template, material, "conteudo_caixa_transcricao"
+        )
+
+    def _prompt_qualificacao_ativo(self, field_ids: list[str], raw_text: str) -> str:
+        """Prompt de USUARIO da qualificacao, com os IDs e o texto bruto."""
+        import assistant_prompts
+
+        template = self._prompt_ativo("qualificacao_user", "")
+        if not template:
+            return assistant_prompts.qualification_user_prompt(field_ids, raw_text)
+        return assistant_prompts.qualification_prompt_with_template(
+            template, field_ids, raw_text
+        )
 
     def _build_menu(self):
         menubar = ttk.Frame(self.root)
@@ -4553,7 +4602,7 @@ class SigApp:
             result = client.post(
                 selected_text_model_for(settings, "qualification"),
                 self._prompt_ativo("qualificacao_system", DEFAULT_QUALIFICATION_SYSTEM_PROMPT),
-                qualification_user_prompt(field_ids, raw_text),
+                self._prompt_qualificacao_ativo(field_ids, raw_text),
             )
             self._queue(
                 "qualification_result",
@@ -6081,7 +6130,7 @@ class SigApp:
         if not client:
             return
         model_config = selected_text_model_for(settings, "history")
-        history_request = history_user_prompt(material)
+        history_request = self._prompt_user_ativo("historico_user", material)
         try:
             history_started = time.monotonic()
             try:
@@ -6108,7 +6157,7 @@ class SigApp:
             selected_text_model_for(settings, "history"),
             selected_text_model_for(settings, "history", secondary=True),
         ]
-        history_request = history_user_prompt(material)
+        history_request = self._prompt_user_ativo("historico_user", material)
         try:
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -6239,8 +6288,8 @@ class SigApp:
         try:
             result = client.post(
                 selected_text_model_for(settings, "statement"),
-                statement_prompt(selected_name),
-                statement_user_prompt(selected_name, material),
+                self._prompt_ativo("oitiva_system", DEFAULT_STATEMENT_TEMPLATE),
+                self._prompt_oitiva_user_ativo(selected_name, material),
             )
             self._queue(
                 "assistant_text_result",
@@ -6285,8 +6334,8 @@ class SigApp:
                     executor.submit(
                         client.post,
                         model,
-                        statement_prompt(selected_name),
-                        statement_user_prompt(selected_name, material),
+                        self._prompt_ativo("oitiva_system", DEFAULT_STATEMENT_TEMPLATE),
+                        self._prompt_oitiva_user_ativo(selected_name, material),
                     ): index
                     for index, model in enumerate(models, start=1)
                 }
@@ -7458,7 +7507,7 @@ try {
             result = client.post(
                 selected_text_model_for(settings, "qualification"),
                 self._prompt_ativo("qualificacao_system", DEFAULT_QUALIFICATION_SYSTEM_PROMPT),
-                qualification_user_prompt(list(LIVE_QUALIFICATION_FIELD_IDS), raw_text),
+                self._prompt_qualificacao_ativo(list(LIVE_QUALIFICATION_FIELD_IDS), raw_text),
             )
             self._queue(
                 "live_qualification_result",

@@ -81,7 +81,20 @@ QUALIFICATION_BASE_FIELD_IDS = {
 
 def qualification_user_prompt(field_ids: list[str], raw_text: str) -> str:
     """Preenche o texto bruto e somente os IDs extras do prompt de qualificação."""
-    template = QUALIFICATION_USER_TEMPLATE
+    return qualification_prompt_with_template(
+        QUALIFICATION_USER_TEMPLATE, field_ids, raw_text
+    )
+
+
+def qualification_prompt_with_template(
+    template: str, field_ids: list[str], raw_text: str
+) -> str:
+    """Monta o prompt de usuario da qualificacao a partir de um template.
+
+    Separado de `qualification_user_prompt` para que a aba Prompts possa
+    aplicar o template escolhido pelo usuario sem reescrever a regra dos
+    IDs extras em dois lugares.
+    """
     extra_ids = []
     for field_id in field_ids:
         normalized = str(field_id).strip()
