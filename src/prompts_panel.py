@@ -14,6 +14,7 @@ settings, nem rede.
 from __future__ import annotations
 
 import threading
+import time
 import tkinter as tk
 from tkinter import END, BOTH, LEFT, RIGHT, X, Y, StringVar, Text, filedialog, messagebox, ttk
 from pathlib import Path
@@ -31,6 +32,64 @@ from prompt_store import (
 
 
 class PromptsPanel:
+    """Tres abas, cada uma com editores independentes de system e user."""
+
+    def __init__(self, parent, store, *, reload_consumer=None, log_consumer=None):
+        self._tab_bar = ttk.Frame(parent, style="Settings.Inner.TFrame")
+        self._tab_bar.pack(fill=X, pady=(0, 8))
+        self._tab_content = ttk.Frame(parent, style="Settings.Inner.TFrame")
+        self._tab_content.pack(fill=BOTH, expand=True)
+        self._tab_pages = {}
+        self._tab_buttons = {}
+        self._sections = []
+        for prefix, label in (("historico", "Histórico"), ("oitiva", "Oitiva"),
+                              ("qualificacao", "Qualificação")):
+            tab = ttk.Frame(self._tab_content, style="Settings.Inner.TFrame")
+            self._tab_pages[label] = tab
+            button = tk.Label(
+                self._tab_bar, text=label, width=len("Qualificação") + 1,
+                height=1, borderwidth=1, relief="solid",
+                font=("Segoe UI Semibold", 10), cursor="hand2",
+            )
+            button.pack(side=LEFT, padx=(0 if not self._tab_buttons else 4, 0))
+            button.bind("<Button-1>", lambda event, name=label: self._select_tab(name))
+            self._tab_buttons[label] = button
+            for role in ("system", "user"):
+                slot = next(s for s in PROMPT_SLOTS if s.key == f"{prefix}_{role}")
+                section = ttk.Frame(tab, style="Settings.Inner.TFrame")
+                section.pack(fill=BOTH, expand=True, pady=(4, 4))
+                self._sections.append(_PromptSection(
+                    section, store, slot=slot, title=role,
+                    reload_consumer=reload_consumer, log_consumer=log_consumer,
+                    refresh_all=self._refresh_all,
+                ))
+        style = ttk.Style(parent)
+        style.configure("Prompts.Download.TButton", foreground="#16803a")
+        style.map("Prompts.Download.TButton", foreground=[("disabled", "#777777"), ("!disabled", "#16803a")])
+        self._download_button = ttk.Button(
+            self._tab_bar, text="Baixar otimizados", style="Prompts.Download.TButton",
+            command=self._sections[0]._baixar_prompts,
+        )
+        self._download_button.pack(side=RIGHT)
+        self._sections[0]._baixar = self._download_button
+        self._select_tab("Histórico")
+
+    def _select_tab(self, name):
+        for page in self._tab_pages.values():
+            page.pack_forget()
+        self._tab_pages[name].pack(fill=BOTH, expand=True)
+        for label, button in self._tab_buttons.items():
+            button.configure(
+                background="#ffffff" if label == name else "#d6d2c7",
+                foreground="#10201f" if label == name else "#111111",
+            )
+
+    def _refresh_all(self):
+        for section in self._sections:
+            section._recarregar()
+
+
+class _PromptSection:
     """Conteudo da aba Prompts: escolha do prompt em uso, edicao e download.
 
     `store` e a area do usuario (`%APPDATA%\\sig\\Prompts`); `reload_consumer` e
@@ -42,15 +101,23 @@ class PromptsPanel:
         parent: tk.Misc,
         store: PromptStore,
         *,
+        slot: PromptSlot,
+        title: str,
+        refresh_all=None,
         reload_consumer=None,
+        log_consumer=None,
     ) -> None:
         self.parent = parent
         self.store = store
         self.reload_consumer = reload_consumer
+        self.log_consumer = log_consumer
+        self.slot = slot
+        self.title = title
+        self.refresh_all = refresh_all
         self._entries: list[PromptEntry] = []
         self._selected = 0
-        self._status: StringVar = StringVar(value="")
-        self._nome_id: StringVar = StringVar(value="")
+        self._status: StringVar = StringVar(master=parent, value="")
+
         self._salvar: ttk.Button | None = None
         self._baixar: ttk.Button | None = None
         self._montar()
@@ -60,7 +127,7 @@ class PromptsPanel:
     def _montar(self) -> None:
         base = ttk.LabelFrame(
             self.parent,
-            text="Prompt em uso",
+            text=self.title,
             padding=(12, 8),
             style="Settings.TLabelframe",
         )
@@ -70,8 +137,8 @@ class PromptsPanel:
 
         self._lista = tk.Listbox(
             base,
-            width=44,
-            height=14,
+            width=13,
+            height=12,
             exportselection=False,
             font=("Consolas", 9),
             activestyle="none",
@@ -83,84 +150,53 @@ class PromptsPanel:
         direita = ttk.Frame(base, style="Settings.Inner.TFrame")
         direita.grid(row=0, column=1, sticky="nsew")
         direita.columnconfigure(0, weight=1)
-        direita.rowconfigure(1, weight=1)
-
-        rotulo = ttk.Label(
-            direita,
-            text="Texto do prompt (editável):",
-            style="Settings.TLabel",
-        )
-        rotulo.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        direita.rowconfigure(0, weight=1)
 
         self._texto = Text(
             direita,
-            width=62,
-            height=14,
+            width=75,
+            height=12,
             wrap="word",
             undo=True,
             font=("Consolas", 9),
         )
-        self._texto.grid(row=1, column=0, sticky="nsew")
+        self._texto.grid(row=0, column=0, sticky="nsew")
 
         barra = ttk.Frame(base, style="Settings.Inner.TFrame")
         barra.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        barra.columnconfigure(2, weight=1)
+        barra.columnconfigure(3, weight=1)
+        self._novo = ttk.Button(base, text="+", width=3, command=self._novo_prompt)
+        self._novo.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        barra.grid_configure(column=1, columnspan=1)
 
-        self._rotulo_selecionado = ttk.Label(
-            barra, text="", style="Settings.TLabel"
-        )
-        self._rotulo_selecionado.grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 6))
-
-        ttk.Label(
-            barra, text="Nome do prompt:", style="Settings.TLabel"
-        ).grid(row=1, column=0, sticky="w")
-        self._campo_nome = ttk.Entry(barra, textvariable=self._nome_id, width=24)
-        self._campo_nome.grid(row=1, column=1, sticky="w", padx=(8, 0))
 
         self._salvar = ttk.Button(barra, text="Salvar", command=self._salvar_prompt)
-        self._salvar.grid(row=1, column=2, sticky="w", padx=(12, 0))
+        self._salvar.grid(row=1, column=0, sticky="w")
 
-        ttk.Button(barra, text="Salvar como", command=self._salvar_como).grid(
-            row=1, column=3, sticky="w", padx=(8, 0)
-        )
-        ttk.Button(barra, text="Importar .txt", command=self._importar).grid(
-            row=1, column=4, sticky="w", padx=(8, 0)
-        )
-        self._apagar = ttk.Button(barra, text="Apagar", command=self._apagar_prompt)
-        self._apagar.grid(row=1, column=5, sticky="w", padx=(8, 0))
-        self._baixar = ttk.Button(
-            barra, text="Baixar prompts atualizados", command=self._baixar_prompts
-        )
-        self._baixar.grid(row=1, column=6, sticky="e", padx=(8, 0))
+
+        self._apagar = ttk.Button(barra, text="Deletar", command=self._apagar_prompt)
+        self._apagar.grid(row=1, column=2, sticky="w", padx=(8, 0))
+
 
         self._status_label = ttk.Label(
             barra, textvariable=self._status, style="Settings.TLabel", wraplength=700
         )
-        self._status_label.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
-
-        ajuda = ttk.Label(
-            self.parent,
-            text=(
-                "O prompt Padrão é o do aplicativo e não pode ser sobrescrito nem apagado: "
-                "para alterá-lo, use Salvar como (outro nome) ou importe outro .txt. "
-                "Baixar prompts atualizados traz a versão mais nova do padrão sem instalar o "
-                "aplicativo de novo e preserva os prompts que você criou."
-            ),
-            style="Settings.TLabel",
-            wraplength=760,
-            justify=LEFT,
-        )
-        ajuda.pack(fill=X, anchor="n", pady=(8, 0))
+        def atualizar_status(*_):
+            if self._status.get():
+                self._status_label.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+            else:
+                self._status_label.grid_remove()
+        self._status.trace_add("write", atualizar_status)
 
         self._recarregar()
 
     # ── lista e selecao ────────────────────────────────────────────────
 
     def _recarregar(self, selecionar: int | None = None) -> None:
-        self._entries = self.store.entries()
+        self._entries = [e for e in self.store.entries() if e.slot.key == self.slot.key]
         self._lista.delete(0, END)
         for entry in self._entries:
-            self._lista.insert(END, entry.display_label)
+            self._lista.insert(END, "Padrão" if entry.is_default else entry.id)
         alvo = self._selected if selecionar is None else selecionar
         if not self._entries:
             self._selected = 0
@@ -178,13 +214,8 @@ class PromptsPanel:
     def _mostrar_conteudo(self, entry: PromptEntry) -> None:
         self._texto.delete("1.0", END)
         self._texto.insert("1.0", self.store.read(entry.slot, entry.id))
-        self._nome_id.set("" if entry.is_default else entry.id)
-        self._rotulo_selecionado.configure(
-            text=(
-                f"Selecionado: {entry.label}"
-                f"{'  (Padrão do aplicativo — não pode ser sobrescrito)' if entry.is_default else ''}"
-            )
-        )
+
+
 
     def _selecionou_linha(self, _event=None) -> None:
         selecao = self._lista.curselection()
@@ -204,7 +235,7 @@ class PromptsPanel:
                 return
             self._recarregar(selecionar=indice)
             self._avisa_consumidor()
-            self._status.set(f"Em uso agora: {entry.label}")
+            self._status.set("")
 
     def _entry_atual(self) -> PromptEntry | None:
         if 0 <= self._selected < len(self._entries):
@@ -230,7 +261,7 @@ class PromptsPanel:
         if entry is None:
             return
         texto = self._texto.get("1.0", END)
-        nome = self._nome_id.get().strip() or entry.id
+        nome = entry.id
         erro = self.store.save_custom(entry.slot, nome, texto)
         if erro:
             messagebox.showerror("sig", erro, parent=self.parent.winfo_toplevel())
@@ -241,24 +272,62 @@ class PromptsPanel:
         self._avisa_consumidor()
         self._status.set(f"Salvo: {nome}")
 
-    def _salvar_como(self) -> None:
-        entry = self._entry_atual()
-        if entry is None:
-            return
-        nome = self._nome_id.get().strip()
-        if not nome or nome == entry.id:
-            self._status.set("Digite um nome diferente no campo antes de Salvar como.")
-            return
-        texto = self._texto.get("1.0", END)
-        erro = self.store.save_as(entry.slot, nome, texto)
-        if erro:
-            messagebox.showerror("sig", erro, parent=self.parent.winfo_toplevel())
-            self._status.set(erro)
-            return
-        self.store.set_active(entry.slot, nome)
-        self._recarregar()
-        self._avisa_consumidor()
-        self._status.set(f"Criado: {nome}")
+    def _novo_prompt(self) -> None:
+        win = tk.Toplevel(self.parent)
+        species = {"historico": "Histórico", "oitiva": "Oitiva", "qualificacao": "Qualificação"}
+        prefix, role = self.slot.key.split("_")
+        win.title(f"{species[prefix]} ({role})")
+        win.transient(self.parent.winfo_toplevel())
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill=BOTH, expand=True)
+        name = StringVar(master=win)
+        ttk.Label(body, text="Nome do prompt:").pack(anchor="w")
+        field = ttk.Entry(body, textvariable=name)
+        field.pack(fill=X, pady=(4, 8))
+        text = Text(body, width=85, height=24, wrap="word", undo=True, font=("Consolas", 9))
+        text.pack(fill=BOTH, expand=True)
+        text.insert("1.0", self.store.read(self.slot, PROMPT_DEFAULT_ID))
+
+        def salvar():
+            nome = name.get().strip()
+            erro = self.store.save_as(self.slot, nome, text.get("1.0", "end-1c"))
+            if erro:
+                messagebox.showerror("sig", erro, parent=win)
+                return
+            # save_as normaliza o nome; localizar o ID persistido pelo store.
+            import prompt_store as ps
+            prompt_id = ps.sanitize_id(nome)
+            self.store.set_active(self.slot, prompt_id)
+            self._recarregar()
+            index = next(i for i, e in enumerate(self._entries) if e.id == prompt_id)
+            self._recarregar(selecionar=index)
+            self._avisa_consumidor()
+            self._status.set("")
+            win.destroy()
+
+        def importar():
+            caminho = filedialog.askopenfilename(
+                parent=win, title="Escolher prompt (.txt)",
+                filetypes=[("Prompt", "*.txt")],
+            )
+            if not caminho:
+                return
+            try:
+                conteudo = Path(caminho).read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError) as exc:
+                messagebox.showerror("sig", f"Não foi possível ler o arquivo: {exc}", parent=win)
+                return
+            text.delete("1.0", END)
+            text.insert("1.0", conteudo)
+            if not name.get().strip():
+                name.set(Path(caminho).stem)
+
+        ttk.Button(body, text="Importar", command=importar).pack(side=LEFT, pady=(8, 0))
+        ttk.Button(body, text="SALVAR", command=salvar).pack(side=RIGHT, pady=(8, 0))
+        self._new_dialog = win
+        self._new_name = name
+        self._new_text = text
+        field.focus_set()
 
     def _apagar_prompt(self) -> None:
         """Apaga o prompt selecionado, depois de confirmar com o usuario.
@@ -336,32 +405,41 @@ class PromptsPanel:
         """
         if self._baixar is not None:
             self._baixar.configure(state="disabled")
-        self._status.set("Baixando os prompts atualizados…")
+        inicio = time.monotonic()
+        self._status.set("")
 
         def terminar(situacao: str, mudancas: list[str]) -> None:
-            self._recarregar()
+            if self.refresh_all is not None:
+                self.refresh_all()
+            else:
+                self._recarregar()
             self._avisa_consumidor()
             if self._baixar is not None:
                 self._baixar.configure(state="normal")
             if situacao == "igual":
-                self._status.set("Os prompts já estão atualizados — nada foi baixado.")
+                mensagem = "Os prompts já estão atualizados."
             elif situacao == "atualizado":
                 alterados = len(mudancas)
-                detalhe = f"{alterados} alterado(s)" if alterados else "conteudo verificado"
-                self._status.set(
-                    f"Prompts atualizados ({detalhe}). "
-                    "Seus prompts personalizados foram preservados."
-                )
+                if self.log_consumer is not None:
+                    for name in mudancas:
+                        self.log_consumer(f"Baixando {name}", tag="activity_step_done")
+                mensagem = f"{alterados} arquivos de prompt foram baixados."
             else:
-                self._status.set("Não foi possível atualizar: " + "; ".join(mudancas))
+                mensagem = "Não foi possível atualizar: " + "; ".join(mudancas)
                 messagebox.showerror(
                     "sig",
                     "Não foi possível atualizar os prompts.\n\n" + "\n".join(mudancas),
                     parent=self.parent.winfo_toplevel(),
                 )
+            if self.log_consumer is not None:
+                tag = "activity_step_done" if situacao in ("igual", "atualizado") else "activity_step_error"
+                self.log_consumer(f"{mensagem} ({time.monotonic() - inicio:.1f}s)", tag=tag)
 
         def trabalho() -> None:
-            situacao, mudancas = download_updates(self.store)
+            try:
+                situacao, mudancas = download_updates(self.store)
+            except Exception as exc:
+                situacao, mudancas = "erro", [str(exc)]
             self.parent.after(0, lambda: terminar(situacao, mudancas))
 
         threading.Thread(target=trabalho, daemon=True).start()

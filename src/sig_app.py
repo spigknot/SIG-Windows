@@ -516,7 +516,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260929_001"
+APP_VERSION = "20260930_002"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -9339,17 +9339,17 @@ try {
         # oitiva e qualificação. A regra vive em `prompt_store.py`; o painel é
         # só a interface. `_reload_prompts` recarrega as constantes do app para
         # que a escolha valha na próxima requisição, sem reiniciar o SIG.
-        prompts_frame = ttk.LabelFrame(
+        prompts_frame = ttk.Frame(
             prompts_tab,
-            text="Prompts do aplicativo",
             padding=(12, 8),
-            style="Settings.TLabelframe",
+            style="Settings.Inner.TFrame",
         )
         prompts_frame.pack(fill=BOTH, expand=True, anchor="n")
         prompts_panel = PromptsPanel(
             prompts_frame,
             self.prompt_store,
             reload_consumer=self._reload_prompts,
+            log_consumer=self._append_activity_log,
         )
 
         # PERFIS: o usuário mantém várias listas nomeadas e escolhe a ativa nos
