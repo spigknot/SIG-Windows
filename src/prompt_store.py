@@ -218,6 +218,18 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def canonical_text(text: str) -> str:
+    """Texto do prompt em uma forma unica, para comparar e gravar.
+
+    O mesmo prompt pode estar no disco com LF (a pasta `prompts/` do repo) e
+    no R2 com CRLF (o que o Windows gravou). Sao o MESMO prompt — sem
+    normalizar, o app diria "8 alterados" num PC recem instalado e reescreveria
+    arquivo por arquivo sem mudar nada. Por isso a comparacao e a gravacao
+    usam esta forma, e o `manifest.json` e calculado sobre ela.
+    """
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 # ── rede ───────────────────────────────────────────────────────────────
 
 def _urlopen(url: str, *, timeout: float) -> bytes:
@@ -408,8 +420,12 @@ class PromptStore:
         return seed or ""
 
     def read_padrao_file(self, name: str) -> str:
-        """Conteudo de um arquivo de `padrao/` pelo nome (mesmo dos de `partes`)."""
-        return _read_text(self._padrao_dir / name) or ""
+        """Conteudo de um arquivo de `padrao/` pelo nome (mesmo dos de `partes`).
+
+        Sai na forma canonica (LF): o que estiver em CRLF no disco e o mesmo
+        prompt, e comparar direto diria que mudou.
+        """
+        return canonical_text(_read_text(self._padrao_dir / name) or "")
 
     def read(self, slot: PromptSlot, id: str) -> str:
         """Conteudo de um prompt pelo id (`Padrao` resolve para `padrao/`)."""
@@ -568,34 +584,59 @@ class PromptStore:
         Se um dos prompts reprovar, NADA e gravado: um download parcial
         deixaria o padrao com metade nova e metade antiga. Os prompts do
         usuario nao sao tocados — so `padrao/` e o registro de origem mudam.
+
+        Arquivo cujo conteudo ja e igual NAO e reescrito: a data de
+        modificacao de um prompt intocado e a prova de que o app nao mexeu
+        nele, e um download idempotente nao pode deixar rastro.
         """
         error = self.validate_defaults(files)
         if error:
             return error
         self._padrao_dir.mkdir(parents=True, exist_ok=True)
         for name in ROOT_PROMPT_FILES:
-            _write_atomic(self._padrao_dir / name, files[name])
+            target = self._padrao_dir / name
+            canonico = canonical_text(files[name])
+            if target.is_file() and canonical_text(_read_text(target) or "") == canonico:
+                continue
+            _write_atomic(target, canonico)
         if from_r2:
-            self._write_origins({name: sha256_text(files[name]) for name in ROOT_PROMPT_FILES})
+            self._write_origins(
+                {name: sha256_text(canonical_text(files[name])) for name in ROOT_PROMPT_FILES}
+            )
         return None
 
     def is_same_as_origin(self, manifest_files: dict[str, str] | None) -> bool | None:
         """`True` quando o R2 ja e o que esta em `padrao/`.
 
-        Com o `manifest.json` do bucket a resposta sai de uma comparacao de
-        hash contra `origem.json` (nenhum prompt baixado). Sem manifesto,
-        devolvemos `None` para o chamador comparar o conteudo baixado.
+        O manifesto do bucket so serve de atalho: quando o `origem.json` bate,
+        nenhum prompt precisa ser lido. O registro sozinho NAO decide — num
+        PC recem instalado ele ainda nao existe, e ai o R2 e igual ao
+        executavel. Por isso, sem registro que prove a igualdade, devolvemos
+        `None` e o chamador compara o conteudo de `padrao/` com o do R2.
         """
         if not manifest_files:
             return None
         origins = self.read_origins()
         if not origins:
-            return False
+            return None
         for name in ROOT_PROMPT_FILES:
             remote = manifest_files.get(name)
             if not remote:
                 return False
             if origins.get(name) != remote:
+                return False
+        return True
+
+    def is_same_content(self, remote: dict[str, str]) -> bool:
+        """`True` quando cada prompt de `padrao/` ja e igual ao que veio do R2.
+
+        Esta e a comparacao de verdade: nao depende de nenhum registro em
+        disco, entao responde certo tambem na primeira execucao do app. Os
+        arquivos de `partes` entram no conjunto mesmo nao tendo slot na tela,
+        porque o app novo os traz junto no `padrao/`.
+        """
+        for name in ROOT_PROMPT_FILES:
+            if self.read_padrao_file(name) != remote.get(name):
                 return False
         return True
 
@@ -647,15 +688,18 @@ def download_updates(
     `atualizado` (gravou), `igual` (nao gravou nada — ja estava atualizado),
     `indisponivel` (faltou arquivo ou rede falhou).
 
-    Regra do dono: prompt igual no R2 nao e baixado. O `manifest.json`, quando
-    existe, faz essa resposta sair em UM request; sem ele comparamos o
-    conteudo depois de baixar.
+    Regra do dono: prompt igual no R2 nao e baixado. O `manifest.json` da
+    atalho para o caso comum (quando `origem.json` prova a igualdade, nenhum
+    prompt e lido); nos demais casos a decisao sai do CONTEUDO de `padrao/`
+    comparado com o do R2 — inclusive na primeira execucao do app, em que o
+    registro ainda nao existe mas o conteudo ja e o mesmo.
     """
     wanted = tuple(files)
     manifest = fetch_manifest(base_url, timeout=min(timeout, 15.0))
     if manifest is not None:
-        same = store.is_same_as_origin(manifest["files"])
-        if same is True:
+        # Atalho: o registro em disco prova que o `padrao/` atual ja veio do
+        # R2 e nao foi mexido. Nenhum prompt e lido.
+        if store.is_same_as_origin(manifest["files"]) is True:
             return "igual", []
 
     downloaded: dict[str, str] = {}
@@ -665,15 +709,18 @@ def download_updates(
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return "indisponivel", [f"{name}: {exc}"]
 
-    if store.is_same_as_origin({name: sha256_text(text) for name, text in downloaded.items()}) is True:
-        return "igual", []
     unchanged = [
         name
         for name, text in downloaded.items()
-        if store.read_padrao_file(name) == text
+        if store.read_padrao_file(name) == canonical_text(text)
     ]
     changed = [name for name in wanted if name not in unchanged]
     error = store.apply_defaults(downloaded, from_r2=True)
     if error:
         return "indisponivel", [error]
+    if not changed:
+        # Nada difere do que ja estava em `padrao/`. O app so registra a
+        # origem (para o proximo clique sair em UM request) e nao toca nos
+        # arquivos: o usuario ve "ja atualizado", nunca "8 alterados".
+        return "igual", []
     return "atualizado", changed

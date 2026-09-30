@@ -109,13 +109,20 @@ def load_config(path: pathlib.Path) -> dict:
 
 
 def collect_prompts(prompts_dir: pathlib.Path) -> dict[str, bytes]:
-    """Todos os .txt da pasta; a chave e o caminho relativo posix (subpasta preservada)."""
+    """Todos os .txt da pasta; a chave e o caminho relativo posix (subpasta preservada).
+
+    O conteudo e gravado em LF: o Windows pode ter CRLF no disco, e publicar
+    assim faria o app ver "prompts alterados" num PC recem instalado, quando
+    o texto e exatamente o mesmo. O `manifest.json` e calculado sobre estes
+    mesmos bytes, entao manifesto e conteudo nunca divergem.
+    """
     if not prompts_dir.is_dir():
         raise SystemExit(f"pasta de prompts nao encontrada: {prompts_dir}")
     files: dict[str, bytes] = {}
     for path in sorted(prompts_dir.rglob("*.txt"), key=lambda item: item.as_posix().casefold()):
         if path.is_file():
-            files[path.relative_to(prompts_dir).as_posix()] = path.read_bytes()
+            texto = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            files[path.relative_to(prompts_dir).as_posix()] = texto
     missing = [name for name in APP_PROMPT_FILES if name not in files]
     if missing:
         raise SystemExit(f"prompts do app ausentes: {', '.join(missing)}")

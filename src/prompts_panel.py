@@ -290,8 +290,10 @@ class PromptsPanel:
             if situacao == "igual":
                 self._status.set("Os prompts já estão atualizados — nada foi baixado.")
             elif situacao == "atualizado":
+                alterados = len(mudancas)
+                detalhe = f"{alterados} alterado(s)" if alterados else "conteudo verificado"
                 self._status.set(
-                    f"Prompts atualizados ({len(mudancas)} alterado(s)). "
+                    f"Prompts atualizados ({detalhe}). "
                     "Seus prompts personalizados foram preservados."
                 )
             else:

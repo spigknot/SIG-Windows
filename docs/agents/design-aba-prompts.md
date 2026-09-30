@@ -52,6 +52,27 @@ O manifesto é **derivado dos mesmos bytes que o sync publica** — nunca escrit
 Por isso o `build_manifest` do script é a única fonte e um teste reprova se
 ele divergir do que sobe.
 
+### CRLF: o mesmo prompt não é uma versão nova
+
+O bug real encontrado no teste manual (29/09): o `sync_prompts_r2.py` lia os
+arquivos de `prompts/` **já com CRLF** do Windows e publicava assim, enquanto o
+app lia o executável com **LF**. Numa instalação nova, o botão respondia
+"8 prompts atualizados" — e o conteúdo era **idêntico**, palavra por palavra.
+O 2º clique dizia "já atualizado" porque o 1º tinha gravado o CRLF por cima.
+
+A correção é nos dois lados, porque remover o sintoma num só deixaria o outro
+reintroduzi-lo:
+
+| Onde | O que faz |
+|---|---|
+| `prompt_store.canonical_text` | compara e grava sempre em LF; o que está em CRLF é o mesmo prompt |
+| `sync_prompts_r2.collect_prompts` | publica em LF, então o manifesto nasce sobre os mesmos bytes |
+| `apply_defaults` | não reescreve arquivo cujo conteúdo já é igual (data de modificação intacta é a prova) |
+
+Vacinas: `test_crlf_e_o_mesmo_prompt_nao_e_alteracao` e
+`test_primeiro_clique_com_padrao_ja_igual_diz_igual` — a segunda reproduz a
+instalação nova (sem `origem.json`) e exige `igual` já no **primeiro** clique.
+
 ## 5. Vacinas (`tests/test_prompt_store.py`)
 
 Padrão protegido; `save_custom`; `save_as`; import; inferência de slot;

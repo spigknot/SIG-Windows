@@ -290,6 +290,54 @@ class DownloadTest(StoreTestCase):
             self.novos["historico_system.txt"],
         )
 
+    def test_crlf_e_o_mesmo_prompt_nao_e_alteracao(self):
+        """Regressao do bug real: o R2 tinha CRLF e o app tinha LF.
+
+        O prompt e identico; sem normalizar, o app dizia "8 alterados" num PC
+        recem instalado e reescrevia tudo sem mudar nada.
+        """
+        # `ensure_layout` so semeia os 6 slots; num PC novo as 3 de `partes`
+        # tambem chegam (o build novo as traz no `padrao/`).
+        for nome in ROOT_PROMPT_FILES:
+            (self.root / "padrao" / nome).write_text(VALID[nome], encoding="utf-8")
+        crlf = {nome: texto.replace("\n", "\r\n") for nome, texto in VALID.items()}
+        situacao, mudancas, _ = self.baixar(crlf)
+        self.assertEqual(situacao, "igual", "CRLF nao pode contar como alteracao")
+        self.assertEqual(mudancas, [])
+        # E nada foi reescrito no disco.
+        for nome in ROOT_PROMPT_FILES:
+            self.assertEqual((self.root / "padrao" / nome).read_text(encoding="utf-8"), VALID[nome])
+
+    def test_primeiro_clique_com_padrao_ja_igual_diz_igual(self):
+        """Regressao: num PC recem instalado o 1o clique nao pode dizer "atualizado".
+
+        O app semeia `padrao/` a partir do executavel, entao o conteudo ja e o
+        do R2. Como `origem.json` so existe DEPOIS do primeiro download, a
+        comparacao por hash nao tinha com o que comparar: o 1o clique
+        reportava 8 "alterados" sem alterar nada. A resposta correta e `igual`,
+        decidido pelo CONTEUDO de `padrao/`, nao por um registro que ainda nao
+        foi escrito.
+        """
+        # PC recem instalado: padrao/ semeado, sem origem.json.
+        (self.root / "origem.json").unlink(missing_ok=True)
+        for nome in ROOT_PROMPT_FILES:
+            # As 3 de `partes` tambem entram: o app novo as semeia do executavel.
+            (self.root / "padrao" / nome).write_text(VALID[nome], encoding="utf-8")
+        digests = {nome: prompt_store.sha256_text(VALID[nome]) for nome in ROOT_PROMPT_FILES}
+        situacao, mudancas, _ = self.baixar(VALID, manifest={"files": digests})
+        self.assertEqual(situacao, "igual")
+        self.assertEqual(mudancas, [])
+        # E o app nao pode ter reescrito os arquivos: so o registro de origem.
+        for nome in ROOT_PROMPT_FILES:
+            self.assertEqual(
+                (self.root / "padrao" / nome).read_text(encoding="utf-8"), VALID[nome]
+            )
+        # O proximo clique sai em UM request, ja com o registro gravado.
+        situacao2, mudancas2, pedidos2 = self.baixar(VALID, manifest={"files": digests})
+        self.assertEqual(situacao2, "igual")
+        self.assertEqual(mudancas2, [])
+        self.assertEqual(pedidos2, [f"{BASE_FAKE}/manifest.json"])
+
     def test_igual_nao_baixa_nem_grava(self):
         """Regra do dono: prompt igual no R2 não é baixado nem gravado."""
         self.store.apply_defaults(VALID, from_r2=True)
