@@ -333,6 +333,16 @@ class PromptStore:
     def _origin_file(self) -> Path:
         return self.root / "origem.json"
 
+    @property
+    def _seed_file(self) -> Path:
+        """Hash do `padrao/` na ultima versao do APLICATIVO aplicada.
+
+        Diferente de `origem.json`, que registra o que veio do R2. Este
+        arquivo e o que permite distinguir "o app foi atualizado" de "o
+        usuario mexeu aqui": sem ele, um update jamais substituiria o padrao.
+        """
+        return self.root / "versao.json"
+
     def _custom_dir(self, slot: PromptSlot) -> Path:
         return self.root / "custom" / slot.key
 
@@ -340,10 +350,14 @@ class PromptStore:
         return self._custom_dir(slot) / f"{sanitize_id(id)}.txt"
 
     def ensure_layout(self) -> None:
-        """Cria o layout e semeia `padrao/` com o que veio no app. Idempotente.
+        """Cria o layout e semeia `padrao/` com o que veio do app. Idempotente.
 
-        Semeia apenas arquivo AUSENTE: um `padrao/` ja baixado do R2 nao e
-        sobrescrito pela versao do executavel.
+        Semeia arquivo AUSENTE e, quando o app foi ATUALIZADO, substitui o
+        `padrao/` pela versao que veio no executavel novo. O que o usuario
+        baixou do R2 nao e sobrescrito aqui: ele tem hash proprio em
+        `origem.json`, e `apply_padrao_do_app` pula justamente o que veio do R2
+        (so o app novo pode mudar esse hash). Os prompts de `custom/` nunca
+        sao tocados.
         """
         self._padrao_dir.mkdir(parents=True, exist_ok=True)
         (self.root / "custom").mkdir(parents=True, exist_ok=True)
@@ -355,6 +369,73 @@ class PromptStore:
             seed = self._read_seed(slot.file)
             if seed is not None:
                 _write_atomic(target, seed)
+
+    def apply_padrao_do_app(self) -> list[str]:
+        """Traz o `padrao/` novo do executavel para a area do usuario.
+
+        Chamado no startup: quando o app e atualizado, os prompts que vieram
+        nele passam a valer no %APPDATA% sem o usuario precisar clicar em
+        "Baixar prompts atualizados". Devolve os nomes trocados.
+
+        Tres regras:
+
+        * so reescreve o que tem hash IGUAL ao da versao anterior do app — o
+          que o usuario editou ou baixou do R2 e preservado;
+        * um prompt sem `padrao/` local e semeado (instalacao nova);
+        * o registro em `versao.json` impede reescrever a cada startup.
+
+        NAO chama `ensure_layout` antes do laco: ela semearia os prompts
+        ausentes e eles entrariam aqui como "ja existem", sendo pulados —
+        foi exatamente o bug da primeira versao deste metodo.
+        """
+        self._padrao_dir.mkdir(parents=True, exist_ok=True)
+        (self.root / "custom").mkdir(parents=True, exist_ok=True)
+        anteriores = self._read_version_seeds()
+        trocados: list[str] = []
+        novos: dict[str, str] = {}
+        for name in ROOT_PROMPT_FILES:
+            seed = self._read_seed(name)
+            if seed is None:
+                continue
+            canonico = canonical_text(seed)
+            digest = sha256_text(canonico)
+            target = self._padrao_dir / name
+            if target.is_file():
+                atual = sha256_text(canonical_text(_read_text(target) or ""))
+                # Divergiu do que o app dava antes: e escolha do usuario (ou
+                # R2). NAO toca.
+                if atual != anteriores.get(name):
+                    continue
+                if atual == digest:
+                    novos[name] = digest
+                    continue
+            _write_atomic(target, canonico)
+            novos[name] = digest
+            trocados.append(name)
+        for slot in PROMPT_SLOTS:
+            self._custom_dir(slot).mkdir(parents=True, exist_ok=True)
+        if novos:
+            self._write_version_seeds(novos)
+        return trocados
+
+    def _read_version_seeds(self) -> dict[str, str]:
+        """Hash do `padrao/` na ultima vez que o app foi aplicado."""
+        data = _read_text(self._seed_file)
+        if not data:
+            return {}
+        try:
+            loaded = json.loads(data)
+        except ValueError:
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        return {str(k): str(v).lower() for k, v in loaded.items() if isinstance(v, str)}
+
+    def _write_version_seeds(self, seeds: dict[str, str]) -> None:
+        _write_atomic(
+            self._seed_file,
+            json.dumps(seeds, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
 
     def _read_seed(self, file: str) -> str | None:
         if self._seed_reader is not None:

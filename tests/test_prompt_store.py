@@ -421,6 +421,129 @@ class EscopoDoDownloadTest(StoreTestCase):
         self.assertNotIn("prompts_antigos/historico_system.txt", self.store.read_origins())
 
 
+class AtualizacaoDoAppTest(unittest.TestCase):
+    """Atualizar o app tem de trazer os prompts novos sem perder os do usuario.
+
+    Nao herda de `StoreTestCase`: o `setUp` de la semeia `padrao/` com 6
+    prompts ANTES de qualquer `apply_padrao_do_app`, e um `padrao/` ja cheio
+    sem registro de versao e justamente o caso que esta classe cria do zero.
+    """
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / "Prompts"
+        self.tmp = Path(temp.name)
+
+    def _store_com_seed(self, semente: dict[str, str]) -> PromptStore:
+        """Store novo lendo de uma 'pasta prompts/' do app especifica.
+
+        NAO chama `ensure_layout`: quem cria o `padrao/` aqui e o
+        `apply_padrao_do_app`, como no startup real. Semear antes faria os 6
+        prompts de slot entrarem ja preenchidos e sem registro de versao.
+        """
+        return PromptStore(self.root, seed_reader=lambda name: semente.get(name))
+
+    def _seed_v1(self) -> dict[str, str]:
+        """Prompt do app versao 1 (o que esta instalado hoje)."""
+        v1 = dict(VALID)
+        v1["qualificacao_user.txt"] = "Lista de IDs. " + ps.QUALIFICATION_RAW_MARKER
+        return v1
+
+    def _seed_v2(self) -> dict[str, str]:
+        """App novo: o `qualificacao_user` perdeu a lista de IDs.
+
+        Tem de diferir de `_seed_v1` de verdade — montar o mesmo texto aqui
+        faria o update parecer que nao mudou nada, e o teste passaria a errado.
+        """
+        nova = dict(VALID)
+        nova["qualificacao_user.txt"] = "Qualifique.\n\n" + ps.QUALIFICATION_RAW_MARKER
+        return nova
+
+    def test_instalacao_nova_registra_a_versao_do_app(self):
+        self._store_com_seed(self._seed_v1()).apply_padrao_do_app()
+        self.assertTrue((self.root / "versao.json").is_file())
+        registros = json.loads((self.root / "versao.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(registros), set(ROOT_PROMPT_FILES))
+
+    def test_update_do_app_atualiza_o_padrao(self):
+        """O executavel novo traz prompt novo e o usuario nao fez nada."""
+        self._store_com_seed(self._seed_v1()).apply_padrao_do_app()
+        store_v2 = self._store_com_seed(self._seed_v2())
+        trocados = store_v2.apply_padrao_do_app()
+        self.assertIn("qualificacao_user.txt", trocados)
+        slot = next(s for s in PROMPT_SLOTS if s.key == "qualificacao_user")
+        self.assertEqual(
+            store_v2.read(slot, PROMPT_DEFAULT_ID), self._seed_v2()["qualificacao_user.txt"]
+        )
+
+    def test_update_do_app_nao_sobrescreve_prompt_que_o_usuario_baixou_do_r2(self):
+        """O que veio do R2 e do usuario: o app nao pode mexer."""
+        store = self._store_com_seed(self._seed_v1())
+        store.apply_padrao_do_app()
+        # O usuario baixa uma versao nova do R2.
+        do_r2 = dict(VALID)
+        do_r2["qualificacao_user.txt"] = "VERSAO DO R2\n\n" + ps.QUALIFICATION_RAW_MARKER
+        self.assertIsNone(store.apply_defaults(do_r2, from_r2=True))
+        # Agora o app e atualizado para v2.
+        store_v2 = self._store_com_seed(self._seed_v2())
+        trocados = store_v2.apply_padrao_do_app()
+        self.assertNotIn("qualificacao_user.txt", trocados)
+        self.assertEqual(
+            store_v2.read_padrao_file("qualificacao_user.txt"),
+            "VERSAO DO R2\n\n" + ps.QUALIFICATION_RAW_MARKER,
+        )
+
+    def test_update_do_app_nao_sobrescreve_prompt_editado_a_mao(self):
+        """Prompt editado a mao, sem registro de origem: preservado."""
+        store = self._store_com_seed(self._seed_v1())
+        store.apply_padrao_do_app()
+        slot = next(s for s in PROMPT_SLOTS if s.key == "qualificacao_user")
+        (self.root / "padrao" / "qualificacao_user.txt").write_text(
+            "EDITADO A MAO\n\n" + ps.QUALIFICATION_RAW_MARKER, encoding="utf-8"
+        )
+        store_v2 = self._store_com_seed(self._seed_v2())
+        self.assertNotIn("qualificacao_user.txt", store_v2.apply_padrao_do_app())
+        self.assertEqual(
+            store_v2.read_padrao_file("qualificacao_user.txt"),
+            "EDITADO A MAO\n\n" + ps.QUALIFICATION_RAW_MARKER,
+        )
+
+    def test_update_nunca_toca_nos_prompts_customizados(self):
+        store = self._store_com_seed(self._seed_v1())
+        store.apply_padrao_do_app()
+        slot = PROMPT_SLOTS[1]
+        # O prompt de usuario exige o marcador: sem ele o store recusa, e o
+        # teste passaria a errado testando um custom que nunca existiu.
+        self.assertIsNone(
+            store.save_custom(slot, "meu", "MEU PROMPT " + ps.HISTORY_TRANSCRIPT_MARKER)
+        )
+        self._store_com_seed(self._seed_v2()).apply_padrao_do_app()
+        self.assertEqual(
+            store.read(slot, "meu"), "MEU PROMPT " + ps.HISTORY_TRANSCRIPT_MARKER
+        )
+        self.assertTrue((self.root / "custom" / slot.key / "meu.txt").is_file())
+
+    def test_startup_repetido_nao_reescreve_nada(self):
+        """O registro de versao evita reescrever a cada startup."""
+        self._store_com_seed(self._seed_v1()).apply_padrao_do_app()
+        store = self._store_com_seed(self._seed_v1())
+        self.assertEqual(store.apply_padrao_do_app(), [])
+        alvo = self.root / "padrao" / "historico_system.txt"
+        mtime = alvo.stat().st_mtime_ns
+        self.assertEqual(store.apply_padrao_do_app(), [])
+        self.assertEqual(mtime, alvo.stat().st_mtime_ns)
+
+    def test_update_tambem_traz_os_prompts_de_partes(self):
+        """Os 3 de `partes` nao tem slot na tela, mas vem com o app."""
+        store = self._store_com_seed(self._seed_v1())
+        store.apply_padrao_do_app()
+        self.assertTrue((self.root / "padrao" / "partes_system.txt").is_file())
+        nova = dict(VALID)
+        nova["partes_system.txt"] = "PARTES NOVAS"
+        self.assertIn("partes_system.txt", self._store_com_seed(nova).apply_padrao_do_app())
+
+
 class EscolhaUsadaNaRequisicaoTest(StoreTestCase):
     """Regressao do bug real: escolher um prompt e o app continuar no Padrao.
 

@@ -1366,6 +1366,11 @@ class SigApp:
         # mesmo que ele nunca abra a aba Prompts nesta sessao.
         self.prompt_store = prompt_store.default_store()
         self.prompt_store.ensure_layout()
+        # Atualizar o app tambem atualiza os prompts: o que veio no executavel
+        # novo entra no `padrao/` sem o usuario clicar em "Baixar prompts".
+        # `apply_padrao_do_app` so troca o que ainda era a versao anterior do
+        # app, entao o que o usuario editou ou baixou do R2 fica intacto.
+        self._prompts_atualizados_pelo_app = self.prompt_store.apply_padrao_do_app()
         self._reload_prompts()
         self.status_var.trace_add("write", lambda *_args: self._on_status_var_changed())
         self._refresh_server_label()
