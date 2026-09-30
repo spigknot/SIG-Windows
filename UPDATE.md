@@ -88,6 +88,7 @@ cd "D:/Projetos/SIG Windows"
 - Gera: `release/generated/YYYYMMDD_NNN/` (package + `*_full.zip` + `setup_sig_*.exe` + `online_setup_sig*.exe`).
 - O `preflight` roda os testes unitários, a validação do estado atual, o `updater-v2-test` e `ui-smoke`, em ordem fail-fast.
 - O comando `release` repete o preflight automaticamente antes do build limpo e depois roda o harness completo (9 cenários): build onedir, updater, diffs, sync e rollbacks.
+- **`release` leva ~10 min (build + harness): rode-o em BACKGROUND, nunca em foreground.** Um foreground expira antes do fim (~7 min nesta máquina) e o processo é morto no meio — mas o `release/generated/<v>/` JÁ está com os 4 artefatos, e o `content_snapshot.json` JÁ registra a versão, então a repetição da MESMA versão é recusada. Ver seção 3.2.
 - **Critério de sucesso**: preflight sem erro, código zero no release, pacote/manifesto válidos e harness completo. Em modo quiet, o resumo deve conter `PASS`; NÃO é sucesso se houver qualquer `FAIL`.
 
 ### 3.1 SE o harness falhar com o SigUpdater
@@ -120,6 +121,34 @@ cp /d/d/tmp/updater-rebuild/SigUpdater.exe dist/SigUpdater.exe
 # 4. Limpar o diretório parcial e RE-RODAR o release
 rm -rf release/generated/YYYYMMDD_NNN release_*.log
 ```
+
+### 3.2 SE o `release` for interrompido por timeout do terminal
+
+Sintoma: o `release --version <v>` estoura o limite do foreground e morre no
+meio, MAS `release/generated/<v>/` ja tem os 4 artefatos e
+`release/content_snapshot.json` ja lista `<v>`. O harness nao chegou ao fim.
+
+**Nao e para repetir `<v>`** — o `release.py` exige versao estritamente maior.
+O que decide o caminho e o manifesto do R2:
+
+```bash
+"C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" -c "
+import sys; sys.path.insert(0, 'updater_v2'); import updater
+print('manifesto R2:', updater.fetch_sync_manifest()['version'])
+"
+```
+
+- **R2 ainda na versao ANTERIOR (o sync nunca rodou)**: nada foi publicado.
+  `rm -rf release/generated/<v>`, bumpar para `NNN+1` e rodar o release
+  **em background**. Snapshot antes/depois prova que o pacote e do fonte:
+  `sha256sum src/*.py scripts/*.py updater_v2/*.py > antes.txt` antes do build e
+  `sha256sum -c antes.txt` depois (todas as linhas `OK`).
+- **R2 ja na versao `<v>`**: publicada. Nao refazer build; seguir so o que
+  faltou (sync/GitHub).
+
+Antes de encerrar processo, identificar: `wmic process where
+"ProcessId=<pid>" get ProcessId,CommandLine` — no ambiente do agente ha
+`python.exe` do proprio Hermes, que NAO deve ser morto.
 
 ## 4. Sync no Cloudflare R2 (o diff — só o que mudou)
 
@@ -247,6 +276,8 @@ a fonte da verdade e deve evoluir com a prática.
 | `RequestTimeTooSkewed` no sync_r2 (`ListObjectsV2`) | relógio do Windows dessincronizado (serviço `w32time` parado; diferença >15 min vs servidor) | iniciar o serviço e sincronizar: `powershell -c "Start-Service w32time; w32tm /resync"` (com elevação); conferir com `date -u` vs `curl -sI https://api.cloudflare.com | grep -i ^date:` |
 | `SignatureDoesNotMatch` no `ListObjectsV2` | `release/r2_config.json` usa um par de credenciais S3 incompatível, antigo ou de outro token/bucket | gerar um novo token S3 para o bucket `sig`, substituir o par `access_key_id` + `secret_access_key` localmente e manter o endpoint S3 e `bucket: sig`; nunca usar o token da API ou a URL pública `.r2.dev` como credencial |
 | `gh release create` interrompido durante upload grande; release parcial, URL `untagged-*` ou `HTTP 404` em `uploads.github.com` | assets grandes foram enviados junto da criação e o processo terminou antes de concluir todos os uploads | confirmar a situação com `gh release list/view`; se a release estiver parcial, excluí-la com sua tag órfã, recriar sem assets e enviar o full e os dois instaladores separadamente, aguardando cada comando |
+| O `release.py release` estoura o timeout do terminal e morre no meio, mas `release/generated/<v>/` ja tem os 4 artefatos | o release completo (build + harness 9 cenarios) leva ~10 min, mais que o limite do foreground; o processo e morto, porem o pacote, o snapshot e os instaladores ja foram gerados | rodar o `release` em BACKGROUND; conferir o manifesto do R2 para saber se algo foi publicado (secao 3.2). R2 na versao anterior => `rm -rf release/generated/<v>` e bumpar `NNN+1` (a mesma versao e recusada pelo snapshot). R2 ja em `<v>`: ja foi publicada; seguir so sync/GitHub |
+| `git status -sb` mostra `ahead 1` logo apos o push, mas `ls-remote` esta correto | a referencia local `origin/main` esta desatualizada (o push por URL nao atualiza o remote-tracking) | `git fetch <url> main:refs/remotes/origin/main` e reavaliar; comparar sempre `ls-remote` vs `git rev-parse HEAD`, nunca o `status -sb` sozinho |
 | O `release_*.log`/`sync_*.log` entram no commit | `git add -A` pegou os logs | `rm -f release_*.log sync_*.log` ANTES do `git add` |
 | `FAIL: não foi possível inspecionar dependências congeladas: "No entry named 'PYZ.pyz' found in the archive!"` no preflight | o `dist/sig.exe` foi gerado por outro interpreter/PyInstaller (tipicamente o `python` do PATH no terminal do Hermes = venv do Hermes, Python 3.11.15 + PyInstaller 6.10.0), que embute o PYZ com o nome `PYZ-00.pyz`; o validador exige `PYZ.pyz` (PyInstaller 6.21.0) | rebuildar o `dist/` com o interpreter do build (`"C:/Users/Gustavo/AppData/Local/Programs/Python/Python311/python.exe" scripts/build_dev.py --quiet`) e repetir o preflight; nunca rodar `build_dev.py`/PyInstaller com o `python` do PATH |
 | Documentos indicam gates diferentes para o updater | O contrato antigo usava `updater-test`, enquanto o updater atual tem metadados v2 | usar `python scripts/release.py preflight --quiet`; o gate oficial é `updater-v2-test` |
