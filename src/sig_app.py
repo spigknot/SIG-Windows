@@ -86,6 +86,7 @@ from assistant_prompts import (
     statement_user_prompt,
 )
 import diarias_protocolo
+import diarias_mapa
 import diarias_store
 import prompt_store
 import qr_encoder
@@ -177,8 +178,12 @@ from documents import (  # noqa: F401
     _replace_word_paragraph_markers,
     generate_docx_from_template,
     generate_diarias_requerimento,
+    generate_declaracao_meios_proprios,
+    next_available_diarias_requerimento_path,
+    next_available_diarias_declaracao_path,
     ensure_document_templates,
     prepare_diarias_requerimento,
+    prepare_declaracao_meios_proprios,
     download_github_url,
 )
 
@@ -519,7 +524,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261002_001"
+APP_VERSION = "20261002_002"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -1369,6 +1374,7 @@ class SigApp:
         self.diarias_abertura_hora_var = StringVar(master=self.root, value="")
         self.diarias_fechamento_data_var = StringVar(master=self.root, value="")
         self.diarias_fechamento_hora_var = StringVar(master=self.root, value="")
+        self.diarias_meios_proprios_var = BooleanVar(master=self.root, value=False)
         self.qrcode_alias_entry = None
         self.qrcode_shortened_row = None
         self.qrcode_shortened_entry = None
@@ -1463,6 +1469,42 @@ class SigApp:
             pass
         settings_surface = style.lookup("TLabelframe", "background") or "#dcdad5"
         style.configure("TFrame", background="#f4f7f6")
+        style.configure("Diarias.Card.TFrame", background="#ffffff", relief="flat")
+        style.configure(
+            "Diarias.Title.TLabel", background="#f4f7f6", foreground="#10201f",
+            font=("Segoe UI Semibold", 16),
+        )
+        style.configure(
+            "Diarias.Section.TLabel", background="#ffffff", foreground="#193d32",
+            font=("Segoe UI Semibold", 11),
+        )
+        style.configure(
+            "Diarias.Field.TLabel", background="#ffffff", foreground="#536565",
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Diarias.TCheckbutton",
+            background="#ffffff",
+            foreground="#1d2b2a",
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Diarias.File.TLabel", background="#ffffff", foreground="#667371",
+            font=("Segoe UI", 9),
+        )
+        style.configure("Diarias.Pdf.TButton", padding=(8, 3))
+        style.configure(
+            "Diarias.Reload.TButton", foreground="#1565d8", padding=(6, 3),
+        )
+        style.configure(
+            "Diarias.Primary.TButton", foreground="#ffffff", background="#16833a",
+            font=("Segoe UI Semibold", 10), padding=(14, 8),
+        )
+        style.map(
+            "Diarias.Primary.TButton",
+            background=[("active", "#116b30"), ("disabled", "#7ea98a")],
+            foreground=[("disabled", "#f1f4f2")],
+        )
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
         style.configure("TLabel", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
         # Keep the settings pages on the normal light surface. Each individual
@@ -4778,171 +4820,172 @@ class SigApp:
 
     # --- Aba Diárias: holerite + talão + protocolo
     def _build_diarias_section(self):
-        """Constrói as sessões UFESP, holerite, talão e protocolo."""
-        ufesp_session = ttk.LabelFrame(self.diarias_tab, text="UFESP")
-        ufesp_session.pack(fill=X, anchor="w", padx=6, pady=(4, 2))
-        ufesp_row = ttk.Frame(ufesp_session)
-        ufesp_row.pack(fill=X, anchor="w", padx=5, pady=4)
-        ttk.Label(ufesp_row, text="Índice").pack(side=LEFT, padx=(3, 2))
-        ttk.Entry(
-            ufesp_row, textvariable=self.diarias_ufesp_index_var, width=14
-        ).pack(side=LEFT)
-        ttk.Label(ufesp_row, text="Valor").pack(side=LEFT, padx=(8, 2))
-        ttk.Entry(
-            ufesp_row, textvariable=self.diarias_ufesp_var, width=14
-        ).pack(side=LEFT)
-
-        holerite_session = ttk.LabelFrame(self.diarias_tab, text="Holerite")
-        holerite_session.pack(fill=X, anchor="w", padx=6, pady=2)
-        holerite_row = ttk.Frame(holerite_session)
-        holerite_row.pack(fill=X, anchor="w", padx=5, pady=4)
-        holerite_button = ttk.Button(
-            holerite_row,
-            text="Holerite.",
-            width=10,
-            command=lambda: self._select_diarias_pdf("holerite"),
-        )
-        holerite_button.pack(side=LEFT)
-        create_tooltip(holerite_button, "Selecionar o PDF do holerite")
+        """Organiza os dados em quatro cartões, com ações fora da área rolável."""
+        heading = ttk.Frame(self.diarias_tab)
+        heading.pack(fill=X, pady=(0, 12))
+        ttk.Label(heading, text="Diárias", style="Diarias.Title.TLabel").pack(anchor="w")
         ttk.Label(
-            holerite_row,
-            textvariable=self.diarias_holerite_file_var,
+            heading,
+            text="Confira os dados dos documentos antes de gerar o requerimento ou mapa.",
             style="Muted.TLabel",
-            width=14,
-            anchor="w",
-        ).pack(side=LEFT, padx=(6, 0))
-        ttk.Label(holerite_row, text="R$").pack(
-            side=LEFT, padx=(8, 2)
-        )
-        ttk.Entry(
-            holerite_row, textvariable=self.diarias_holerite_total_var, width=11
-        ).pack(side=LEFT)
-        ttk.Label(holerite_row, text="mês/ano").pack(
-            side=LEFT, padx=(8, 2)
-        )
-        ttk.Entry(
-            holerite_row, textvariable=self.diarias_holerite_mes_var, width=12
-        ).pack(side=LEFT)
-        holerite_reload = tk.Button(
-            holerite_row,
-            text="⟳",
-            fg="#1565d8",
-            relief="flat",
-            cursor="hand2",
-            font=("", 11, "bold"),
-            command=lambda: self._reload_diarias_pdf("holerite"),
-        )
-        holerite_reload.pack(side=LEFT, padx=(4, 0))
-        create_tooltip(holerite_reload, "Extrair novamente os dados do holerite")
+        ).pack(anchor="w", pady=(2, 0))
 
-        talao_session = ttk.LabelFrame(self.diarias_tab, text="Talão")
-        talao_session.pack(fill=X, anchor="w", padx=6, pady=2)
-        talao_row = ttk.Frame(talao_session)
-        talao_row.pack(fill=X, anchor="w", padx=5, pady=4)
-        talao_button = ttk.Button(
-            talao_row,
-            text="Talão.",
-            width=10,
-            command=lambda: self._select_diarias_pdf("talao"),
+        footer = ttk.Frame(self.diarias_tab)
+        footer.pack(side="bottom", fill=X, pady=(12, 0))
+        ttk.Separator(footer).pack(fill=X, pady=(0, 10))
+        self.diarias_generate_button = ttk.Button(
+            footer, text="Gerar requerimento", style="Diarias.Primary.TButton",
+            cursor="hand2", command=self._generate_diarias_requerimento,
         )
-        talao_button.pack(side=LEFT)
-        create_tooltip(talao_button, "Selecionar o PDF do talão da viatura")
+        self.diarias_generate_button.pack(side=RIGHT)
+        self.diarias_generate_map_button = ttk.Button(
+            footer,
+            text="Gerar mapa",
+            style="Diarias.Primary.TButton",
+            cursor="hand2",
+            command=self._generate_diarias_mapa,
+        )
+        self.diarias_generate_map_button.pack(side=RIGHT, padx=(0, 8))
+        self.diarias_meios_proprios_button = ttk.Button(
+            footer,
+            text="Gerar declaração Meios Próprios",
+            style="Diarias.Primary.TButton",
+            cursor="hand2",
+            command=self._generate_diarias_meios_proprios,
+        )
+        self.diarias_meios_proprios_button.pack(side=RIGHT, padx=(0, 8))
         ttk.Label(
-            talao_row,
-            textvariable=self.diarias_talao_file_var,
-            style="Muted.TLabel",
-            width=14,
-            anchor="w",
-        ).pack(side=LEFT, padx=(6, 0))
-        ttk.Label(talao_row, text="ida").pack(side=LEFT, padx=(8, 2))
-        ttk.Entry(
-            talao_row, textvariable=self.diarias_abertura_data_var, width=11
+            footer, text="Word (.docx) e Excel (.xlsx)", style="Muted.TLabel",
         ).pack(side=LEFT)
-        ttk.Entry(talao_row, textvariable=self.diarias_abertura_hora_var, width=6).pack(
-            side=LEFT, padx=(2, 0)
-        )
-        ttk.Label(talao_row, text="volta").pack(side=LEFT, padx=(8, 2))
-        ttk.Entry(
-            talao_row, textvariable=self.diarias_fechamento_data_var, width=11
-        ).pack(side=LEFT)
-        ttk.Entry(
-            talao_row, textvariable=self.diarias_fechamento_hora_var, width=6
-        ).pack(side=LEFT, padx=(2, 0))
-        talao_reload = tk.Button(
-            talao_row,
-            text="⟳",
-            fg="#1565d8",
-            relief="flat",
-            cursor="hand2",
-            font=("", 11, "bold"),
-            command=lambda: self._reload_diarias_pdf("talao"),
-        )
-        talao_reload.pack(side=LEFT, padx=(4, 0))
-        create_tooltip(talao_reload, "Extrair novamente os dados do talão")
 
-        protocolo_session = ttk.LabelFrame(self.diarias_tab, text="Protocolo")
-        protocolo_session.pack(fill=X, anchor="w", padx=6, pady=2)
-        protocolo_row = ttk.Frame(protocolo_session)
-        protocolo_row.pack(fill=X, anchor="w", padx=5, pady=4)
-        protocolo_button = ttk.Button(
-            protocolo_row,
-            text="Protocolo.",
-            width=10,
-            command=lambda: self._select_diarias_pdf("protocolo"),
+        viewport = ttk.Frame(self.diarias_tab)
+        viewport.pack(fill=BOTH, expand=True)
+        canvas = Canvas(viewport, highlightthickness=0, background="#f4f7f6", width=1)
+        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side=RIGHT, fill=Y, padx=(8, 0))
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window(0, 0, window=body, anchor="nw")
+        canvas.bind(
+            "<Configure>", lambda event: canvas.itemconfigure(body_window, width=event.width),
         )
-        protocolo_button.pack(side=LEFT)
-        create_tooltip(protocolo_button, "Selecionar o PDF do protocolo da diária")
-        ttk.Label(
-            protocolo_row,
-            textvariable=self.diarias_protocolo_file_var,
-            style="Muted.TLabel",
-            width=14,
-            anchor="w",
-        ).pack(side=LEFT, padx=(6, 0))
-        ttk.Label(protocolo_row, text="requerimento").pack(
-            side=LEFT, padx=(8, 2)
+        body.bind(
+            "<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
         )
-        ttk.Entry(protocolo_row, textvariable=self.diarias_req_var, width=12).pack(
-            side=LEFT
-        )
-        ttk.Label(protocolo_row, text="mapa").pack(
-            side=LEFT, padx=(8, 2)
-        )
-        ttk.Entry(protocolo_row, textvariable=self.diarias_mapa_var, width=12).pack(
-            side=LEFT
-        )
-        ttk.Label(protocolo_row, text="data").pack(
-            side=LEFT, padx=(8, 2)
-        )
-        ttk.Entry(protocolo_row, textvariable=self.diarias_data_var, width=11).pack(
-            side=LEFT
-        )
-        protocolo_reload = tk.Button(
-            protocolo_row,
-            text="⟳",
-            fg="#1565d8",
-            relief="flat",
-            cursor="hand2",
-            font=("", 11, "bold"),
-            command=lambda: self._reload_diarias_pdf("protocolo"),
-        )
-        protocolo_reload.pack(side=LEFT, padx=(4, 0))
-        create_tooltip(protocolo_reload, "Extrair novamente os protocolos do PDF")
+        self.diarias_sections = {}
 
-        gerar_button = tk.Button(
-            self.diarias_tab,
-            text="Gerar requerimento",
-            fg="#188038",
-            activeforeground="#137333",
-            cursor="hand2",
-            relief="flat",
-            font=("", 10, "bold"),
-            command=self._generate_diarias_requerimento,
+        def section(title, kind=None, file_var=None):
+            card = ttk.Frame(body, style="Diarias.Card.TFrame", padding=(14, 10))
+            card.pack(fill=X, pady=(0, 10))
+            self.diarias_sections[title] = card
+            header = ttk.Frame(card, style="Diarias.Card.TFrame")
+            header.pack(fill=X, pady=(0, 8))
+            header.columnconfigure(1, weight=1)
+            ttk.Label(header, text=title, style="Diarias.Section.TLabel").grid(
+                row=0, column=0, sticky="w",
+            )
+            if kind:
+                # A largura do arquivo é flexível: nomes longos não empurram as ações.
+                filename = ttk.Label(
+                    header, textvariable=file_var, width=1, anchor="w",
+                    style="Diarias.File.TLabel",
+                )
+                filename.grid(row=0, column=1, sticky="ew", padx=12)
+                select = ttk.Button(
+                    header, text="Selecionar PDF", style="Diarias.Pdf.TButton",
+                    command=lambda: self._select_diarias_pdf(kind),
+                )
+                select.grid(row=0, column=2)
+                create_tooltip(select, f"Selecionar o PDF de {title.lower()}")
+                reload_button = ttk.Button(
+                    header, text="⟳", width=3, style="Diarias.Reload.TButton",
+                    command=lambda: self._reload_diarias_pdf(kind),
+                )
+                reload_button.grid(row=0, column=3, padx=(6, 0))
+                create_tooltip(reload_button, "Extrair novamente os dados do PDF")
+            fields = ttk.Frame(card, style="Diarias.Card.TFrame")
+            fields.pack(fill=X)
+            return fields
+
+        def field(parent, column, label, variable, width=16):
+            gap = (0, 14)
+            ttk.Label(parent, text=label, style="Diarias.Field.TLabel").grid(
+                row=0, column=column, sticky="w", padx=gap, pady=(0, 3),
+            )
+            ttk.Entry(parent, textvariable=variable, width=width).grid(
+                row=1, column=column, sticky="ew", padx=gap,
+            )
+
+        ufesp = section("UFESP")
+        field(ufesp, 0, "Índice", self.diarias_ufesp_index_var)
+        field(ufesp, 1, "Valor (R$)", self.diarias_ufesp_var)
+
+        holerite = section("Holerite", "holerite", self.diarias_holerite_file_var)
+        field(holerite, 0, "Total de vencimentos (R$)", self.diarias_holerite_total_var, 22)
+        field(holerite, 1, "Mês/ano", self.diarias_holerite_mes_var)
+
+        talao = section("Talão", "talao", self.diarias_talao_file_var)
+        field(talao, 0, "Ida · data", self.diarias_abertura_data_var)
+        field(talao, 1, "Ida · hora", self.diarias_abertura_hora_var, 9)
+        field(talao, 2, "Volta · data", self.diarias_fechamento_data_var)
+        field(talao, 3, "Volta · hora", self.diarias_fechamento_hora_var, 9)
+        ttk.Checkbutton(
+            talao,
+            text="Meios Próprios",
+            variable=self.diarias_meios_proprios_var,
+            style="Diarias.TCheckbutton",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+        protocolo = section("Protocolo", "protocolo", self.diarias_protocolo_file_var)
+        field(protocolo, 0, "Requerimento", self.diarias_req_var)
+        field(protocolo, 1, "Mapa", self.diarias_mapa_var)
+        field(protocolo, 2, "Data", self.diarias_data_var)
+
+        def scroll(event):
+            # Não usar bind_all: a rolagem pertence somente à aba Diárias.
+            if body.winfo_height() > canvas.winfo_height():
+                direction = -1 if event.delta > 0 else 1
+                canvas.yview_scroll(direction * max(1, abs(event.delta) // 120), "units")
+            return "break"
+
+        def bind_scroll(widget):
+            widget.bind("<MouseWheel>", scroll, add="+")
+            for child in widget.winfo_children():
+                bind_scroll(child)
+
+        bind_scroll(canvas)
+
+    def _start_diarias_activity(self, key: str, label: str) -> float:
+        """Abre uma linha de atividade para uma ação da aba Diárias."""
+        started_at = time.perf_counter()
+        self._begin_activity_step(key, label)
+        return started_at
+
+    def _finish_diarias_activity(
+        self,
+        key: str,
+        started_at: float,
+        *,
+        error: str | None = None,
+        suffix: str | None = None,
+        tag: str | None = None,
+    ) -> None:
+        """Fecha a linha de Diárias com duração e estado final."""
+        self._finish_activity_step(
+            key,
+            max(0.0, time.perf_counter() - started_at),
+            error=error,
+            suffix=suffix,
+            tag=tag,
         )
-        gerar_button.pack(anchor="w", pady=(10, 0))
 
     def _generate_diarias_requerimento(self):
         """Monta o DOCX com os dados preenchidos na aba Diárias."""
+        activity_key = "diarias:gerar-requerimento"
+        started_at = self._start_diarias_activity(
+            activity_key, "Gerando requerimento de diária"
+        )
         try:
             template_kind, replacements = prepare_diarias_requerimento(
                 data_abertura=self.diarias_abertura_data_var.get(),
@@ -4954,25 +4997,43 @@ class SigApp:
                 protocolo_requerimento=self.diarias_req_var.get(),
             )
         except ValueError as exc:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix=f"- dados inválidos: {exc}",
+                tag="activity_step_warning",
+            )
             messagebox.showwarning("Diárias", str(exc), parent=self.root)
             return
 
-        destination = filedialog.asksaveasfilename(
+        destination_dir = filedialog.askdirectory(
             parent=self.root,
-            title="Salvar requerimento de diária",
-            defaultextension=".docx",
-            initialfile=f"requerimento_diaria_{template_kind}.docx",
-            filetypes=(("Documento do Word", "*.docx"),),
+            title="Selecionar pasta para salvar o requerimento",
+            mustexist=True,
         )
-        if not destination:
+        if not destination_dir:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix="- cancelado",
+                tag="activity_step_warning",
+            )
             return
         try:
+            destination = next_available_diarias_requerimento_path(
+                Path(destination_dir),
+                template_kind,
+                replacements["data_ida"],
+            )
             generate_diarias_requerimento(
                 template_kind,
-                Path(destination),
+                destination,
                 replacements,
             )
         except Exception as exc:
+            self._finish_diarias_activity(
+                activity_key, started_at, error=str(exc)
+            )
             messagebox.showerror(
                 "Diárias",
                 f"Não foi possível gerar o requerimento: {exc}",
@@ -4980,10 +5041,147 @@ class SigApp:
             )
             return
 
+        self._finish_diarias_activity(
+            activity_key,
+            started_at,
+            suffix=f"- salvo: {destination.name}",
+        )
         tipo = "meia diária" if template_kind == "meia" else "diária inteira"
         messagebox.showinfo(
             "Diárias",
             f"Requerimento de {tipo} salvo em:\n{destination}",
+            parent=self.root,
+        )
+
+    def _generate_diarias_mapa(self):
+        """Gera o mapa de diária em Excel com os dados extraídos na aba."""
+        activity_key = "diarias:gerar-mapa"
+        started_at = self._start_diarias_activity(
+            activity_key, "Gerando mapa de diária"
+        )
+        try:
+            values = diarias_mapa.prepare_diarias_mapa(
+                total_vencimentos=self.diarias_holerite_total_var.get(),
+                valor_ufesp=self.diarias_ufesp_var.get(),
+                data_ida=self.diarias_abertura_data_var.get(),
+                horario_ida=self.diarias_abertura_hora_var.get(),
+                data_volta=self.diarias_fechamento_data_var.get(),
+                horario_volta=self.diarias_fechamento_hora_var.get(),
+                data_protocolo=self.diarias_data_var.get(),
+                protocolo_requerimento=self.diarias_req_var.get(),
+                protocolo_mapa=self.diarias_mapa_var.get(),
+                meios_proprios=self.diarias_meios_proprios_var.get(),
+            )
+        except ValueError as exc:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix=f"- dados inválidos: {exc}",
+                tag="activity_step_warning",
+            )
+            messagebox.showwarning("Diárias", str(exc), parent=self.root)
+            return
+
+        destination_dir = filedialog.askdirectory(
+            parent=self.root,
+            title="Selecionar pasta para salvar o mapa",
+            mustexist=True,
+        )
+        if not destination_dir:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix="- cancelado",
+                tag="activity_step_warning",
+            )
+            return
+
+        try:
+            destination = diarias_mapa.next_available_diarias_mapa_path(
+                Path(destination_dir), values.data_ida
+            )
+            diarias_mapa.generate_diarias_mapa(destination, values)
+        except Exception as exc:
+            self._finish_diarias_activity(
+                activity_key, started_at, error=str(exc)
+            )
+            messagebox.showerror(
+                "Diárias",
+                f"Não foi possível gerar o mapa: {exc}",
+                parent=self.root,
+            )
+            return
+
+        self._finish_diarias_activity(
+            activity_key,
+            started_at,
+            suffix=f"- salvo: {destination.name}",
+        )
+        messagebox.showinfo(
+            "Diárias",
+            f"Mapa salvo em:\n{destination}",
+            parent=self.root,
+        )
+
+    def _generate_diarias_meios_proprios(self):
+        """Gera a declaração de meios próprios com as datas do talão e do protocolo."""
+        activity_key = "diarias:gerar-meios-proprios"
+        started_at = self._start_diarias_activity(
+            activity_key, "Gerando declaração de meios próprios"
+        )
+        data_ida = self.diarias_abertura_data_var.get()
+        try:
+            replacements = prepare_declaracao_meios_proprios(
+                data_ida=data_ida,
+                data_protocolo=self.diarias_data_var.get(),
+            )
+        except ValueError as exc:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix=f"- dados inválidos: {exc}",
+                tag="activity_step_warning",
+            )
+            messagebox.showwarning("Diárias", str(exc), parent=self.root)
+            return
+
+        destination_dir = filedialog.askdirectory(
+            parent=self.root,
+            title="Selecionar pasta para salvar a declaração",
+            mustexist=True,
+        )
+        if not destination_dir:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix="- cancelado",
+                tag="activity_step_warning",
+            )
+            return
+        try:
+            destination = next_available_diarias_declaracao_path(
+                Path(destination_dir), data_ida
+            )
+            generate_declaracao_meios_proprios(destination, replacements)
+        except Exception as exc:
+            self._finish_diarias_activity(
+                activity_key, started_at, error=str(exc)
+            )
+            messagebox.showerror(
+                "Diárias",
+                f"Não foi possível gerar a declaração de meios próprios: {exc}",
+                parent=self.root,
+            )
+            return
+
+        self._finish_diarias_activity(
+            activity_key,
+            started_at,
+            suffix=f"- salvo: {destination.name}",
+        )
+        messagebox.showinfo(
+            "Diárias",
+            f"Declaração de meios próprios salva em:\n{destination}",
             parent=self.root,
         )
 
@@ -5017,6 +5215,10 @@ class SigApp:
 
     def _attach_diarias_holerite_pdf(self, source_path):
         """Extrai e guarda uma cópia do holerite antes de torná-lo o anexo ativo."""
+        activity_key = "diarias:holerite:anexar"
+        started_at = self._start_diarias_activity(
+            activity_key, "Lendo e anexando holerite"
+        )
         try:
             total, mes = diarias_protocolo.extract_holerite_pdf(source_path)
             if not total or not mes:
@@ -5025,6 +5227,12 @@ class SigApp:
                     faltando.append("o total de vencimentos")
                 if not mes:
                     faltando.append("o mês do holerite")
+                self._finish_diarias_activity(
+                    activity_key,
+                    started_at,
+                    suffix="- dados não encontrados: " + ", ".join(faltando),
+                    tag="activity_step_warning",
+                )
                 messagebox.showwarning(
                     "Diárias",
                     "Não encontrei "
@@ -5038,6 +5246,9 @@ class SigApp:
                 source_path, total, mes
             )
         except Exception as exc:
+            self._finish_diarias_activity(
+                activity_key, started_at, error=str(exc)
+            )
             messagebox.showerror(
                 "Diárias",
                 f"Não foi possível ler ou guardar o holerite localmente: {exc}",
@@ -5049,9 +5260,22 @@ class SigApp:
         self.diarias_holerite_file_var.set(display_name)
         self.diarias_holerite_total_var.set(total)
         self.diarias_holerite_mes_var.set(mes)
+        self._finish_diarias_activity(
+            activity_key,
+            started_at,
+            suffix=f"- anexado: {display_name}",
+        )
 
     def _reload_diarias_pdf(self, kind):
         """Reextrai do PDF e preenche os campos imediatamente."""
+        titles = {
+            "holerite": "holerite",
+            "talao": "talão",
+            "protocolo": "protocolo",
+        }
+        activity_key = f"diarias:{kind}:reextrair"
+        label = f"Lendo dados do {titles.get(kind, kind)}"
+        started_at = self._start_diarias_activity(activity_key, label)
         if kind == "holerite":
             caminho = self.diarias_holerite_path
         elif kind == "talao":
@@ -5059,6 +5283,12 @@ class SigApp:
         else:
             caminho = self.diarias_protocolo_path
         if not caminho:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix="- PDF não selecionado",
+                tag="activity_step_warning",
+            )
             messagebox.showwarning(
                 "Diárias",
                 "Selecione primeiro o PDF.",
@@ -5074,6 +5304,12 @@ class SigApp:
                         faltando.append("o total de vencimentos")
                     if not mes:
                         faltando.append("o mês do holerite")
+                    self._finish_diarias_activity(
+                        activity_key,
+                        started_at,
+                        suffix="- dados não encontrados: " + ", ".join(faltando),
+                        tag="activity_step_warning",
+                    )
                     messagebox.showwarning(
                         "Diárias",
                         "Não encontrei "
@@ -5116,6 +5352,9 @@ class SigApp:
                     ("a data do protocolo", data),
                 )
         except Exception as exc:
+            self._finish_diarias_activity(
+                activity_key, started_at, error=str(exc)
+            )
             messagebox.showerror(
                 "Diárias",
                 f"Não foi possível ler o PDF: {exc}",
@@ -5124,6 +5363,12 @@ class SigApp:
             return
         faltando = [rotulo for rotulo, valor in valores if not valor]
         if faltando:
+            self._finish_diarias_activity(
+                activity_key,
+                started_at,
+                suffix="- dados não encontrados: " + ", ".join(faltando),
+                tag="activity_step_warning",
+            )
             messagebox.showwarning(
                 "Diárias",
                 "Não encontrei "
@@ -5131,6 +5376,8 @@ class SigApp:
                 + " no PDF; confira o arquivo ou digite manualmente.",
                 parent=self.root,
             )
+            return
+        self._finish_diarias_activity(activity_key, started_at)
 
     def _save_diarias_holerite_data(self, *_trace_args):
         """Persiste imediatamente os dois campos compartilhados no mês."""

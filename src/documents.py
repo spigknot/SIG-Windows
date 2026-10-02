@@ -31,6 +31,24 @@ DIARIAS_REQUERIMENTO_TEMPLATE_NAMES = {
     "inteira": "modelo_requerimento_inteira.docx",
 }
 
+MEIOS_PROPRIOS_TEMPLATE_NAME = "modelo_meios_proprios.docx"
+
+# Meses em minúsculas para as datas por extenso dos documentos de diárias.
+DIARIAS_MONTHS = (
+    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+)
+
+
+def _diarias_month_year(value: datetime) -> str:
+    """Mês/ano como nos modelos de diárias: ``dezembro/2026``."""
+    return f"{DIARIAS_MONTHS[value.month - 1]}/{value.year}"
+
+
+def _diarias_long_date(value: datetime) -> str:
+    """Data por extenso como nos modelos de diárias: ``31 de dezembro de 2026``."""
+    return f"{value.day} de {DIARIAS_MONTHS[value.month - 1]} de {value.year}"
+
 
 def build_cf_html(html_text: str | bytes) -> bytes:
     """Build a Windows CF_HTML payload using UTF-8 byte offsets."""
@@ -656,12 +674,8 @@ def prepare_diarias_requerimento(
         )
 
     template_kind = "inteira" if volta - saida > timedelta(hours=12) else "meia"
-    meses = (
-        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
-        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
-    )
     replacements = {
-        "mes_e_ano": f"{meses[saida.month - 1]}/{saida.year}",
+        "mes_e_ano": _diarias_month_year(saida),
         "data_ida": saida.strftime("%d/%m/%Y"),
         "horario_ida": saida.strftime("%Hh%Mmin"),
         "horario_volta": volta.strftime("%Hh%Mmin"),
@@ -682,10 +696,7 @@ def prepare_diarias_requerimento(
     except ValueError:
         protocol_date = None
     if protocol_date:
-        month = meses[protocol_date.month - 1]
-        replacements["data_protocolo"] = (
-            f"{protocol_date.day} de {month} de {protocol_date.year}"
-        )
+        replacements["data_protocolo"] = _diarias_long_date(protocol_date)
         replacements["data_protocolo2"] = protocol_date.strftime("%d/%m/%Y")
 
     protocol_number = str(protocolo_requerimento or "").strip()
@@ -724,6 +735,85 @@ def generate_diarias_requerimento(
         replacements,
         allow_unresolved_markers=True,
     )
+
+
+def next_available_diarias_requerimento_path(
+    directory: Path, template_kind: str, data_ida: str
+) -> Path:
+    """Monta o nome padrão e encontra o próximo sufixo livre na pasta."""
+    if template_kind not in DIARIAS_REQUERIMENTO_TEMPLATE_NAMES:
+        raise ValueError(f"Tipo de requerimento inválido: {template_kind}")
+    date_ida = datetime.strptime(str(data_ida).strip(), "%d/%m/%Y")
+    stem = f"requerimento_{template_kind}_{date_ida.strftime('%d-%m-%Y')}"
+    directory = Path(directory)
+    candidate = directory / f"{stem}.docx"
+    suffix = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}_{suffix}.docx"
+        suffix += 1
+    return candidate
+
+
+def prepare_declaracao_meios_proprios(
+    *,
+    data_ida: str,
+    data_protocolo: str,
+) -> dict[str, str]:
+    """Monta as substituições da declaração de meios próprios.
+
+    As duas datas chegam dos PDFs (talão e protocolo) no formato ``dd/mm/aaaa``;
+    a declaração usa o mês/ano da ida e as duas datas por extenso.
+    """
+    try:
+        ida = datetime.strptime(str(data_ida or "").strip(), "%d/%m/%Y")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Confira a data de ida do talão.") from exc
+    try:
+        protocolo = datetime.strptime(str(data_protocolo or "").strip(), "%d/%m/%Y")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Confira a data do protocolo.") from exc
+    return {
+        "mes_e_ano": _diarias_month_year(ida),
+        "data_ida": _diarias_long_date(ida),
+        "data_protocolo": _diarias_long_date(protocolo),
+    }
+
+
+def ensure_meios_proprios_template() -> Path:
+    """Resolve o modelo da declaração de meios próprios na pasta `modelos/`."""
+    external_path = app_base_dir() / "modelos" / MEIOS_PROPRIOS_TEMPLATE_NAME
+    if not external_path.is_file():
+        raise FileNotFoundError(
+            f"Modelo não encontrado: {external_path}\n"
+            "Os modelos são entregues pela instalação/atualização do SIG. "
+            "Execute uma atualização para receber o modelo ausente."
+        )
+    return external_path
+
+
+def generate_declaracao_meios_proprios(
+    output_path: Path,
+    replacements: dict[str, str],
+) -> int:
+    """Gera o DOCX da declaração de meios próprios a partir do modelo."""
+    return generate_docx_from_template(
+        ensure_meios_proprios_template(),
+        Path(output_path),
+        replacements,
+    )
+
+
+def next_available_diarias_declaracao_path(directory: Path, data_ida: str) -> Path:
+    """Monta o nome padrão e encontra o próximo sufixo livre na pasta."""
+    date_ida = datetime.strptime(str(data_ida).strip(), "%d/%m/%Y")
+    stem = f"declaracao_meios_proprios_{date_ida.strftime('%d-%m-%Y')}"
+    directory = Path(directory)
+    candidate = directory / f"{stem}.docx"
+    suffix = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}_{suffix}.docx"
+        suffix += 1
+    return candidate
 
 
 def ensure_document_templates() -> dict[str, Path]:

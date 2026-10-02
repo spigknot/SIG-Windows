@@ -12,7 +12,8 @@ Orquestracao .. sig_app.py (classe SigApp), vad_worker.py, batch_execution.py
 Integracoes ... stt_clients.py, http_clients.py, text_models.py, imei_lookup.py
 Processamento . transcription_parsing.py, log_formatting.py, documents.py,
                 reporting.py, qualification.py, name_database.py, audio_io.py,
-                batch_errors.py, media_probe.py, diarias_protocolo.py
+                batch_errors.py, media_probe.py, diarias_protocolo.py,
+                diarias_mapa.py
 Config ........ providers.py, settings_store.py, prompt_store.py
 Persistencia .. diarias_store.py
 Dominio ....... domain_models.py
@@ -51,6 +52,7 @@ Ambiente ...... app_env.py
 | `name_database.py` | Base de nomes: extracao, normalizacao, chave fonetica | UI |
 | `qualification.py` | Qualificacao de ocorrencias: parsing de JSON, labels, status | UI |
 | `diarias_protocolo.py` | Extracao dos campos dos PDFs de protocolo, talão e holerite | UI, persistencia |
+| `diarias_mapa.py` | Validação dos dados e preenchimento do modelo Excel de mapa de diária, preservando o formato `.xls` | UI, extração de PDFs |
 | `diarias_store.py` | Persistencia local do UFESP, dos valores e do PDF ativo do holerite da aba Diarias | Leitura de PDF, UI |
 | `ui_widgets.py` | Widgets reutilizaveis (`create_tooltip`, `PreviewIconButton`) | Regra de negocio |
 | `ffmpeg_tools_panel.py` | Aba FFmpeg: conversao, corte, juncao, aceleracao, player, linha do tempo | STT/transcricao |

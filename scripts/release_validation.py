@@ -45,8 +45,10 @@ REQUIRED_FULL_FILES = (
     "prompts/qualificacao_user.txt",
     "modelos/modelo_declaracoes.docx",
     "modelos/modelo_depoimento.docx",
+    "modelos/modelo_meios_proprios.docx",
     "modelos/modelo_requerimento_meia.docx",
     "modelos/modelo_requerimento_inteira.docx",
+    "modelos/modelo_mapa.xlsx",
 )
 REQUIRED_FULL_DIRECTORIES = ("_internal", "vad_deps", "prompts", "modelos")
 RUNTIME_ASSET_FILES = ("ffmpeg.exe", "ffplay.exe", "ffprobe.exe")
@@ -149,6 +151,7 @@ def source_fingerprint(repo_root: Path) -> str:
     digest = hashlib.sha256()
     for relative in (
         "src/sig_app.py",
+        "src/diarias_mapa.py",
         "src/vad_worker.py",
         "src/assistant_prompts.py",
         "updater_v2/updater.py",
@@ -163,8 +166,10 @@ def source_fingerprint(repo_root: Path) -> str:
         "prompts/qualificacao_user.txt",
         "modelos/modelo_declaracoes.docx",
         "modelos/modelo_depoimento.docx",
+        "modelos/modelo_meios_proprios.docx",
         "modelos/modelo_requerimento_meia.docx",
         "modelos/modelo_requerimento_inteira.docx",
+        "modelos/modelo_mapa.xlsx",
     ):
         path = repo_root / relative
         if not path.is_file():
