@@ -2,6 +2,7 @@
 import json
 import threading
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -47,9 +48,38 @@ class DeepgramRestTests(unittest.TestCase):
         query = sig_app.deepgram_query_string(_settings())
         self.assertIn("model=nova-3", query)
         self.assertIn("language=pt", query)
-        self.assertIn("smart_format=true", query)
+        self.assertIn("smart_format=false", query)
+        self.assertIn("numerals=false", query)
         self.assertIn("punctuate=true", query)
+        self.assertNotIn("smart_format=true", query)
         self.assertNotIn("diarize", query)
+
+    def test_valores_fixos_de_smart_format_numerals_e_punctuate(self):
+        """Vacina (02/10): smart_format=false, numerals=false, punctuate=true.
+
+        Os MESMOS valores no REST (query da URL do POST) e no WS (a mesma query
+        + encoding/streaming). `paragraphs` nunca entra. Voltar a
+        `smart_format=true` (ou sumir com `numerals`) quebra aqui de proposito.
+        """
+        settings = _settings(transcription_server=sig_app.DEEPGRAM_API_NAME)
+        rest = dict(
+            urllib.parse.parse_qsl(urllib.parse.urlparse(sig_app.transcribe_url(settings)).query)
+        )
+        self.assertEqual(rest["smart_format"], "false")
+        self.assertEqual(rest["numerals"], "false")
+        self.assertEqual(rest["punctuate"], "true")
+        self.assertNotIn("paragraphs", rest)
+
+        ws_query = sig_app.deepgram_query_string(settings, "pt")
+        ws_query += (
+            "&encoding=linear16&sample_rate=16000&channels=1"
+            "&interim_results=true&endpointing=900"
+        )
+        ws = dict(urllib.parse.parse_qsl(ws_query))
+        self.assertEqual(ws["smart_format"], "false")
+        self.assertEqual(ws["numerals"], "false")
+        self.assertEqual(ws["punctuate"], "true")
+        self.assertNotIn("paragraphs", ws)
 
     def test_transcribe_url_has_query_for_deepgram(self):
         settings = _settings(transcription_server=sig_app.DEEPGRAM_API_NAME)

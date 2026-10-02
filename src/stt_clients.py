@@ -71,7 +71,17 @@ def deepgram_query_string(settings: dict, language: str | None = None, diarize: 
     """
     if language is None:
         language = stt_provider_rules.deepgram_language_param(settings)
-    params = ["model=nova-3", f"language={language}", "smart_format=true", "punctuate=true"]
+    # Valores fixos (02/10, a pedido do usuário): smart_format=false,
+    # numerals=false e punctuate=true — os MESMOS no REST (query da URL) e no
+    # WS (esta query + encoding/streaming em sig_app._deepgram_live_capture_loop).
+    # Vacina: tests/test_deepgram.py::test_valores_fixos_de_smart_format_numerals_e_punctuate
+    params = [
+        "model=nova-3",
+        f"language={language}",
+        "smart_format=false",
+        "numerals=false",
+        "punctuate=true",
+    ]
     if diarize or settings.get("diarize") or settings.get("grok_diarize"):
         diarize_param = stt_provider_rules.deepgram_diarize_query(True)
         if diarize_param:
