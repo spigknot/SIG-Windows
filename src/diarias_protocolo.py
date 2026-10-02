@@ -35,22 +35,6 @@ _HOLERITE_TOTAL_LABEL_RE = re.compile(r"\bTotal\s+(Vencimentos)\b", re.I)
 _HOLERITE_PAGAMENTO_LABEL_RE = re.compile(r"\bData\s+Pagamento\b", re.I)
 _HOLERITE_AMOUNT_RE = re.compile(r"(?<!\d)(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?!\d)")
 _DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
-_MESES_PT = (
-    "janeiro",
-    "fevereiro",
-    "março",
-    "abril",
-    "maio",
-    "junho",
-    "julho",
-    "agosto",
-    "setembro",
-    "outubro",
-    "novembro",
-    "dezembro",
-)
-
-
 def extract_protocol_numbers(text: str) -> tuple[str, str]:
     """Devolve `(mapa, requerimento)`; `""` onde o padrão não aparece."""
     mapa_match = _MAPA_RE.search(text or "")
@@ -168,13 +152,13 @@ def _extract_holerite_page(text_page, text: str) -> tuple[str, str]:
             except ValueError:
                 pagamento = None
             if pagamento:
-                month = _MESES_PT[pagamento.month - 1]
+                month = pagamento.strftime("%m/%Y")
 
     return total, month
 
 
 def extract_holerite_pdf(path: str | Path) -> tuple[str, str]:
-    """Lê o PDF e devolve `(total_vencimentos, mes_do_pagamento)`.
+    """Lê o PDF e devolve `(total_vencimentos, mes_ano_do_pagamento)`.
 
     Os campos ficam em colunas distintas do documento. A extração usa a posição
     de cada rótulo e lê a célula logo abaixo dele, evitando confundir os valores

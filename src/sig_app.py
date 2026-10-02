@@ -1337,6 +1337,13 @@ class SigApp:
         self.diarias_protocolo_file_var = StringVar(master=self.root, value="")
         self.diarias_talao_file_var = StringVar(master=self.root, value="")
         holerite_total, holerite_mes = diarias_store.load_holerite()
+        self.diarias_ufesp_index_var = StringVar(
+            master=self.root, value=diarias_store.load_ufesp_index()
+        )
+        self.diarias_ufesp_index_save_error_shown = False
+        self.diarias_ufesp_index_var.trace_add(
+            "write", self._save_diarias_ufesp_index_data
+        )
         self.diarias_ufesp_var = StringVar(
             master=self.root, value=diarias_store.load_ufesp()
         )
@@ -1407,6 +1414,10 @@ class SigApp:
         self.root.after(0, self._refresh_microphone_availability)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self.diarias_holerite_path and not re.fullmatch(
+            r"(?:0[1-9]|1[0-2])/\d{4}", holerite_mes.strip()
+        ):
+            self.root.after_idle(self._migrate_saved_diarias_holerite_month)
 
     def _install_error_reporter(self):
         """Erro em callback do Tk vai para o log e para um arquivo de texto.
@@ -2808,7 +2819,7 @@ class SigApp:
         top = ttk.Frame(outer)
         top.pack(fill=X)
         self.update_button = ttk.Button(
-            top,
+            outer,
             textvariable=self.update_button_var,
             style="Update.TButton",
             command=self.install_available_update,
@@ -4770,9 +4781,16 @@ class SigApp:
         """Constrói as sessões UFESP, holerite, talão e protocolo."""
         ufesp_session = ttk.LabelFrame(self.diarias_tab, text="UFESP")
         ufesp_session.pack(fill=X, anchor="w", padx=6, pady=(4, 2))
+        ufesp_row = ttk.Frame(ufesp_session)
+        ufesp_row.pack(fill=X, anchor="w", padx=5, pady=4)
+        ttk.Label(ufesp_row, text="Índice").pack(side=LEFT, padx=(3, 2))
         ttk.Entry(
-            ufesp_session, textvariable=self.diarias_ufesp_var, width=14
-        ).pack(side=LEFT, padx=8, pady=5)
+            ufesp_row, textvariable=self.diarias_ufesp_index_var, width=14
+        ).pack(side=LEFT)
+        ttk.Label(ufesp_row, text="Valor").pack(side=LEFT, padx=(8, 2))
+        ttk.Entry(
+            ufesp_row, textvariable=self.diarias_ufesp_var, width=14
+        ).pack(side=LEFT)
 
         holerite_session = ttk.LabelFrame(self.diarias_tab, text="Holerite")
         holerite_session.pack(fill=X, anchor="w", padx=6, pady=2)
@@ -5132,6 +5150,24 @@ class SigApp:
         else:
             self.diarias_holerite_save_error_shown = False
 
+    def _migrate_saved_diarias_holerite_month(self):
+        """Atualiza meses antigos lendo o holerite que já está salvo no perfil."""
+        if re.fullmatch(
+            r"(?:0[1-9]|1[0-2])/\d{4}",
+            self.diarias_holerite_mes_var.get().strip(),
+        ):
+            return
+        if not self.diarias_holerite_path:
+            return
+        try:
+            _total, mes_ano = diarias_protocolo.extract_holerite_pdf(
+                self.diarias_holerite_path
+            )
+        except Exception:
+            return
+        if re.fullmatch(r"(?:0[1-9]|1[0-2])/\d{4}", mes_ano):
+            self.diarias_holerite_mes_var.set(mes_ano)
+
     def _save_diarias_ufesp_data(self, *_trace_args):
         """Persiste imediatamente o valor UFESP da aba Diárias."""
         try:
@@ -5146,6 +5182,21 @@ class SigApp:
                 )
         else:
             self.diarias_ufesp_save_error_shown = False
+
+    def _save_diarias_ufesp_index_data(self, *_trace_args):
+        """Persiste imediatamente o índice UFESP da aba Diárias."""
+        try:
+            diarias_store.save_ufesp_index(self.diarias_ufesp_index_var.get())
+        except Exception as exc:
+            if not self.diarias_ufesp_index_save_error_shown:
+                self.diarias_ufesp_index_save_error_shown = True
+                messagebox.showerror(
+                    "Diárias",
+                    f"Não foi possível salvar o índice UFESP localmente: {exc}",
+                    parent=self.root,
+                )
+        else:
+            self.diarias_ufesp_index_save_error_shown = False
 
     def _update_imei_inputs(self):
         if self.imei_formatting:
@@ -16463,7 +16514,11 @@ try {
                     self.update_button_var.set("Atualizar")
                     self.update_button.configure(state="normal")
                     if not self.update_button.winfo_ismapped():
-                        self.update_button.pack(side=RIGHT, anchor="n")
+                        # Use the existing top padding and tab-bar gap. A placed
+                        # widget does not resize the packed rows below it.
+                        self.update_button.place(
+                            relx=1.0, x=-18, y=0, anchor="ne"
+                        )
                     self._finish_activity_step(
                         "update:check",
                         time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),

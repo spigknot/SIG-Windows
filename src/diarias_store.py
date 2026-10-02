@@ -59,10 +59,23 @@ def load_ufesp() -> str:
     return value if isinstance(value, str) else ""
 
 
+def load_ufesp_index() -> str:
+    """Devolve o último índice UFESP salvo, ou uma string vazia."""
+    value = _read_holerite_data().get("ufesp_index")
+    return value if isinstance(value, str) else ""
+
+
 def save_ufesp(value: str) -> None:
     """Persiste UFESP sem alterar os dados ou o anexo do holerite."""
     data = _read_holerite_data()
     data["ufesp"] = str(value or "")
+    _write_holerite_data(data)
+
+
+def save_ufesp_index(value: str) -> None:
+    """Persiste o índice UFESP sem alterar os demais dados de Diárias."""
+    data = _read_holerite_data()
+    data["ufesp_index"] = str(value or "")
     _write_holerite_data(data)
 
 
