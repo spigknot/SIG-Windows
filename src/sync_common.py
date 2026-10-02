@@ -49,6 +49,8 @@ SYNC_REQUIRED_FILES = (
     "prompts/qualificacao_user.txt",
     "modelos/modelo_declaracoes.docx",
     "modelos/modelo_depoimento.docx",
+    "modelos/modelo_requerimento_meia.docx",
+    "modelos/modelo_requerimento_inteira.docx",
 )
 
 SYNC_MANAGED_TOP_LEVELS = (

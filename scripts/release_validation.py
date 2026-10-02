@@ -45,6 +45,8 @@ REQUIRED_FULL_FILES = (
     "prompts/qualificacao_user.txt",
     "modelos/modelo_declaracoes.docx",
     "modelos/modelo_depoimento.docx",
+    "modelos/modelo_requerimento_meia.docx",
+    "modelos/modelo_requerimento_inteira.docx",
 )
 REQUIRED_FULL_DIRECTORIES = ("_internal", "vad_deps", "prompts", "modelos")
 RUNTIME_ASSET_FILES = ("ffmpeg.exe", "ffplay.exe", "ffprobe.exe")
@@ -161,6 +163,8 @@ def source_fingerprint(repo_root: Path) -> str:
         "prompts/qualificacao_user.txt",
         "modelos/modelo_declaracoes.docx",
         "modelos/modelo_depoimento.docx",
+        "modelos/modelo_requerimento_meia.docx",
+        "modelos/modelo_requerimento_inteira.docx",
     ):
         path = repo_root / relative
         if not path.is_file():

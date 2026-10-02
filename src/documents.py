@@ -5,6 +5,8 @@ Fluxo: generate_docx_from_template -> export_docx_to_pdf_with_word -> render_pdf
 Sem Tkinter (a UI chama estas funcoes)."""
 
 import ctypes
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 import hashlib
 import html
 import os
@@ -22,6 +24,11 @@ from pathlib import Path
 DOCUMENT_TEMPLATE_NAMES = {
     "declarations": "modelo_declaracoes.docx",
     "deposition": "modelo_depoimento.docx",
+}
+
+DIARIAS_REQUERIMENTO_TEMPLATE_NAMES = {
+    "meia": "modelo_requerimento_meia.docx",
+    "inteira": "modelo_requerimento_inteira.docx",
 }
 
 
@@ -416,6 +423,8 @@ WORD_FLOW_BREAK_RE = re.compile(
     re.IGNORECASE,
 )
 
+WORD_MARKER_RE = re.compile(r"\{\{\{([^{}]+)\}\}\}|\{\{([^{}]+)\}\}")
+
 
 def _replace_word_paragraph_markers(
     paragraph_xml: str,
@@ -425,27 +434,24 @@ def _replace_word_paragraph_markers(
     if not matches:
         return paragraph_xml, 0
     text_values = [html.unescape(match.group(2)) for match in matches]
-    aliases = []
-    for marker, replacement in replacements.items():
-        aliases.extend(
-            (
-                (f"{{{{{marker}}}}}", replacement),
-                (f"{{{{{{{marker}}}}}}}", replacement),
-            )
-        )
-    aliases.sort(key=lambda item: len(item[0]), reverse=True)
+    replacement_by_marker = {
+        str(marker): str(replacement or "")
+        for marker, replacement in replacements.items()
+    }
     changed = 0
     while True:
         joined = "".join(text_values)
-        match = None
-        for marker, replacement in aliases:
-            offset = joined.find(marker)
-            if offset >= 0 and (match is None or offset > match[0]):
-                match = (offset, marker, str(replacement or ""))
-        if match is None:
+        candidates = [
+            match
+            for match in WORD_MARKER_RE.finditer(joined)
+            if (match.group(1) or match.group(2)) in replacement_by_marker
+        ]
+        if not candidates:
             break
-        start, marker, replacement = match
-        end = start + len(marker)
+        marker_match = candidates[-1]
+        marker_name = marker_match.group(1) or marker_match.group(2)
+        replacement = replacement_by_marker[marker_name]
+        start, end = marker_match.span()
         spans = []
         cursor = 0
         for node_text in text_values:
@@ -537,6 +543,8 @@ def generate_docx_from_template(
     template_path: Path,
     output_path: Path,
     replacements: dict[str, str],
+    *,
+    allow_unresolved_markers: bool = False,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     total_changes = 0
@@ -576,13 +584,146 @@ def generate_docx_from_template(
                             if marker not in unresolved
                         )
                 destination.writestr(item, data)
-    if unresolved:
+    if unresolved and not allow_unresolved_markers:
         output_path.unlink(missing_ok=True)
         raise RuntimeError("Marcadores sem valor no modelo: " + ", ".join(unresolved))
     if total_changes == 0:
         output_path.unlink(missing_ok=True)
         raise RuntimeError("O modelo não contém marcadores reconhecidos.")
     return total_changes
+
+
+def _parse_diarias_datetime(date_text: str, time_text: str) -> datetime:
+    date_value = datetime.strptime(date_text.strip(), "%d/%m/%Y").date()
+    time_value = datetime.strptime(time_text.strip(), "%H:%M").time()
+    return datetime.combine(date_value, time_value)
+
+
+def _format_diarias_amount(value: str) -> str:
+    """Normaliza o total para 1.234,56; o modelo já traz o prefixo `R$`."""
+    raw = re.sub(r"[^\d,.-]", "", str(value or "").strip())
+    if not raw or raw.count(",") > 1:
+        return ""
+    if "," in raw:
+        integer_part, decimal_part = raw.rsplit(",", 1)
+        integer_part = integer_part.replace(".", "")
+        if not integer_part or not integer_part.lstrip("-").isdigit() or not decimal_part.isdigit():
+            return ""
+        normalized = f"{integer_part}.{decimal_part}"
+    elif "." in raw:
+        integer_part, decimal_part = raw.rsplit(".", 1)
+        if len(decimal_part) in (1, 2) and integer_part.replace(".", "").lstrip("-").isdigit():
+            normalized = f"{integer_part.replace('.', '')}.{decimal_part}"
+        elif raw.replace(".", "").lstrip("-").isdigit():
+            normalized = raw.replace(".", "")
+        else:
+            return ""
+    else:
+        if not raw.lstrip("-").isdigit():
+            return ""
+        normalized = raw
+    try:
+        amount = Decimal(normalized).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return ""
+    if amount < 0:
+        return ""
+    formatted = f"{amount:,.2f}"
+    return formatted.replace(",", "\0").replace(".", ",").replace("\0", ".")
+
+
+def prepare_diarias_requerimento(
+    *,
+    data_abertura: str,
+    hora_abertura: str,
+    data_fechamento: str,
+    hora_fechamento: str,
+    total_vencimentos: str = "",
+    data_protocolo: str = "",
+    protocolo_requerimento: str = "",
+) -> tuple[str, dict[str, str]]:
+    """Escolhe o modelo e monta substituições só para valores disponíveis."""
+    try:
+        saida = _parse_diarias_datetime(data_abertura, hora_abertura)
+        volta = _parse_diarias_datetime(data_fechamento, hora_fechamento)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Confira as datas e os horários de abertura e fechamento do talão."
+        ) from exc
+    if volta < saida:
+        raise ValueError(
+            "A data e o horário de fechamento do talão são anteriores à abertura."
+        )
+
+    template_kind = "inteira" if volta - saida > timedelta(hours=12) else "meia"
+    meses = (
+        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+    )
+    replacements = {
+        "mes_e_ano": f"{meses[saida.month - 1]}/{saida.year}",
+        "data_ida": saida.strftime("%d/%m/%Y"),
+        "horario_ida": saida.strftime("%Hh%Mmin"),
+        "horario_volta": volta.strftime("%Hh%Mmin"),
+        "data_volta": volta.strftime("%d/%m/%Y"),
+    }
+    # O modelo legado usa a grafia acentuada em uma ocorrência do marcador.
+    replacements["horário_ida"] = replacements["horario_ida"]
+
+    amount = _format_diarias_amount(total_vencimentos)
+    if amount:
+        # Os dois modelos já incluem "R$" imediatamente antes do marcador.
+        replacements["total_vencimentos"] = amount
+
+    try:
+        protocol_date = datetime.strptime(
+            str(data_protocolo or "").strip(), "%d/%m/%Y"
+        ).date()
+    except ValueError:
+        protocol_date = None
+    if protocol_date:
+        month = meses[protocol_date.month - 1]
+        replacements["data_protocolo"] = (
+            f"{protocol_date.day} de {month} de {protocol_date.year}"
+        )
+        replacements["data_protocolo2"] = protocol_date.strftime("%d/%m/%Y")
+
+    protocol_number = str(protocolo_requerimento or "").strip()
+    if protocol_number:
+        replacements["protocolo_requerimento"] = protocol_number
+
+    return template_kind, replacements
+
+
+def ensure_diarias_requerimento_templates() -> dict[str, Path]:
+    """Resolve os dois modelos de requerimento na pasta externa `modelos/`."""
+    external_dir = app_base_dir() / "modelos"
+    resolved: dict[str, Path] = {}
+    for template_kind, filename in DIARIAS_REQUERIMENTO_TEMPLATE_NAMES.items():
+        external_path = external_dir / filename
+        if not external_path.is_file():
+            raise FileNotFoundError(
+                f"Modelo de requerimento não encontrado: {external_path}"
+            )
+        resolved[template_kind] = external_path
+    return resolved
+
+
+def generate_diarias_requerimento(
+    template_kind: str,
+    output_path: Path,
+    replacements: dict[str, str],
+) -> int:
+    """Gera o DOCX da diária, mantendo marcadores sem valor disponível."""
+    if template_kind not in DIARIAS_REQUERIMENTO_TEMPLATE_NAMES:
+        raise ValueError(f"Tipo de requerimento inválido: {template_kind}")
+    template = ensure_diarias_requerimento_templates()[template_kind]
+    return generate_docx_from_template(
+        template,
+        Path(output_path),
+        replacements,
+        allow_unresolved_markers=True,
+    )
 
 
 def ensure_document_templates() -> dict[str, Path]:

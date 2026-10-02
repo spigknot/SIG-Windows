@@ -86,6 +86,7 @@ from assistant_prompts import (
     statement_user_prompt,
 )
 import diarias_protocolo
+import diarias_store
 import prompt_store
 import qr_encoder
 import smart_join_planner
@@ -175,7 +176,9 @@ from documents import (  # noqa: F401
     WORD_FLOW_BREAK_RE,
     _replace_word_paragraph_markers,
     generate_docx_from_template,
+    generate_diarias_requerimento,
     ensure_document_templates,
+    prepare_diarias_requerimento,
     download_github_url,
 )
 
@@ -516,7 +519,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20260930_002"
+APP_VERSION = "20261002_001"
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -1323,10 +1326,35 @@ class SigApp:
         self.qrcode_shorten_var = BooleanVar(value=False)
         self.qrcode_alias_var = StringVar()
         self.qrcode_shortened_var = StringVar()
+        self.diarias_holerite_path, holerite_filename = (
+            diarias_store.load_holerite_pdf()
+        )
         self.diarias_protocolo_path = ""
         self.diarias_talao_path = ""
+        self.diarias_holerite_file_var = StringVar(
+            master=self.root, value=holerite_filename
+        )
         self.diarias_protocolo_file_var = StringVar(master=self.root, value="")
         self.diarias_talao_file_var = StringVar(master=self.root, value="")
+        holerite_total, holerite_mes = diarias_store.load_holerite()
+        self.diarias_ufesp_var = StringVar(
+            master=self.root, value=diarias_store.load_ufesp()
+        )
+        self.diarias_ufesp_save_error_shown = False
+        self.diarias_ufesp_var.trace_add(
+            "write", self._save_diarias_ufesp_data
+        )
+        self.diarias_holerite_total_var = StringVar(
+            master=self.root, value=holerite_total
+        )
+        self.diarias_holerite_mes_var = StringVar(master=self.root, value=holerite_mes)
+        self.diarias_holerite_save_error_shown = False
+        self.diarias_holerite_total_var.trace_add(
+            "write", self._save_diarias_holerite_data
+        )
+        self.diarias_holerite_mes_var.trace_add(
+            "write", self._save_diarias_holerite_data
+        )
         self.diarias_req_var = StringVar(master=self.root, value="")
         self.diarias_mapa_var = StringVar(master=self.root, value="")
         self.diarias_data_var = StringVar(master=self.root, value="")
@@ -4737,54 +4765,62 @@ class SigApp:
             self.qrcode_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.root.after_idle(self._position_live_parts_button)
 
-    # --- Aba Diárias: protocolo (mapa x requerimento) + talão (abertura x fechamento)
+    # --- Aba Diárias: holerite + talão + protocolo
     def _build_diarias_section(self):
-        """Duas linhas compactas: seletor do PDF + campos editáveis + reload."""
-        protocolo_row = ttk.Frame(self.diarias_tab)
-        protocolo_row.pack(fill=X, anchor="w")
-        protocolo_button = ttk.Button(
-            protocolo_row,
-            text="Protocolo.",
+        """Constrói as sessões UFESP, holerite, talão e protocolo."""
+        ufesp_session = ttk.LabelFrame(self.diarias_tab, text="UFESP")
+        ufesp_session.pack(fill=X, anchor="w", padx=6, pady=(4, 2))
+        ttk.Entry(
+            ufesp_session, textvariable=self.diarias_ufesp_var, width=14
+        ).pack(side=LEFT, padx=8, pady=5)
+
+        holerite_session = ttk.LabelFrame(self.diarias_tab, text="Holerite")
+        holerite_session.pack(fill=X, anchor="w", padx=6, pady=2)
+        holerite_row = ttk.Frame(holerite_session)
+        holerite_row.pack(fill=X, anchor="w", padx=5, pady=4)
+        holerite_button = ttk.Button(
+            holerite_row,
+            text="Holerite.",
             width=10,
-            command=lambda: self._select_diarias_pdf("protocolo"),
+            command=lambda: self._select_diarias_pdf("holerite"),
         )
-        protocolo_button.pack(side=LEFT)
-        create_tooltip(protocolo_button, "Selecionar o PDF do protocolo da diária")
+        holerite_button.pack(side=LEFT)
+        create_tooltip(holerite_button, "Selecionar o PDF do holerite")
         ttk.Label(
-            protocolo_row,
-            textvariable=self.diarias_protocolo_file_var,
+            holerite_row,
+            textvariable=self.diarias_holerite_file_var,
             style="Muted.TLabel",
             width=14,
             anchor="w",
         ).pack(side=LEFT, padx=(6, 0))
-        ttk.Label(protocolo_row, text="Protocolo do requerimento").pack(
+        ttk.Label(holerite_row, text="R$").pack(
             side=LEFT, padx=(8, 2)
         )
-        ttk.Entry(protocolo_row, textvariable=self.diarias_req_var, width=12).pack(
-            side=LEFT
+        ttk.Entry(
+            holerite_row, textvariable=self.diarias_holerite_total_var, width=11
+        ).pack(side=LEFT)
+        ttk.Label(holerite_row, text="mês/ano").pack(
+            side=LEFT, padx=(8, 2)
         )
-        ttk.Label(protocolo_row, text="Protocolo do mapa").pack(side=LEFT, padx=(8, 2))
-        ttk.Entry(protocolo_row, textvariable=self.diarias_mapa_var, width=12).pack(
-            side=LEFT
-        )
-        ttk.Label(protocolo_row, text="Data do protocolo").pack(side=LEFT, padx=(8, 2))
-        ttk.Entry(protocolo_row, textvariable=self.diarias_data_var, width=11).pack(
-            side=LEFT
-        )
-        protocolo_reload = tk.Button(
-            protocolo_row,
+        ttk.Entry(
+            holerite_row, textvariable=self.diarias_holerite_mes_var, width=12
+        ).pack(side=LEFT)
+        holerite_reload = tk.Button(
+            holerite_row,
             text="⟳",
             fg="#1565d8",
             relief="flat",
             cursor="hand2",
             font=("", 11, "bold"),
-            command=lambda: self._reload_diarias_pdf("protocolo"),
+            command=lambda: self._reload_diarias_pdf("holerite"),
         )
-        protocolo_reload.pack(side=LEFT, padx=(4, 0))
-        create_tooltip(protocolo_reload, "Extrair novamente os protocolos do PDF")
+        holerite_reload.pack(side=LEFT, padx=(4, 0))
+        create_tooltip(holerite_reload, "Extrair novamente os dados do holerite")
 
-        talao_row = ttk.Frame(self.diarias_tab)
-        talao_row.pack(fill=X, anchor="w", pady=(6, 0))
+        talao_session = ttk.LabelFrame(self.diarias_tab, text="Talão")
+        talao_session.pack(fill=X, anchor="w", padx=6, pady=2)
+        talao_row = ttk.Frame(talao_session)
+        talao_row.pack(fill=X, anchor="w", padx=5, pady=4)
         talao_button = ttk.Button(
             talao_row,
             text="Talão.",
@@ -4800,14 +4836,14 @@ class SigApp:
             width=14,
             anchor="w",
         ).pack(side=LEFT, padx=(6, 0))
-        ttk.Label(talao_row, text="Abertura").pack(side=LEFT, padx=(8, 2))
+        ttk.Label(talao_row, text="ida").pack(side=LEFT, padx=(8, 2))
         ttk.Entry(
             talao_row, textvariable=self.diarias_abertura_data_var, width=11
         ).pack(side=LEFT)
         ttk.Entry(talao_row, textvariable=self.diarias_abertura_hora_var, width=6).pack(
             side=LEFT, padx=(2, 0)
         )
-        ttk.Label(talao_row, text="Fechamento").pack(side=LEFT, padx=(8, 2))
+        ttk.Label(talao_row, text="volta").pack(side=LEFT, padx=(8, 2))
         ttk.Entry(
             talao_row, textvariable=self.diarias_fechamento_data_var, width=11
         ).pack(side=LEFT)
@@ -4826,15 +4862,117 @@ class SigApp:
         talao_reload.pack(side=LEFT, padx=(4, 0))
         create_tooltip(talao_reload, "Extrair novamente os dados do talão")
 
-        vazio = ttk.Frame(self.diarias_tab)
-        vazio.pack(fill=BOTH, expand=True)
-        ttk.Label(vazio, text="em construção", style="Muted.TLabel").place(
-            relx=0.5, rely=0.5, anchor="center"
+        protocolo_session = ttk.LabelFrame(self.diarias_tab, text="Protocolo")
+        protocolo_session.pack(fill=X, anchor="w", padx=6, pady=2)
+        protocolo_row = ttk.Frame(protocolo_session)
+        protocolo_row.pack(fill=X, anchor="w", padx=5, pady=4)
+        protocolo_button = ttk.Button(
+            protocolo_row,
+            text="Protocolo.",
+            width=10,
+            command=lambda: self._select_diarias_pdf("protocolo"),
+        )
+        protocolo_button.pack(side=LEFT)
+        create_tooltip(protocolo_button, "Selecionar o PDF do protocolo da diária")
+        ttk.Label(
+            protocolo_row,
+            textvariable=self.diarias_protocolo_file_var,
+            style="Muted.TLabel",
+            width=14,
+            anchor="w",
+        ).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(protocolo_row, text="requerimento").pack(
+            side=LEFT, padx=(8, 2)
+        )
+        ttk.Entry(protocolo_row, textvariable=self.diarias_req_var, width=12).pack(
+            side=LEFT
+        )
+        ttk.Label(protocolo_row, text="mapa").pack(
+            side=LEFT, padx=(8, 2)
+        )
+        ttk.Entry(protocolo_row, textvariable=self.diarias_mapa_var, width=12).pack(
+            side=LEFT
+        )
+        ttk.Label(protocolo_row, text="data").pack(
+            side=LEFT, padx=(8, 2)
+        )
+        ttk.Entry(protocolo_row, textvariable=self.diarias_data_var, width=11).pack(
+            side=LEFT
+        )
+        protocolo_reload = tk.Button(
+            protocolo_row,
+            text="⟳",
+            fg="#1565d8",
+            relief="flat",
+            cursor="hand2",
+            font=("", 11, "bold"),
+            command=lambda: self._reload_diarias_pdf("protocolo"),
+        )
+        protocolo_reload.pack(side=LEFT, padx=(4, 0))
+        create_tooltip(protocolo_reload, "Extrair novamente os protocolos do PDF")
+
+        gerar_button = tk.Button(
+            self.diarias_tab,
+            text="Gerar requerimento",
+            fg="#188038",
+            activeforeground="#137333",
+            cursor="hand2",
+            relief="flat",
+            font=("", 10, "bold"),
+            command=self._generate_diarias_requerimento,
+        )
+        gerar_button.pack(anchor="w", pady=(10, 0))
+
+    def _generate_diarias_requerimento(self):
+        """Monta o DOCX com os dados preenchidos na aba Diárias."""
+        try:
+            template_kind, replacements = prepare_diarias_requerimento(
+                data_abertura=self.diarias_abertura_data_var.get(),
+                hora_abertura=self.diarias_abertura_hora_var.get(),
+                data_fechamento=self.diarias_fechamento_data_var.get(),
+                hora_fechamento=self.diarias_fechamento_hora_var.get(),
+                total_vencimentos=self.diarias_holerite_total_var.get(),
+                data_protocolo=self.diarias_data_var.get(),
+                protocolo_requerimento=self.diarias_req_var.get(),
+            )
+        except ValueError as exc:
+            messagebox.showwarning("Diárias", str(exc), parent=self.root)
+            return
+
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Salvar requerimento de diária",
+            defaultextension=".docx",
+            initialfile=f"requerimento_diaria_{template_kind}.docx",
+            filetypes=(("Documento do Word", "*.docx"),),
+        )
+        if not destination:
+            return
+        try:
+            generate_diarias_requerimento(
+                template_kind,
+                Path(destination),
+                replacements,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Diárias",
+                f"Não foi possível gerar o requerimento: {exc}",
+                parent=self.root,
+            )
+            return
+
+        tipo = "meia diária" if template_kind == "meia" else "diária inteira"
+        messagebox.showinfo(
+            "Diárias",
+            f"Requerimento de {tipo} salvo em:\n{destination}",
+            parent=self.root,
         )
 
     def _select_diarias_pdf(self, kind):
-        """Abre o seletor de PDF e já preenche os campos na hora."""
+        """Abre o seletor de PDF e ja preenche os campos na hora."""
         titulos = {
+            "holerite": "Selecionar o PDF do holerite",
             "protocolo": "Selecionar o PDF do protocolo",
             "talao": "Selecionar o PDF do talão",
         }
@@ -4848,7 +4986,10 @@ class SigApp:
         )
         if not selecionado:
             return
-        if kind == "talao":
+        if kind == "holerite":
+            self._attach_diarias_holerite_pdf(selecionado)
+            return
+        elif kind == "talao":
             self.diarias_talao_path = selecionado
             self.diarias_talao_file_var.set(Path(selecionado).name)
         else:
@@ -4856,11 +4997,49 @@ class SigApp:
             self.diarias_protocolo_file_var.set(Path(selecionado).name)
         self._reload_diarias_pdf(kind)
 
+    def _attach_diarias_holerite_pdf(self, source_path):
+        """Extrai e guarda uma cópia do holerite antes de torná-lo o anexo ativo."""
+        try:
+            total, mes = diarias_protocolo.extract_holerite_pdf(source_path)
+            if not total or not mes:
+                faltando = []
+                if not total:
+                    faltando.append("o total de vencimentos")
+                if not mes:
+                    faltando.append("o mês do holerite")
+                messagebox.showwarning(
+                    "Diárias",
+                    "Não encontrei "
+                    + " e ".join(faltando)
+                    + " no PDF. O anexo e os dados salvos anteriormente foram mantidos; "
+                    "confira o arquivo ou preencha os campos manualmente.",
+                    parent=self.root,
+                )
+                return
+            stored_path, display_name = diarias_store.attach_holerite_pdf(
+                source_path, total, mes
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Diárias",
+                f"Não foi possível ler ou guardar o holerite localmente: {exc}",
+                parent=self.root,
+            )
+            return
+
+        self.diarias_holerite_path = stored_path
+        self.diarias_holerite_file_var.set(display_name)
+        self.diarias_holerite_total_var.set(total)
+        self.diarias_holerite_mes_var.set(mes)
+
     def _reload_diarias_pdf(self, kind):
         """Reextrai do PDF e preenche os campos imediatamente."""
-        caminho = (
-            self.diarias_talao_path if kind == "talao" else self.diarias_protocolo_path
-        )
+        if kind == "holerite":
+            caminho = self.diarias_holerite_path
+        elif kind == "talao":
+            caminho = self.diarias_talao_path
+        else:
+            caminho = self.diarias_protocolo_path
         if not caminho:
             messagebox.showwarning(
                 "Diárias",
@@ -4869,7 +5048,30 @@ class SigApp:
             )
             return
         try:
-            if kind == "talao":
+            if kind == "holerite":
+                total, mes = diarias_protocolo.extract_holerite_pdf(caminho)
+                if not total or not mes:
+                    faltando = []
+                    if not total:
+                        faltando.append("o total de vencimentos")
+                    if not mes:
+                        faltando.append("o mês do holerite")
+                    messagebox.showwarning(
+                        "Diárias",
+                        "Não encontrei "
+                        + " e ".join(faltando)
+                        + " no PDF. Os dados salvos anteriormente foram mantidos; "
+                        "confira o arquivo ou preencha os campos manualmente.",
+                        parent=self.root,
+                    )
+                    return
+                self.diarias_holerite_total_var.set(total)
+                self.diarias_holerite_mes_var.set(mes)
+                valores = (
+                    ("o total de vencimentos", total),
+                    ("o mês do holerite", mes),
+                )
+            elif kind == "talao":
                 data_abertura, hora_abertura, data_fechamento, hora_fechamento = (
                     diarias_protocolo.extract_talao_pdf(caminho)
                 )
@@ -4898,7 +5100,7 @@ class SigApp:
         except Exception as exc:
             messagebox.showerror(
                 "Diárias",
-                f"Não foi possível ler o PDF:\n{exc}",
+                f"Não foi possível ler o PDF: {exc}",
                 parent=self.root,
             )
             return
@@ -4908,9 +5110,42 @@ class SigApp:
                 "Diárias",
                 "Não encontrei "
                 + " e ".join(faltando)
-                + " no PDF — confira o arquivo ou digite manualmente.",
+                + " no PDF; confira o arquivo ou digite manualmente.",
                 parent=self.root,
             )
+
+    def _save_diarias_holerite_data(self, *_trace_args):
+        """Persiste imediatamente os dois campos compartilhados no mês."""
+        try:
+            diarias_store.save_holerite(
+                self.diarias_holerite_total_var.get(),
+                self.diarias_holerite_mes_var.get(),
+            )
+        except Exception as exc:
+            if not self.diarias_holerite_save_error_shown:
+                self.diarias_holerite_save_error_shown = True
+                messagebox.showerror(
+                    "Di\u00e1rias",
+                    f"Não foi possível salvar os dados do holerite localmente: {exc}",
+                    parent=self.root,
+                )
+        else:
+            self.diarias_holerite_save_error_shown = False
+
+    def _save_diarias_ufesp_data(self, *_trace_args):
+        """Persiste imediatamente o valor UFESP da aba Diárias."""
+        try:
+            diarias_store.save_ufesp(self.diarias_ufesp_var.get())
+        except Exception as exc:
+            if not self.diarias_ufesp_save_error_shown:
+                self.diarias_ufesp_save_error_shown = True
+                messagebox.showerror(
+                    "Diárias",
+                    f"Não foi possível salvar o valor UFESP localmente: {exc}",
+                    parent=self.root,
+                )
+        else:
+            self.diarias_ufesp_save_error_shown = False
 
     def _update_imei_inputs(self):
         if self.imei_formatting:
