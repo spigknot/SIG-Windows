@@ -173,6 +173,20 @@ class DocumentTemplateTests(unittest.TestCase):
                 self.assertNotIn("ns0:", document_xml)
                 self.assertIn('w:sz w:val="20"', document_xml)
 
+    def test_failed_generation_preserves_an_existing_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "existing.docx"
+            original = b"keep the existing file if generation fails"
+            output.write_bytes(original)
+            with self.assertRaisesRegex(RuntimeError, "Marcadores sem valor"):
+                generate_docx_from_template(
+                    ROOT / "modelos" / DOCUMENT_TEMPLATE_NAMES["declarations"],
+                    output,
+                    {},
+                )
+            self.assertEqual(original, output.read_bytes())
+            self.assertEqual([output], list(output.parent.iterdir()))
+
     def test_bold_statement_marker_remains_bold(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "declaracoes.docx"

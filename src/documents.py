@@ -13,9 +13,11 @@ import os
 import pypdfium2 as pdfium
 import re
 import subprocess
+import tempfile
 import time
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 from app_env import app_base_dir
 from pathlib import Path
@@ -565,49 +567,59 @@ def generate_docx_from_template(
     allow_unresolved_markers: bool = False,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.stem}_",
+        suffix=output_path.suffix or ".docx",
+        dir=output_path.parent,
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
     total_changes = 0
     unresolved: list[str] = []
-    with zipfile.ZipFile(template_path, "r") as source:
-        with zipfile.ZipFile(output_path, "w") as destination:
-            for item in source.infolist():
-                data = source.read(item.filename)
-                if item.filename.startswith("word/") and item.filename.endswith(".xml"):
-                    try:
-                        xml_text = data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        xml_text = ""
-                    if xml_text and "<w:t" in xml_text:
-                        changes = 0
+    try:
+        with zipfile.ZipFile(template_path, "r") as source:
+            with zipfile.ZipFile(temporary_path, "w") as destination:
+                for item in source.infolist():
+                    data = source.read(item.filename)
+                    if item.filename.startswith("word/") and item.filename.endswith(".xml"):
+                        try:
+                            xml_text = data.decode("utf-8")
+                        except UnicodeDecodeError:
+                            xml_text = ""
+                        if xml_text and "<w:t" in xml_text:
+                            changes = 0
 
-                        def replace_paragraph(match):
-                            nonlocal changes
-                            updated, count = _replace_word_paragraph_markers(
-                                match.group(0),
-                                replacements,
+                            def replace_paragraph(match):
+                                nonlocal changes
+                                updated, count = _replace_word_paragraph_markers(
+                                    match.group(0),
+                                    replacements,
+                                )
+                                changes += count
+                                return updated
+
+                            xml_text = WORD_PARAGRAPH_RE.sub(replace_paragraph, xml_text)
+                            if changes:
+                                data = xml_text.encode("utf-8")
+                                total_changes += changes
+                            remaining_text = "".join(
+                                html.unescape(match.group(2))
+                                for match in WORD_TEXT_RE.finditer(xml_text)
                             )
-                            changes += count
-                            return updated
-
-                        xml_text = WORD_PARAGRAPH_RE.sub(replace_paragraph, xml_text)
-                        if changes:
-                            data = xml_text.encode("utf-8")
-                            total_changes += changes
-                        remaining_text = "".join(
-                            html.unescape(match.group(2))
-                            for match in WORD_TEXT_RE.finditer(xml_text)
-                        )
-                        unresolved.extend(
-                            marker
-                            for marker in re.findall(r"\{\{\{?[^{}]+\}\}\}?", remaining_text)
-                            if marker not in unresolved
-                        )
-                destination.writestr(item, data)
-    if unresolved and not allow_unresolved_markers:
-        output_path.unlink(missing_ok=True)
-        raise RuntimeError("Marcadores sem valor no modelo: " + ", ".join(unresolved))
-    if total_changes == 0:
-        output_path.unlink(missing_ok=True)
-        raise RuntimeError("O modelo não contém marcadores reconhecidos.")
+                            unresolved.extend(
+                                marker
+                                for marker in re.findall(r"\{\{\{?[^{}]+\}\}\}?", remaining_text)
+                                if marker not in unresolved
+                            )
+                    destination.writestr(item, data)
+        if unresolved and not allow_unresolved_markers:
+            raise RuntimeError("Marcadores sem valor no modelo: " + ", ".join(unresolved))
+        if total_changes == 0:
+            raise RuntimeError("O modelo não contém marcadores reconhecidos.")
+        os.replace(temporary_path, output_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
     return total_changes
 
 
@@ -737,6 +749,39 @@ def generate_diarias_requerimento(
     )
 
 
+def _generate_docx_as_pdf(
+    output_path: Path,
+    build_docx: Callable[[Path], int],
+) -> int:
+    """Gera DOCX temporário, converte para PDF e troca o destino ao concluir."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".sig-diarias-pdf-", dir=str(output_path.parent)
+    ) as temporary_directory:
+        temporary_directory = Path(temporary_directory)
+        temporary_docx = temporary_directory / "documento.docx"
+        temporary_pdf = temporary_directory / "documento.pdf"
+        changes = build_docx(temporary_docx)
+        export_docx_to_pdf_with_word(temporary_docx, temporary_pdf)
+        os.replace(temporary_pdf, output_path)
+        return changes
+
+
+def generate_diarias_requerimento_pdf(
+    template_kind: str,
+    output_path: Path,
+    replacements: dict[str, str],
+) -> int:
+    """Gera requerimento em PDF usando o Word para manter a paginação do modelo."""
+    return _generate_docx_as_pdf(
+        output_path,
+        lambda temporary_docx: generate_diarias_requerimento(
+            template_kind, temporary_docx, replacements
+        ),
+    )
+
+
 def next_available_diarias_requerimento_path(
     directory: Path, template_kind: str, data_ida: str
 ) -> Path:
@@ -800,6 +845,19 @@ def generate_declaracao_meios_proprios(
         ensure_meios_proprios_template(),
         Path(output_path),
         replacements,
+    )
+
+
+def generate_declaracao_meios_proprios_pdf(
+    output_path: Path,
+    replacements: dict[str, str],
+) -> int:
+    """Gera a declaração em PDF sem alterar um destino se a conversão falhar."""
+    return _generate_docx_as_pdf(
+        output_path,
+        lambda temporary_docx: generate_declaracao_meios_proprios(
+            temporary_docx, replacements
+        ),
     )
 
 

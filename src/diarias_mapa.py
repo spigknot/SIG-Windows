@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import gc
+import os
 import re
+import time as time_module
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -240,17 +242,17 @@ def next_available_diarias_mapa_path(directory: Path, data_ida: date) -> Path:
 
 
 def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
-    """Preenche uma cópia do modelo com Excel, preservando seu layout e estilos."""
+    """Gera o mapa como XLSX ou PDF a partir do modelo e dados da diária."""
     destination = Path(destination)
     template_path = app_base_dir() / TEMPLATE_RELATIVE_PATH
     if not template_path.is_file():
         raise FileNotFoundError(f"Modelo de mapa não encontrado: {template_path}")
     if not destination.parent.is_dir():
         raise FileNotFoundError(f"Pasta para salvar o mapa não encontrada: {destination.parent}")
-    if destination.exists():
-        raise FileExistsError(f"O arquivo de destino já existe: {destination}")
-    if destination.suffix.casefold() != ".xlsx":
-        raise ValueError("O mapa deve ser salvo no formato .xlsx.")
+    extension = destination.suffix.casefold()
+    if extension not in {".xlsx", ".pdf"}:
+        raise ValueError("O mapa deve ser salvo no formato .xlsx ou .pdf.")
+    export_pdf = extension == ".pdf"
 
     try:
         from win32com.client import DispatchEx
@@ -268,7 +270,7 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
 
     workbook = None
     temporary_destination = destination.with_name(
-        f".{destination.stem}_{uuid.uuid4().hex}.xlsx"
+        f".{destination.stem}_{uuid.uuid4().hex}{extension}"
     )
     try:
         excel.Visible = False
@@ -317,12 +319,29 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
                 "Marca(s) não encontrada(s) na planilha Verso: " + ", ".join(missing)
             )
 
-        workbook.SaveAs(str(temporary_destination), 51)
+        if export_pdf:
+            for worksheet in (limite, verso):
+                worksheet.PageSetup.Zoom = False
+                worksheet.PageSetup.FitToPagesWide = 1
+                worksheet.PageSetup.FitToPagesTall = 1
+            # O modelo pode estar em cálculo manual ou ter resultados em cache.
+            # Reconstrói as dependências após preencher os dados e aguarda o Excel.
+            excel.CalculateFullRebuild()
+            calculation_deadline = time_module.monotonic() + 60
+            while excel.CalculationState != 0:  # xlDone
+                if time_module.monotonic() >= calculation_deadline:
+                    raise RuntimeError(
+                        "O Excel não concluiu o cálculo das fórmulas do mapa."
+                    )
+                time_module.sleep(0.1)
+            workbook.ExportAsFixedFormat(0, str(temporary_destination))
+        else:
+            workbook.SaveAs(str(temporary_destination), 51)
         workbook.Close(SaveChanges=False)
         workbook = None
-        if not temporary_destination.is_file():
+        if not temporary_destination.is_file() or temporary_destination.stat().st_size <= 0:
             raise RuntimeError("O Excel não criou o arquivo de mapa no destino escolhido.")
-        temporary_destination.rename(destination)
+        os.replace(temporary_destination, destination)
         return destination
     except Exception as exc:
         temporary_destination.unlink(missing_ok=True)

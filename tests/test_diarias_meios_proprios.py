@@ -156,33 +156,105 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
         self.assertEqual("#ffffff", style.lookup(button["style"], "foreground"))
         self.assertEqual("normal", str(button["state"]))
 
-    def test_clique_gera_o_docx_na_pasta_escolhida(self):
+    def test_clique_abre_salvar_com_nome_padrao_e_permite_nomear_arquivo(self):
         self.app.diarias_abertura_data_var.set("31/12/2026")
         self.app.diarias_data_var.set("31/12/2026")
         with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "declaracao_escolhida.docx"
+            output.write_bytes(b"arquivo existente para substituir")
             with patch.object(
-                sig_app.filedialog, "askdirectory", return_value=temporary
+                sig_app.filedialog, "asksaveasfilename", return_value=str(output)
             ) as ask, patch.object(
                 sig_app.messagebox, "showinfo"
             ) as showinfo, patch.object(
                 sig_app.messagebox, "showwarning"
-            ) as showwarning:
+            ) as showwarning, patch.object(
+                sig_app.messagebox, "askyesno", return_value=True
+            ) as confirm_overwrite:
                 self._botao().invoke()
             ask.assert_called_once()
+            confirm_overwrite.assert_called_once()
+            self.assertEqual(
+                next_available_diarias_declaracao_path(
+                    Path.home() / "Desktop", "31/12/2026"
+                ).name,
+                ask.call_args.kwargs["initialfile"],
+            )
+            self.assertEqual(
+                str(Path.home() / "Desktop"), ask.call_args.kwargs["initialdir"]
+            )
+            self.assertEqual(".docx", ask.call_args.kwargs["defaultextension"])
+            self.assertFalse(ask.call_args.kwargs["confirmoverwrite"])
             self.assertTrue(showinfo.called, "o usuário precisa ver onde o arquivo foi salvo")
             self.assertFalse(showwarning.called)
             self.app._finish_diarias_activity.assert_called_once()
-            output = Path(temporary) / "declaracao_meios_proprios_31-12-2026.docx"
             self.assertTrue(output.is_file(), "a declaração precisa ser gravada")
             texto = _texto_do_docx(output)
             self.assertIn("referente dezembro/2026", texto)
             self.assertNotIn("{{", texto)
-            self.assertIn("declaracao_meios_proprios_31-12-2026.docx", showinfo.call_args.args[1])
+            self.assertIn("declaracao_escolhida.docx", showinfo.call_args.args[1])
+
+    def test_declaracao_pode_ser_salva_em_pdf(self):
+        self.app.diarias_abertura_data_var.set("31/12/2026")
+        self.app.diarias_data_var.set("31/12/2026")
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "declaracao_escolhida.docx"
+
+            def choose_pdf(**options):
+                options["typevariable"].set("PDF (*.pdf)")
+                return str(destination)
+
+            with patch.object(
+                sig_app.filedialog, "asksaveasfilename", side_effect=choose_pdf
+            ) as ask, patch.object(
+                sig_app, "generate_declaracao_meios_proprios_pdf"
+            ) as generate_pdf, patch.object(
+                sig_app, "generate_declaracao_meios_proprios"
+            ) as generate_docx, patch.object(
+                sig_app.messagebox, "showinfo"
+            ):
+                self._botao().invoke()
+
+            self.assertIn(("PDF (*.pdf)", "*.pdf"), ask.call_args.kwargs["filetypes"])
+            self.assertEqual(destination.with_suffix(".pdf"), generate_pdf.call_args.args[0])
+            generate_docx.assert_not_called()
+
+    def test_exportacao_pdf_falha_sem_apagar_arquivo_existente(self):
+        replacements = prepare_declaracao_meios_proprios(
+            data_ida="31/12/2026", data_protocolo="31/12/2026"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "declaracao.pdf"
+            destination.write_bytes(b"pdf anterior")
+            with patch.object(
+                documents,
+                "export_docx_to_pdf_with_word",
+                side_effect=lambda _docx, pdf: Path(pdf).write_bytes(
+                    b"%PDF-1.7\ndeclaracao"
+                ),
+            ):
+                changes = documents.generate_declaracao_meios_proprios_pdf(
+                    destination, replacements
+                )
+            self.assertEqual(3, changes)
+            self.assertEqual(b"%PDF-1.7\ndeclaracao", destination.read_bytes())
+            destination.write_bytes(b"pdf valido anterior")
+            with patch.object(
+                documents,
+                "export_docx_to_pdf_with_word",
+                side_effect=RuntimeError("falha de conversão simulada"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "falha de conversão"):
+                    documents.generate_declaracao_meios_proprios_pdf(
+                        destination, replacements
+                    )
+            self.assertEqual(b"pdf valido anterior", destination.read_bytes())
+            self.assertEqual([destination], list(destination.parent.iterdir()))
 
     def test_datas_invalidas_avisam_sem_perder_dados(self):
         self.app.diarias_abertura_data_var.set("")
         self.app.diarias_data_var.set("")
-        with patch.object(sig_app.filedialog, "askdirectory") as ask, patch.object(
+        with patch.object(sig_app.filedialog, "asksaveasfilename") as ask, patch.object(
             sig_app.messagebox, "showwarning"
         ) as showwarning:
             self._botao().invoke()

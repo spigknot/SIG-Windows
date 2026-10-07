@@ -178,7 +178,9 @@ from documents import (  # noqa: F401
     _replace_word_paragraph_markers,
     generate_docx_from_template,
     generate_diarias_requerimento,
+    generate_diarias_requerimento_pdf,
     generate_declaracao_meios_proprios,
+    generate_declaracao_meios_proprios_pdf,
     next_available_diarias_requerimento_path,
     next_available_diarias_declaracao_path,
     ensure_document_templates,
@@ -524,7 +526,28 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261002_002"
+APP_VERSION = "20261007_001"
+
+
+def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
+    """Aplica a extensão do formato escolhido no diálogo Salvar como."""
+    destination = Path(filename)
+    selected_type = str(file_type.get() or "").casefold()
+    is_pdf = ".pdf" in selected_type or destination.suffix.casefold() == ".pdf"
+    extension = ".pdf" if is_pdf else default_extension
+    if destination.suffix.casefold() != extension.casefold():
+        destination = destination.with_suffix(extension)
+    return destination
+
+
+def _confirm_diarias_output_overwrite(parent, destination: Path) -> bool:
+    if not destination.exists():
+        return True
+    return messagebox.askyesno(
+        "Substituir arquivo?",
+        f"Já existe um arquivo neste local:\n{destination}\n\nDeseja substituí-lo?",
+        parent=parent,
+    )
 
 
 def _audio_file_size(path: Path) -> int | None:
@@ -5006,12 +5029,26 @@ class SigApp:
             messagebox.showwarning("Diárias", str(exc), parent=self.root)
             return
 
-        destination_dir = filedialog.askdirectory(
-            parent=self.root,
-            title="Selecionar pasta para salvar o requerimento",
-            mustexist=True,
+        suggested_path = next_available_diarias_requerimento_path(
+            Path.home() / "Desktop",
+            template_kind,
+            replacements["data_ida"],
         )
-        if not destination_dir:
+        file_type_var = StringVar(master=self.root)
+        destination_file = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Salvar requerimento de diária",
+            initialdir=str(suggested_path.parent),
+            initialfile=suggested_path.name,
+            defaultextension=".docx",
+            filetypes=[
+                ("Documento do Word (*.docx)", "*.docx"),
+                ("PDF (*.pdf)", "*.pdf"),
+            ],
+            confirmoverwrite=False,
+            typevariable=file_type_var,
+        )
+        if not destination_file:
             self._finish_diarias_activity(
                 activity_key,
                 started_at,
@@ -5020,16 +5057,25 @@ class SigApp:
             )
             return
         try:
-            destination = next_available_diarias_requerimento_path(
-                Path(destination_dir),
-                template_kind,
-                replacements["data_ida"],
+            destination = _diarias_selected_output_path(
+                destination_file, file_type_var, ".docx"
             )
-            generate_diarias_requerimento(
-                template_kind,
-                destination,
-                replacements,
-            )
+            if not _confirm_diarias_output_overwrite(self.root, destination):
+                self._finish_diarias_activity(
+                    activity_key,
+                    started_at,
+                    suffix="- cancelado",
+                    tag="activity_step_warning",
+                )
+                return
+            if destination.suffix.casefold() == ".pdf":
+                generate_diarias_requerimento_pdf(
+                    template_kind, destination, replacements
+                )
+            else:
+                generate_diarias_requerimento(
+                    template_kind, destination, replacements
+                )
         except Exception as exc:
             self._finish_diarias_activity(
                 activity_key, started_at, error=str(exc)
@@ -5082,12 +5128,24 @@ class SigApp:
             messagebox.showwarning("Diárias", str(exc), parent=self.root)
             return
 
-        destination_dir = filedialog.askdirectory(
-            parent=self.root,
-            title="Selecionar pasta para salvar o mapa",
-            mustexist=True,
+        suggested_path = diarias_mapa.next_available_diarias_mapa_path(
+            Path.home() / "Desktop", values.data_ida
         )
-        if not destination_dir:
+        file_type_var = StringVar(master=self.root)
+        destination_file = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Salvar mapa de diária",
+            initialdir=str(suggested_path.parent),
+            initialfile=suggested_path.name,
+            defaultextension=".xlsx",
+            filetypes=[
+                ("Pasta de trabalho do Excel (*.xlsx)", "*.xlsx"),
+                ("PDF (*.pdf)", "*.pdf"),
+            ],
+            confirmoverwrite=False,
+            typevariable=file_type_var,
+        )
+        if not destination_file:
             self._finish_diarias_activity(
                 activity_key,
                 started_at,
@@ -5097,9 +5155,17 @@ class SigApp:
             return
 
         try:
-            destination = diarias_mapa.next_available_diarias_mapa_path(
-                Path(destination_dir), values.data_ida
+            destination = _diarias_selected_output_path(
+                destination_file, file_type_var, ".xlsx"
             )
+            if not _confirm_diarias_output_overwrite(self.root, destination):
+                self._finish_diarias_activity(
+                    activity_key,
+                    started_at,
+                    suffix="- cancelado",
+                    tag="activity_step_warning",
+                )
+                return
             diarias_mapa.generate_diarias_mapa(destination, values)
         except Exception as exc:
             self._finish_diarias_activity(
@@ -5145,12 +5211,24 @@ class SigApp:
             messagebox.showwarning("Diárias", str(exc), parent=self.root)
             return
 
-        destination_dir = filedialog.askdirectory(
-            parent=self.root,
-            title="Selecionar pasta para salvar a declaração",
-            mustexist=True,
+        suggested_path = next_available_diarias_declaracao_path(
+            Path.home() / "Desktop", data_ida
         )
-        if not destination_dir:
+        file_type_var = StringVar(master=self.root)
+        destination_file = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Salvar declaração de meios próprios",
+            initialdir=str(suggested_path.parent),
+            initialfile=suggested_path.name,
+            defaultextension=".docx",
+            filetypes=[
+                ("Documento do Word (*.docx)", "*.docx"),
+                ("PDF (*.pdf)", "*.pdf"),
+            ],
+            confirmoverwrite=False,
+            typevariable=file_type_var,
+        )
+        if not destination_file:
             self._finish_diarias_activity(
                 activity_key,
                 started_at,
@@ -5159,10 +5237,21 @@ class SigApp:
             )
             return
         try:
-            destination = next_available_diarias_declaracao_path(
-                Path(destination_dir), data_ida
+            destination = _diarias_selected_output_path(
+                destination_file, file_type_var, ".docx"
             )
-            generate_declaracao_meios_proprios(destination, replacements)
+            if not _confirm_diarias_output_overwrite(self.root, destination):
+                self._finish_diarias_activity(
+                    activity_key,
+                    started_at,
+                    suffix="- cancelado",
+                    tag="activity_step_warning",
+                )
+                return
+            if destination.suffix.casefold() == ".pdf":
+                generate_declaracao_meios_proprios_pdf(destination, replacements)
+            else:
+                generate_declaracao_meios_proprios(destination, replacements)
         except Exception as exc:
             self._finish_diarias_activity(
                 activity_key, started_at, error=str(exc)
