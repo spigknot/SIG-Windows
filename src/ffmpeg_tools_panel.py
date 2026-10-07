@@ -13,6 +13,8 @@ NAO contem transcricao/STT (ver stt_clients.py)."""
 
 import concurrent.futures
 import ctypes
+import json
+import math
 import os
 import queue
 import re
@@ -24,7 +26,8 @@ import uuid
 import webbrowser
 from PIL import Image, ImageTk
 from app_env import app_base_dir
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from fractions import Fraction
 from domain_models import Cancelled
 from log_formatting import (
     FFMPEG_COMMAND_BLOCK_TAG,
@@ -51,6 +54,10 @@ from tkinter import (
 )
 from ui_widgets import PreviewIconButton, create_tooltip
 import smart_join_planner
+import smart_cut_planner
+import smart_insert_planner
+import smart_insert_flac
+import smart_insert_wave
 from video_encoders import (
     CATALOG,
     ENCODER_ADVANCED_AUTO,
@@ -111,14 +118,14 @@ CUT_MODE_COPY = "Sem Reencode"
 CUT_MODES = (CUT_MODE_SMART, CUT_MODE_REENCODE, CUT_MODE_COPY)
 CUT_MODE_HELP = (
     "SmartCut: corte preciso e rápido, mas EXPERIMENTAL — copia os trechos que já começam em "
-    "keyframe e reencoda apenas as bordas até os tempos exatos.\n\n"
+    "keyframe e reencoda apenas as bordas até os tempos exatos. O áudio é cortado em uma "
+    "passagem contínua para evitar emendas e perda de sincronização.\n\n"
+    "Em áudio puro, SmartCut usa o mesmo processamento do Reencode Completo para manter "
+    "a precisão. Recodificar áudio costuma ser muito mais leve que recodificar vídeo.\n\n"
     "Reencode Completo: reencoda todo o trecho — lento e preciso.\n\n"
     "Sem Reencode: copia os streams sem reencodar — rápido e menos preciso, porque início e fim "
     "escorregam até o keyframe/pacote disponível."
 )
-# SmartCut: margem mínima para valer a pena reencodar a borda e para considerar
-# que há miolo copiável entre dois keyframes.
-SMARTCUT_MIN_EDGE = 0.05
 PREVIEW_STAGE_MIN_WIDTH = 240
 PREVIEW_STAGE_MIN_HEIGHT = 135
 PREVIEW_STAGE_MAX_HEIGHT = 760
@@ -755,6 +762,8 @@ class MediaProfile:
     # desaparecer sem aviso quando a saida normaliza os dois streams.
     audio_start_seconds: float = 0.0
     container_start_seconds: float = 0.0
+    audio_sample_fmt: str = ""
+    audio_bits_per_raw_sample: int = 0
 
     # Mantém compatibilidade com as rotinas existentes que tratam o perfil como tupla.
     def __iter__(self):
@@ -2359,6 +2368,8 @@ class FfmpegToolsPanel:
             width=39,
         )
         self.cut_stream_policy_combo.pack(side=LEFT, padx=(6, 0))
+        self.cut_audio_hint_var = StringVar(master=self.root, value="")
+        ttk.Label(self.cut_tab, textvariable=self.cut_audio_hint_var, wraplength=850).pack(anchor="w", pady=(6, 0))
         self._update_cut_controls()
 
     def _build_extract_tab(self) -> None:
@@ -2516,6 +2527,13 @@ class FfmpegToolsPanel:
             command=self._on_toggle_join_smart,
         )
         self.join_smart_check.pack(side=LEFT, padx=(18, 0))
+        create_tooltip(
+            self.join_smart_check,
+            "Copia os corpos compatíveis e recodifica as emendas e os clipes incompatíveis com o perfil escolhido. "
+            "Qualidade e velocidade afetam apenas as partes recodificadas. Fade in/out mantém a duração; "
+            "as demais transições sobrepõem o tempo escolhido. Se não houver um plano seguro com ganho de cópia, "
+            "a tarefa será interrompida, sem trocar automaticamente para Reencode Completo.",
+        )
         options = ttk.Frame(self.join_tab)
         options.pack(anchor="w", pady=(8, 0))
         ttk.Label(options, text="Transição:").grid(row=0, column=0, sticky="w")
@@ -2628,6 +2646,9 @@ class FfmpegToolsPanel:
             command=self._on_toggle_insert_smart,
         )
         self.insert_smart_check.pack(side=LEFT, padx=(18, 0))
+        self.insert_processing_hint_var = StringVar(master=self.root, value="")
+        ttk.Label(self.insert_options_frame, textvariable=self.insert_processing_hint_var,
+                  style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(8, 0))
         ttk.Label(
             self.insert_options_frame,
             text="Sem reencodar, o ponto pode variar até o frame/pacote disponível e transições não são aplicadas. Quando uma transição está ativa, a prévia usa o mesmo filtro da saída.",
@@ -2690,6 +2711,13 @@ class FfmpegToolsPanel:
         fast = self._cut_mode_is_copy()
         profile = getattr(self, "cut_media_profile", None)
         has_video = bool(profile and profile.has_video)
+        hint = getattr(self, "cut_audio_hint_var", None)
+        if hint is not None:
+            hint.set(
+                "Áudio puro: SmartCut usa o mesmo corte preciso do Reencode Completo. "
+                "Recodificar áudio costuma ser muito mais leve que recodificar vídeo."
+                if profile and not has_video and str(self.cut_mode_var.get()) == CUT_MODE_SMART else ""
+            )
         running = getattr(self, "running", False)
         self.cut_audio_policy_combo.configure(state="readonly" if (has_video and not fast and not running) else "disabled")
         self.cut_stream_policy_combo.configure(state="readonly" if (has_video and fast and not running) else "disabled")
@@ -3164,6 +3192,21 @@ class FfmpegToolsPanel:
         reencode = self.insert_reencode_var.get()
         smart = self.insert_smart_var.get()
         has_mode = reencode or smart
+        hint = getattr(self, "insert_processing_hint_var", None)
+        if hint is not None:
+            profile = getattr(self, "_insert_main_profile", None)
+            codec = profile.audio_codec if profile else ""
+            path = getattr(self, "insert_main_input", None)
+            partial = profile and path and self._insert_partial_supported(profile, path, path)
+            if not smart or not profile:
+                hint.set("")
+            elif partial and codec.startswith("pcm_"):
+                hint.set("Smart Insert: o principal será copiado por amostras; somente o áudio inserido será recodificado.")
+            elif partial:
+                hint.set("Smart Insert: o principal será copiado; somente o inserido e a emenda serão recodificados.")
+            else:
+                hint.set(f"Smart Insert: {codec} exige recodificação contínua para evitar erros nas emendas. "
+                         "O efeito selecionado será mantido; recodificar áudio costuma ser leve.")
         enabled = has_mode and not self.running and self.insert_secondary_input is not None
 
         self.insert_reencode_check.configure(state="normal" if not self.running else "disabled")
@@ -3397,9 +3440,9 @@ class FfmpegToolsPanel:
         requested: float,
     ) -> float:
         neighbors = [inserted_duration]
-        if insertion > 0.001:
+        if insertion > 0:
             neighbors.append(insertion)
-        if main_duration - insertion > 0.001:
+        if main_duration - insertion > 0:
             neighbors.append(main_duration - insertion)
         return min(requested, max(0.0, min(neighbors) / 2 if neighbors else 0.0))
 
@@ -3442,44 +3485,10 @@ class FfmpegToolsPanel:
             shift += effective
         return output_position + shift
 
-    def _insert_smart_preview_filter(
-        self,
-        profile: MediaProfile,
-        inserted_duration: float,
-        insertion: float,
-        fade_seconds: float,
-        fade_curve: str = "fade",
-    ) -> str:
-        normalize = (
-            f"aresample={profile.audio_rate},"
-            f"aformat=sample_fmts=fltp:sample_rates={profile.audio_rate}:channel_layouts={profile.audio_layout}"
-        )
-        labels: list[str] = []
-        parts: list[str] = []
-        if insertion > 0.001:
-            parts.append(f"[0:a]atrim=0:{self._fmt_seconds(insertion)},{normalize},asetpts=PTS-STARTPTS[a0]")
-            labels.append("a0")
-        effective = min(fade_seconds, inserted_duration / 2)
-        fades = ""
-        if effective > 0:
-            curve = "" if fade_curve in ("", "fade", "none") else f":curve={fade_curve}"
-            fades = (
-                f",afade=t=in:st=0:d={self._fmt_seconds(effective)}{curve},"
-                f"afade=t=out:st={self._fmt_seconds(max(0.0, inserted_duration - effective))}:d={self._fmt_seconds(effective)}{curve}"
-            )
-        parts.append(
-            f"[1:a]atrim=0:{self._fmt_seconds(inserted_duration)},{normalize},"
-            f"asetpts=PTS-STARTPTS{fades}[a1]"
-        )
-        labels.append("a1")
-        if profile.duration - insertion > 0.001:
-            parts.append(
-                f"[0:a]atrim={self._fmt_seconds(insertion)}:{self._fmt_seconds(profile.duration)},"
-                f"{normalize},asetpts=PTS-STARTPTS[a2]"
-            )
-            labels.append("a2")
-        parts.append("".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
-        return ";".join(parts)
+    def _insert_smart_preview_filter(self, profile: MediaProfile, inserted_duration: float,
+                                     insertion: float, fade_seconds: float, fade_curve: str = "fade") -> str:
+        return self._insert_audio_filter(profile, inserted_duration, insertion, fade_seconds,
+                                         fade_curve if fade_seconds > 0 else "none", True)[0]
 
     def _start_insert_filtered_preview(self, context: dict, composite_position: float) -> bool:
         main = self.insert_main_input
@@ -3492,15 +3501,21 @@ class FfmpegToolsPanel:
             requested = float(self.insert_seconds_var.get().replace(",", ".")) if transition_code != "none" else 0.0
         except ValueError:
             return False
+        if not math.isfinite(requested) or requested < 0:
+            return False
         full_reencode = self.insert_reencode_var.get()
         smart_transition = self.insert_smart_var.get() and transition_code != "none" and requested > 0
         if not (full_reencode and transition_code != "none" and requested > 0) and not smart_transition:
             return False
 
-        profile = self._probe_media(main)
-        inserted_duration = self._get_duration_only(inserted)
-        insertion = self.insert_timeline.insertion
-        effective = self._insert_effective_transition(profile.duration, inserted_duration, insertion, requested)
+        profile = self._insert_probe_profile(main)
+        inserted_duration = self._insert_duration(inserted)
+        rate = profile.audio_rate
+        insertion = max(0, min(round(self.insert_timeline.insertion * rate), round(profile.duration * rate))) / rate
+        inserted_duration = round(inserted_duration * rate) / rate
+        effective = (min(requested, inserted_duration / 2) if smart_transition and not full_reencode else
+                     self._insert_effective_transition(profile.duration, inserted_duration, insertion, requested))
+        effective = round(effective * rate) / rate
         if full_reencode:
             preview_args = self._insert_full_reencode_arguments(
                 main, inserted, Path("preview.wav"), profile, insertion, requested, transition_code,
@@ -3518,11 +3533,11 @@ class FfmpegToolsPanel:
             inserted_duration,
             effective,
             crossfade,
-            insertion > 0.001,
-            profile.duration - insertion > 0.001,
+            insertion > 0,
+            round(profile.duration * rate) / rate - insertion > 0,
         )
         filter_text += (
-            f";[aout]atrim=start={self._fmt_seconds(output_position)},"
+            f";[aout]atrim=start={self._precise_seconds(output_position)},"
             "asetpts=PTS-STARTPTS[apreview]"
         )
         command = [
@@ -3561,8 +3576,8 @@ class FfmpegToolsPanel:
         context["insert_preview_output_start"] = output_position
         context["insert_preview_effective"] = effective
         context["insert_preview_crossfade"] = crossfade
-        context["insert_preview_has_left"] = insertion > 0.001
-        context["insert_preview_has_right"] = profile.duration - insertion > 0.001
+        context["insert_preview_has_left"] = insertion > 0
+        context["insert_preview_has_right"] = round(profile.duration * rate) / rate - insertion > 0
         self.external_preview_started_at = time.monotonic()
         self.preview_playing = True
         context["button"].configure(text="||")
@@ -4228,12 +4243,13 @@ class FfmpegToolsPanel:
         if not selected:
             return
         source = Path(selected)
-        media = self._probe_media(source)
+        media = self._insert_probe_profile(source)
         if not media.has_audio:
             messagebox.showerror("sig", "O arquivo selecionado não contém uma faixa de áudio.")
             return
         self._stop_preview()
         self.insert_main_input = source
+        self._insert_main_profile = media
         self.insert_secondary_input = None
         self.insert_main_var.set(source.name)
         self.insert_secondary_var.set("Nenhum áudio para inserir")
@@ -4255,7 +4271,7 @@ class FfmpegToolsPanel:
         if not selected:
             return
         source = Path(selected)
-        media = self._probe_media(source)
+        media = self._insert_probe_profile(source)
         if not media.has_audio:
             messagebox.showerror("sig", "O arquivo selecionado não contém uma faixa de áudio.")
             return
@@ -4263,7 +4279,7 @@ class FfmpegToolsPanel:
         self._stop_preview()
         self.insert_secondary_input = source
         self.insert_secondary_var.set(f"Inserir: {source.name}")
-        main_media = self._probe_media(self.insert_main_input)
+        main_media = self._insert_probe_profile(self.insert_main_input)
         self.insert_timeline.configure_media(self.insert_main_input.name, main_media.duration, source.name, media.duration, insertion)
         self.insert_timeline.set_position(insertion)
         self.insert_current_var.set(self._clock(insertion))
@@ -5034,8 +5050,8 @@ class FfmpegToolsPanel:
             VideoAcceleration("cpu", "CPU", "libx264"),
         )
 
-    def _execute_video(self, label: str, builder, progress: int = 1, total: int = 1, duration_seconds: float = 0.0, progress_callback=None) -> None:
-        profile = self.acceleration or self._cpu_encoder_for("libx264")
+    def _execute_video(self, label: str, builder, progress: int = 1, total: int = 1, duration_seconds: float = 0.0, progress_callback=None, profile: VideoAcceleration | None = None) -> None:
+        profile = profile or self.acceleration or self._cpu_encoder_for("libx264")
         try:
             self._execute(builder(profile), label, progress, total, duration_seconds, progress_callback)
         except RuntimeError as exc:
@@ -5068,6 +5084,8 @@ class FfmpegToolsPanel:
             seconds = float(value)
         except ValueError as exc:
             raise RuntimeError(f"{label} deve ser um número em segundos") from exc
+        if not math.isfinite(seconds):
+            raise RuntimeError(f"{label} deve ser um número finito")
         if seconds < 0:
             raise RuntimeError(f"{label} não pode ser negativo")
         return seconds
@@ -5075,6 +5093,10 @@ class FfmpegToolsPanel:
     @staticmethod
     def _fmt_seconds(value: float) -> str:
         return f"{value:.3f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _precise_seconds(value: float) -> str:
+        return f"{value:.9f}".rstrip("0").rstrip(".") or "0"
 
     @staticmethod
     def _safe_output(base: Path, suffix: str, extension: str) -> Path:
@@ -5181,19 +5203,8 @@ class FfmpegToolsPanel:
 
         if not fast_copy and is_video:
             aviso_cor = color_depth_warning(getattr(media, "pix_fmt", ""))
-            if aviso_cor:
+            if aviso_cor and not smart_cut:
                 self._append_log(aviso_cor)
-            aviso_vfr = variable_rate_warning(
-                getattr(media, "fps", ""), getattr(media, "average_rate", "")
-            )
-            if aviso_vfr:
-                self._append_log(aviso_vfr)
-            aviso_offset = audio_offset_warning(
-                getattr(media, "audio_start_seconds", 0.0),
-                getattr(media, "container_start_seconds", 0.0),
-            )
-            if aviso_offset:
-                self._append_log(aviso_offset)
         if fast_copy:
             self._append_log(
                 "Corte rápido: codecs preservados; os limites são aproximados ao keyframe/pacote disponível."
@@ -5242,11 +5253,9 @@ class FfmpegToolsPanel:
                 crop=crop,
             )
         else:
-            codec_args = self._audio_codec_args_for_source_codec(
-                media.audio_codec, extension, media.audio_bitrate
-            ) or self._audio_codec_args(extension, media.audio_bitrate)
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration), "-map", "0:a:0?", "-vn", *codec_args, "-map_metadata", "0", str(output)]
-            self._execute(command, "Cortando áudio", 1, 1, duration)
+            if smart_cut:
+                self._append_log("SmartCut de áudio: mesmo corte por amostras do Reencode Completo; uma passagem contínua, sem emendas.")
+            self._cut_audio_precise(source, output, start, end, media)
 
     @staticmethod
     def _smartcut_codec_family(media: MediaProfile) -> str | None:
@@ -5295,234 +5304,339 @@ class FfmpegToolsPanel:
             return None
         return aceleracao
 
-    def _smartcut_segment_arguments(
-        self,
-        source: Path,
-        segment: Path,
-        start: float,
-        duration: float,
-        media: MediaProfile,
-        codec_family: str,
-        reencode: bool,
-        # F5: mantido por compatibilidade de chamada — o áudio do SmartCut não é
-        # mais montado por trecho (vem de uma passagem única no mux final).
-        audio_precise: bool = True,
-        encoder: VideoAcceleration | None = None,
-    ) -> list[str]:
-        """Um trecho do SmartCut em MPEG-TS pronto para ser concatenado.
+    def _cut_audio_precise(self, source: Path, output: Path, start: float, end: float, media: MediaProfile) -> None:
+        """SmartCut e Reencode Completo de áudio compartilham o mesmo corte.
 
-        Compatibilidade (pedido do usuário): as bordas reencodadas espelham as
-        características do trecho COPIADO — mesmo codec, resolução, fps, pix_fmt,
-        SAR e bitrate próximo — porque é o miolo copiado que dita o padrão do
-        arquivo final. O encoder também segue a família do codec de origem
-        (`_smart_join_acceleration_for_codec`), nunca o combo por acaso.
-
-        Áudio: o trecho é SÓ VÍDEO (`-an`). Desde o F5 o áudio do SmartCut vem
-        de uma passagem ÚNICA sobre a fonte, no mux final: costurar o áudio por
-        trecho acumulava ~20 ms por emenda (medido: +60 ms num corte de duas
-        emendas), porque cada segmento começava numa fronteira de pacote AAC.
-
-        Seek: input seek em todos os trechos. Com OUTPUT seek o `-c:v copy` recua
-        até o keyframe ANTERIOR (o miolo saía ~1 s deslocado, com o áudio fora de
-        sincronia); com input seek o corte cai no keyframe pedido e o `-t` fecha
-        a duração. A orientação fica no bitstream e o mux final devolve a rotação,
-        como no SmartJoin.
+        Emendas de áudio comprimido podem acrescentar priming/padding e exigir
+        novos parâmetros de decoder. Uma passagem contínua evita essas perdas.
         """
+        work = output.parent / f"audio_cut_{uuid.uuid4().hex}"
+        work.mkdir(parents=True, exist_ok=True)
+        staged = work / output.name
+        try:
+            codec = self._audio_codec_args_for_source_codec(media.audio_codec, output.suffix, media.audio_bitrate)
+            codec = codec or self._audio_codec_args(output.suffix, media.audio_bitrate)
+            samples = max(1, round((end - start) * media.audio_rate))
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(start),
+                       "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
+                       "-af", f"apad,atrim=end_sample={samples},asetpts=N/SR/TB",
+                       *codec, "-map_metadata", "0", "-map_chapters", "-1", str(staged)]
+            self._execute(command, "Cortando áudio com precisão", 1, 1, end - start)
+            if self._get_ffprobe():
+                info = self._smart_join_probe(staged)
+                self._smartcut_validate_audio(info, end - start, 1)
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            staged.replace(output)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    @staticmethod
+    def _smartcut_validate_audio(info: dict, duration: float, tracks: int, copied: bool = False) -> None:
+        streams = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+        if len(streams) != tracks:
+            raise RuntimeError("SmartCut: a quantidade de faixas de áudio mudou.")
+        for stream in streams:
+            rate = int(stream.get("sample_rate") or 48000)
+            codec = stream.get("codec_name", "")
+            lossless = codec.startswith("pcm_") or codec in {"alac", "flac"}
+            tolerance = max(.002, (1 if lossless else 4096) / rate)
+            actual = float(stream.get("duration") or info.get("format", {}).get("duration") or 0)
+            offset = float(stream.get("start_time") or 0)
+            valid = (offset >= -.1 and actual > 0 and offset + actual <= duration + .1) if copied else (
+                abs(actual - duration) <= tolerance and abs(offset) <= tolerance
+            )
+            if not math.isfinite(actual) or not math.isfinite(offset) or not valid:
+                raise RuntimeError(f"SmartCut: duração ou início incorretos na faixa de áudio ({offset:.3f}s / {actual:.3f}s).")
+
+    def _smartcut_segment_arguments(
+        self, source: Path, segment: Path, start: float, duration: float,
+        media: MediaProfile, codec_family: str, reencode: bool,
+        audio_precise: bool = True, encoder: VideoAcceleration | None = None,
+        frame_count: int | None = None, b_frames: int = 0,
+        seek_offset: float = 0.0, leading_frames: int = 0,
+        color: dict | None = None,
+        decode_seek: float | None = None, packet_start: int | None = None,
+    ) -> list[str]:
+        """Vídeo somente: pacotes exatos no corpo; timestamps originais nas bordas."""
+        seek = start if decode_seek is None else decode_seek
         args = [str(self._ffmpeg()), "-hide_banner", "-y", "-noautorotate", "-display_rotation:v:0", "0"]
-        args += ["-ss", self._fmt_seconds(start), "-i", str(source), "-t", self._fmt_seconds(duration)]
-        args += ["-map", "0:v:0"]
-        # F5: o áudio NÃO é mais montado por trecho (acumulava ~20 ms por emenda
-        # na costura dos segmentos). Os trechos saem só com vídeo; o áudio entra
-        # numa passagem única sobre a fonte, no mux final.
-        args += ["-an"]
+        if packet_start is None:
+            args += ["-ss", self._precise_seconds(seek + seek_offset)]
+        args += ["-i", str(source), "-map", "0:v:0", "-an"]
+        if frame_count is not None:
+            args += ["-frames:v", str(frame_count)]
+        else:
+            args += ["-t", self._precise_seconds(duration)]
         if reencode:
-            escolhido = encoder or self._smartcut_edge_encoder(codec_family) or self._smart_join_acceleration_for_codec(codec_family)
-            args += self._video_args(escolhido, media.video_bitrate)
-            # Espelha o padrão do trecho copiado (o miolo é a referência).
-            args += ["-pix_fmt", media.pix_fmt or "yuv420p"]
+            chosen = encoder or self._smartcut_edge_encoder(codec_family) or self._smart_join_acceleration_for_codec(codec_family)
+            args += self._video_args(chosen, media.video_bitrate)
+            filters = ["settb=AVTB",
+                       f"trim=start={self._precise_seconds(start - seek)}:end={self._precise_seconds(start - seek + duration)}",
+                       "setpts=PTS-STARTPTS"]
             if media.sar and media.sar not in ("1:1", "0:1", "N/A", ""):
-                args += ["-vf", f"setsar={media.sar.replace(':', '/')}"]
-            if media.fps:
-                args += ["-r", media.fps]
+                filters.append(f"setsar={media.sar.replace(':', '/')}")
+            args += ["-vf", ",".join(filters), "-pix_fmt", media.pix_fmt or "yuv420p",
+                     "-fps_mode", "passthrough", "-enc_time_base", "1/90000", "-bf", str(b_frames)]
+            if frame_count:
+                args += ["-force_key_frames", f"expr:eq(n,{frame_count - 1})"]
+                if codec_family == "hevc":
+                    if chosen.encoder in {"libx265", "hevc_nvenc"}:
+                        args += ["-forced-idr", "1"]
+                    elif chosen.encoder in {"hevc_qsv", "hevc_amf"}:
+                        args += ["-forced_idr", "1"]
+            for key in ("color_primaries", "color_trc", "colorspace", "color_range"):
+                value = (color or {}).get(key)
+                if value and value not in {"unknown", "unspecified", "reserved"}:
+                    args += [f"-{key}", str(value)]
         else:
             args += ["-c:v", "copy"]
-        args += [
-            "-bsf:v", self._smart_join_ts_bitstream(codec_family),
-            "-avoid_negative_ts", "make_zero",
-            "-mpegts_flags", "+resend_headers+initial_discontinuity",
-            "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", str(segment),
-        ]
-        return args
+        args += ["-map_metadata", "-1", "-avoid_negative_ts", "disabled"]
+        if segment.suffix.lower() == ".ts":
+            bsf = self._smart_join_ts_bitstream(codec_family)
+            if packet_start is not None:
+                bsf += f",noise=drop='lt(n,{packet_start})',setts=pts=PTS-{self._precise_seconds(start + seek_offset)}/TB:dts=DTS-{self._precise_seconds(start + seek_offset)}/TB"
+            if leading_frames:
+                bsf += ",noise=drop='lt(pts,0)'"
+            args += ["-bsf:v", bsf, "-mpegts_flags", "+resend_headers+initial_discontinuity",
+                     "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts"]
+        else:
+            args += ["-video_track_timescale", "90000", "-movflags", "+faststart"]
+        return args + [str(segment)]
 
     def _cut_video_smartcut(
-        self,
-        source: Path,
-        output: Path,
-        start: float,
-        end: float,
-        media: MediaProfile,
-        audio_precise: bool = True,
+        self, source: Path, output: Path, start: float, end: float,
+        media: MediaProfile, audio_precise: bool = True,
     ) -> None:
-        """SmartCut: copia o miolo entre keyframes e reencoda só as bordas.
-
-        Cabeça e cauda (do tempo pedido até o keyframe mais próximo) são reencodadas
-        para os limites ficarem exatos; o miolo é copiado sem tocar nos codecs. Se
-        não houver keyframe útil (ou o codec não permitir), cai no Reencode Completo.
-        """
-        codec_family = self._smartcut_codec_family(media)
-        encoder_bordas = self._smartcut_edge_encoder(codec_family) if codec_family else None
-        if codec_family and encoder_bordas is None:
-            self._append_log(
-                "O encoder selecionado não produz o mesmo codec do arquivo (o miolo é copiado): "
-                "usando o Reencode Completo."
-            )
-            self._cut_video_precise(source, output, start, end, media)
+        """Copia GOPs completos; recodifica bordas e valida antes de publicar."""
+        family = self._smartcut_codec_family(media)
+        def full(reason):
+            self._append_log(f"SmartCut: {reason}; usando Reencode Completo.")
+            self._cut_video_precise(source, output, start, end, media, copy_audio=not audio_precise)
+        if not family:
+            full("o codec não permite emendas em stream copy")
             return
-        # Keyframes que servem de fronteira: inclusive os que caem EXATAMENTE no
-        # início/fim pedidos (aí não há borda para reencodar).
-        limite = max(SMARTCUT_MIN_EDGE, 0.02)
-        keyframes = [
-            value for value in self._extract_keyframes(source)
-            if start - limite <= value <= end + limite
-        ]
-        cabeca_fim = min(keyframes) if keyframes else None
-        cauda_inicio = max(keyframes) if keyframes else None
-        if (
-            not codec_family
-            or encoder_bordas is None
-            or cabeca_fim is None
-            or cauda_inicio is None
-            or cauda_inicio - cabeca_fim <= SMARTCUT_MIN_EDGE
-        ):
-            self._append_log(
-                "SmartCut não encontrou keyframes úteis (ou o codec não é compatível): "
-                "usando o Reencode Completo."
-            )
-            self._cut_video_precise(source, output, start, end, media)
+        if not self._get_ffprobe():
+            full("FFprobe não está disponível para planejar a cópia com segurança")
             return
-
-        trechos: list[tuple[Path, float, float, bool, str]] = []
-        trabalho = output.parent / f"smartcut_{uuid.uuid4().hex[:8]}"
-        trabalho.mkdir(parents=True, exist_ok=True)
+        info = self._smart_join_probe(source, packets=True)
+        stream = info["streams"][0]
+        fps = float(Fraction(stream.get("r_frame_rate") or media.fps))
         try:
-            if cabeca_fim - start > SMARTCUT_MIN_EDGE:
-                trechos.append((trabalho / "01_cabeca.ts", start, cabeca_fim - start, True, "Reencodando a borda inicial"))
-            trechos.append((trabalho / "02_miolo.ts", cabeca_fim, cauda_inicio - cabeca_fim, False, "Copiando o miolo"))
-            if end - cauda_inicio > SMARTCUT_MIN_EDGE:
-                trechos.append((trabalho / "03_cauda.ts", cauda_inicio, end - cauda_inicio, True, "Reencodando a borda final"))
-            copiado = sum(duration for _path, _start, duration, reencode, _label in trechos if not reencode)
-            total = max(0.01, end - start)
-            self._append_log(
-                f"SmartCut: {copiado:.2f}s copiados sem reencode e "
-                f"{total - copiado:.2f}s reencodados ({len(trechos)} trechos)."
-            )
-            if media.has_audio:
-                self._append_log(
-                    "SmartCut: o áudio vai numa passagem única sobre a fonte "
-                    "(sem emendas de áudio); a política de cópia de áudio não se aplica aqui."
-                )
-            passos = len(trechos) + 1
-            for indice, (segmento, trecho_inicio, duracao, reencode, rotulo) in enumerate(trechos, start=1):
-                self._execute(
-                    self._smartcut_segment_arguments(
-                        source, segmento, trecho_inicio, duracao, media, codec_family, reencode,
-                        audio_precise=audio_precise,
-                        encoder=self._smartcut_edge_encoder(codec_family, duracao) if reencode else None,
-                    ),
-                    rotulo,
-                    indice,
-                    passos,
-                    duracao,
-                )
-            manifest = trabalho / "lista.txt"
-            manifest.write_text(
-                "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path, *_resto in trechos),
-                encoding="utf-8",
-            )
-            # F5: áudio CONTÍNUO. Entrada 0 = a fonte com seek no início pedido
-            # (com reencode o seek é exato, por amostra); entrada 1 = o vídeo já
-            # concatenado. Assim o áudio não tem emenda nenhuma — some o atraso
-            # que se acumulava (~20 ms por emenda; medido +60 ms num corte só).
-            concat = [
-                str(self._ffmpeg()), "-hide_banner", "-y",
-                "-ss", self._fmt_seconds(start), "-i", str(source),
-                "-display_rotation:v:0", str(media.rotation or 0),
-                "-fflags", "+genpts",
-                "-f", "concat", "-safe", "0", "-i", str(manifest),
-                "-map", "1:v:0",
-            ]
+            plan = smart_cut_planner.plan(info, start, end, fps)
+        except ValueError as exc:
+            raise RuntimeError(f"SmartCut: {exc}") from exc
+        if not any(s.copy for s in plan.segments):
+            full("o intervalo não contém um GOP completo copiável")
+            return
+        if any(not s.copy for s in plan.segments) and self._smartcut_edge_encoder(family) is None:
+            full("o encoder selecionado não produz o mesmo codec do arquivo")
+            return
+        delay = max(s.decode_delay for s in plan.segments if s.copy)
+        b_frames = int(stream.get("has_b_frames") or 0)
+        if family == "hevc":
+            b_frames = max(b_frames, math.ceil(delay * fps - 1e-6))
+        media = replace(media, fps=stream.get("r_frame_rate") or media.fps,
+                        pix_fmt=stream.get("pix_fmt") or media.pix_fmt)
+        copied = sum(s.frames for s in plan.segments if s.copy)
+        self._append_log(f"SmartCut: {copied}/{len(plan.timestamps)} quadros em cópia; somente as bordas serão recodificadas.")
+        if media.has_audio:
+            self._append_log("SmartCut: áudio contínuo da fonte, " + ("cortado por amostras em AAC." if audio_precise else "copiado nos limites de pacote."))
+        work = output.parent / f"smartcut_{uuid.uuid4().hex}"
+        work.mkdir(parents=True, exist_ok=True)
+        staged = work / output.name
+        steps = len(plan.segments) * 2 + 1
+        try:
+            prepared = []
+            step = 0
+            # Primeiro codificar as bordas: o maior atraso realmente produzido
+            # também participa do alinhamento DTS dos corpos copiados.
+            for i, segment in enumerate(plan.segments):
+                if self.cancel_event.is_set():
+                    raise Cancelled()
+                path = work / f"{i:02d}.mp4"
+                if not segment.copy:
+                    step += 1
+                    encoder = self._smartcut_edge_encoder(family, segment.end - segment.start)
+                    def build_edge(candidate):
+                        return self._smartcut_segment_arguments(
+                            source, path, segment.start, segment.end - segment.start, media, family, True,
+                            encoder=candidate, frame_count=segment.frames, b_frames=b_frames,
+                            seek_offset=plan.seek_offset, decode_seek=segment.decode_seek,
+                            color={"colorspace": stream.get("color_space"), "color_trc": stream.get("color_transfer"),
+                                   **{k: stream.get(k) for k in ("color_primaries", "color_range")}},
+                        )
+                    self._execute_video("Reencodando a borda inicial" if i == 0 else "Reencodando a borda final",
+                                        build_edge, step, steps, segment.end - segment.start, profile=encoder)
+                    encoded_delay = self._smart_join_encoded_delay(path)
+                    delay = max(delay, encoded_delay)
+                else:
+                    encoded_delay = segment.decode_delay
+                prepared.append((segment, path, encoded_delay))
+            pieces = []
+            for i, (segment, path, piece_delay) in enumerate(prepared):
+                step += 1
+                ts = work / f"{i:02d}.ts"
+                if segment.copy:
+                    cmd = self._smartcut_segment_arguments(
+                        source, ts, segment.start, segment.end - segment.start, media, family, False,
+                        frame_count=segment.frames, seek_offset=plan.seek_offset, leading_frames=segment.leading,
+                    )
+                    shift = delay - piece_delay
+                    if shift > 1e-6:
+                        ix = cmd.index("-bsf:v") + 1
+                        cmd[ix] += f",setts=pts=PTS:dts=DTS-{self._precise_seconds(shift)}/TB"
+                    label = "Copiando o miolo"
+                else:
+                    cmd = self._smart_join_ts_arguments(path, ts, family, False, decode_delay=delay - piece_delay)
+                    label = "Preparando a borda"
+                self._execute(cmd, label, step, steps, segment.end - segment.start)
+                if segment.copy:
+                    expected_piece = [t - segment.start for t in plan.timestamps
+                                      if segment.start - 1e-6 <= t < segment.end - 1e-6]
+                    actual_piece = sorted(float(p["pts_time"]) for p in self._smart_join_probe(ts, packets=True).get("packets", []))
+                    if len(actual_piece) != len(expected_piece) or any(abs(a - b) > .0001 for a, b in zip(actual_piece, expected_piece)):
+                        # Alguns índices MP4/VFR fazem seek no GOP anterior.
+                        # Refazer a cópia por índice de pacote evita recodificar
+                        # o corpo ou aceitar conteúdo errado com PTS rebased.
+                        self._append_log("SmartCut: índice de seek impreciso; copiando pelos índices reais dos pacotes.")
+                        cmd = self._smartcut_segment_arguments(
+                            source, ts, segment.start, segment.end - segment.start, media, family, False,
+                            frame_count=segment.frames, seek_offset=plan.seek_offset,
+                            leading_frames=segment.leading, packet_start=segment.packet_start,
+                        )
+                        if delay - piece_delay > 1e-6:
+                            ix = cmd.index("-bsf:v") + 1
+                            cmd[ix] += f",setts=pts=PTS:dts=DTS-{self._precise_seconds(delay - piece_delay)}/TB"
+                        self._execute(cmd, label, step, steps, segment.end - segment.start)
+                self._smart_join_validate_piece(ts, {"codec_family": family, "width": media.width, "height": media.height})
+                pieces.append(ts)
+            manifest = work / "lista.txt"
+            manifest.write_text("\n".join(
+                f"file '{self._concat_escape(str(path.resolve()))}'\nduration {self._precise_seconds(s.end - s.start)}"
+                for path, s in zip(pieces, plan.segments)), encoding="utf-8")
+            total = end - start
+            gap = self._precise_seconds(plan.first_gap)
+            limit = self._precise_seconds(total)
+            audio_origin = float(info.get("format", {}).get("start_time", 0)) + start
+            concat = [str(self._ffmpeg()), "-hide_banner", "-y", "-copyts"]
+            if not audio_precise:
+                concat += ["-itsoffset", self._precise_seconds(-audio_origin)]
+            concat += ["-ss", self._precise_seconds(start), "-i", str(source),
+                      "-display_rotation:v:0", str(media.rotation or 0),
+                      "-f", "concat", "-safe", "0", "-i", str(manifest), "-map", "1:v:0"]
             if media.has_audio:
                 concat += ["-map", "0:a?"]
-            concat += ["-c:v", "copy"]
-            if not media.has_audio:
-                concat += ["-an"]
+                if audio_precise:
+                    concat += ["-af", f"asetpts=PTS-{self._precise_seconds(audio_origin)}/TB,aresample=async=1:first_pts=0,apad,atrim=duration={limit},asetpts=N/SR/TB",
+                               *self._precise_audio_args(media)]
+                else:
+                    concat += ["-c:a", "copy"]
             else:
-                # AAC por faixa (mesmo perfil da fonte, um passe só).
-                concat += self._precise_audio_args(media)
-            if codec_family == "hevc":
-                concat += ["-tag:v", "hvc1"]
-            concat += [
-                "-avoid_negative_ts", "make_zero",
-                # Fecha o arquivo exatamente no tempo pedido: os trechos podem
-                # trazer alguns milissegundos a mais de áudio na emenda.
-                "-t", self._fmt_seconds(total),
-                "-max_interleave_delta", "0",
-                "-video_track_timescale", "90000",
-                "-movflags", "+faststart",
-                "-map_metadata", "0", "-map_chapters", "-1",
-                str(output),
-            ]
-            self._execute(concat, "Montando o arquivo final", passos, passos, total)
+                concat += ["-an"]
+            concat += ["-c:v", "copy", "-bsf:v",
+                       f"setts=pts=PTS+{gap}/TB:dts='if(eq(N,0),DTS+{gap}/TB,max(DTS+{gap}/TB,PREV_OUTDTS+1))':duration='min(DURATION,max(1,{limit}/TB-(PTS+{gap}/TB)))'",
+                       "-avoid_negative_ts", "disabled", "-t", limit,
+                       "-max_interleave_delta", "0", "-video_track_timescale", "90000",
+                       "-movie_timescale", "90000",
+                       "-movflags", "+faststart", "-map_metadata", "0", "-map_chapters", "-1"]
+            if family == "hevc":
+                concat += ["-tag:v", "hev1"]
+            self._execute(concat + [str(staged)], "Montando o arquivo final", steps, steps, total)
+            result = self._smart_join_probe(staged, packets=True)
+            actual = sorted(float(p["pts_time"]) for p in result.get("packets", []))
+            expected = [t - start for t in plan.timestamps]
+            if len(actual) != len(expected) or any(abs(a - b) > .0001 for a, b in zip(actual, expected)):
+                raise RuntimeError("SmartCut: a saída não contém exatamente os quadros e timestamps escolhidos.")
+            dts = [float(p["dts_time"]) for p in result["packets"]]
+            if any(b <= a for a, b in zip(dts, dts[1:])):
+                raise RuntimeError("SmartCut: timestamps de decodificação fora de ordem.")
+            self._smartcut_validate_audio(self._smart_join_probe(staged), total,
+                                          (media.audio_streams or 1) if media.has_audio else 0, not audio_precise)
+            position = plan.first_gap
+            for s in plan.segments:
+                if not s.copy:
+                    self._smart_join_validate_decoded_junction(staged, position, s.end - s.start, fps)
+                position += s.end - s.start
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            staged.replace(output)
         finally:
-            shutil.rmtree(trabalho, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
     def _cut_video_precise(
-        self,
-        source: Path,
-        output: Path,
-        start: float,
-        end: float,
-        media: MediaProfile,
-        copy_audio: bool = False,
-        crop: tuple[int, int, int, int] | None = None,
+        self, source: Path, output: Path, start: float, end: float, media: MediaProfile,
+        copy_audio: bool = False, crop: tuple[int, int, int, int] | None = None,
     ) -> None:
+        """Corte integral com os mesmos limites de apresentação do SmartCut."""
         if crop:
-            self._append_log(
-                f"Recorte por seleção: {selection_crop_label(crop)}."
-            )
+            self._append_log(f"Recorte por seleção: {selection_crop_label(crop)}.")
         if media.audio_streams > 1:
             action = "copiadas nos limites de pacote" if copy_audio else "preservadas e reencodadas em AAC"
             self._append_log(f"{source.name} possui {media.audio_streams} faixas de áudio; todas serão {action}.")
         if media.subtitle_streams or media.data_streams:
-            self._append_log(
-                "Legendas, anexos e streams de dados não são preservados no corte MP4. "
-                "Os capítulos também são omitidos: a timeline de origem não vale mais depois do corte."
-            )
-        if copy_audio and media.has_audio and media.audio_codec not in self._MP4_SAFE_AUDIO_CODECS:
-            raise RuntimeError(
-                f"O codec de áudio '{media.audio_codec}' não pode ser copiado para MP4. "
-                "Use 'Precisão máxima (AAC)'."
-            )
+            self._append_log("Legendas, anexos, streams de dados e capítulos não são preservados no corte MP4.")
         if copy_audio and media.has_audio:
             self._append_log("O vídeo será cortado com precisão; o áudio será copiado nos limites de pacote disponíveis.")
-
+        info = self._smart_join_probe(source, packets=True) if self._get_ffprobe() else None
+        anchor, seek_offset = 0.0, 0.0
+        plan = None
+        if info:
+            stream = info["streams"][0]
+            fps = float(Fraction(stream.get("r_frame_rate") or media.fps))
+            try:
+                plan = smart_cut_planner.plan(info, start, end, fps)
+            except ValueError as exc:
+                raise RuntimeError(f"Corte: {exc}") from exc
+            origin = float(stream.get("start_time", 0))
+            anchor = max((float(p["pts_time"]) - origin for p in info["packets"]
+                          if "K" in p.get("flags", "") and float(p["pts_time"]) - origin < start - 1e-6), default=0.0)
+            seek_offset = plan.seek_offset
+        delta = start - anchor
+        limit = self._precise_seconds(end - start)
+        work = output.parent / f"precise_cut_{uuid.uuid4().hex}"
+        work.mkdir(parents=True, exist_ok=True)
+        staged = work / output.name
         def build(profile: VideoAcceleration):
-            plan = selection_crop_filter(crop) if crop else "null"
-            input_args, filter_args = self._filter_for_profile(plan, profile)
-            audio_args = ["-c:a", "copy"] if copy_audio else self._precise_audio_args(media)
-            return [
-                str(self._ffmpeg()), "-hide_banner", "-y", *input_args,
-                "-ss", self._fmt_seconds(start), "-i", str(source),
-                "-t", self._fmt_seconds(end - start),
-                "-map", "0:v:0?", "-map", "0:a?", "-sn", "-dn", *filter_args,
-                *self._video_args(profile, media.video_bitrate),
-                *hevc_tag_arguments(profile.encoder, output.suffix), *audio_args,
-                "-map_metadata", "0", "-map_chapters", "-1", "-movflags", "+faststart",
-                str(output),
-            ]
-
-        self._execute_video("Cortando vídeo com precisão", build, duration_seconds=end - start)
+            filters = ["settb=AVTB",
+                       f"trim=start={self._precise_seconds(delta)}:end={self._precise_seconds(delta + end - start)}",
+                       f"setpts=PTS-{self._precise_seconds(delta)}/TB"]
+            if crop:
+                filters.append(selection_crop_filter(crop))
+            input_args, filter_args = self._filter_for_profile(",".join(filters), profile)
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", *input_args,
+                       "-ss", self._precise_seconds(anchor + seek_offset), "-i", str(source),
+                       "-ss", self._precise_seconds(start), "-i", str(source),
+                       "-map", "0:v:0", "-map", "1:a?", "-sn", "-dn", *filter_args,
+                       *self._video_args(profile, media.video_bitrate),
+                       *hevc_tag_arguments(profile.encoder, output.suffix),
+                       "-fps_mode", "passthrough", "-enc_time_base", "1/90000",
+                       "-bsf:v", f"setts=pts=PTS:dts=DTS:duration='min(DURATION,max(1,{limit}/TB-PTS))'"]
+            if copy_audio:
+                command += ["-c:a", "copy"]
+            elif media.has_audio:
+                command += ["-af", f"aresample=async=1:first_pts=0,apad,atrim=duration={limit},asetpts=N/SR/TB",
+                            *self._precise_audio_args(media)]
+            else:
+                command += ["-an"]
+            return command + ["-t", limit, "-avoid_negative_ts", "disabled", "-map_metadata", "0",
+                              "-map_chapters", "-1", "-video_track_timescale", "90000", "-movie_timescale", "90000",
+                              "-movflags", "+faststart", str(staged)]
+        try:
+            self._execute_video("Cortando vídeo com precisão", build, duration_seconds=end - start)
+            if info:
+                result = self._smart_join_probe(staged, packets=True)
+                actual = sorted(float(p["pts_time"]) for p in result.get("packets", []))
+                expected = [t - start for t in plan.timestamps]
+                if len(actual) != len(expected) or any(abs(a - b) > .0001 for a, b in zip(actual, expected)):
+                    raise RuntimeError("Corte: o encoder não preservou os quadros/timestamps escolhidos.")
+                self._smartcut_validate_audio(self._smart_join_probe(staged), end - start,
+                                              (media.audio_streams or 1) if media.has_audio else 0, copy_audio)
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            staged.replace(output)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def _extract_keyframes(self, source: Path) -> list[float]:
         command = [str(self._ffmpeg()), "-hide_banner", "-skip_frame", "nokey", "-i", str(source),
@@ -6191,6 +6305,8 @@ class FfmpegToolsPanel:
             transition_seconds = float(str(self._worker_value("join_seconds", self.join_seconds_var)).replace(",", "."))
         except ValueError as exc:
             raise RuntimeError("Tempo de transição inválido") from exc
+        if not math.isfinite(transition_seconds):
+            raise RuntimeError("Tempo de transição inválido")
         if transition_seconds < 0:
             raise RuntimeError("Tempo de transição não pode ser negativo")
 
@@ -6397,6 +6513,10 @@ class FfmpegToolsPanel:
         force_silence_reencode = self._join_requires_silence_reencode(
             clips, copy_audio, join_reencode, join_smart, requested_transition_seconds
         )
+        # SmartJoin pode copiar o vídeo e montar apenas o áudio/silêncio.
+        smart_audio_only_reencode = join_smart and force_silence_reencode
+        if smart_audio_only_reencode:
+            force_silence_reencode = False
         if force_silence_reencode:
             join_reencode = True
             join_smart = False
@@ -6441,6 +6561,8 @@ class FfmpegToolsPanel:
             transition_seconds = float(str(self._worker_value("join_seconds", self.join_seconds_var)).replace(",", "."))
         except ValueError as exc:
             raise RuntimeError("Tempo de transição inválido") from exc
+        if not math.isfinite(transition_seconds):
+            raise RuntimeError("Tempo de transição inválido")
         if transition_seconds < 0:
             raise RuntimeError("Tempo de transição não pode ser negativo")
         strategy = "Smart Join" if join_smart else "Reencodar"
@@ -6449,11 +6571,12 @@ class FfmpegToolsPanel:
             transition_seconds = 0.0
             transition_label = "Fundir"
         transition = self.VIDEO_TRANSITION_CODES.get(transition_label, transition_label)
-        if preserve_all_streams and not (join_smart and transition_seconds <= 0.001):
+        if preserve_all_streams and (smart_audio_only_reencode or not (join_smart and transition_seconds <= 0.001)):
             raise RuntimeError(
-                "Preservar todas as faixas está disponível somente no join sem transição, porque transições exigem uma política por faixa."
+                "Preservar todas as faixas exige cópia sem transição e faixas compatíveis. "
+                "Transições ou preenchimento de silêncio exigem uma política por faixa; escolha Primeira faixa (MP4)."
             )
-        if strategy == "Smart Join" and transition_seconds <= 0.001:
+        if strategy == "Smart Join" and transition_seconds <= smart_join_planner.NO_TRANSITION_SECONDS and not smart_audio_only_reencode:
             self._validate_video_copy_compatibility(clips, require_mp4=not preserve_all_streams, ignore_audio=not copy_audio)
             if preserve_all_streams:
                 topology = {((clip.audio_streams if copy_audio else 0), clip.subtitle_streams, clip.data_streams) for clip in clips}
@@ -6467,6 +6590,15 @@ class FfmpegToolsPanel:
             try:
                 mapping = self._join_copy_mapping(preserve_all_streams, copy_audio)
                 container_args = [] if preserve_all_streams else ["-movflags", "+faststart"]
+                # O concat usa o início mais antigo de todas as faixas. O
+                # priming AAC pode então deslocar o primeiro vídeo em 21 ms.
+                # Rebasear só os timestamps conserva os pacotes e B-frames.
+                container_args += ["-avoid_negative_ts", "disabled", "-bsf:v", "setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS"]
+                if copy_audio:
+                    # Priming dos áudios pode dar DTS repetido na emenda. Uma
+                    # correção de no máximo 1 ms mantém os pacotes em cópia,
+                    # sem duplicar timestamps no MKV ou recodificar faixas.
+                    container_args += ["-bsf:a", "setts=ts='if(eq(PREV_OUTPTS,NOPTS),PTS,max(PTS,PREV_OUTPTS+0.001/TB))'"]
                 self._execute([str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), *mapping, "-c", "copy", *container_args, str(output)], "Join automático sem perda", 1, 1, sum(item.duration for item in clips))
                 return
             finally:
@@ -6526,7 +6658,7 @@ class FfmpegToolsPanel:
         if normalized:
             self._append_log("Clipes normalizados para o perfil de saída: " + "; ".join(normalized))
         include_audio = any(clip.has_audio for clip in clips) and not audio_policy.startswith("Gerar saída sem áudio")
-        if strategy == "Smart Join" and transition_seconds > 0.001:
+        if strategy == "Smart Join":
             # SmartJoin hibrido portado do Android: copia os corpos entre
             # keyframes em stream copy e recodifica apenas as emendas. Se o
             # plano for inviavel, interrompe com diagnostico (sem reencodar
@@ -6686,8 +6818,8 @@ class FfmpegToolsPanel:
 
     def _smart_join_video_profile(self, media: MediaProfile) -> "smart_join_planner.VideoProfile":
         try:
-            fps = float(media.fps) if media.fps else 30.0
-        except (TypeError, ValueError):
+            fps = float(Fraction(media.fps)) if media.fps else 30.0
+        except (TypeError, ValueError, ZeroDivisionError):
             fps = 30.0
         return smart_join_planner.VideoProfile(
             codec_family=(media.video_codec or "h264"),
@@ -6731,7 +6863,7 @@ class FfmpegToolsPanel:
             return (
                 f"[{input_spec}]aresample={rate}:async=1:first_pts=0,"
                 f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts={layout},"
-                f"atrim=duration={self._fmt_seconds(duration)},asetpts=N/SR/TB[{output_label}]"
+                f"apad,atrim=duration={self._fmt_seconds(duration)},asetpts=N/SR/TB[{output_label}]"
             )
         return (
             f"anullsrc=channel_layout={layout}:sample_rate={rate},"
@@ -6749,8 +6881,12 @@ class FfmpegToolsPanel:
         if src_rot != tgt_rot:
             parts += self._smart_rotation_filters(src_rot)
             parts += self._smart_rotation_filters((-tgt_rot) % 360)
+        # Ajustar pela proporção de EXIBIÇÃO também quando os SARs diferem.
+        # Só setsar após scale esticaria os clipes normalizados.
+        sar = target.get("sar") or "1"
         parts.append(
-            f"scale={target['width']}:{target['height']}:force_original_aspect_ratio=decrease"
+            f"scale=w='max(2,trunc(min({target['width']},{target['height']}*dar/({sar}))/2)*2)':"
+            f"h='max(2,trunc(min({target['height']},{target['width']}*({sar})/dar)/2)*2)'"
         )
         parts.append(f"pad={target['width']}:{target['height']}:(ow-iw)/2:(oh-ih)/2")
         parts.append(f"setsar={target.get('sar') or '1'}")
@@ -6763,16 +6899,22 @@ class FfmpegToolsPanel:
     def _smart_join_acceleration_for_codec(self, codec_family: str) -> VideoAcceleration:
         """Devolve o VideoAcceleration do Windows adequado ao codec do target.
 
-        Segue a regra do app Windows (combo de aceleracao do usuario + fallback
-        CPU): se o codec do target casar com o encoder selecionado, usa o
-        acceleration escolhido; caso contrario, fallback por software do mesmo
-        codec (libx264/libx265). O Android escolhe encoder por mediacodec; aqui
-        a parametrizacao e a do Windows (qualidade/crf/rate-control).
+        Respeita a preferência CPU/GPU e resolve a variante do codec de saída
+        no catálogo sondado. Não troca por CPU apenas porque a emenda é curta.
+        Sem catálogo, usa o encoder selecionado compatível ou libx264/libx265.
         """
+        path, advanced, available = self._worker_encoder_inputs()
+        # O codec vem do perfil de saída. Preferir a variante da GPU sondada
+        # para esse codec, sem aplicar fallback por trecho curto no SmartJoin.
+        if available:
+            choice = resolve_encoder(codec=codec_family, path=path, advanced=advanced,
+                                     available=[option for option in available if option.encoder != "mpeg4"])
+            if choice is not None:
+                return self._catalog_video_acceleration(choice.option)
         accel = getattr(self, "acceleration", None)
         if accel is not None:
             enc = (accel.encoder or "").lower()
-            if codec_family == "h264" and enc.startswith(("libx264", "h264_", "mpeg4")):
+            if codec_family == "h264" and enc.startswith(("libx264", "h264_")):
                 return accel
             if codec_family == "hevc" and enc.startswith(("libx265", "hevc_")):
                 return accel
@@ -6783,13 +6925,18 @@ class FfmpegToolsPanel:
     def _smart_join_video_args(self, codec_family: str, bitrate: str) -> list[str]:
         """Argumentos de encoder do SmartJoin, delegando ao _video_args do Windows.
 
-        Usa o encoder selecionado no combo (se compativel com o codec do target)
-        e a QUALIDADE selecionada (via _video_args). Sem parametrizacao do
-        Android (mediacodec/-bf/-profile): o app Windows ja resolve isso no
-        _video_args por aceleracao.
+        Usa qualidade e velocidade do app com o codec do perfil escolhido.
+        A pipeline ajusta a reordenação dos quadros às partes copiadas; em HEVC,
+        o keyframe forçado no fim da emenda precisa ser IDR.
         """
         accel = self._smart_join_acceleration_for_codec(codec_family)
-        return self._video_args(accel, bitrate)
+        args = self._video_args(accel, bitrate)
+        if codec_family == "hevc":
+            if accel.encoder in {"libx265", "hevc_nvenc"}:
+                args += ["-forced-idr", "1"]
+            elif accel.encoder in {"hevc_qsv", "hevc_amf"}:
+                args += ["-forced_idr", "1"]
+        return args
 
     def _smart_join_ts_bitstream(self, codec_family: str) -> str:
         return "hevc_mp4toannexb" if codec_family == "hevc" else "h264_mp4toannexb"
@@ -6805,25 +6952,33 @@ class FfmpegToolsPanel:
         include_audio: bool,
         output_file: Path,
         output_as_mpeg_ts: bool = True,
+        frame_count: int | None = None,
+        decode_delay: float = 0.0,
+        seek_offset: float = 0.0,
+        leading_frames: int = 0,
     ) -> list[str]:
         args = [str(self._ffmpeg()), "-hide_banner", "-y"]
         if not copy_video:
             # arquivo incompativel pode carregar edit-list/PTS nao continuos
             args += ["-fflags", "+genpts"]
-        # O corpo comeca SEMPRE num keyframe (garantia do planner). Usamos
-        # -ss DEPOIS do input (output seek) no stream copy: com -ss antes do
-        # input + reencode de audio mono, o FFmpeg desktop nao aplica o -t ao
-        # audio copiado e a peca TS sai com a duracao cheia (bug observado).
-        # Em output seek o corte em keyframe com -c:v copy e exato.
+        # Seek de entrada preserva o IDR mesmo quando seu DTS precede o PTS.
+        # Limitar também os pacotes evita incluir o próximo GOP por causa dos
+        # B-frames. Áudio usa essa mesma janela, sem outro seek de saída.
+        seek = start_seconds + seek_offset
+        if abs(seek) > 0.000001:
+            args += ["-ss", self._fmt_seconds(seek)]
         args += ["-noautorotate", "-display_rotation:v:0", "0", "-i", str(source)]
-        if start_seconds > 0.0005:
-            args += ["-ss", self._fmt_seconds(start_seconds)]
-        args += ["-t", self._fmt_seconds(duration_seconds)]
+        if not copy_video or frame_count is None:
+            args += ["-t", self._fmt_seconds(duration_seconds)]
+        if frame_count is not None:
+            args += ["-frames:v", str(frame_count + (leading_frames if copy_video else 0))]
 
         filters: list[str] = []
         if not copy_video:
             filters.append(
-                f"[0:v:0]{self._smart_join_video_normalization_filter(media, target)}[vout]"
+                f"[0:v:0]{self._smart_join_video_normalization_filter(media, target)},"
+                f"tpad=stop_mode=clone:stop_duration={self._fmt_seconds(duration_seconds)},"
+                f"trim=duration={self._fmt_seconds(duration_seconds)}[vout]"
             )
         audio_filter = ""
         if include_audio:
@@ -6837,8 +6992,6 @@ class FfmpegToolsPanel:
         if include_audio:
             args += ["-map", "[aout0]"]
 
-        encoder_name: str | None = None
-        encoder_args: list[str] = []
         if copy_video:
             args += ["-c:v", "copy"]
         else:
@@ -6847,16 +7000,24 @@ class FfmpegToolsPanel:
             # com os corpos copiados.
             source_bitrate = media.video_bitrate or "1M"
             args += self._smart_join_video_args(target["codec_family"], source_bitrate)
-            args += ["-pix_fmt", "yuv420p", "-r", str(target["fps"])]
+            args += ["-pix_fmt", "yuv420p", "-r", str(target["fps"]), "-bf", str(target.get("b_frames", 0))]
         if include_audio:
             args += [
                 "-c:a", "aac", "-b:a", str(target["audio_bitrate"]),
                 "-ar", str(target["audio_rate"]), "-ac", str(target["audio_channels"]),
             ]
-        args += ["-map_metadata", "-1", "-avoid_negative_ts", "make_zero"]
+        else:
+            args += ["-an"]
+        args += ["-map_metadata", "-1", "-avoid_negative_ts", "disabled"]
         if output_as_mpeg_ts:
+            shift = max(0.0, target.get("decode_delay", 0.0) - decode_delay)
+            bitstream = self._smart_join_ts_bitstream(target["codec_family"])
+            if leading_frames:
+                bitstream += ",noise=drop='lt(pts,0)'"
+            if shift > 0.000001:
+                bitstream += f",setts=pts=PTS:dts=DTS-{self._fmt_seconds(shift)}/TB"
             args += [
-                "-bsf:v", self._smart_join_ts_bitstream(target["codec_family"]),
+                "-bsf:v", bitstream,
                 "-mpegts_flags", "+resend_headers+initial_discontinuity",
                 "-muxdelay", "0", "-muxpreload", "0",
                 "-f", "mpegts",
@@ -6878,6 +7039,9 @@ class FfmpegToolsPanel:
         xfade_transition: str,
         include_audio: bool,
         output_file: Path,
+        frame_count: int | None = None,
+        first_seek_offset: float = 0.0,
+        second_seek_offset: float = 0.0,
     ) -> list[str]:
         transition = junction.incoming_transition_end_seconds
         outgoing_window = junction.outgoing_duration_seconds - junction.outgoing_bridge_start_seconds
@@ -6895,16 +7059,23 @@ class FfmpegToolsPanel:
         # A bridge reencoda (sem stream copy) e o seek do 1o input e feito
         # antes dos inputs (input seek) - igual ao Android. A bridge nao sofre
         # do bug de -t ignorado (que so afeta stream copy de audio mono).
-        if junction.outgoing_bridge_start_seconds > 0.0005:
-            args += ["-ss", self._fmt_seconds(junction.outgoing_bridge_start_seconds)]
+        seek = junction.outgoing_bridge_start_seconds + first_seek_offset
+        if abs(seek) > 0.000001:
+            args += ["-ss", self._fmt_seconds(seek)]
         args += ["-noautorotate", "-display_rotation:v:0", "0", "-i", str(first_input)]
+        if abs(second_seek_offset) > 0.000001:
+            args += ["-ss", self._fmt_seconds(second_seek_offset)]
         args += ["-noautorotate", "-display_rotation:v:0", "0", "-i", str(second_input)]
 
         nf_first = self._smart_join_video_normalization_filter(first_media, target)
         nf_second = self._smart_join_video_normalization_filter(second_media, target)
         filters = [
-            f"[0:v:0]trim=duration={self._fmt_seconds(outgoing_window)},{nf_first}[ovbase]",
-            f"[1:v:0]trim=duration={self._fmt_seconds(incoming_window)},{nf_second}[ivbase]",
+            f"[0:v:0]trim=duration={self._fmt_seconds(outgoing_window)},{nf_first},"
+            f"tpad=stop_mode=clone:stop_duration={self._fmt_seconds(outgoing_window)},"
+            f"trim=duration={self._fmt_seconds(outgoing_window)}[ovbase]",
+            f"[1:v:0]trim=duration={self._fmt_seconds(incoming_window)},{nf_second},"
+            f"tpad=stop_mode=clone:stop_duration={self._fmt_seconds(incoming_window)},"
+            f"trim=duration={self._fmt_seconds(incoming_window)}[ivbase]",
         ]
         if fade_in_out:
             filters.append(
@@ -7030,15 +7201,21 @@ class FfmpegToolsPanel:
         args += self._smart_join_video_args(
             target["codec_family"], first_media.video_bitrate or "1M"
         )
-        args += ["-pix_fmt", "yuv420p", "-r", str(target["fps"])]
+        args += ["-pix_fmt", "yuv420p", "-r", str(target["fps"]), "-bf", str(target.get("b_frames", 0))]
+        if frame_count is not None:
+            # Fechar a emenda com IDR esvazia os quadros pendentes antes do
+            # GOP copiado seguinte, sem recodificar esse corpo.
+            args += ["-frames:v", str(frame_count), "-force_key_frames", f"expr:eq(n,{frame_count - 1})"]
         if include_audio:
             args += [
                 "-c:a", "aac", "-b:a", str(target["audio_bitrate"]),
                 "-ar", str(target["audio_rate"]), "-ac", str(target["audio_channels"]),
             ]
+        else:
+            args += ["-an"]
         args += [
             "-t", self._fmt_seconds(max(0.01, expected_duration)),
-            "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+            "-map_metadata", "-1", "-avoid_negative_ts", "disabled",
             "-video_track_timescale", "90000", "-movflags", "+faststart",
             str(output_file),
         ]
@@ -7050,14 +7227,18 @@ class FfmpegToolsPanel:
         output_file: Path,
         codec_family: str,
         include_audio: bool,
+        decode_delay: float = 0.0,
     ) -> list[str]:
         args = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(input_file), "-map", "0:v:0"]
         if include_audio:
             args += ["-map", "0:a?"]
+        bitstream = self._smart_join_ts_bitstream(codec_family)
+        if decode_delay > 0.000001:
+            bitstream += f",setts=pts=PTS:dts=DTS-{self._fmt_seconds(decode_delay)}/TB"
         args += [
             "-c", "copy",
-            "-bsf:v", self._smart_join_ts_bitstream(codec_family),
-            "-avoid_negative_ts", "make_zero",
+            "-bsf:v", bitstream,
+            "-avoid_negative_ts", "disabled",
             "-mpegts_flags", "+resend_headers+initial_discontinuity",
             "-muxdelay", "0", "-muxpreload", "0",
             "-f", "mpegts",
@@ -7072,9 +7253,21 @@ class FfmpegToolsPanel:
         target: dict,
         include_audio: bool,
         manifest_path: Path,
+        durations: list[float] | None = None,
+        paths: list[Path] | None = None,
+        medias: list[MediaProfile] | None = None,
+        transition_seconds: float = 0.0,
+        fade_in_out: bool = False,
+        input_offsets: list[float] | None = None,
     ) -> list[str]:
+        if durations is not None and len(durations) != len(pieces):
+            raise ValueError("Durações dos segmentos não correspondem ao manifesto")
         manifest_path.write_text(
-            "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path in pieces),
+            "\n".join(
+                f"file '{self._concat_escape(str(path.resolve()))}'"
+                + (f"\nduration {self._fmt_seconds(durations[index])}" if durations is not None else "")
+                for index, path in enumerate(pieces)
+            ),
             encoding="utf-8",
         )
         args = [
@@ -7082,23 +7275,146 @@ class FfmpegToolsPanel:
             "-display_rotation:v:0", str(target.get("rotation") or 0),
             "-fflags", "+genpts",
             "-f", "concat", "-safe", "0", "-i", str(manifest_path),
-            "-map", "0:v:0",
         ]
-        if include_audio:
-            args += ["-map", "0:a?"]
-        args += ["-c", "copy"]
-        if include_audio:
-            args += ["-bsf:a", "aac_adtstoasc"]
+        if include_audio and paths and medias:
+            # Áudio é decodificado/codificado uma única vez. Não há AAC delay
+            # acumulado em corpos/emendas nem lacunas quando falta uma faixa.
+            for index, path in enumerate(paths):
+                if input_offsets and abs(input_offsets[index]) > 0.000001:
+                    args += ["-ss", self._fmt_seconds(input_offsets[index])]
+                args += ["-i", str(path)]
+            filters = []
+            labels = []
+            for index, media in enumerate(medias):
+                label = f"aj{index}"
+                filters.append(self._smart_join_audio_window_filter(
+                    f"{index + 1}:a:0", media, media.duration, target, label
+                ))
+                if fade_in_out and transition_seconds > 0:
+                    fades = []
+                    if index > 0:
+                        fades.append(f"afade=t=in:st=0:d={self._fmt_seconds(transition_seconds)}")
+                    if index < len(medias) - 1:
+                        fades.append(f"afade=t=out:st={self._fmt_seconds(media.duration - transition_seconds)}:d={self._fmt_seconds(transition_seconds)}")
+                    filters.append(f"[{label}]{','.join(fades)}[{label}f]")
+                    label += "f"
+                labels.append(label)
+            if not fade_in_out and transition_seconds > 0:
+                previous = labels[0]
+                for index, label in enumerate(labels[1:], 1):
+                    output_label = f"axj{index}"
+                    filters.append(f"[{previous}][{label}]acrossfade=d={self._fmt_seconds(transition_seconds)}:c1=tri:c2=tri[{output_label}]")
+                    previous = output_label
+                filters.append(f"[{previous}]anull[aout]")
+            else:
+                filters.append(''.join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
+            args += ["-filter_complex", ";".join(filters), "-map", "0:v:0", "-map", "[aout]",
+                     "-c:v", "copy", "-c:a", "aac", "-b:a", str(target["audio_bitrate"]),
+                     "-ar", str(target["audio_rate"]), "-ac", str(target["audio_channels"])]
+        else:
+            args += ["-map", "0:v:0", "-c:v", "copy", "-an"]
         if target["codec_family"] == "hevc":
-            args += ["-tag:v", "hvc1"]
+            # hev1 sinaliza VPS/SPS/PPS dentro do stream: as emendas podem
+            # usar parâmetros distintos dos corpos copiados.
+            args += ["-tag:v", "hev1"]
         args += [
-            "-avoid_negative_ts", "make_zero",
+            "-avoid_negative_ts", "disabled",
             "-max_interleave_delta", "0",
             "-video_track_timescale", "90000",
             "-movflags", "+faststart",
             str(output_file),
         ]
         return args
+
+    def _smart_join_probe(self, path: Path, packets: bool = False, first_packets: bool = False,
+                          frames_interval: tuple[float, float] | None = None,
+                          packet_stream: str = "v:0") -> dict:
+        """Sonda pacotes sem decodificar vídeo; permite cancelar arquivos longos."""
+        ffprobe = self._get_ffprobe()
+        if not ffprobe:
+            raise RuntimeError("FFprobe não foi encontrado; não é possível validar o SmartJoin.")
+        command = [str(ffprobe), "-v", "error", "-show_streams", "-show_format", "-of", "json"]
+        if packets:
+            command += ["-select_streams", packet_stream, "-show_packets", "-show_entries",
+                        "packet=pts_time,dts_time,duration_time,flags,pos,size:packet_side_data=skip_samples,discard_padding:stream=codec_type,codec_name,width,height,pix_fmt,sample_aspect_ratio,r_frame_rate,avg_frame_rate,has_b_frames,start_time,duration,duration_ts,time_base,sample_rate,channels,channel_layout,sample_fmt,bits_per_raw_sample,color_primaries,color_transfer,color_space,color_range:format=start_time,duration"]
+            if first_packets:
+                command += ["-read_intervals", "%+0.1"]
+        if frames_interval is not None:
+            start, end = frames_interval
+            command += ["-select_streams", "v:0", "-show_frames", "-show_entries",
+                        "frame=pts_time,best_effort_timestamp_time", "-read_intervals",
+                        f"{self._fmt_seconds(start)}%{self._fmt_seconds(end)}"]
+        command += [str(path)]
+        self._record_ffmpeg_command(command, probe=True)
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0) as process:
+            while True:
+                if self.cancel_event.is_set():
+                    process.kill()
+                    process.communicate()
+                    raise Cancelled()
+                try:
+                    stdout, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        if process.returncode or (frames_interval is not None and stderr.strip()):
+            raise RuntimeError(f"Não consegui analisar {path.name}: {stderr.decode('utf-8', 'replace')[-600:]}")
+        try:
+            return json.loads(stdout)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"Sonda inválida para {path.name}") from exc
+
+    def _smart_join_validate_video(self, path: Path, expected: float, frame_count: int,
+                                   fps: float, max_source_gap: float = 0.0) -> None:
+        info = self._smart_join_probe(path, packets=True)
+        packets = info.get("packets", [])
+        times = sorted(float(p["pts_time"]) for p in packets if "pts_time" in p)
+        tolerance = max(0.002, 1.1 / fps)
+        if len(times) != frame_count or not times:
+            raise RuntimeError(f"SmartJoin: vídeo incompleto em {path.name} ({len(times)}/{frame_count} quadros).")
+        end = max(float(p["pts_time"]) + float(p.get("duration_time", 1 / fps))
+                  for p in packets if "pts_time" in p)
+        if abs(times[0]) > tolerance or abs(end - expected) > tolerance:
+            raise RuntimeError(f"SmartJoin: janela de vídeo incorreta em {path.name} ({times[0]:.3f}–{end:.3f}s; esperado 0–{expected:.3f}s).")
+        gap_limit = max(2.1 / fps, max_source_gap + 1.1 / fps)
+        if any(b - a > gap_limit or b - a <= 0 for a, b in zip(times, times[1:])):
+            raise RuntimeError(f"SmartJoin: descontinuidade nos quadros de {path.name}.")
+
+    def _smart_join_validate_piece(self, path: Path, target: dict) -> None:
+        # Um TS de poucos quadros pode ser confundido com MPEG-PS no probing
+        # automático do concat. Pacotes null tornam o container identificável,
+        # sem adicionar quadros, som ou tempo à peça.
+        if path.stat().st_size < 4096:
+            null_packet = b"\x47\x1f\xff\x10" + b"\xff" * 184
+            with path.open("ab") as stream:
+                stream.write(null_packet * 32)
+        info = self._smart_join_probe(path)
+        videos = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
+        if not videos or any(
+            (v.get("codec_name"), v.get("width"), v.get("height"))
+            != (target["codec_family"], target["width"], target["height"])
+            for v in videos
+        ):
+            raise RuntimeError(f"SmartJoin: segmento inválido ({path.name}).")
+
+    def _smart_join_encoded_delay(self, path: Path) -> float:
+        packets = self._smart_join_probe(path, packets=True, first_packets=True).get("packets", [])
+        if not packets:
+            raise RuntimeError(f"SmartJoin: a recodificação não gerou quadros em {path.name}.")
+        first = packets[0]
+        return max(0.0, float(first["pts_time"]) - float(first.get("dts_time", first["pts_time"])))
+
+    def _smart_join_validate_decoded_junction(self, path: Path, start: float, duration: float,
+                                             fps: float) -> None:
+        # Só decodifica a emenda e alguns quadros seguintes. Pacotes podem ter
+        # PTS válidos enquanto um GOP aberto/SPS causa saída fora de ordem no
+        # decoder; não justificaríamos decodificar todos os corpos copiados.
+        info = self._smart_join_probe(path, frames_interval=(start + .5 / fps, start + duration + 4 / fps))
+        times = [float(frame.get("pts_time", frame.get("best_effort_timestamp_time", "nan")))
+                 for frame in info.get("frames", [])]
+        if not times or any(not math.isfinite(t) for t in times) or any(b <= a for a, b in zip(times, times[1:])):
+            raise RuntimeError("SmartJoin: o decoder encontrou quadros fora de ordem em uma emenda.")
 
     def _smart_join_execute(
         self,
@@ -7109,10 +7425,10 @@ class FfmpegToolsPanel:
         transition_label: str,
         include_audio: bool,
     ) -> None:
-        """Executa o pipeline SmartJoin hibrido (corpos copy + bridges + concat TS).
+        """Copia corpos, codifica emendas e monta áudio uma única vez.
 
-        Portado integralmente do Android. Levanta RuntimeError sem reencodar
-        tudo quando o plano e inviavel (mesma politica do Android).
+        Valida a timeline antes de publicar o arquivo. Nunca substitui um plano
+        inviável por recodificação completa silenciosa.
         """
         fade_in_out = transition_label == "Fade in/out"
         xfade_name = self.VIDEO_TRANSITION_CODES.get(transition_label, transition_label)
@@ -7121,28 +7437,89 @@ class FfmpegToolsPanel:
 
         self._append_log(f"SmartJoin: analisando perfis e keyframes de {len(paths)} clipe(s).")
         sources: list[smart_join_planner.Source] = []
+        packet_infos = []
+        prepared_sources = {}
+        max_source_gap = 0.0
         for index, (path, media) in enumerate(zip(paths, medias)):
-            keyframes = self._extract_keyframes(path)
-            if self.cancel_event.is_set():
-                raise Cancelled()
+            if path in prepared_sources:
+                cached_media, cached_source, cached_packets, cached_gap = prepared_sources[path]
+                medias[index] = cached_media
+                sources.append(cached_source)
+                packet_infos.append(cached_packets)
+                max_source_gap = max(max_source_gap, cached_gap)
+                continue
+            info = self._smart_join_probe(path, packets=True)
+            packets = info.get("packets", [])
+            if not packets or not info.get("streams"):
+                raise RuntimeError(f"Não consegui identificar os quadros de {path.name}.")
+            stream = info["streams"][0]
+            origin = float(stream.get("start_time", 0))
+            times = sorted(float(p["pts_time"]) - origin for p in packets if "pts_time" in p)
+            if len(times) != len(packets):
+                raise RuntimeError(f"Há quadros sem timestamp em {path.name}; SmartJoin não pode copiá-los com segurança.")
+            keyframes = [float(p["pts_time"]) - origin for p in packets if "K" in p.get("flags", "")]
+            ordered_times = [float(p["pts_time"]) - origin for p in packets]
+            key_indices = [i for i, packet in enumerate(packets) if "K" in packet.get("flags", "")]
+            safe_ends = []
+            leading = {}
+            key_delays = {}
+            for number, packet_index in enumerate(key_indices):
+                key_time = ordered_times[packet_index]
+                next_index = key_indices[number + 1] if number + 1 < len(key_indices) else len(packets)
+                group = ordered_times[packet_index:next_index]
+                safe_ends.append((key_time, min(group)))
+                leading[key_time] = sum(t < key_time - 0.000001 for t in group)
+                packet = packets[packet_index]
+                key_delays[key_time] = max(0.0, float(packet["pts_time"]) - float(packet.get("dts_time", packet["pts_time"])))
+            source_gap = max((b - a for a, b in zip(times, times[1:])), default=0.0)
+            max_source_gap = max(max_source_gap, source_gap)
+            seek_offset = origin - float(info.get("format", {}).get("start_time", 0))
+            try:
+                duration = float(stream.get("duration") or media.duration)
+            except (TypeError, ValueError):
+                duration = media.duration
+            # Não arredondar 30000/1001 para 29.97 nem a duração para centésimos.
+            media = replace(media, fps=stream.get("r_frame_rate") or media.fps,
+                            duration=duration if abs(duration - media.duration) < 0.05 else media.duration)
+            medias[index] = media
+            packet_infos.append((times, key_delays, seek_offset, leading, int(stream.get("has_b_frames", 0))))
             sources.append(
                 smart_join_planner.Source(
                     duration_seconds=media.duration,
                     profile=self._smart_join_video_profile(media),
                     keyframes_seconds=keyframes,
+                    safe_copy_ends=safe_ends,
                 )
             )
+            prepared_sources[path] = (media, sources[-1], packet_infos[-1], source_gap)
+            # Guardar apenas PTS/chaves compactos. O JSON completo de pacotes
+            # de vários vídeos longos consumiria centenas de MB desnecessários.
+            del info, packets
 
-        plan_result = smart_join_planner.plan(sources, transition_seconds, fade_in_out)
+        choice = str(self._worker_value_default("join_profile", "join_profile_var", "Primeiro clipe"))
+        base = self._select_join_base(medias, choice)
+        target_index = next(index for index, media in enumerate(medias) if media is base)
+        fps = float(Fraction(base.fps))
+        if not math.isfinite(fps) or fps <= 0:
+            raise RuntimeError("Não consegui identificar a taxa de quadros do perfil escolhido.")
+        if 0 < transition_seconds < 0.5 / fps:
+            transition_seconds = 0.0
+            self._append_log("A transição é menor que meio quadro; os clipes serão unidos sem efeito.")
+        plan_result = smart_join_planner.plan(sources, transition_seconds, fade_in_out, target_index=target_index)
         if not plan_result.can_smart_join:
             raise RuntimeError(plan_result.ineligibility_reason or "SmartJoin não aplicável.")
-        if not any(clip.copy_video for clip in plan_result.clips):
+        if not any(clip.copy_video and clip.body_duration_seconds > 0.000001 for clip in plan_result.clips):
             raise RuntimeError(
                 "Nenhum corpo de vídeo pôde ser preservado por stream copy: "
-                "o SmartJoin recodificaria tudo e não traria ganho."
+                "o SmartJoin recodificaria tudo e não traria ganho. "
+                "Escolha outro perfil de saída ou use Reencode Completo."
             )
+        decode_delay = max(
+            packet_infos[clip.index][1].get(clip.body_start_seconds, 0.0)
+            for clip in plan_result.clips if clip.copy_video and clip.body_duration_seconds > 0.000001
+        )
 
-        copied_count = sum(1 for clip in plan_result.clips if clip.copy_video)
+        copied_count = sum(1 for clip in plan_result.clips if clip.copy_video and clip.body_duration_seconds > 0.000001)
         self._append_log(
             f"SmartJoin: {copied_count}/{len(plan_result.clips)} corpos em stream copy; "
             f"target = clipe {plan_result.target_index + 1} "
@@ -7167,21 +7544,59 @@ class FfmpegToolsPanel:
         target["codec_family"] = (
             "hevc" if smart_join_planner._normalize_codec(plan_result.target_profile.codec_family) == "hevc" else "h264"
         )
+        acceleration = self._smart_join_acceleration_for_codec(target["codec_family"])
+        self._append_log(f"SmartJoin: encoder das partes recodificadas: {acceleration.label} ({acceleration.encoder}).")
+        target["decode_delay"] = decode_delay
+        fps = float(Fraction(target["fps"]))
+        # Manter a profundidade de reordenação do vídeo copiado evita que o
+        # decoder HEVC solte o CRA seguinte antes dos últimos quadros da emenda.
+        target["b_frames"] = max(
+            packet_infos[clip.index][4] for clip in plan_result.clips
+            if clip.copy_video and clip.body_duration_seconds > 0.000001
+        )
+        if target["codec_family"] == "hevc":
+            # O CRA de um GOP aberto pode exigir um quadro a mais de atraso
+            # que o IDR inicial. As emendas seguem a maior janela realmente
+            # usada pelos GOPs que entram em cópia.
+            target["b_frames"] = max(target["b_frames"], math.ceil(decode_delay * fps - .000001))
+        order = smart_join_segment_order(
+            len(plan_result.clips), [c.body_duration_seconds > 0.000001 for c in plan_result.clips],
+            [j.index for j in plan_result.junctions],
+        )
+        durations = {}
+        counts = {}
+        logical_end = 0.0
+        scheduled_end = 0.0
+        for kind, index in order:
+            if kind == "body":
+                clip = plan_result.clips[index]
+                duration = clip.body_duration_seconds
+            else:
+                duration = smart_join_planner.junction_duration_seconds(plan_result.junctions[index], fade_in_out)
+            logical_end += duration
+            if kind == "body" and clip.copy_video:
+                times = packet_infos[index][0]
+                count = sum(clip.body_start_seconds - 0.000001 <= t < clip.body_end_seconds - 0.000001 for t in times)
+            else:
+                count = max(1, round((logical_end - scheduled_end) * fps))
+                duration = count / fps
+            if count <= 0:
+                raise RuntimeError("SmartJoin: um corpo planejado não contém quadros copiáveis.")
+            durations[kind, index] = duration
+            counts[kind, index] = count
+            scheduled_end += duration
 
         work_dir = self.output_dir / f"smart_join_{uuid.uuid4().hex}"
         work_dir.mkdir(parents=True, exist_ok=True)
         pieces: list[Path] = []
-        total_steps = (
-            len([c for c in plan_result.clips if c.body_duration_seconds > 0.020])
-            + len(plan_result.junctions) * 2
-            + 1
-        )
+        total_steps = sum(1 if c.copy_video else 2 for c in plan_result.clips if c.body_duration_seconds > 0.000001) + len(plan_result.junctions) * 2 + 1
+        staged_output = work_dir / "resultado.mp4"
         step = 0
         try:
             for index, clip_plan in enumerate(plan_result.clips):
                 if self.cancel_event.is_set():
                     raise Cancelled()
-                if clip_plan.body_duration_seconds <= 0.020:
+                if clip_plan.body_duration_seconds <= 0.000001:
                     continue
                 step += 1
                 ts_path = work_dir / f"body_{index:03d}.ts"
@@ -7189,9 +7604,12 @@ class FfmpegToolsPanel:
                     self._append_log(f"SmartJoin: copiando corpo {index + 1}/{len(paths)} (stream copy).")
                     body_cmd = self._smart_join_body_arguments(
                         paths[index], medias[index],
-                        clip_plan.body_start_seconds, clip_plan.body_duration_seconds,
-                        copy_video=True, target=target, include_audio=include_audio,
+                        clip_plan.body_start_seconds, durations["body", index],
+                        copy_video=True, target=target, include_audio=False,
                         output_file=ts_path, output_as_mpeg_ts=True,
+                        frame_count=counts["body", index], decode_delay=packet_infos[index][1].get(clip_plan.body_start_seconds, 0.0),
+                        seek_offset=packet_infos[index][2],
+                        leading_frames=packet_infos[index][3].get(clip_plan.body_start_seconds, 0),
                     )
                     self._execute(
                         body_cmd, f"SmartJoin corpo {index + 1} (copy)", step, total_steps,
@@ -7202,9 +7620,10 @@ class FfmpegToolsPanel:
                     mp4_path = work_dir / f"body_{index:03d}.mp4"
                     body_cmd = self._smart_join_body_arguments(
                         paths[index], medias[index],
-                        clip_plan.body_start_seconds, clip_plan.body_duration_seconds,
-                        copy_video=False, target=target, include_audio=include_audio,
+                        clip_plan.body_start_seconds, durations["body", index],
+                        copy_video=False, target=target, include_audio=False,
                         output_file=mp4_path, output_as_mpeg_ts=False,
+                        frame_count=counts["body", index], seek_offset=packet_infos[index][2],
                     )
                     self._execute(
                         body_cmd, f"SmartJoin recodificando clipe {index + 1}", step, total_steps,
@@ -7212,12 +7631,14 @@ class FfmpegToolsPanel:
                     )
                     step += 1
                     ts_cmd = self._smart_join_ts_arguments(
-                        mp4_path, ts_path, target["codec_family"], include_audio
+                        mp4_path, ts_path, target["codec_family"], False,
+                        decode_delay=max(0.0, decode_delay - self._smart_join_encoded_delay(mp4_path)),
                     )
                     self._execute(
                         ts_cmd, f"SmartJoin preparando corpo {index + 1}", step, total_steps,
                         clip_plan.body_duration_seconds,
                     )
+                self._smart_join_validate_piece(ts_path, target)
 
             for junction in plan_result.junctions:
                 if self.cancel_event.is_set():
@@ -7230,8 +7651,10 @@ class FfmpegToolsPanel:
                 bridge_cmd = self._smart_join_bridge_arguments(
                     paths[j], paths[j + 1],
                     medias[j], medias[j + 1],
-                    target, junction, fade_in_out, xfade_name, include_audio,
+                    target, junction, fade_in_out, xfade_name, False,
                     mp4_path,
+                    frame_count=counts["bridge", j],
+                    first_seek_offset=packet_infos[j][2], second_seek_offset=packet_infos[j + 1][2],
                 )
                 self._execute(
                     bridge_cmd, f"SmartJoin emenda {j + 1}", step, total_steps,
@@ -7239,12 +7662,14 @@ class FfmpegToolsPanel:
                 )
                 step += 1
                 ts_cmd = self._smart_join_ts_arguments(
-                    mp4_path, ts_path, target["codec_family"], include_audio
+                    mp4_path, ts_path, target["codec_family"], False,
+                    decode_delay=max(0.0, decode_delay - self._smart_join_encoded_delay(mp4_path)),
                 )
                 self._execute(
                     ts_cmd, f"SmartJoin preparando emenda {j + 1}", step, total_steps,
                     max(0.1, smart_join_planner.junction_duration_seconds(junction, fade_in_out)),
                 )
+                self._smart_join_validate_piece(ts_path, target)
 
             # F7: a ORDEM dos segmentos é o que define o arquivo final. Os dois
             # laços acima só criam os arquivos; aqui eles entram intercalados —
@@ -7253,20 +7678,20 @@ class FfmpegToolsPanel:
             # para o fim e o SmartJoin com transição saía fora de ordem:
             # medido no N4, a linha do tempo foi 2>3>4>5>1.
             pieces = []
-            for tipo, index in smart_join_segment_order(
-                len(plan_result.clips),
-                [clip.body_duration_seconds > 0.020 for clip in plan_result.clips],
-                [junction.index for junction in plan_result.junctions],
-            ):
+            for tipo, index in order:
                 arquivo = work_dir / f"{'body' if tipo == 'body' else 'bridge'}_{index:03d}.ts"
-                if arquivo.exists():
-                    pieces.append(arquivo)
+                if not arquivo.exists():
+                    raise RuntimeError(f"SmartJoin: segmento ausente ({arquivo.name}).")
+                pieces.append(arquivo)
             if not pieces:
                 raise RuntimeError("O SmartJoin não gerou segmentos.")
             step += 1
             manifest_path = work_dir / f"manifest_{uuid.uuid4().hex}.txt"
             concat_cmd = self._smart_join_concat_arguments(
-                pieces, output, target, include_audio, manifest_path
+                pieces, staged_output, target, include_audio, manifest_path,
+                durations=[durations[key] for key in order], paths=paths, medias=medias,
+                transition_seconds=plan_result.transition_seconds, fade_in_out=fade_in_out,
+                input_offsets=[info[2] for info in packet_infos],
             )
             expected = plan_result.expected_duration_seconds([m.duration for m in medias])
             self._execute(concat_cmd, "SmartJoin: unindo segmentos", step, total_steps, expected)
@@ -7275,14 +7700,26 @@ class FfmpegToolsPanel:
             except OSError:
                 pass
 
-            # validacao pos (como Android validateSmartJoinDuration)
-            actual = self._get_duration_only(output)
-            if actual > 0:
-                tolerance = max(0.35, len(plan_result.junctions) * 0.12)
-                if abs(actual - expected) > tolerance:
-                    raise RuntimeError(
-                        f"Duração inesperada: {actual:.3f}s; esperado {expected:.3f}s."
-                    )
+            self._smart_join_validate_video(staged_output, expected, sum(counts.values()), fps, max_source_gap)
+            position = 0.0
+            for key in order:
+                if key[0] == "bridge":
+                    self._smart_join_validate_decoded_junction(staged_output, position, durations[key], fps)
+                position += durations[key]
+            final_info = self._smart_join_probe(staged_output)
+            audio_streams = [s for s in final_info.get("streams", []) if s.get("codec_type") == "audio"]
+            if include_audio:
+                if len(audio_streams) != 1:
+                    raise RuntimeError("SmartJoin: a faixa de áudio final está ausente.")
+                audio = audio_streams[0]
+                tolerance = max(1.1 / fps, 2048 / target["audio_rate"])
+                if abs(float(audio.get("start_time", 0))) > tolerance or abs(float(audio.get("duration", 0)) - expected) > tolerance:
+                    raise RuntimeError("SmartJoin: a duração do áudio não acompanha o vídeo.")
+            elif audio_streams:
+                raise RuntimeError("SmartJoin: a saída deveria estar sem áudio.")
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            staged_output.replace(output)
             self._append_log(f"SmartJoin concluído: {expected:.2f}s em {len(pieces)} segmento(s).")
         finally:
             try:
@@ -7297,10 +7734,12 @@ class FfmpegToolsPanel:
             raise RuntimeError("Selecione o áudio principal")
         if not inserted or not inserted.exists():
             raise RuntimeError("Selecione o áudio que será inserido")
-        main_profile = self._probe_media(main)
-        inserted_profile = self._probe_media(inserted)
+        main_profile = self._insert_probe_profile(main)
+        inserted_profile = self._insert_probe_profile(inserted)
         if not main_profile.has_audio or not inserted_profile.has_audio:
             raise RuntimeError("Os dois arquivos precisam conter áudio")
+        if not math.isfinite(self.insert_timeline.insertion):
+            raise RuntimeError("Ponto de inserção inválido")
         insertion = max(0.0, min(self.insert_timeline.insertion, main_profile.duration))
         transition_label = str(self._worker_value("insert_transition", self.insert_transition_var))
         transition_code = self.insert_transition_code(transition_label)
@@ -7314,6 +7753,8 @@ class FfmpegToolsPanel:
         if transition_seconds < 0:
             raise RuntimeError("Tempo de transição não pode ser negativo")
 
+        if not math.isfinite(transition_seconds):
+            raise RuntimeError("Tempo de transição inválido")
         full_reencode = bool(self._worker_value("insert_reencode", self.insert_reencode_var))
         use_smart = bool(self._worker_value("insert_smart", self.insert_smart_var))
         extension = main.suffix.lower() if main.suffix.lower() in AUDIO_EXTENSIONS else ".m4a"
@@ -7323,7 +7764,7 @@ class FfmpegToolsPanel:
             effective = self._insert_effective_transition(
                 main_profile.duration, inserted_profile.duration, insertion, transition_seconds
             )
-            boundaries = int(insertion > 0.001) + int(main_profile.duration - insertion > 0.001)
+            boundaries = int(insertion > 0) + int(main_profile.duration - insertion > 0)
             total_duration = max(0.01, total_duration - effective * boundaries)
         mode = "Reencode Completo" if full_reencode else ("Smart Insert" if use_smart else "Sem reencodar")
         self._set_status(f"Inserindo áudio ({mode})", 0)
@@ -7333,26 +7774,9 @@ class FfmpegToolsPanel:
             f"{inserted_profile.audio_channels} canal(is)."
         )
         if full_reencode:
-            command = self._insert_full_reencode_arguments(
-                main, inserted, output, main_profile, insertion, transition_seconds, transition_code
-            )
-            self._execute(command, "Inserindo áudio (Reencode Completo)", 1, 1, total_duration)
+            self._insert_render_continuous(main, inserted, output, main_profile, insertion, transition_seconds, transition_code, False)
             return
         if use_smart:
-            self._append_log("Smart Insert preserva o corpo do áudio, mas o ponto de corte é aproximado ao frame/pacote do codec.")
-            if self._audio_codec_args_for_source_codec(
-                main_profile.audio_codec, extension, main_profile.audio_bitrate
-            ) is None:
-                self._append_log(
-                    f"Smart Insert não pode preservar o codec '{main_profile.audio_codec}'; "
-                    "usando reencode completo para gerar uma saída válida."
-                )
-                fallback_transition = transition_code if transition_code != "none" else "none"
-                command = self._insert_full_reencode_arguments(
-                    main, inserted, output, main_profile, insertion, transition_seconds, fallback_transition
-                )
-                self._execute(command, "Inserindo áudio (compatibilização completa)", 1, 1, total_duration)
-                return
             self._insert_smart_worker(
                 main, inserted, output, main_profile, insertion, total_duration,
                 transition_code if transition_seconds > 0 else "none", transition_seconds,
@@ -7420,110 +7844,265 @@ class FfmpegToolsPanel:
                 path.unlink(missing_ok=True)
             work_dir.rmdir()
 
-    def _insert_smart_worker(
-        self,
-        main: Path,
-        inserted: Path,
-        output: Path,
-        profile: MediaProfile,
-        insertion: float,
-        total_duration: float,
-        transition_code: str = "none",
-        transition_seconds: float = 0.5,
-    ) -> None:
-        work_dir = self.output_dir / f"smart_insert_{uuid.uuid4().hex}"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        extension = output.suffix or ".m4a"
-        pieces: list[Path] = []
+    def _insert_probe_profile(self, path: Path) -> MediaProfile:
+        key = (str(path.resolve()), path.stat().st_mtime_ns, path.stat().st_size)
+        cache = getattr(self, "_insert_profiles", {})
+        if key in cache:
+            return cache[key]
+        profile = self._probe_media(path)
+        if profile.has_audio and self._get_ffprobe():
+            info = self._smart_join_probe(path)
+            audio = next(s for s in info["streams"] if s.get("codec_type") == "audio")
+            if audio.get("codec_name") == "opus":
+                info = self._smart_join_probe(path, packets=True, first_packets=True, packet_stream="a:0")
+            duration = smart_insert_planner.audio_duration(info, profile.duration)
+            profile = replace(profile, duration=duration, audio_sample_fmt=audio.get("sample_fmt", ""),
+                              audio_bits_per_raw_sample=int(audio.get("bits_per_raw_sample") or 0))
+        cache[key] = profile
+        self._insert_profiles = cache
+        return profile
+
+    def _insert_duration(self, path: Path) -> float:
+        return self._insert_probe_profile(path).duration if path.exists() else self._get_duration_only(path)
+
+    def _insert_codec_args(self, profile: MediaProfile, extension: str) -> list[str]:
+        args = self._audio_codec_args_for_source_codec(profile.audio_codec, extension, profile.audio_bitrate)
+        args = args or self._audio_codec_args(extension, profile.audio_bitrate)
+        if profile.audio_codec == "alac" and profile.audio_sample_fmt in {"s16p", "s32p"}:
+            args += ["-sample_fmt", profile.audio_sample_fmt]
+        if profile.audio_codec == "flac" and profile.audio_sample_fmt in {"s16", "s32"}:
+            args += ["-sample_fmt", profile.audio_sample_fmt]
+            if profile.audio_bits_per_raw_sample:
+                args += ["-bits_per_raw_sample", str(profile.audio_bits_per_raw_sample)]
+        return args
+
+    def _insert_validate(self, path: Path, profile: MediaProfile, samples: int) -> None:
+        # Estes containers declaram a contagem exata de amostras. Ler o header
+        # evita iniciar FFprobe repetidamente para peças já verificadas na montagem.
+        if profile.audio_codec == "flac" and path.suffix.lower() == ".flac":
+            stream = smart_insert_flac.metadata(path)[0][1]
+            packed = int.from_bytes(stream[10:18], "big")
+            rate, channels, bits, actual = packed >> 44, ((packed >> 41) & 7) + 1, ((packed >> 36) & 31) + 1, packed & ((1 << 36) - 1)
+            if (rate != profile.audio_rate or channels != profile.audio_channels or actual != samples or
+                (profile.audio_bits_per_raw_sample and bits != profile.audio_bits_per_raw_sample)):
+                raise RuntimeError("Inserir áudio: formato ou contagem de amostras FLAC incorretos.")
+            return
+        if (profile.audio_codec in {"pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le"}
+            and path.suffix.lower() == ".wav"):
+            data = smart_insert_wave.inspect(path)
+            if (data.signature[1:3] != (profile.audio_channels, profile.audio_rate) or data.size // data.align != samples):
+                raise RuntimeError("Inserir áudio: formato ou contagem de amostras WAV incorretos.")
+            return
+        if not self._get_ffprobe():
+            return
+        info = self._smart_join_probe(path)
+        self._smartcut_validate_audio(info, samples / profile.audio_rate, 1)
+        audio = next(s for s in info["streams"] if s.get("codec_type") == "audio")
+        if int(audio.get("sample_rate") or 0) != profile.audio_rate or int(audio.get("channels") or 0) != profile.audio_channels:
+            raise RuntimeError("Inserir áudio: a taxa de amostragem ou a quantidade de canais mudou.")
+        if audio.get("codec_name", "").startswith("pcm_") or audio.get("codec_name") in {"alac", "flac"}:
+            actual = round(smart_insert_planner.audio_duration(info, 0) * profile.audio_rate)
+            if abs(actual - samples) > 1:
+                raise RuntimeError(f"Inserir áudio: contagem incorreta de amostras ({actual}/{samples}).")
+
+    def _insert_audio_filter(self, profile: MediaProfile, inserted_duration: float, insertion: float,
+                             seconds: float, code: str, smart: bool = False) -> tuple[str, int]:
+        rate = profile.audio_rate
+        main = round(profile.duration * rate)
+        inserted = round(inserted_duration * rate)
+        cut = max(0, min(round(insertion * rate), main))
+        effective = min(seconds, inserted_duration / 2) if smart else self._insert_effective_transition(
+            main / rate, inserted / rate, cut / rate, seconds)
+        fade = max(0, round(effective * rate)) if code != "none" else 0
+        normalize = (f"asetpts=PTS-STARTPTS,aresample={rate},"
+                     f"aformat=sample_fmts=dblp:sample_rates={rate}:channel_layouts={profile.audio_layout},apad")
+        def window(source, start, end):
+            return f"[{source}]{normalize},atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS"
+        def fade_filter(direction, start=0, curve="fade"):
+            curve_arg = "" if curve == "fade" else f":curve={curve}"
+            return f",afade=t={direction}:st={self._precise_seconds(start / rate)}:d={self._precise_seconds(fade / rate)}{curve_arg}"
+        use_fade = fade > 0 and (smart or code == "fade")
+        crossfade = fade > 0 and not smart and code not in {"none", "fade"}
+        parts, labels = [], []
+        if cut:
+            tail_fade = fade_filter("out", cut - fade) if use_fade and not smart else ""
+            parts.append(window("0:a:0", 0, cut) + tail_fade + "[a0]")
+            labels.append("a0")
+        fades = ""
+        if use_fade:
+            if smart or cut:
+                fades += fade_filter("in", curve=code)
+            if smart or cut < main:
+                fades += fade_filter("out", inserted - fade, code)
+        parts.append(window("1:a:0", 0, inserted) + fades + "[a1]")
+        labels.append("a1")
+        if cut < main:
+            head_fade = fade_filter("in") if use_fade and not smart else ""
+            parts.append(window("0:a:0", cut, main) + head_fade + "[a2]")
+            labels.append("a2")
+        if crossfade:
+            previous = labels[0]
+            for i, label in enumerate(labels[1:], 1):
+                parts.append(f"[{previous}][{label}]acrossfade=d={self._precise_seconds(fade / rate)}:c1={code}:c2={code}[ax{i}]")
+                previous = f"ax{i}"
+            parts.append(f"[{previous}]anull[aout]")
+        else:
+            parts.append("".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
+        return ";".join(parts), main + inserted - (fade * (len(labels) - 1) if crossfade else 0)
+
+    def _insert_render_continuous(self, main: Path, inserted: Path, output: Path, profile: MediaProfile,
+                                   insertion: float, seconds: float, code: str, smart: bool) -> None:
+        work = output.parent / f"insert_encode_{uuid.uuid4().hex}"
+        work.mkdir(parents=True, exist_ok=True)
+        staged = work / output.name
         try:
-            step = 0
-            if insertion > 0.001:
-                step += 1
-                left = work_dir / f"{len(pieces):03d}{extension}"
-                self._execute(
-                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", "0", "-i", str(main), "-t", self._fmt_seconds(insertion), "-map", "0:a:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(left)],
-                    "Smart Insert: trecho inicial",
-                    step,
-                    4,
-                    insertion,
-                )
-                pieces.append(left)
-            step += 1
-            middle = work_dir / f"{len(pieces):03d}{extension}"
-            inserted_dur = self._get_duration_only(inserted)
-            eff_fade = (
-                min(transition_seconds, inserted_dur / 2)
-                if transition_code != "none" and transition_seconds > 0
-                else 0.0
-            )
-
-            fade_filters: list[str] = []
-            if eff_fade > 0:
-                # "Fade in/out" (código "fade") usa a curva padrão do afade; as
-                # demais curvas (Linear, Seno, Logarítmica...) são aplicadas
-                # com a mesma forma escolhida — sempre apenas no áudio inserido.
-                curve = "" if transition_code == "fade" else f":curve={transition_code}"
-                fade_filters.append(f"afade=t=in:st=0:d={self._fmt_seconds(eff_fade)}{curve}")
-                fade_out_st = max(0.0, inserted_dur - eff_fade)
-                fade_filters.append(f"afade=t=out:st={self._fmt_seconds(fade_out_st)}:d={self._fmt_seconds(eff_fade)}{curve}")
-
-            middle_cmd = [
-                str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted), "-map", "0:a:0",
-                "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
-            ]
-            if fade_filters:
-                middle_cmd += ["-af", ",".join(fade_filters)]
-
-            codec_args = self._audio_codec_args_for_source_codec(
-                profile.audio_codec, extension, profile.audio_bitrate
-            )
-            if codec_args is None:
-                raise RuntimeError(
-                    f"Smart Insert não consegue preservar com segurança o codec '{profile.audio_codec}'. "
-                    "Use Reencode Completo."
-                )
-            middle_cmd += codec_args
-            middle_cmd.append(str(middle))
-
-            self._execute(
-                middle_cmd,
-                "Smart Insert: compatibilizando áudio inserido",
-                step,
-                4,
-                inserted_dur,
-            )
-            pieces.append(middle)
-            main_duration = self._get_duration_only(main)
-            if insertion < main_duration - 0.001:
-                step += 1
-                right = work_dir / f"{len(pieces):03d}{extension}"
-                self._execute(
-                    [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._fmt_seconds(insertion), "-i", str(main), "-map", "0:a:0", "-c", "copy", str(right)],
-                    "Smart Insert: trecho final",
-                    step,
-                    4,
-                    max(0.1, main_duration - insertion),
-                )
-                pieces.append(right)
-            self._concat_insert_pieces(pieces, output, "Smart Insert: juntando áudio", 4, 4, total_duration)
+            command = self._insert_full_reencode_arguments(main, inserted, staged, profile, insertion, seconds, code,
+                                                          smart_semantics=smart)
+            _, samples = self._insert_audio_filter(profile, self._insert_duration(inserted), insertion, seconds, code, smart)
+            self._execute(command, "Inserindo áudio (compatibilização contínua)" if smart else "Inserindo áudio (Reencode Completo)",
+                          1, 1, samples / profile.audio_rate)
+            self._insert_validate(staged, profile, samples)
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            staged.replace(output)
         finally:
-            for path in work_dir.glob("*"):
-                path.unlink(missing_ok=True)
-            work_dir.rmdir()
+            shutil.rmtree(work, ignore_errors=True)
 
-    def _concat_insert_pieces(self, pieces: list[Path], output: Path, label: str, progress: int, total: int, duration: float) -> None:
+    @staticmethod
+    def _insert_partial_supported(profile: MediaProfile, main: Path, output: Path) -> bool:
+        return ((profile.audio_codec == "alac" and output.suffix.lower() == ".m4a") or
+                (profile.audio_codec in {"pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le"}
+                 and output.suffix.lower() == ".wav") or
+                (profile.audio_codec == "flac" and output.suffix.lower() == ".flac" and main.suffix.lower() == ".flac"))
+
+    def _insert_smart_worker(self, main: Path, inserted: Path, output: Path, profile: MediaProfile,
+                             insertion: float, total_duration: float, transition_code: str = "none",
+                             transition_seconds: float = 0.5) -> None:
+        supported = self._insert_partial_supported(profile, main, output)
+        if not supported or not self._get_ffprobe():
+            reasons = {"aac": "priming e padding em emendas AAC", "mp3": "reservatório e atraso do encoder MP3",
+                       "opus": "pre-skip e padding em emendas Opus", "vorbis": "parâmetros e granule positions Vorbis",
+                       "flac": "cabeçalho e posições dos frames FLAC", "wmav2": "atraso e dependências dos frames WMA"}
+            reason = reasons.get(profile.audio_codec, "codec sem cópia parcial validada") if self._get_ffprobe() else "FFprobe indisponível"
+            self._append_log(f"Smart Insert: {reason}; usando uma recodificação contínua, mantendo o efeito selecionado.")
+            self._insert_render_continuous(main, inserted, output, profile, insertion, transition_seconds, transition_code, True)
+            return
+        if profile.audio_codec.startswith("pcm_"):
+            self._insert_pcm_worker(main, inserted, output, profile, insertion, transition_seconds, transition_code)
+            return
+        info = self._smart_join_probe(main, packets=True, packet_stream="a:0")
+        try:
+            plan = smart_insert_planner.plan(info, profile.duration, self._insert_duration(inserted), insertion, profile.audio_rate,
+                                             16 if profile.audio_codec == "flac" else 0)
+        except ValueError as exc:
+            self._append_log(f"Smart Insert: {exc}; usando recodificação contínua.")
+            self._insert_render_continuous(main, inserted, output, profile, insertion, transition_seconds, transition_code, True)
+            return
+        rate = plan.rate
+        self._append_log(f"Smart Insert: {(plan.main_samples - plan.right + plan.left) / rate:.6f}s do principal em cópia; "
+                         f"somente o inserido e {(plan.right - plan.left) / rate:.6f}s da emenda serão recodificados.")
+        work = output.parent / f"smart_insert_{uuid.uuid4().hex}"
+        work.mkdir(parents=True, exist_ok=True)
+        staged = work / output.name
+        pieces, durations = [], []
+        def copy_piece(start, samples, packets, label):
+            path = work / f"{len(pieces):03d}{output.suffix}"
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(start / rate),
+                       "-i", str(main), "-ss", "0", "-map", "0:a:0", "-c:a", "copy", "-frames:a", str(packets),
+                       "-bsf:a", "setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS", "-avoid_negative_ts", "disabled", str(path)]
+            self._execute(command, label, len(pieces) + 1, 4, samples / rate)
+            self._insert_validate(path, profile, samples)
+            pieces.append(path)
+            durations.append(samples / rate)
+        try:
+            if plan.left and profile.audio_codec != "flac":
+                copy_piece(0, plan.left, plan.prefix_packets, "Smart Insert: trecho inicial")
+            middle = work / f"{len(pieces):03d}{output.suffix}"
+            bridge_profile = replace(profile, duration=(plan.right - plan.left) / rate)
+            filters, samples = self._insert_audio_filter(bridge_profile, plan.inserted_samples / rate,
+                                                        (plan.insertion - plan.left) / rate,
+                                                        transition_seconds, transition_code, True)
+            middle_cmd = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(plan.left / rate),
+                          "-i", str(main), "-i", str(inserted), "-filter_complex", filters, "-map", "[aout]", "-vn",
+                          "-ar", str(rate), "-ac", str(profile.audio_channels), *self._insert_codec_args(profile, output.suffix),
+                          "-map_metadata", "0", "-map_chapters", "-1", str(middle)]
+            self._execute(middle_cmd, "Smart Insert: compatibilizando áudio inserido", len(pieces) + 1, 4, samples / rate)
+            self._insert_validate(middle, profile, samples)
+            pieces.append(middle)
+            durations.append(samples / rate)
+            if plan.right < plan.main_samples and profile.audio_codec != "flac":
+                copy_piece(plan.right, plan.main_samples - plan.right, plan.suffix_packets, "Smart Insert: trecho final")
+            if profile.audio_codec == "flac":
+                parts = []
+                if plan.prefix_packets:
+                    parts.append((main, info["packets"][:plan.prefix_packets]))
+                parts.append((middle, self._smart_join_probe(middle, packets=True, packet_stream="a:0")["packets"]))
+                if plan.suffix_packets:
+                    parts.append((main, info["packets"][-plan.suffix_packets:]))
+                def check_cancelled():
+                    if self.cancel_event.is_set():
+                        raise Cancelled()
+                smart_insert_flac.assemble(parts, staged, main, plan.total_samples, check_cancelled)
+            else:
+                self._concat_insert_pieces(pieces, staged, "Smart Insert: juntando áudio", 4, 4, plan.total_samples / rate,
+                                           durations=durations, metadata_source=main)
+            self._insert_validate(staged, profile, plan.total_samples)
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            staged.replace(output)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _insert_pcm_worker(self, main: Path, inserted: Path, output: Path, profile: MediaProfile,
+                           insertion: float, seconds: float, code: str) -> None:
+        rate = profile.audio_rate
+        cut = max(0, min(round(insertion * rate), round(profile.duration * rate)))
+        middle_samples = round(self._insert_duration(inserted) * rate)
+        total = round(profile.duration * rate) + middle_samples
+        work = output.parent / f"smart_insert_{uuid.uuid4().hex}"
+        work.mkdir(parents=True, exist_ok=True)
+        staged, middle = work / output.name, work / "inserted.wav"
+        try:
+            smart_insert_wave.inspect(main)
+            filters, _ = self._insert_audio_filter(replace(profile, duration=0), middle_samples / rate, 0, seconds, code, True)
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(inserted),
+                       "-filter_complex", filters.replace("[1:a:0]", "[0:a:0]"), "-map", "[aout]", "-vn",
+                       "-ar", str(rate), "-ac", str(profile.audio_channels), *self._insert_codec_args(profile, ".wav"),
+                       str(middle)]
+            self._execute(command, "Smart Insert: compatibilizando áudio inserido", 1, 2, middle_samples / rate)
+            self._append_log("Smart Insert: principal WAV/PCM em cópia por amostras; somente o áudio inserido foi recodificado.")
+            def check_cancelled():
+                if self.cancel_event.is_set():
+                    raise Cancelled()
+            smart_insert_wave.assemble(main, middle, staged, cut, total, check_cancelled)
+            self._insert_validate(staged, profile, total)
+            check_cancelled()
+            staged.replace(output)
+        except ValueError as exc:
+            self._append_log(f"Smart Insert: {exc}; usando compatibilização contínua para este WAV.")
+            self._insert_render_continuous(main, inserted, output, profile, insertion, seconds, code, True)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _concat_insert_pieces(self, pieces: list[Path], output: Path, label: str, progress: int, total: int, duration: float,
+                              durations: list[float] | None = None, metadata_source: Path | None = None) -> None:
         if not pieces:
             raise RuntimeError("Nenhum trecho foi criado para a inserção")
         list_file = output.parent / f"{output.stem}_pieces_{uuid.uuid4().hex}.txt"
         list_file.write_text(
-            "\n".join(f"file '{self._concat_escape(str(piece.resolve()))}'" for piece in pieces),
+            "\n".join(f"file '{self._concat_escape(str(piece.resolve()))}'" +
+                      (f"\nduration {self._precise_seconds(durations[i])}" if durations else "")
+                      for i, piece in enumerate(pieces)),
             encoding="utf-8",
         )
         try:
-            concat_cmd = [str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy"]
+            concat_cmd = [str(self._ffmpeg()), "-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+            if metadata_source is not None:
+                concat_cmd += ["-i", str(metadata_source), "-map", "0:a:0", "-map_metadata", "1", "-map_chapters", "-1"]
+            concat_cmd += ["-c", "copy"]
             if output.suffix.lower() == ".m4a":
                 concat_cmd += ["-movflags", "+faststart"]
-            concat_cmd += ["-avoid_negative_ts", "make_zero", str(output)]
+            concat_cmd += ["-avoid_negative_ts", "disabled" if durations else "make_zero", str(output)]
             self._execute(
                 concat_cmd,
                 label,
@@ -7535,68 +8114,20 @@ class FfmpegToolsPanel:
             list_file.unlink(missing_ok=True)
 
     def _insert_full_reencode_arguments(
-        self,
-        main: Path,
-        inserted: Path,
-        output: Path,
-        profile: MediaProfile,
-        insertion: float,
-        transition_seconds: float,
-        transition_code: str,
-        log_adjustment: bool = True,
+        self, main: Path, inserted: Path, output: Path, profile: MediaProfile,
+        insertion: float, transition_seconds: float, transition_code: str,
+        log_adjustment: bool = True, smart_semantics: bool = False,
     ) -> list[str]:
-        main_end = profile.duration
-        inserted_duration = self._get_duration_only(inserted)
-        neighbors = [inserted_duration]
-        if insertion > 0:
-            neighbors.append(insertion)
-        if main_end > insertion:
-            neighbors.append(main_end - insertion)
-        effective = min(transition_seconds, max(0.0, min(neighbors) / 2 if neighbors else 0.0))
-        if log_adjustment and effective + 0.001 < transition_seconds:
-            self._append_log(
-                f"Tempo de transição ajustado de {transition_seconds:.2f}s para {effective:.2f}s para caber nos trechos."
-            )
-        has_left = insertion > 0.001
-        has_right = main_end - insertion > 0.001
-        use_fade = transition_code == "fade" and effective > 0
-        use_crossfade = transition_code not in {"none", "fade"} and effective > 0
-        layout = profile.audio_layout
-        normalize = f"aresample={profile.audio_rate},aformat=sample_fmts=fltp:sample_rates={profile.audio_rate}:channel_layouts={layout}"
-        filters: list[str] = []
-        labels: list[str] = []
-        if has_left:
-            fade_out = f",afade=t=out:st={self._fmt_seconds(max(0.0, insertion - effective))}:d={self._fmt_seconds(effective)}" if use_fade else ""
-            filters.append(f"[0:a]atrim=start=0:end={self._fmt_seconds(insertion)},{normalize},asetpts=PTS-STARTPTS{fade_out}[a0]")
-            labels.append("a0")
-        inserted_fades = ""
-        if use_fade and has_left:
-            inserted_fades += f",afade=t=in:st=0:d={self._fmt_seconds(effective)}"
-        if use_fade and has_right:
-            inserted_fades += f",afade=t=out:st={self._fmt_seconds(max(0.0, inserted_duration - effective))}:d={self._fmt_seconds(effective)}"
-        filters.append(f"[1:a]atrim=start=0:end={self._fmt_seconds(inserted_duration)},{normalize},asetpts=PTS-STARTPTS{inserted_fades}[a1]")
-        labels.append("a1")
-        if has_right:
-            fade_in = f",afade=t=in:st=0:d={self._fmt_seconds(effective)}" if use_fade else ""
-            filters.append(f"[0:a]atrim=start={self._fmt_seconds(insertion)}:end={self._fmt_seconds(main_end)},{normalize},asetpts=PTS-STARTPTS{fade_in}[a2]")
-            labels.append("a2")
-        if use_crossfade and len(labels) > 1:
-            previous = labels[0]
-            for index in range(1, len(labels)):
-                output_label = f"ax{index}"
-                filters.append(f"[{previous}][{labels[index]}]acrossfade=d={self._fmt_seconds(effective)}:c1={transition_code}:c2={transition_code}[{output_label}]")
-                previous = output_label
-            filters.append(f"[{previous}]anull[aout]")
-        else:
-            filters.append("".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]")
-        ext = output.suffix.lower().lstrip(".")
-        codec_args = self._audio_codec_args(ext, profile.audio_bitrate)
-        return [
-            str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-i", str(inserted),
-            "-filter_complex", ";".join(filters), "-map", "[aout]", "-vn",
-            "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
-            *codec_args, "-map_metadata", "0", str(output),
-        ]
+        inserted_duration = self._insert_duration(inserted)
+        effective = min(transition_seconds, inserted_duration / 2) if smart_semantics else self._insert_effective_transition(
+            profile.duration, inserted_duration, insertion, transition_seconds)
+        if log_adjustment and effective + 1 / profile.audio_rate < transition_seconds:
+            self._append_log(f"Tempo de transição ajustado de {transition_seconds:.3f}s para {effective:.3f}s para caber nos trechos.")
+        filters, _ = self._insert_audio_filter(profile, inserted_duration, insertion, transition_seconds, transition_code, smart_semantics)
+        return [str(self._ffmpeg()), "-hide_banner", "-y", "-i", str(main), "-i", str(inserted),
+                "-filter_complex", filters, "-map", "[aout]", "-vn", "-sn", "-dn",
+                "-ar", str(profile.audio_rate), "-ac", str(profile.audio_channels),
+                *self._insert_codec_args(profile, output.suffix), "-map_metadata", "0", "-map_chapters", "-1", str(output)]
 
     def _clean_worker(self) -> None:
         source = self.clean_input

@@ -212,7 +212,7 @@ class EncoderSelectorWiringTests(unittest.TestCase):
 
     def test_smartcut_resolve_o_encoder_por_trecho(self):
         origem = method_source("_cut_video_smartcut")
-        self.assertIn("_smartcut_edge_encoder(codec_family, duracao)", origem)
+        self.assertIn("_smartcut_edge_encoder(family, segment.end - segment.start)", origem)
         borda = method_source("_smartcut_edge_encoder")
         self.assertIn("resolve_encoder", borda)
         self.assertIn("seconds=segundos", borda)

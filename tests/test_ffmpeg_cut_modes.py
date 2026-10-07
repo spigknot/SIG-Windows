@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import ast
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -29,10 +31,17 @@ from ffmpeg_tools_panel import (  # noqa: E402
     FfmpegToolsPanel,
     MediaProfile,
     VideoAcceleration,
+    Cancelled,
 )
 
 SOURCE = (ROOT / "src" / "ffmpeg_tools_panel.py").read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
+TEMPORARIES = []
+
+
+def tearDownModule():
+    for temp in TEMPORARIES:
+        temp.cleanup()
 
 
 def method_source(name: str) -> str:
@@ -48,7 +57,10 @@ def painel_smartcut():
     panel.selected_video_quality = "Alta"
     panel.video_quality_var = MagicMock()
     panel.video_quality_var.get.return_value = "Alta"
-    panel.output_dir = Path(".")
+    panel._test_temp = tempfile.TemporaryDirectory()
+    TEMPORARIES.append(panel._test_temp)
+    panel.output_dir = Path(panel._test_temp.name)
+    panel.cancel_event = threading.Event()
     panel._ffmpeg = lambda: Path("ffmpeg.exe")
     panel._fmt_seconds = FfmpegToolsPanel._fmt_seconds
     panel._concat_escape = FfmpegToolsPanel._concat_escape
@@ -56,8 +68,30 @@ def painel_smartcut():
     panel._smart_join_acceleration_for_codec = lambda familia: panel.acceleration
     panel._smart_join_ts_bitstream = lambda familia: FfmpegToolsPanel._smart_join_ts_bitstream(panel, familia)
     panel._append_log = MagicMock()
-    panel._execute = MagicMock()
-    panel._extract_keyframes = lambda _fonte: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    panel.keyframes = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    panel._get_ffprobe = lambda: Path("ffprobe.exe")
+    def execute(command, *_args, **_kwargs):
+        Path(command[-1]).touch()
+    panel._execute = MagicMock(side_effect=execute)
+    panel._smart_join_validate_piece = MagicMock()
+    panel._smart_join_encoded_delay = lambda _p: 0.0
+    panel._smart_join_validate_decoded_junction = MagicMock()
+    panel._smartcut_validate_audio = MagicMock()
+    def probe(path, packets=False, **_kwargs):
+        stream = {"codec_name": "h264", "r_frame_rate": "25", "start_time": "0", "has_b_frames": 0}
+        if str(path) == "entrada.mp4":
+            times = [i / 25 for i in range(250)]
+        else:
+            cmd = next(c.args[0] for c in panel._execute.call_args_list if c.args[0][-1] == str(path))
+            if "-f" in cmd and cmd[cmd.index("-f") + 1] == "concat":
+                start = float(cmd[cmd.index("-ss") + 1]); end = start + float(cmd[cmd.index("-t") + 1])
+                times = [i / 25 - start for i in range(250) if start - 1e-6 <= i / 25 < end - 1e-6]
+            else:
+                times = [i / 25 for i in range(int(cmd[cmd.index("-frames:v") + 1]))]
+        return {"streams": [stream], "format": {"start_time": "0"}, "packets": [
+            {"pts_time": str(t), "dts_time": str(t), "duration_time": ".04",
+             "flags": "K" if t in panel.keyframes else "_"} for t in times]}
+    panel._smart_join_probe = probe
     return panel
 
 
@@ -125,8 +159,9 @@ class SmartCutArgumentsTests(unittest.TestCase):
             Path("entrada.mp4"), Path("saida.ts"), 1.4, 0.6, media, "h264", reencode=True
         )
         self.assertEqual(comando[comando.index("-pix_fmt") + 1], "yuv420p")
-        self.assertEqual(comando[comando.index("-r") + 1], "30000/1001")
-        self.assertIn("setsar=4/3", comando)
+        self.assertNotIn("-r", comando)
+        self.assertEqual(comando[comando.index("-fps_mode") + 1], "passthrough")
+        self.assertIn("setsar=4/3", comando[comando.index("-vf") + 1])
         # F5: o trecho é SÓ VÍDEO — o áudio do SmartCut vem de uma passagem única
         # sobre a fonte, no mux final (costurar áudio por trecho acumulava atraso).
         self.assertIn("-an", comando)
@@ -177,7 +212,7 @@ class SmartCutArgumentsTests(unittest.TestCase):
         panel = painel_smartcut()
         panel._smart_join_acceleration_for_codec = lambda _f: VideoAcceleration("cpu", "CPU (fallback)", "mpeg4")
         panel._cut_video_precise = MagicMock()
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia())
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 1.4, 4.6, midia())
         panel._cut_video_precise.assert_called_once()
         panel._execute.assert_not_called()
         self.assertTrue(
@@ -186,16 +221,41 @@ class SmartCutArgumentsTests(unittest.TestCase):
 
 
 class SmartCutFlowTests(unittest.TestCase):
+    def test_failed_validation_preserves_existing_output(self):
+        panel = painel_smartcut()
+        output = panel.output_dir / "saida.mp4"
+        output.write_bytes(b"previous valid export")
+        panel._smartcut_validate_audio.side_effect = RuntimeError("invalid audio")
+        with self.assertRaisesRegex(RuntimeError, "invalid audio"):
+            panel._cut_video_smartcut(Path("entrada.mp4"), output, 1.4, 4.6, midia())
+        self.assertEqual(output.read_bytes(), b"previous valid export")
+        self.assertEqual(list(panel.output_dir.iterdir()), [output])
+
+    def test_cancel_after_mux_preserves_existing_output(self):
+        panel = painel_smartcut()
+        output = panel.output_dir / "saida.mp4"
+        output.write_bytes(b"previous valid export")
+        def cancel_after_mux(command, *_args, **_kwargs):
+            Path(command[-1]).touch()
+            if "-f" in command and command[command.index("-f") + 1] == "concat":
+                panel.cancel_event.set()
+        panel._execute.side_effect = cancel_after_mux
+        with self.assertRaises(Cancelled):
+            panel._cut_video_smartcut(Path("entrada.mp4"), output, 1.4, 4.6, midia())
+        self.assertEqual(output.read_bytes(), b"previous valid export")
+        self.assertEqual(list(panel.output_dir.iterdir()), [output])
+
     def test_tres_trechos_quando_ha_keyframes(self):
         panel = painel_smartcut()
         # [1.4, 4.6] com keyframes em 2,3,4 -> cabeça (1.4-2.0), miolo (2.0-4.0), cauda (4.0-4.6)
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia())
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 1.4, 4.6, midia())
         comandos = [chamada[0][0] for chamada in panel._execute.call_args_list]
-        self.assertEqual(len(comandos), 4)  # 3 trechos + mux final
+        self.assertEqual(len(comandos), 6)  # 2 bordas, 3 preparações TS, mux final
         rotulos = [chamada[0][1] for chamada in panel._execute.call_args_list]
-        self.assertEqual(rotulos, ["Reencodando a borda inicial", "Copiando o miolo", "Reencodando a borda final", "Montando o arquivo final"])
+        self.assertEqual(rotulos, ["Reencodando a borda inicial", "Reencodando a borda final",
+                                  "Preparando a borda", "Copiando o miolo", "Preparando a borda", "Montando o arquivo final"])
         # o miolo é stream copy e o mux final copia o vídeo
-        miolo = comandos[1]
+        miolo = comandos[3]
         self.assertEqual(miolo[miolo.index("-c:v") + 1], "copy")
         final = comandos[-1]
         self.assertEqual(final[final.index("-c:v") + 1], "copy")
@@ -214,7 +274,7 @@ class SmartCutFlowTests(unittest.TestCase):
         # emenda de áudio. Antes o áudio vinha dos trechos e acumulava ~20 ms por
         # emenda (medido: +60 ms num corte de duas emendas).
         panel = painel_smartcut()
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia())
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 1.4, 4.6, midia())
 
         final = panel._execute.call_args_list[-1][0][0]
         self.assertEqual(final[final.index("-ss") + 1], FfmpegToolsPanel._fmt_seconds(1.4))
@@ -228,16 +288,16 @@ class SmartCutFlowTests(unittest.TestCase):
 
     def test_sem_borda_quando_o_tempo_cai_no_keyframe(self):
         panel = painel_smartcut()
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 2.0, 4.0, midia())
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 2.0, 4.0, midia())
         rotulos = [chamada[0][1] for chamada in panel._execute.call_args_list]
         self.assertEqual(rotulos, ["Copiando o miolo", "Montando o arquivo final"])
         self.assertEqual(len(panel._execute.call_args_list), 2)
 
     def test_sem_keyframes_cai_no_reencode_completo(self):
         panel = painel_smartcut()
-        panel._extract_keyframes = lambda _fonte: []
+        panel.keyframes = []
         panel._cut_video_precise = MagicMock()
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia())
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 1.4, 4.6, midia())
         panel._cut_video_precise.assert_called_once()
         self.assertTrue(
             any("Reencode Completo" in str(chamada) for chamada in panel._append_log.call_args_list)
@@ -246,14 +306,14 @@ class SmartCutFlowTests(unittest.TestCase):
     def test_codec_incompativel_cai_no_reencode_completo(self):
         panel = painel_smartcut()
         panel._cut_video_precise = MagicMock()
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia(video_codec="vp9"))
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 1.4, 4.6, midia(video_codec="vp9"))
         panel._cut_video_precise.assert_called_once()
 
     def test_apenas_um_keyframe_no_meio_nao_vale_smartcut(self):
         panel = painel_smartcut()
-        panel._extract_keyframes = lambda _fonte: [3.0]
+        panel.keyframes = [3.0]
         panel._cut_video_precise = MagicMock()
-        panel._cut_video_smartcut(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia())
+        panel._cut_video_smartcut(Path("entrada.mp4"), panel.output_dir / "saida.mp4", 1.4, 4.6, midia())
         panel._cut_video_precise.assert_called_once()
 
     def test_limpa_a_pasta_temporaria(self):

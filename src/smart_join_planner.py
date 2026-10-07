@@ -1,6 +1,7 @@
-"""Planejador puro do SmartJoin - espelho fiel do SmartJoinPlanner.kt (Android).
+"""Planejador puro do SmartJoin, adaptado do SmartJoinPlanner.kt (Android).
 
-Os corpos elegiveis para stream copy sempre comecam e terminam em keyframes.
+Os corpos elegiveis comecam em keyframes e terminam antes do GOP seguinte,
+incluindo a margem necessária para quadros de apresentação de GOPs abertos.
 As lacunas entre o corte logico e esses keyframes viram margens da emenda
 recodificada. Um clipe incompatível (ou com GOP grande demais) e recodificado
 isoladamente, sem impedir que os demais continuem em stream copy.
@@ -8,9 +9,11 @@ isoladamente, sem impedir que os demais continuem em stream copy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import List, Optional, Tuple
 
 EPSILON_SECONDS = 0.002
+NO_TRANSITION_SECONDS = 0.001
 MAX_FPS_DELTA = 0.01
 FIRST_KEYFRAME_TOLERANCE_SECONDS = 0.500
 SUPPORTED_CODECS = {"h264", "hevc"}
@@ -34,6 +37,9 @@ class Source:
     duration_seconds: float
     profile: VideoProfile
     keyframes_seconds: List[float]
+    # Open GOP: quadros anteriores ao CRA/IDR podem ser armazenados depois
+    # dele. Esses quadros ficam na emenda, sem copiar uma referência ausente.
+    safe_copy_ends: List[Tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -208,10 +214,15 @@ def plan(
     sources: List[Source],
     transition_seconds: float,
     fade_in_out: bool,
+    target_index: Optional[int] = None,
 ) -> Plan:
     assert sources, "SmartJoin precisa de ao menos um clipe."
-    safe_transition = max(0.0, transition_seconds)
-    target_index = choose_target_index(sources)
+    if not math.isfinite(transition_seconds) or transition_seconds < 0:
+        raise ValueError("Tempo de transição inválido")
+    safe_transition = 0.0 if transition_seconds <= NO_TRANSITION_SECONDS else transition_seconds
+    target_index = choose_target_index(sources) if target_index is None else target_index
+    if not 0 <= target_index < len(sources):
+        raise ValueError("Perfil de saída inválido")
     target = sources[target_index].profile
 
     unsupported_reason: Optional[str] = None
@@ -256,10 +267,10 @@ def plan(
 
     def compute_clip_plan(index: int, copy_video: bool, reason: Optional[str]) -> Optional[ClipPlan]:
         source = sources[index]
-        desired_start = 0.0 if (index == 0 or safe_transition <= EPSILON_SECONDS) else safe_transition
+        desired_start = 0.0 if (index == 0 or safe_transition == 0.0) else safe_transition
         desired_end = (
             source.duration_seconds
-            if (index == len(sources) - 1 or safe_transition <= EPSILON_SECONDS)
+            if (index == len(sources) - 1 or safe_transition == 0.0)
             else source.duration_seconds - safe_transition
         )
         if not copy_video:
@@ -268,14 +279,16 @@ def plan(
         # contribuir desde o próprio início. Não aplique o primeiro keyframe
         # visível (edit-list), pois isso cortaria o começo dos clipes que
         # entram depois do primeiro.
-        if safe_transition <= EPSILON_SECONDS or index == 0:
+        if safe_transition == 0.0 or index == 0:
             body_start = 0.0
         else:
             body_start = _next_keyframe(source.keyframes_seconds, desired_start)
-        if safe_transition <= EPSILON_SECONDS or index == len(sources) - 1:
+        if safe_transition == 0.0 or index == len(sources) - 1:
             body_end = source.duration_seconds
         else:
             body_end = _previous_keyframe(source.keyframes_seconds, desired_end)
+            if body_end is not None:
+                body_end = dict(source.safe_copy_ends).get(body_end, body_end)
         if body_start is None or body_end is None or body_start > body_end + EPSILON_SECONDS:
             return None
         return ClipPlan(index, True, body_start, body_end, reason)
@@ -308,7 +321,7 @@ def plan(
     ]
 
     junctions: List[JunctionPlan] = []
-    if safe_transition > EPSILON_SECONDS:
+    if safe_transition > 0.0:
         for index in range(len(sources) - 1):
             outgoing = sources[index]
             junctions.append(

@@ -18,6 +18,8 @@ from __future__ import annotations
 import ast
 import random
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -413,15 +415,19 @@ class SelectionWorkerTests(unittest.TestCase):
         panel._filter_for_profile = lambda filters, profile: FfmpegToolsPanel._filter_for_profile(panel, filters, profile)
         panel._video_args = lambda *_args, **_kwargs: ["-c:v", "libx264"]
         panel._execute_video = MagicMock()
+        panel.cancel_event = threading.Event()
+        panel._get_ffprobe = lambda: None
+        panel._execute_video.side_effect = lambda _label, build, **_kw: Path(build(VideoAcceleration("cpu", "CPU", "libx264"))[-1]).touch()
         perfil = self._profile()
-        panel._cut_video_precise(
-            Path("entrada.mp4"), Path("saida.mp4"), 1.0, 5.0, perfil,
-            copy_audio=False, crop=(100, 50, 640, 360),
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            panel._cut_video_precise(
+                Path("entrada.mp4"), Path(directory) / "saida.mp4", 1.0, 5.0, perfil,
+                copy_audio=False, crop=(100, 50, 640, 360),
+            )
         build = panel._execute_video.call_args[0][1]
         comando = build(VideoAcceleration("cpu", "CPU", "libx264"))
         indice = comando.index("-vf")
-        self.assertEqual(comando[indice + 1], "crop=640:360:100:50")
+        self.assertIn("crop=640:360:100:50", comando[indice + 1].split(","))
         self.assertTrue(any("Recorte por seleção" in str(chamada) for chamada in panel._append_log.call_args_list))
 
     def test_cut_without_selection_keeps_null_filter(self):
@@ -432,9 +438,13 @@ class SelectionWorkerTests(unittest.TestCase):
         panel._filter_for_profile = lambda filters, profile: FfmpegToolsPanel._filter_for_profile(panel, filters, profile)
         panel._video_args = lambda *_args, **_kwargs: ["-c:v", "libx264"]
         panel._execute_video = MagicMock()
-        panel._cut_video_precise(Path("entrada.mp4"), Path("saida.mp4"), 1.0, 5.0, self._profile())
+        panel.cancel_event = threading.Event()
+        panel._get_ffprobe = lambda: None
+        panel._execute_video.side_effect = lambda _label, build, **_kw: Path(build(VideoAcceleration("cpu", "CPU", "libx264"))[-1]).touch()
+        with tempfile.TemporaryDirectory() as directory:
+            panel._cut_video_precise(Path("entrada.mp4"), Path(directory) / "saida.mp4", 1.0, 5.0, self._profile())
         comando = panel._execute_video.call_args[0][1](VideoAcceleration("cpu", "CPU", "libx264"))
-        self.assertEqual(comando[comando.index("-vf") + 1], "null")
+        self.assertEqual(comando[comando.index("-vf") + 1], "settb=AVTB,trim=start=1:end=5,setpts=PTS-1/TB")
 
     def test_cut_worker_forces_precise_when_there_is_a_selection(self):
         panel = painel_falso()

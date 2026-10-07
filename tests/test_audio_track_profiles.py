@@ -9,6 +9,8 @@ saía mono/44,1 kHz em B).
 from __future__ import annotations
 
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -44,6 +46,8 @@ def painel():
     panel._video_args = lambda *_a, **_k: ["-c:v", "libx264", "-preset", "medium", "-crf", "20"]
     panel._filter_for_profile = lambda texto, _perfil: ([], ["-vf", texto])
     panel._append_log = MagicMock()
+    panel.cancel_event = threading.Event()
+    panel._get_ffprobe = lambda: None
     return panel
 
 
@@ -106,11 +110,13 @@ class ArgumentosPorFaixaTests(unittest.TestCase):
     def test_corte_preciso_usa_os_argumentos_por_faixa(self):
         panel = painel()
         capturado: list[list[str]] = []
-        panel._execute_video = (
-            lambda _rotulo, build, duration_seconds=None: capturado.append(build(panel.acceleration))
-        )
-
-        panel._cut_video_precise(Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia_duas_faixas())
+        def execute(_rotulo, build, duration_seconds=None):
+            command = build(panel.acceleration)
+            capturado.append(command)
+            Path(command[-1]).touch()
+        panel._execute_video = execute
+        with tempfile.TemporaryDirectory() as directory:
+            panel._cut_video_precise(Path("entrada.mp4"), Path(directory) / "saida.mp4", 1.4, 4.6, midia_duas_faixas())
 
         comando = capturado[0]
         self.assertIn("-b:a:1", comando)
@@ -124,13 +130,15 @@ class ArgumentosPorFaixaTests(unittest.TestCase):
     def test_copia_de_audio_nao_ganha_perfil_por_faixa(self):
         panel = painel()
         capturado: list[list[str]] = []
-        panel._execute_video = (
-            lambda _rotulo, build, duration_seconds=None: capturado.append(build(panel.acceleration))
-        )
-
-        panel._cut_video_precise(
-            Path("entrada.mp4"), Path("saida.mp4"), 1.4, 4.6, midia_duas_faixas(), copy_audio=True
-        )
+        def execute(_rotulo, build, duration_seconds=None):
+            command = build(panel.acceleration)
+            capturado.append(command)
+            Path(command[-1]).touch()
+        panel._execute_video = execute
+        with tempfile.TemporaryDirectory() as directory:
+            panel._cut_video_precise(
+                Path("entrada.mp4"), Path(directory) / "saida.mp4", 1.4, 4.6, midia_duas_faixas(), copy_audio=True
+            )
 
         comando = capturado[0]
         self.assertIn("copy", comando)

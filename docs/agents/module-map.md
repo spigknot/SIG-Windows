@@ -56,6 +56,10 @@ Ambiente ...... app_env.py
 | `diarias_store.py` | Persistencia local do UFESP, dos valores e do PDF ativo do holerite da aba Diarias | Leitura de PDF, UI |
 | `ui_widgets.py` | Widgets reutilizaveis (`create_tooltip`, `PreviewIconButton`) | Regra de negocio |
 | `ffmpeg_tools_panel.py` | Aba FFmpeg: conversao, corte, juncao, aceleracao, player, linha do tempo | STT/transcricao |
+| `smart_cut_planner.py` | Intervalos e fronteiras de GOP do SmartCut pelos timestamps dos pacotes | UI, execução de FFmpeg |
+| `smart_insert_planner.py` | Duração e limites de pacotes/amostras do Smart Insert de áudio | UI, execução de FFmpeg |
+| `smart_insert_flac.py` | Remontagem dos headers e metadados FLAC, preservando subframes comprimidos | UI, encode de áudio |
+| `smart_insert_wave.py` | Montagem WAV/RF64 por cópia de bytes PCM com corte por amostra | UI, encode de áudio |
 | `prompts_panel.py` | Aba Prompts: lista de selecao com id, caixa de texto, Salvar / Salvar como / Importar .txt / Baixar atualizados | A regra dos prompts (esta em `prompt_store`), rede |
 | `sig_app.py` | UI principal (`SigApp`), abas/dialogs e orquestracao; `main()` | Implementacao de dominio (reexporta dos modulos) |
 

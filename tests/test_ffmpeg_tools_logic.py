@@ -708,10 +708,10 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
         panel._fmt_seconds = lambda s: f"{s:.3f}"
         panel._execute = MagicMock()
+        panel._cut_audio_precise = MagicMock()
         panel._cut_worker()
-        cmd = panel._execute.call_args[0][0]
-        self.assertIn("-vn", cmd)
-        self.assertIn("0:a:0?", cmd)
+        panel._cut_audio_precise.assert_called_once()
+        self.assertEqual(panel._cut_audio_precise.call_args.args[1].suffix, ".m4a")
 
     def test_cut_video_uses_full_precise_reencode(self):
         panel = object.__new__(FfmpegToolsPanel)
@@ -1144,7 +1144,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         self.assertIn("-ss", tail_command)
         self.assertNotIn("-avoid_negative_ts", tail_command)
 
-    def test_smart_insert_tail_does_not_expand_timestamps(self):
+    def test_smart_insert_aac_fallback_preserves_the_chosen_effect(self):
         panel = object.__new__(FfmpegToolsPanel)
         panel.output_dir = Path(tempfile.mkdtemp())
         panel._ffmpeg = lambda: Path("ffmpeg.exe")
@@ -1152,21 +1152,19 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._get_duration_only = lambda path: 10.0 if path.name == "main.m4a" else 2.0
         panel._audio_codec_args_for_source_codec = lambda *_args: ["-c:a", "aac"]
         panel._execute = MagicMock()
-        panel._concat_insert_pieces = MagicMock()
+        panel._insert_render_continuous = MagicMock()
         profile = MediaProfile(10.0, True, 0, 0, "0", "0k", "128k", 48000, 2, "stereo", False, audio_codec="aac")
         try:
             panel._insert_smart_worker(
                 Path("main.m4a"), Path("inserted.m4a"), Path("out.m4a"),
-                profile, 3.0, 12.0,
+                profile, 3.0, 12.0, "tri", 0.5,
             )
         finally:
             panel.output_dir.rmdir()
-        tail_command = next(
-            call.args[0] for call in panel._execute.call_args_list
-            if call.args[1] == "Smart Insert: trecho final"
+        panel._insert_render_continuous.assert_called_once_with(
+            Path("main.m4a"), Path("inserted.m4a"), Path("out.m4a"), profile, 3.0, 0.5, "tri", True
         )
-        self.assertIn("-ss", tail_command)
-        self.assertNotIn("-avoid_negative_ts", tail_command)
+        panel._execute.assert_not_called()
 
     def test_join_profile_selector_uses_requested_resolution(self):
         small = MediaProfile(4.0, True, 640, 360, "30", "500k", "128k", 48000, 2, "stereo", True)
@@ -1258,18 +1256,22 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._filter_for_profile = lambda _filter, _profile: ([], ["-vf", "null"])
         panel._video_args = lambda _profile, _bitrate: ["-c:v", "libx264"]
         captured = []
-        panel._execute_video = lambda _label, builder, **_kwargs: captured.append(
-            builder(VideoAcceleration("cpu", "CPU", "libx264"))
-        )
+        panel.cancel_event = MagicMock(); panel.cancel_event.is_set.return_value = False
+        def execute(_label, builder, **_kwargs):
+            command = builder(VideoAcceleration("cpu", "CPU", "libx264"))
+            captured.append(command)
+            Path(command[-1]).touch()
+        panel._execute_video = execute
         media = MediaProfile(
             10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo",
             True, audio_codec="aac", video_codec="h264",
         )
-        panel._cut_video_precise(Path("in.mp4"), Path("out.mp4"), 1.0, 5.0, media, copy_audio=True)
+        with tempfile.TemporaryDirectory() as directory:
+            panel._cut_video_precise(Path("in.mp4"), Path(directory) / "out.mp4", 1.0, 5.0, media, copy_audio=True)
         command = captured[0]
         self.assertEqual(command[command.index("-c:a") + 1], "copy")
         self.assertNotIn("-ar", command)
-        self.assertNotIn("-avoid_negative_ts", command)
+        self.assertEqual(command[command.index("-avoid_negative_ts") + 1], "disabled")
 
     def test_join_copy_mapping_covers_all_stream_and_video_only_modes(self):
         self.assertEqual(FfmpegToolsPanel._join_copy_mapping(True, True), ["-map", "0"])
