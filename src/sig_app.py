@@ -526,7 +526,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261007_002"
+APP_VERSION = "20261008_001"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
