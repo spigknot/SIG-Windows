@@ -526,7 +526,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261007_001"
+APP_VERSION = "20261007_002"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -16855,6 +16855,10 @@ try {
                         self.update_button.place(
                             relx=1.0, x=-18, y=0, anchor="ne"
                         )
+                        # The tab bar is created after this button and may
+                        # overlap it at higher DPI scales. Keep the button in
+                        # the reserved header area and above that sibling.
+                        self.update_button.tkraise()
                     self._finish_activity_step(
                         "update:check",
                         time.perf_counter() - getattr(self, "_update_check_started", time.perf_counter()),
