@@ -4,6 +4,7 @@ from __future__ import annotations
 import array
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -69,7 +70,7 @@ class SmartJoinFfmpegIntegrationTests(unittest.TestCase):
         return path
 
     def join(self, inputs, transition="Fade in/out", seconds=.5,
-             profile="Primeiro clipe", audio="Preservar áudio e preencher silêncio"):
+             profile="Primeiro clipe", audio="Preservar áudio e preencher silêncio", runtime=None):
         directory = self.directory / f"case_{len(list(self.directory.glob('case_*')))}"
         directory.mkdir()
         p = object.__new__(FfmpegToolsPanel)
@@ -79,8 +80,9 @@ class SmartJoinFfmpegIntegrationTests(unittest.TestCase):
         p.acceleration = VideoAcceleration("cpu", "CPU", "libx264")
         p.selected_video_quality = "Alta"
         p.selected_video_speed = "Equilibrada"
-        p._ffmpeg = lambda: Path(FFMPEG)
-        p._get_ffprobe = lambda: Path(FFPROBE)
+        p._ffmpeg = lambda: Path(FFMPEG) if runtime is None else runtime / "ffmpeg.exe"
+        if runtime is None:
+            p._get_ffprobe = lambda: Path(FFPROBE)
         p._record_ffmpeg_command = lambda *a, **k: None
         p._append_log = lambda text: None
         p.worker_options = dict(join_reencode=False, join_smart=True, join_transition=transition,
@@ -123,6 +125,21 @@ class SmartJoinFfmpegIntegrationTests(unittest.TestCase):
             cosine = sum(x * math.cos(2 * math.pi * frequency * i / 8000) for i, x in enumerate(samples))
             scores[frequency] = sine*sine + cosine*cosine
         return max(scores, key=scores.get), rms
+
+    def test_updated_installation_without_top_level_ffprobe(self):
+        runtime = self.directory / "old_installation"
+        (runtime / "_internal" / "tools").mkdir(parents=True)
+        os.link(FFMPEG, runtime / "ffmpeg.exe")
+        os.link(FFPROBE, runtime / "_internal" / "tools" / "ffprobe.exe")
+        self.assertFalse((runtime / "ffprobe.exe").exists())
+        for seconds in (0, .2, .5, 1):
+            with self.subTest(seconds=seconds):
+                _, info, commands = self.join([self.red, self.green, self.blue], "Fundir", seconds, runtime=runtime)
+                self.assert_timeline(info, 18 - 2 * seconds, round((18 - 2 * seconds) * 25))
+                self.assertTrue(any(
+                    ("-c:v" in c and c[c.index("-c:v") + 1] == "copy")
+                    or ("-c" in c and c[c.index("-c") + 1] == "copy")
+                    for c in commands))
 
     def test_all_transitions_preserve_content_duration_and_audio(self):
         for transition in FfmpegToolsPanel.TRANSITIONS:

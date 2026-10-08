@@ -34,6 +34,22 @@ def panel():
 
 
 class SmartJoinPipelineTests(unittest.TestCase):
+    def test_ffprobe_in_updated_internal_runtime_without_root_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = root / "_internal" / "tools" / "ffprobe.exe"
+            probe.parent.mkdir(parents=True)
+            probe.write_bytes(b"probe")
+            p = panel()
+            p._ffmpeg = lambda: root / "ffmpeg.exe"
+            self.assertEqual(p._get_ffprobe(), probe)
+            root_probe = root / "ffprobe.exe"
+            root_probe.write_bytes(b"root probe")
+            self.assertEqual(p._get_ffprobe(), root_probe)
+            root_probe.unlink()
+            probe.unlink()
+            self.assertIsNone(p._get_ffprobe())
+
     def test_copy_seek_keeps_keyframe_and_limits_packets(self):
         p = panel()
         target = p._smart_join_target_dict(media())

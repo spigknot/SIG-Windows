@@ -152,6 +152,11 @@ def copy_runtime_assets(runtime_root: Path, package_root: Path, updater_path: Pa
     if not updater_source.is_file():
         raise ValidationError(f"SigUpdater.exe ausente: {updater_source}")
     shutil.copy2(updater_source, package_root / "SigUpdater.exe")
+    # _internal é um componente conhecido também pelos updaters antigos.
+    # SmartJoin precisa dos pacotes/PTS reais; ffmpeg -i não substitui ffprobe.
+    probe_dir = package_root / "_internal" / "tools"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(runtime_root / "ffprobe.exe", probe_dir / "ffprobe.exe")
 
 
 def zip_directory(source_root: Path, zip_path: Path) -> None:

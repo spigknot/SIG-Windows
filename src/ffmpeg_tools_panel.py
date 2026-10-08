@@ -4775,6 +4775,11 @@ class FfmpegToolsPanel:
             candidate = ffmpeg.parent / "ffprobe.exe"
             if candidate.exists():
                 return candidate
+            # Instalações antigas recebem o runtime interno pelo sync, mas
+            # não recebem novos componentes na raiz (compatibilidade updater).
+            candidate = ffmpeg.parent / "_internal" / "tools" / "ffprobe.exe"
+            if candidate.is_file():
+                return candidate
         except Exception:
             pass
         return None
