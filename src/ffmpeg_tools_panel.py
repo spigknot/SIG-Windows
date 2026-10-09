@@ -112,6 +112,11 @@ PREVIEW_ZOOM_MIN = 1.0
 PREVIEW_ZOOM_MAX = 5.0
 PREVIEW_ZOOM_STEP = 1.25
 PREVIEW_ZOOM_RESTART_MS = 250
+PREVIEW_SEEK_DEBOUNCE_MS = 120
+PREVIEW_FRAME_INTERVAL_MS = 16
+PREVIEW_FRAME_QUEUE_SIZE = 3
+PREVIEW_FPS = 30
+PREVIEW_DECODER_THREADS = 2
 PREVIEW_SPEED_VALUES = (0.25, 0.5, 1.0, 2.0, 4.0)
 FFMPEG_SIDEBAR_WIDTH = 252
 WAVEFORM_POINTS = 1200
@@ -136,9 +141,8 @@ PREVIEW_STAGE_MIN_WIDTH = 240
 PREVIEW_STAGE_MIN_HEIGHT = 135
 PREVIEW_STAGE_MAX_HEIGHT = 760
 PREVIEW_STAGE_MARGIN = 8
-# Orçamentos medidos nesta máquina (FFmpeg rawvideo + PIL + PhotoImage, 15 fps de
-# alvo): 1200x675 ~= 40 quadros/s, 1600x900 ~= 22, 1920x1080 ~= 16. Renderizar o
-# pipeline acima de 1600x900 derruba a taxa da prévia sem ganho de imagem.
+# O decoder e o cache de quadros ficam limitados mesmo com fontes 4K/8K.
+# A imagem enviada ao Tk contém apenas a área visível, inclusive durante o zoom.
 PREVIEW_RENDER_MAX_PIXELS = 1600 * 900
 # Limite da imagem exibida (zoom): evita PhotoImage gigante na memória.
 PREVIEW_DISPLAY_MAX_PIXELS = 2600 * 1500
@@ -1549,10 +1553,12 @@ class FfmpegToolsPanel:
         self.preview_stills: dict[Canvas, object] = {}
         self.preview_frames: dict[Canvas, object] = {}
         self.preview_frame_items: dict[Canvas, int] = {}
+        self.preview_paint_after_ids: dict[Canvas, object] = {}
         self.preview_hint_text: dict[Canvas, str] = {}
         self.preview_still_after_id = None
         self.preview_still_pending: dict | None = None
         self.preview_still_running = False
+        self.preview_still_cancel_event = threading.Event()
         self.preview_still_cache: dict[tuple, object] = {}
         self.preview_still_key: dict[Canvas, tuple] = {}
         self.preview_still_queue: queue.Queue = queue.Queue(maxsize=4)
@@ -1560,6 +1566,8 @@ class FfmpegToolsPanel:
         self.preview_selection_drag: dict[Canvas, dict] = {}
         self.preview_selection_filters: dict[Canvas, str] = {}
         self.preview_restart_id = None
+        self.preview_seek_after_id = None
+        self.preview_seek_pending: tuple[dict, float] | None = None
         self.audio_preview_process: subprocess.Popen | None = None
         self.external_preview_process: subprocess.Popen | None = None
         self.external_preview_started_at = 0.0
@@ -1567,13 +1575,15 @@ class FfmpegToolsPanel:
         self.frame_preview_process: subprocess.Popen | None = None
         self.frame_preview_thread: threading.Thread | None = None
         self.frame_preview_stop_event = threading.Event()
-        self.preview_frame_queue: queue.Queue = queue.Queue(maxsize=3)
+        self.preview_frame_queue: queue.Queue = queue.Queue(maxsize=PREVIEW_FRAME_QUEUE_SIZE)
         self.preview_generation = 0
+        self.preview_shutting_down = False
+        self.preview_poll_after_id = None
 
         self._build(parent)
         self.recovery_job = None
         self.root.after(600, self._offer_ffmpeg_recovery)
-        self.root.after(33, self._poll_preview_frames)
+        self.preview_poll_after_id = self.root.after(PREVIEW_FRAME_INTERVAL_MS, self._poll_preview_frames)
         threading.Thread(target=self._load_available_accelerations, daemon=True).start()
 
     @staticmethod
@@ -1896,7 +1906,7 @@ class FfmpegToolsPanel:
             holder.configure(width=width, height=height)
             self.preview_player.resize(canvas)
         if changed or not self.preview_frame_items.get(canvas):
-            self._paint_preview_view(canvas)
+            self._schedule_preview_paint(canvas)
         if changed:
             self._refresh_preview_hint(canvas)
             self._schedule_preview_restart(canvas)
@@ -1905,14 +1915,18 @@ class FfmpegToolsPanel:
         width, height, _zoom = preview_drawn_size(view.stage_width, view.stage_height, view.zoom)
         return width, height
 
-    def _preview_scaled_image(self, image, width: int, height: int):
-        if (image.width, image.height) == (width, height):
-            return image
-        shrinking = width * height < image.width * image.height
-        return image.resize((width, height), Image.LANCZOS if shrinking else Image.BILINEAR)
+    def _schedule_preview_paint(self, canvas: Canvas) -> None:
+        """Agrupa movimentos do mouse; pinta a geometria mais recente uma vez."""
+        if canvas not in self.preview_paint_after_ids:
+            self.preview_paint_after_ids[canvas] = self.root.after(
+                PREVIEW_FRAME_INTERVAL_MS, lambda: self._paint_preview_view(canvas)
+            )
 
     def _paint_preview_view(self, canvas: Canvas) -> None:
         """Desenha o quadro atual (vivo ou congelado) na geometria de zoom/deslocamento."""
+        pending = self.preview_paint_after_ids.pop(canvas, None)
+        if pending:
+            self.root.after_cancel(pending)
         view = self.preview_viewports.get(canvas)
         if view is None or view.stage_width <= 0 or view.stage_height <= 0:
             return
@@ -1923,10 +1937,6 @@ class FfmpegToolsPanel:
         if source is None:
             return
         drawn_width, drawn_height = self._preview_drawn_size(view)
-        image = self._preview_scaled_image(source, drawn_width, drawn_height)
-        photo = ImageTk.PhotoImage(image, master=self.root)
-        self.preview_image_refs[canvas] = photo
-        canvas.delete("all")
         x, y = preview_view_rect(
             view.stage_width,
             view.stage_height,
@@ -1935,27 +1945,43 @@ class FfmpegToolsPanel:
             view.offset_x,
             view.offset_y,
         )
-        self.preview_frame_items[canvas] = canvas.create_image(x, y, image=photo, anchor="nw")
+        # Recorta ANTES de ampliar. O zoom nunca cria/transfere ao Tk os milhões
+        # de pixels que ficariam fora do canvas (o custo independe da ampliação).
+        left, top = max(0, x), max(0, y)
+        right = min(view.stage_width, x + drawn_width)
+        bottom = min(view.stage_height, y + drawn_height)
+        box = (
+            (left - x) * source.width / drawn_width,
+            (top - y) * source.height / drawn_height,
+            (right - x) * source.width / drawn_width,
+            (bottom - y) * source.height / drawn_height,
+        )
+        size = (right - left, bottom - top)
+        image = source if size == source.size and box == (0, 0, *source.size) else source.resize(
+            size, Image.BILINEAR, box=box
+        )
+        photo = ImageTk.PhotoImage(image, master=self.root)
+        # Mantém o PhotoImage anterior vivo até o item apontar para o novo.
+        item = self.preview_frame_items.get(canvas)
+        if item is None:
+            canvas.delete("all")
+            self.preview_frame_items[canvas] = canvas.create_image(left, top, image=photo, anchor="nw")
+        else:
+            canvas.itemconfigure(item, image=photo)
+            canvas.coords(item, left, top)
+        self.preview_image_refs[canvas] = photo
+        canvas.delete(PREVIEW_SELECTION_TAG)
         # A seleção é redesenhada por último: ela fica sempre sobre os pixels
         # escolhidos, com o zoom/deslocamento atuais.
         self._draw_preview_selection(canvas)
 
     def _preview_move_item(self, canvas: Canvas) -> None:
-        """Arrasta o quadro sem redesenhar (o canvas recorta o que passa das bordas)."""
+        """Agrupa o arrasto para recortar apenas o novo trecho visível do quadro."""
         view = self.preview_viewports.get(canvas)
         item = self.preview_frame_items.get(canvas)
         if view is None or item is None:
             return
-        drawn_width, drawn_height = self._preview_drawn_size(view)
-        x, y = preview_view_rect(
-            view.stage_width,
-            view.stage_height,
-            drawn_width,
-            drawn_height,
-            view.offset_x,
-            view.offset_y,
-        )
-        canvas.coords(item, x, y)
+        self._schedule_preview_paint(canvas)
         # A seleção acompanha o arrasto do quadro (mesmos pixels, outra posição).
         self._redraw_preview_selection(canvas)
 
@@ -2015,7 +2041,7 @@ class FfmpegToolsPanel:
         view.zoom = effective
         view.offset_x = preview_clamped_offset(view.stage_width, zoomed_width, offset_x)
         view.offset_y = preview_clamped_offset(view.stage_height, zoomed_height, offset_y)
-        self._paint_preview_view(canvas)
+        self._schedule_preview_paint(canvas)
         self._schedule_preview_restart(canvas)
 
     def _preview_pan_start(self, canvas: Canvas, event) -> str:
@@ -2303,6 +2329,10 @@ class FfmpegToolsPanel:
 
     def _preview_live_position(self, context: dict) -> float:
         timeline = context["timeline"]
+        if self.preview_player.opened:
+            return min(timeline.end, max(timeline.start, self.preview_player.position()))
+        if not context.get("audio_only"):
+            return timeline.position
         if self.external_preview_started_at <= 0:
             return max(timeline.start, timeline.position)
         elapsed = (time.monotonic() - self.external_preview_started_at) * self.preview_speed
@@ -2317,6 +2347,8 @@ class FfmpegToolsPanel:
             or not self.preview_playing
             or context.get("audio_only")
         ):
+            return
+        if not self.preview_player.opened and context.get("render_size") == self._preview_pipeline_size(canvas):
             return
         if self.preview_restart_id:
             try:
@@ -2337,21 +2369,16 @@ class FfmpegToolsPanel:
             or context.get("canvas") is not canvas
             or not self.preview_playing
             or context.get("audio_only")
+            or self.preview_seek_pending
         ):
+            return
+        if not self.preview_player.opened and context.get("render_size") == self._preview_pipeline_size(canvas):
             return
         position = self._preview_live_position(context)
         timeline = context["timeline"]
         if position >= timeline.end - 0.02:
             position = timeline.start
-        self.preview_player.close()
-        self.frame_preview_stop_event.set()
-        self._terminate_preview_process(self.external_preview_process)
-        self.external_preview_process = None
-        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
-        self.audio_preview_process = None
-        self._terminate_preview_process(self.frame_preview_process)
-        self.frame_preview_process = None
-        self.preview_playing = False
+        self._stop_preview_streams()
         self._start_canvas_preview(context, position)
 
     def _add_preview_speed_controls(self, parent):
@@ -3605,9 +3632,33 @@ class FfmpegToolsPanel:
             return media.height, media.width
         return media.width, media.height
 
-    def _stop_preview(self) -> None:
+    def _cancel_preview_seek(self) -> None:
+        pending = getattr(self, "preview_seek_after_id", None)
+        if pending:
+            self.root.after_cancel(pending)
+        self.preview_seek_after_id = None
+        self.preview_seek_pending = None
+
+    def _stop_preview_streams(self, close_native: bool = True) -> None:
+        """Invalida os leitores antes de encerrar os processos, sem esperar na UI."""
         self.preview_generation += 1
         self.preview_playing = False
+        self._cancel_preview_seek()
+        self.frame_preview_stop_event.set()
+        if self.preview_after_id:
+            self.root.after_cancel(self.preview_after_id)
+            self.preview_after_id = None
+        if close_native:
+            self.preview_player.close()
+        for name in ("external_preview_process", "audio_preview_process", "frame_preview_process"):
+            self._terminate_preview_process(getattr(self, name, None))
+            setattr(self, name, None)
+        self.external_preview_started_at = 0.0
+
+    def _stop_preview(self) -> None:
+        self._stop_preview_streams()
+        self.preview_still_cancel_event.set()
+        self.preview_still_pending = None
         if self.preview_still_after_id:
             try:
                 self.root.after_cancel(self.preview_still_after_id)
@@ -3627,20 +3678,6 @@ class FfmpegToolsPanel:
                 canvas.configure(cursor="crosshair")
             except Exception:
                 pass
-        if self.preview_after_id:
-            try:
-                self.root.after_cancel(self.preview_after_id)
-            except Exception:
-                pass
-            self.preview_after_id = None
-        self.preview_player.close()
-        self._terminate_preview_process(self.external_preview_process)
-        self.external_preview_process = None
-        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
-        self.audio_preview_process = None
-        self.frame_preview_stop_event.set()
-        self._terminate_preview_process(self.frame_preview_process)
-        self.frame_preview_process = None
         if self.preview_context:
             self.preview_context["button"].configure(text=">")
 
@@ -3653,14 +3690,7 @@ class FfmpegToolsPanel:
             return
         if self.preview_playing:
             self.preview_player.pause()
-            self._terminate_preview_process(self.external_preview_process)
-            self.external_preview_process = None
-            self._terminate_preview_process(getattr(self, "audio_preview_process", None))
-            self.audio_preview_process = None
-            self.frame_preview_stop_event.set()
-            self._terminate_preview_process(self.frame_preview_process)
-            self.frame_preview_process = None
-            self.preview_playing = False
+            self._stop_preview_streams(close_native=False)
             context["button"].configure(text=">")
             return
         position = context["timeline"].position
@@ -3674,7 +3704,8 @@ class FfmpegToolsPanel:
                 messagebox.showerror("sig", f"Não foi possível reproduzir o áudio:\n{exc}")
             return
         use_canvas = (
-            self.preview_speed != 1.0
+            context.get("use_canvas_preview", False)
+            or self.preview_speed != 1.0
             or context["tool"] == "join"
             or (context["tool"] == "rotate" and bool(self._rotate_preview_filter()))
             or not self._preview_view_is_fitted(context["canvas"])
@@ -3696,20 +3727,7 @@ class FfmpegToolsPanel:
         if not context or not self.insert_main_input:
             return
         if self.preview_playing:
-            self.preview_generation += 1
-            if self.preview_after_id:
-                try:
-                    self.root.after_cancel(self.preview_after_id)
-                except Exception:
-                    pass
-                self.preview_after_id = None
-            self._terminate_preview_process(self.external_preview_process)
-            self.external_preview_process = None
-            self._terminate_preview_process(getattr(self, "audio_preview_process", None))
-            self.audio_preview_process = None
-            self._terminate_preview_process(self.frame_preview_process)
-            self.frame_preview_process = None
-            self.preview_playing = False
+            self._stop_preview_streams()
             context["button"].configure(text=">")
             return
         position = max(0.0, min(self.insert_timeline.position, self.insert_timeline.duration))
@@ -4022,6 +4040,9 @@ class FfmpegToolsPanel:
         context = self.preview_context
         if not self.preview_playing or not context:
             return
+        if getattr(self, "preview_seek_pending", None):
+            self.preview_after_id = self.root.after(100, self._preview_tick)
+            return
         position = self.preview_player.position()
         timeline = context["timeline"]
         end = timeline.end
@@ -4029,7 +4050,6 @@ class FfmpegToolsPanel:
         context["current_var"].set(self._clock(position))
         if position >= end - 0.05:
             self.preview_player.pause()
-            self.preview_player.seek(end)
             timeline.set_position(end)
             context["current_var"].set(self._clock(end))
             self.preview_playing = False
@@ -4042,25 +4062,49 @@ class FfmpegToolsPanel:
         if not process or process.poll() is not None:
             return
         try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                process.terminate()
+            # FFmpeg/FFplay são processos diretos, todos guardados pelo painel.
+            # No Windows terminate usa TerminateProcess; taskkill /T não é
+            # necessário e esperava vários segundos no thread do Tk.
+            process.terminate()
         except Exception:
             try:
                 process.kill()
             except Exception:
                 pass
+        threading.Thread(
+            target=FfmpegToolsPanel._reap_preview_process, args=(process,),
+            daemon=True, name="sig-preview-reap",
+        ).start()
+
+    @staticmethod
+    def _reap_preview_process(process: subprocess.Popen) -> None:
+        """Recolhe o processo e seus pipes fora do thread da interface."""
+        try:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
 
     def _start_canvas_preview(self, context: dict, offset: float) -> None:
         self.preview_generation += 1
         generation = self.preview_generation
+        # Cada leitor possui seu próprio sinal. Reutilizar/limpar o mesmo Event
+        # permitia que o leitor antigo voltasse a rodar durante um reinício.
+        self.frame_preview_stop_event.set()
+        self.frame_preview_stop_event = threading.Event()
+        stop_event = self.frame_preview_stop_event
+        self.preview_still_cancel_event.set()
+        self.preview_still_pending = None
         canvas = context["canvas"]
         canvas.update_idletasks()
         timeline = context["timeline"]
@@ -4071,7 +4115,6 @@ class FfmpegToolsPanel:
         context["current_var"].set(self._clock(offset))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         if context.get("audio_only"):
-            self.frame_preview_stop_event.clear()
             self.external_preview_started_at = time.monotonic()
             self.external_preview_offset = offset
             if context["tool"] == "join":
@@ -4091,16 +4134,21 @@ class FfmpegToolsPanel:
             self._audio_preview_tick(context, generation)
             return
         width, height = self._preview_pipeline_size(canvas)
-        fps = 15
+        context["use_canvas_preview"] = True
+        context["render_size"] = (width, height)
+        fps = PREVIEW_FPS
+        speed = self.preview_speed
+        end = timeline.end
         filters = []
         if context["tool"] == "rotate":
             rotate_filter = self._rotate_preview_filter()
             if rotate_filter:
                 filters.append(rotate_filter)
         filters += self._preview_video_filters(width, height, fps, self.preview_speed)
-        self.frame_preview_stop_event.clear()
         video_command = [
-            str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-ss", self._fmt_seconds(offset),
+            str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-filter_threads", str(PREVIEW_DECODER_THREADS),
+            "-threads", str(PREVIEW_DECODER_THREADS), "-ss", self._fmt_seconds(offset),
             "-i", str(context["source"]), "-t", self._fmt_seconds(play_duration), "-an", "-vf", ",".join(filters), "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
         ]
         if context["tool"] == "join":
@@ -4136,7 +4184,7 @@ class FfmpegToolsPanel:
             index = 0
             started_at = None
             try:
-                while process and process.stdout and not self.frame_preview_stop_event.is_set():
+                while process and process.stdout and not stop_event.is_set():
                     raw = process.stdout.read(frame_size)
                     if len(raw) != frame_size:
                         break
@@ -4144,11 +4192,13 @@ class FfmpegToolsPanel:
                         started_at = time.monotonic()
                     target_time = started_at + index / fps
                     remaining = target_time - time.monotonic()
-                    if remaining > 0 and self.frame_preview_stop_event.wait(remaining):
+                    if remaining > 0 and stop_event.wait(remaining):
+                        break
+                    if stop_event.is_set():
                         break
                     image = Image.frombytes("RGB", (width, height), raw)
-                    position = offset + index / fps * self.preview_speed
-                    if position > timeline.end + 0.001:
+                    position = offset + index / fps * speed
+                    if position > end + 0.001:
                         break
                     index += 1
                     try:
@@ -4162,20 +4212,33 @@ class FfmpegToolsPanel:
                             self.preview_frame_queue.put_nowait((context, generation, image, position, False))
                         except queue.Full:
                             pass
+            except (OSError, ValueError):
+                # O encerramento de uma geração pode fechar o pipe durante read.
+                pass
             finally:
-                if started_at is not None and index:
-                    remaining = started_at + index / fps - time.monotonic()
-                    if remaining > 0:
-                        self.frame_preview_stop_event.wait(remaining)
-                while True:
+                if process and process.stdout:
+                    process.stdout.close()
+                if process:
                     try:
-                        self.preview_frame_queue.put_nowait((context, generation, None, 0.0, True))
-                        break
-                    except queue.Full:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        self._terminate_preview_process(process)
+                if not stop_event.is_set():
+                    if started_at is not None and index:
+                        remaining = started_at + index / fps - time.monotonic()
+                        if remaining > 0:
+                            stop_event.wait(remaining)
+                    if not stop_event.is_set():
+                        # Um leitor cancelado não pode inserir um fim antigo ou
+                        # expulsar quadros pertencentes à reprodução seguinte.
                         try:
-                            self.preview_frame_queue.get_nowait()
-                        except queue.Empty:
-                            break
+                            self.preview_frame_queue.put_nowait((context, generation, None, 0.0, True))
+                        except queue.Full:
+                            try:
+                                self.preview_frame_queue.get_nowait()
+                                self.preview_frame_queue.put_nowait((context, generation, None, 0.0, True))
+                            except (queue.Empty, queue.Full):
+                                pass
 
         self.frame_preview_thread = threading.Thread(target=render_frames, daemon=True)
         self.frame_preview_thread.start()
@@ -4187,6 +4250,9 @@ class FfmpegToolsPanel:
             or generation != self.preview_generation
             or self.frame_preview_stop_event.is_set()
         ):
+            return
+        if getattr(self, "preview_seek_pending", None):
+            self.preview_after_id = self.root.after(80, lambda: self._audio_preview_tick(context, generation))
             return
         timeline = context["timeline"]
         elapsed = (time.monotonic() - self.external_preview_started_at) * self.preview_speed
@@ -4206,19 +4272,35 @@ class FfmpegToolsPanel:
         self.preview_after_id = self.root.after(80, lambda: self._audio_preview_tick(context, generation))
 
     def _poll_preview_frames(self) -> None:
-        try:
-            while True:
+        self.preview_poll_after_id = None
+        if getattr(self, "preview_shutting_down", False):
+            return
+        started = time.monotonic()
+        latest = None
+        completion = None
+        # Um limite fixo devolve o controle ao Tk mesmo se o produtor continuar
+        # enchendo a fila. Só o quadro mais recente precisa ser desenhado.
+        for _ in range(PREVIEW_FRAME_QUEUE_SIZE):
+            try:
                 context, generation, image, position, finished = self.preview_frame_queue.get_nowait()
-                if finished:
-                    self._finish_canvas_preview(context, generation)
-                elif image is not None:
-                    self._render_canvas_frame(context, generation, image, position)
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                break
+            if context is not self.preview_context or generation != self.preview_generation:
+                continue
+            if finished:
+                completion = (context, generation)
+                break
+            if image is not None:
+                latest = (context, generation, image, position)
+        if latest:
+            self._render_canvas_frame(*latest)
+        if completion:
+            self._finish_canvas_preview(*completion)
         self._apply_pending_stills()
         self._apply_pending_waveforms()
         try:
-            self.root.after(33, self._poll_preview_frames)
+            delay = max(1, PREVIEW_FRAME_INTERVAL_MS - int((time.monotonic() - started) * 1000))
+            self.preview_poll_after_id = self.root.after(delay, self._poll_preview_frames)
         except Exception:
             pass
 
@@ -4228,13 +4310,21 @@ class FfmpegToolsPanel:
         canvas = context["canvas"]
         self.preview_frames[canvas] = image
         self._paint_preview_view(canvas)
-        context["timeline"].set_position(position)
-        context["current_var"].set(self._clock(position))
+        if not getattr(self, "preview_seek_pending", None):
+            position = min(context["timeline"].end, position)
+            context["timeline"].set_position(position)
+            context["current_var"].set(self._clock(position))
+            if position >= context["timeline"].end:
+                self._finish_canvas_preview(context, generation)
 
     def _finish_canvas_preview(self, context: dict, generation: int) -> None:
         if self.frame_preview_stop_event.is_set() or context is not self.preview_context or generation != self.preview_generation:
             return
+        if getattr(self, "preview_seek_pending", None):
+            return
         self.preview_playing = False
+        self.frame_preview_stop_event.set()
+        self._terminate_preview_process(self.frame_preview_process)
         self.frame_preview_process = None
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
@@ -4262,11 +4352,21 @@ class FfmpegToolsPanel:
         timeline = context["timeline"]
         self._update_waveform_position(context)
         if target == "position":
-            is_canvas = bool(self.frame_preview_process or self.external_preview_process)
-            if self.preview_playing and (is_canvas or not self.preview_player.opened):
+            if self.preview_playing:
                 self._jump_to_preview_position(context, seconds)
                 return
+            # MCI seek depende do driver/codec e pode bloquear por todo o GOP.
+            # Depois de navegar, tanto o quadro parado como a reprodução usam
+            # o decoder em segundo plano, com os pedidos agrupados.
+            if context.get("has_video") and self.preview_player.opened:
+                self.preview_player.close()
+                context["use_canvas_preview"] = True
             self._seek_preview(seconds, current_var, restart_playback=True)
+            if not self.preview_playing and not self.preview_player.opened and context.get("has_video") and context["tool"] != "join":
+                self._show_video_thumbnail(
+                    context["canvas"], context["source"], seconds,
+                    self._rotate_preview_filter() if context["tool"] == "rotate" else "",
+                )
             return
         if not self.preview_playing:
             return
@@ -4283,22 +4383,30 @@ class FfmpegToolsPanel:
             self._stop_preview()
             self._update_waveform_position(context)
             return
-        is_canvas = bool(self.frame_preview_process or self.external_preview_process)
-        if self.preview_player.opened and not is_canvas:
-            self.preview_player.pause()
-            self.preview_player.seek(seconds)
-            self.preview_player.play(seconds)
+        if getattr(timeline, "drag_target", None):
+            self._cancel_preview_seek()
+            self.preview_seek_pending = (context, seconds)
+            generation = self.preview_generation
+            self.preview_seek_after_id = self.root.after(
+                PREVIEW_SEEK_DEBOUNCE_MS, lambda: self._apply_pending_preview_seek(generation)
+            )
             return
+        self._cancel_preview_seek()
+        self._seek_preview_streams(context, seconds)
+
+    def _apply_pending_preview_seek(self, generation: int) -> None:
+        if generation != self.preview_generation:
+            return
+        self.preview_seek_after_id = None
+        pending = self.preview_seek_pending
+        self.preview_seek_pending = None
+        if pending and pending[0] is self.preview_context and self.preview_playing:
+            self._seek_preview_streams(*pending)
+
+    def _seek_preview_streams(self, context: dict, seconds: float) -> None:
         # A prévia por FFmpeg/FFplay não oferece seek durante a execução;
         # reiniciamos os dois fluxos no novo ponto para áudio e vídeo seguirem juntos.
-        self.frame_preview_stop_event.set()
-        self._terminate_preview_process(self.external_preview_process)
-        self.external_preview_process = None
-        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
-        self.audio_preview_process = None
-        self._terminate_preview_process(self.frame_preview_process)
-        self.frame_preview_process = None
-        self.preview_playing = False
+        self._stop_preview_streams()
         self._start_canvas_preview(context, seconds)
 
     def _ffplay(self) -> Path:
@@ -4327,7 +4435,7 @@ class FfmpegToolsPanel:
         elif target == "end":
             self.rotate_end_var.set(self._fmt_seconds(seconds))
         self._timeline_changed(target, seconds, self.rotate_current_var)
-        if not self.preview_player.opened and self.rotate_input:
+        if not self.preview_playing and not self.preview_player.opened and self.rotate_input and target != "position":
             self._show_video_thumbnail(self.rotate_preview, self.rotate_input, seconds, self._rotate_preview_filter())
 
     def _sync_cut_range_from_entries(self) -> None:
@@ -4385,9 +4493,15 @@ class FfmpegToolsPanel:
     def _refresh_rotate_thumbnail(self) -> None:
         if not self.rotate_input:
             return
+        context = self.preview_context
+        playing = self.preview_playing and context and context.get("tool") == "rotate"
+        position = self._preview_live_position(context) if playing else self.rotate_timeline.position
         self._stop_preview()
         self._rotate_selection_with_filters()
         self._apply_rotate_media_size()
+        if playing:
+            self._start_canvas_preview(context, position)
+            return
         self._show_video_thumbnail(
             self.rotate_preview,
             self.rotate_input,
@@ -4428,23 +4542,33 @@ class FfmpegToolsPanel:
         return (str(source), mtime, round(max(0.0, float(seconds)), 2), str(filters or ""))
 
     def _show_video_thumbnail(self, canvas: Canvas, source: Path, seconds: float, filters: str) -> None:
-        """Quadro congelado da prévia: agrupado, com cache e SEM travar a interface.
-
-        Antes: um FFmpeg SÍNCRONO por movimento da linha do tempo — a interface
-        congelava durante a extração e o log era inundado (um comando por passo do
-        arrasto). Agora o pedido é agrupado (debounce curto), reaproveitado quando
-        já foi extraído antes (cache por arquivo+tempo+filtros) e extraído em
-        segundo plano, entregue pelo mesmo laço de UI que pinta os quadros vivos.
-        """
-        self.preview_frames.pop(canvas, None)
-        self.preview_frame_items.pop(canvas, None)
+        """Quadro congelado limitado ao orçamento, extraído em memória e cancelável."""
         context = getattr(self, "preview_context", None)
+        if self.preview_playing and context and context.get("canvas") is canvas:
+            return
+        frame = self.preview_frames.pop(canvas, None)
+        if frame is not None:
+            self.preview_stills[canvas] = frame
         context_matches = bool(context and context.get("source") == source)
-        has_video = bool(context.get("has_video")) if context_matches else self._probe_media(source).has_video
+        # As entradas já foram sondadas ao carregar a ferramenta. Nunca lançar
+        # uma nova sonda síncrona durante o arrasto da linha do tempo.
+        has_video = bool(context.get("has_video")) if context_matches else source.suffix.lower() in VIDEO_EXTENSIONS
         if not has_video:
             self._preview_show_hint(canvas, f"{source.name}\nPrévia de áudio")
             return
-        chave = self._preview_still_key(source, seconds, filters)
+        self.preview_still_cancel_event.set()
+        self.preview_still_pending = None
+        if self.preview_still_after_id:
+            try:
+                self.root.after_cancel(self.preview_still_after_id)
+            except Exception:
+                pass
+            self.preview_still_after_id = None
+        view = self.preview_viewports.get(canvas)
+        size = preview_render_size(view.media_width, view.media_height, view.media_width, view.media_height) if (
+            view and view.media_width > 0 and view.media_height > 0
+        ) else self._preview_pipeline_size(canvas)
+        chave = (*self._preview_still_key(source, seconds, filters), *size)
         self.preview_still_key[canvas] = chave
         guardado = self.preview_still_cache.get(chave)
         if guardado is not None:
@@ -4453,13 +4577,8 @@ class FfmpegToolsPanel:
             return
         self.preview_still_pending = {
             "canvas": canvas, "source": source, "seconds": seconds, "filters": filters, "key": chave,
+            "size": size,
         }
-        if self.preview_still_after_id:
-            try:
-                self.root.after_cancel(self.preview_still_after_id)
-            except Exception:
-                pass
-            self.preview_still_after_id = None
         # Sem quadro nenhum ainda (primeira carga): extrai quase na hora; com
         # quadro na tela (arrasto da linha do tempo), agrupa para não inundar.
         atraso = PREVIEW_STILL_DEBOUNCE_MS if self.preview_stills.get(canvas) is not None else 1
@@ -4473,47 +4592,59 @@ class FfmpegToolsPanel:
         pedido = self.preview_still_pending
         self.preview_still_pending = None
         self.preview_still_running = True
+        self.preview_still_cancel_event = threading.Event()
+        pedido["cancel_event"] = self.preview_still_cancel_event
         threading.Thread(target=self._extract_still_worker, args=(pedido,), daemon=True).start()
 
     def _extract_still_worker(self, pedido: dict) -> None:
         """Extrai o quadro em segundo plano (sem tocar em Tk) e devolve pela fila."""
         imagem = None
-        image_path = self.output_dir / f"preview_{uuid.uuid4().hex}.png"
+        process = None
+        cancel_event = pedido["cancel_event"]
         try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            command = [
-                str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", self._fmt_seconds(float(pedido["seconds"])), "-i", str(pedido["source"]),
-                "-frames:v", "1", "-an",
+            if cancel_event.is_set():
+                return
+            width, height = pedido["size"]
+            filters = [pedido["filters"]] if pedido["filters"] else []
+            filters += [
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2", "setsar=1",
             ]
-            if pedido["filters"]:
-                command += ["-vf", str(pedido["filters"])]
-            command.append(str(image_path))
+            command = [
+                str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-filter_threads", str(PREVIEW_DECODER_THREADS), "-threads", str(PREVIEW_DECODER_THREADS),
+                "-ss", self._fmt_seconds(float(pedido["seconds"])), "-i", str(pedido["source"]),
+                "-frames:v", "1", "-an", "-vf", ",".join(filters),
+                "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+            ]
             # Prévia NÃO é trabalho da ferramenta: registra como sonda para não
             # inundar o log de atividade (o rastreador da tarefa continua vendo).
             self._record_ffmpeg_command(command, probe=True)
-            result = subprocess.run(
-                command, capture_output=True, timeout=30,
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-            if result.returncode == 0 and image_path.exists():
-                with Image.open(image_path) as image:
-                    imagem = image.copy()
+            deadline = time.monotonic() + 10
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                try:
+                    raw, _stderr = process.communicate(timeout=0.1)
+                    if process.returncode == 0 and len(raw) == width * height * 3:
+                        imagem = Image.frombytes("RGB", (width, height), raw)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
         except Exception:
             imagem = None
         finally:
-            image_path.unlink(missing_ok=True)
-        try:
-            self.preview_still_queue.put_nowait({"pedido": pedido, "image": imagem})
-        except queue.Full:
-            try:
-                self.preview_still_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.preview_still_queue.put_nowait({"pedido": pedido, "image": imagem})
-            except queue.Full:
-                pass
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                except OSError:
+                    pass
+                self._reap_preview_process(process)
+            # Até os pedidos cancelados liberam o slot de extração pela fila.
+            self.preview_still_queue.put({"pedido": pedido, "image": imagem, "cancelled": cancel_event.is_set()})
 
     def _apply_pending_stills(self) -> None:
         """Aplica (na UI) os quadros congelados que ficaram prontos no segundo plano."""
@@ -4524,8 +4655,13 @@ class FfmpegToolsPanel:
                 pedido = pronto["pedido"]
                 canvas = pedido["canvas"]
                 imagem = pronto["image"]
-                if imagem is None:
-                    if self.preview_still_key.get(canvas) == pedido["key"]:
+                active = self.preview_still_key.get(canvas) == pedido["key"] and not (
+                    self.preview_playing and self.preview_context and self.preview_context.get("canvas") is canvas
+                )
+                if pronto.get("cancelled"):
+                    pass
+                elif imagem is None:
+                    if active:
                         canvas.create_text(
                             max(80, canvas.winfo_width() // 2), max(40, canvas.winfo_height() // 2),
                             text="Não foi possível gerar a prévia deste vídeo",
@@ -4535,10 +4671,11 @@ class FfmpegToolsPanel:
                     self.preview_still_cache[pedido["key"]] = imagem
                     while len(self.preview_still_cache) > PREVIEW_STILL_CACHE_SIZE:
                         self.preview_still_cache.pop(next(iter(self.preview_still_cache)))
-                    if self.preview_still_key.get(canvas) == pedido["key"]:
+                    if active:
                         self.preview_stills[canvas] = imagem
                         self._paint_preview_view(canvas)
-                self._start_pending_still()
+                if not self.preview_still_after_id:
+                    self._start_pending_still()
         except queue.Empty:
             pass
 
@@ -4548,7 +4685,7 @@ class FfmpegToolsPanel:
             self.cut_input = Path(selected)
             self.cut_media_profile = self._probe_media(self.cut_input)
             self.cut_input_var.set(self.cut_input.name)
-            self._activate_preview(self.cut_input, self.cut_preview, self.cut_timeline, self.cut_current_var, self.cut_play_button, "cut")
+            self._activate_preview(self.cut_input, self.cut_preview, self.cut_timeline, self.cut_current_var, self.cut_play_button, "cut", self.cut_media_profile)
             self.cut_start_var.set("0")
             self.cut_end_var.set(self._fmt_seconds(self.cut_timeline.duration))
             self._update_cut_controls()
@@ -4926,12 +5063,13 @@ class FfmpegToolsPanel:
         clips = self._join_preview_clips(context, offset)
         if not clips:
             raise RuntimeError("Não há mídia para reproduzir nesta posição.")
-        command = [str(self._ffmpeg()), "-hide_banner", "-loglevel", "error"]
+        command = [str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-filter_complex_threads", str(PREVIEW_DECODER_THREADS)]
         filters = []
         for index, (path, media, start, remaining) in enumerate(clips):
             if start > 0:
                 command += ["-ss", self._precise_seconds(start)]
-            command += ["-i", str(path)]
+            command += ["-threads", str(PREVIEW_DECODER_THREADS), "-i", str(path)]
             duration = self._precise_seconds(remaining)
             if video:
                 if media.has_video:
@@ -5412,8 +5550,19 @@ class FfmpegToolsPanel:
                 pass
 
     def shutdown(self) -> None:
+        self.preview_shutting_down = True
         self.cancel()
         self._stop_preview()
+        for pending in [self.preview_poll_after_id, *self.preview_paint_after_ids.values()]:
+            if pending:
+                self.root.after_cancel(pending)
+        self.preview_poll_after_id = None
+        self.preview_paint_after_ids.clear()
+        # PhotoImage pertence ao Tk: liberar estas referências no thread da UI.
+        self.preview_image_refs.clear()
+        self.preview_frames.clear()
+        self.preview_stills.clear()
+        self.preview_still_cache.clear()
         self.waveform_stop_event.set()
         self.waveform_executor.shutdown(wait=False, cancel_futures=True)
         with self.waveform_lock:

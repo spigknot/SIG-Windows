@@ -232,7 +232,8 @@ class SelectionWiringTests(unittest.TestCase):
         self.assertIn("_redraw_preview_selection", method_source("_preview_move_item"))
         self.assertIn("_draw_preview_selection", method_source("_paint_preview_view"))
         # zoom também redesenha (a seleção acompanha o zoom)
-        self.assertIn("_paint_preview_view", method_source("_preview_zoom_at"))
+        self.assertIn("_schedule_preview_paint", method_source("_preview_zoom_at"))
+        self.assertIn("_paint_preview_view", method_source("_schedule_preview_paint"))
 
     def test_context_menu_has_undo_item(self):
         origem = method_source("_preview_open_selection_menu")

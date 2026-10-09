@@ -46,7 +46,7 @@ class JoinSimplifiedControlsTests(unittest.TestCase):
                      "preview_waveforms", "waveform_requests", "preview_stills",
                      "preview_frames", "preview_frame_items", "preview_hint_text",
                      "preview_still_key", "preview_selections", "preview_selection_drag",
-                     "preview_selection_filters", "preview_image_refs"):
+                     "preview_selection_filters", "preview_image_refs", "preview_paint_after_ids"):
             setattr(self.p, attr, {})
         self.p._build_join_tab()
 

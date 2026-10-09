@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import queue
 import shutil
 import subprocess
@@ -303,6 +304,111 @@ class PlayerLayoutTests(unittest.TestCase):
     def test_audio_speed_quarter_is_composed_correctly(self):
         self.panel.preview_speed = 0.25
         self.assertEqual(self.panel._preview_atempo_filter(), "atempo=0.5,atempo=0.5")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg indisponivel")
+    def test_zoom_and_timeline_drag_keep_playing_and_reclaim_old_decoders(self):
+        ffmpeg = shutil.which("ffmpeg")
+        self.panel._ffmpeg = lambda: Path(ffmpeg)
+        self.root.geometry("1600x1000+30+30")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "moving.mp4"
+            subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                            "-i", "testsrc2=s=1920x1080:r=30:d=4", "-c:v", "libx264",
+                            "-preset", "ultrafast", "-threads", "2", "-y", str(path)],
+                           check=True, capture_output=True, timeout=30,
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            self.load_join({path: profile(4, width=1920, height=1080, audio=False)})
+            canvas = self.panel.join_preview
+            timeline = self.panel.join_timeline
+            process_launch = subprocess.Popen
+            processes = []
+            def launch(*args, **kwargs):
+                process = process_launch(*args, **kwargs)
+                processes.append(process)
+                return process
+            def until(condition):
+                deadline = time.monotonic() + 6
+                while not condition() and time.monotonic() < deadline:
+                    self.root.update()
+                    time.sleep(0.005)
+                self.assertTrue(condition())
+                self.assertEqual(self.errors, [])
+            with patch("ffmpeg_tools_panel.subprocess.Popen", side_effect=launch):
+                try:
+                    self.panel._toggle_preview()
+                    until(lambda: timeline.position > 0.1)
+                    generation = self.panel.preview_generation
+                    self.panel._preview_zoom_at(canvas, 300, 150, 2)
+                    self.panel._preview_zoom_at(canvas, 300, 150, 1.25)
+                    until(lambda: self.panel.preview_generation > generation)
+                    self.assertTrue(self.panel.preview_playing)
+                    self.assertEqual((self.panel.preview_image_refs[canvas].width(),
+                                      self.panel.preview_image_refs[canvas].height()),
+                                     (self.panel.preview_viewports[canvas].stage_width,
+                                      self.panel.preview_viewports[canvas].stage_height))
+                    count = len(processes)
+                    timeline.drag_target = "position"
+                    for seconds in (1.0, 1.2, 1.5, 2.0):
+                        timeline.set_position(seconds)
+                        self.panel._join_timeline_changed("position", seconds)
+                    self.assertEqual(len(processes), count)
+                    timeline.drag_target = None
+                    until(lambda: len(processes) > count)
+                    until(lambda: timeline.position > 2.05)
+                    self.assertEqual(len(processes), count + 1)
+                    self.assertTrue(self.panel.preview_playing)
+                    until(lambda: all(process.poll() is not None for process in processes[:-1]))
+                finally:
+                    self.panel._stop_preview()
+                    for process in processes:
+                        process.wait(timeout=3)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffplay"), "FFmpeg/FFplay indisponiveis")
+    def test_seeking_video_with_audio_reclaims_both_decoders_and_ffplay(self):
+        ffmpeg, ffplay = shutil.which("ffmpeg"), shutil.which("ffplay")
+        self.panel._ffmpeg = lambda: Path(ffmpeg)
+        self.panel._ffplay = lambda: Path(ffplay)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "with_audio.mp4"
+            subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                            "-i", "color=c=red:s=320x180:r=30:d=3", "-f", "lavfi",
+                            "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:v", "libx264",
+                            "-preset", "ultrafast", "-c:a", "aac", "-threads", "2", "-y", str(path)],
+                           check=True, capture_output=True, timeout=30,
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            self.load_join({path: profile(3)})
+            process_launch = subprocess.Popen
+            processes = []
+            def launch(command, **kwargs):
+                # Exercita FFplay de verdade sem depender da placa de som ou
+                # emitir áudio durante o teste.
+                if Path(command[0]) == Path(ffplay):
+                    kwargs["env"] = {**os.environ, "SDL_AUDIODRIVER": "dummy"}
+                    kwargs["stderr"] = subprocess.DEVNULL
+                process = process_launch(command, **kwargs)
+                processes.append(process)
+                return process
+            with patch("ffmpeg_tools_panel.subprocess.Popen", side_effect=launch):
+                try:
+                    self.panel._toggle_preview()
+                    deadline = time.monotonic() + 5
+                    while self.panel.join_timeline.position <= 0.1 and time.monotonic() < deadline:
+                        self.root.update()
+                        time.sleep(0.01)
+                    self.assertGreater(self.panel.join_timeline.position, 0.1)
+                    self.assertEqual(len(processes), 3)
+                    self.assertIsNone(self.panel.external_preview_process.poll())
+                    self.panel._join_timeline_changed("position", 1)
+                    self.assertEqual(len(processes), 6)
+                    for process in processes[:3]:
+                        process.wait(timeout=3)
+                    self.assertIsNone(self.panel.external_preview_process.poll())
+                    self.assertTrue(self.panel.preview_playing)
+                    self.assertEqual(self.errors, [])
+                finally:
+                    self.panel._stop_preview()
+                    for process in processes:
+                        process.wait(timeout=3)
 
 
 FFMPEG = shutil.which("ffmpeg")
