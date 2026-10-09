@@ -308,6 +308,7 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
             values = SimpleNamespace(
                 total_vencimentos=10817.23,
                 meios_proprios=True,
+                cidade_plantao="TAGUAI",
                 valor_ufesp=38.42,
                 data_ida=date(2026, 12, 31),
                 data_volta=date(2026, 12, 31),
@@ -349,6 +350,7 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
             values = SimpleNamespace(
                 total_vencimentos=10817.23,
                 meios_proprios=True,
+                cidade_plantao="TAGUAI",
                 valor_ufesp=38.42,
                 data_ida=date(2026, 12, 31),
                 data_volta=date(2026, 12, 31),

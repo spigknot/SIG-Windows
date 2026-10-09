@@ -71,7 +71,7 @@ def painel_smartcut():
     panel.keyframes = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
     panel._get_ffprobe = lambda: Path("ffprobe.exe")
     def execute(command, *_args, **_kwargs):
-        Path(command[-1]).touch()
+        Path(command[-1]).write_bytes(b"staged")
     panel._execute = MagicMock(side_effect=execute)
     panel._smart_join_validate_piece = MagicMock()
     panel._smart_join_encoded_delay = lambda _p: 0.0
@@ -220,15 +220,40 @@ class SmartCutArgumentsTests(unittest.TestCase):
         )
 
 
+class _RootStub:
+    """Root de teste: registra os callbacks agendados por after() (sem render)."""
+
+    def __init__(self):
+        self.after_calls = []
+
+    def after(self, delay, callback=None):
+        self.after_calls.append((delay, callback))
+        return "after-id"
+
+
 class SmartCutFlowTests(unittest.TestCase):
-    def test_failed_validation_preserves_existing_output(self):
+    def test_failed_validation_releases_output_with_warning(self):
+        # Contrato novo: divergência na validação de uma saída CONCLUÍDA não
+        # bloqueia — o arquivo é publicado com aviso (log + messagebox no root).
+        # Só cancelamento, falha do FFmpeg e ausência de saída continuam erros.
         panel = painel_smartcut()
+        panel.root = _RootStub()
         output = panel.output_dir / "saida.mp4"
         output.write_bytes(b"previous valid export")
         panel._smartcut_validate_audio.side_effect = RuntimeError("invalid audio")
-        with self.assertRaisesRegex(RuntimeError, "invalid audio"):
-            panel._cut_video_smartcut(Path("entrada.mp4"), output, 1.4, 4.6, midia())
-        self.assertEqual(output.read_bytes(), b"previous valid export")
+        panel._cut_video_smartcut(Path("entrada.mp4"), output, 1.4, 4.6, midia())
+        self.assertEqual(output.read_bytes(), b"staged")
+        self.assertTrue(
+            any("Arquivo concluído com aviso" in str(chamada) and "invalid audio" in str(chamada)
+                for chamada in panel._append_log.call_args_list)
+        )
+        self.assertEqual(len(panel.root.after_calls), 1)
+        delay, aviso = panel.root.after_calls[0]
+        self.assertEqual(delay, 0)
+        with patch("ffmpeg_tools_panel.messagebox.showwarning") as showwarning:
+            aviso()
+        showwarning.assert_called_once()
+        self.assertIn("invalid audio", showwarning.call_args[0][1])
         self.assertEqual(list(panel.output_dir.iterdir()), [output])
 
     def test_cancel_after_mux_preserves_existing_output(self):
@@ -317,8 +342,15 @@ class SmartCutFlowTests(unittest.TestCase):
         panel._cut_video_precise.assert_called_once()
 
     def test_limpa_a_pasta_temporaria(self):
-        self.assertIn("shutil.rmtree", method_source("_cut_video_smartcut"))
-        self.assertIn("finally", method_source("_cut_video_smartcut"))
+        origem = method_source("_cut_video_smartcut")
+        # A limpeza literal saiu do SmartCut: o finally entrega a pasta à
+        # máquina de recovery job — que a mantém para retomada quando existe
+        # uma tarefa e a apaga (shutil.rmtree) quando não existe.
+        self.assertIn("finally", origem)
+        self.assertIn("self._remove_work_directory(work)", origem)
+        limpeza = method_source("_remove_work_directory")
+        self.assertIn("recovery_job", limpeza)
+        self.assertIn("shutil.rmtree", limpeza)
 
 
 class CutWorkerDispatchTests(unittest.TestCase):

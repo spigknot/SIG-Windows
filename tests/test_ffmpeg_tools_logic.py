@@ -1260,7 +1260,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         def execute(_label, builder, **_kwargs):
             command = builder(VideoAcceleration("cpu", "CPU", "libx264"))
             captured.append(command)
-            Path(command[-1]).touch()
+            Path(command[-1]).write_bytes(b"staged")
         panel._execute_video = execute
         media = MediaProfile(
             10.0, True, 320, 240, "30", "1M", "128k", 48000, 2, "stereo",

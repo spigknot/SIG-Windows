@@ -531,7 +531,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261008_003"
+APP_VERSION = "20261009_001"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -10033,44 +10033,44 @@ try {
         req_var = IntVar(value=self.settings["transcribe_parallel"])
         vad_var = IntVar(value=self.settings["vad_parallel"])
         transcription_labels = {}
-        transcription_server_var = StringVar()
+        transcription_server_var = StringVar(master=self.root)
         refreshing_transcription_servers = False
         history_model_labels = {}
-        history_model_var = StringVar()
-        history_reasoning_var = StringVar(value=self.settings.get("history_reasoning", "low"))
-        history_proxy_model_var = StringVar(value=self.settings.get("history_proxy_model", GROK_TEXT_NAME))
+        history_model_var = StringVar(master=self.root)
+        history_reasoning_var = StringVar(master=self.root, value=self.settings.get("history_reasoning", "low"))
+        history_proxy_model_var = StringVar(master=self.root, value=self.settings.get("history_proxy_model", GROK_TEXT_NAME))
         statement_model_labels = {}
-        statement_model_var = StringVar()
-        statement_reasoning_var = StringVar(value=self.settings.get("statement_reasoning", "low"))
-        statement_proxy_model_var = StringVar(value=self.settings.get("statement_proxy_model", GROK_TEXT_NAME))
-        extraction_var = StringVar(value=PARTS_EXTRACTION_LABELS[self.settings["parts_extraction"]])
-        parts_model_var = StringVar(value=self.settings.get("parts_model", IA_PROXY_NAME))
-        parts_proxy_model_var = StringVar(
+        statement_model_var = StringVar(master=self.root)
+        statement_reasoning_var = StringVar(master=self.root, value=self.settings.get("statement_reasoning", "low"))
+        statement_proxy_model_var = StringVar(master=self.root, value=self.settings.get("statement_proxy_model", GROK_TEXT_NAME))
+        extraction_var = StringVar(master=self.root, value=PARTS_EXTRACTION_LABELS[self.settings["parts_extraction"]])
+        parts_model_var = StringVar(master=self.root, value=self.settings.get("parts_model", IA_PROXY_NAME))
+        parts_proxy_model_var = StringVar(master=self.root, 
             value=self.settings.get("parts_proxy_model", GROK_TEXT_NAME)
         )
-        parts_reasoning_var = StringVar(value=self.settings.get("parts_reasoning", "low"))
+        parts_reasoning_var = StringVar(master=self.root, value=self.settings.get("parts_reasoning", "low"))
         parts_model_labels: dict[str, str] = {}
-        qualification_model_var = StringVar(value=self.settings.get("qualification_model", IA_PROXY_NAME))
-        qualification_proxy_model_var = StringVar(
+        qualification_model_var = StringVar(master=self.root, value=self.settings.get("qualification_model", IA_PROXY_NAME))
+        qualification_proxy_model_var = StringVar(master=self.root, 
             value=self.settings.get("qualification_proxy_model", GROK_TEXT_NAME)
         )
-        qualification_reasoning_var = StringVar(value=self.settings.get("qualification_reasoning", "low"))
+        qualification_reasoning_var = StringVar(master=self.root, value=self.settings.get("qualification_reasoning", "low"))
         qualification_model_labels: dict[str, str] = {}
-        grok_api_key_var = StringVar(value=self.settings.get("grok_api_key", ""))
-        deepseek_api_key_var = StringVar(value=self.settings.get("deepseek_api_key", ""))
-        deepgram_api_key_var = StringVar(value=self.settings.get("deepgram_api_key", ""))
-        assemblyai_api_key_var = StringVar(value=self.settings.get("assemblyai_api_key", ""))
-        elevenlabs_api_key_var = StringVar(value=self.settings.get("elevenlabs_api_key", ""))
-        metamuse_api_key_var = StringVar(value=self.settings.get("metamuse_api_key", ""))
-        alibaba_api_key_var = StringVar(value=self.settings.get("alibaba_api_key", ""))
-        imei_api_key_var = StringVar(value=self.settings.get("imei_api_key", ""))
-        police_name_var = StringVar(value=self.settings.get("police_name", ""))
-        police_role_var = StringVar(value=self.settings.get("police_role", ""))
-        police_station_var = StringVar(value=self.settings.get("police_station", ""))
-        police_delegate_var = StringVar(value=self.settings.get("police_delegate", ""))
-        police_city_var = StringVar(value=self.settings.get("police_city", ""))
-        grok_chunk_ms_var = StringVar(value=str(self.settings.get("grok_chunk_ms", 100)))
-        grok_rest_var = BooleanVar(value=bool(self.settings.get("grok_rest_requests", False)))
+        grok_api_key_var = StringVar(master=self.root, value=self.settings.get("grok_api_key", ""))
+        deepseek_api_key_var = StringVar(master=self.root, value=self.settings.get("deepseek_api_key", ""))
+        deepgram_api_key_var = StringVar(master=self.root, value=self.settings.get("deepgram_api_key", ""))
+        assemblyai_api_key_var = StringVar(master=self.root, value=self.settings.get("assemblyai_api_key", ""))
+        elevenlabs_api_key_var = StringVar(master=self.root, value=self.settings.get("elevenlabs_api_key", ""))
+        metamuse_api_key_var = StringVar(master=self.root, value=self.settings.get("metamuse_api_key", ""))
+        alibaba_api_key_var = StringVar(master=self.root, value=self.settings.get("alibaba_api_key", ""))
+        imei_api_key_var = StringVar(master=self.root, value=self.settings.get("imei_api_key", ""))
+        police_name_var = StringVar(master=self.root, value=self.settings.get("police_name", ""))
+        police_role_var = StringVar(master=self.root, value=self.settings.get("police_role", ""))
+        police_station_var = StringVar(master=self.root, value=self.settings.get("police_station", ""))
+        police_delegate_var = StringVar(master=self.root, value=self.settings.get("police_delegate", ""))
+        police_city_var = StringVar(master=self.root, value=self.settings.get("police_city", ""))
+        grok_chunk_ms_var = StringVar(master=self.root, value=str(self.settings.get("grok_chunk_ms", 100)))
+        grok_rest_var = BooleanVar(master=self.root, value=bool(self.settings.get("grok_rest_requests", False)))
 
         # A aba Modelos usa uma única coluna para evitar largura horizontal
         # desperdiçada e manter a leitura das seções em sequência.
@@ -10527,8 +10527,8 @@ try {
             nome: list(termos)
             for nome, termos in keyword_profiles(self.settings).items()
         }
-        keywords_hint_var = StringVar()
-        keywords_profile_var = StringVar()
+        keywords_hint_var = StringVar(master=self.root)
+        keywords_profile_var = StringVar(master=self.root)
         keywords_profile_combo: ttk.Combobox | None = None
 
         def current_profile_name() -> str:
@@ -10595,7 +10595,7 @@ try {
 
         keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_entry_row.pack(fill=X, pady=(0, 10))
-        keyword_entry_var = StringVar()
+        keyword_entry_var = StringVar(master=self.root)
         keyword_entry = ttk.Entry(keywords_entry_row, textvariable=keyword_entry_var, width=40)
         keyword_entry.pack(side=LEFT)
 
@@ -11100,7 +11100,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(side=LEFT, padx=(0, 10))
-            proxy_display_var = StringVar(value=proxy_var.get())
+            proxy_display_var = StringVar(master=self.root, value=proxy_var.get())
             proxy_button = ttk.Menubutton(proxy_model_frame, textvariable=proxy_display_var, width=30)
             proxy_menu = tk.Menu(proxy_button, tearoff=False)
             proxy_button.configure(menu=proxy_menu)
@@ -11114,7 +11114,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(side=LEFT, padx=(0, 10))
-            reasoning_display_var = StringVar(value=reasoning_var.get())
+            reasoning_display_var = StringVar(master=self.root, value=reasoning_var.get())
             reasoning_button = ttk.Menubutton(
                 reasoning_frame, textvariable=reasoning_display_var, width=12
             )
@@ -11249,7 +11249,7 @@ try {
             ).pack(
                 side=LEFT, padx=(0, 10)
             )
-            proxy_model_display_var = StringVar(value=proxy_var.get())
+            proxy_model_display_var = StringVar(master=self.root, value=proxy_var.get())
             proxy_model_button = ttk.Menubutton(
                 proxy_model_frame, textvariable=proxy_model_display_var, width=30
             )
@@ -11266,7 +11266,7 @@ try {
                 anchor="w",
                 style="Settings.TLabel",
             ).pack(side=LEFT, padx=(0, 10))
-            reasoning_display_var = StringVar(value=reasoning_var.get())
+            reasoning_display_var = StringVar(master=self.root, value=reasoning_var.get())
             reasoning_button = ttk.Menubutton(
                 reasoning_frame, textvariable=reasoning_display_var, width=12
             )
@@ -11500,7 +11500,7 @@ try {
                 dialog_frame,
                 text="A base é usada quando a opção Base de nomes está selecionada.",
             ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-            name_var = StringVar()
+            name_var = StringVar(master=self.root)
             entry = ttk.Entry(dialog_frame, textvariable=name_var, width=38)
             entry.grid(row=1, column=0, columnspan=2, sticky="ew")
             entry.focus_set()

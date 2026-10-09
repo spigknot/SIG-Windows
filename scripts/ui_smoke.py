@@ -801,10 +801,14 @@ def _check_ffmpeg_preview_stage(app, root) -> None:
 
             view = panel.preview_viewports[canvas]
             holder = panel.preview_holders[canvas]
-            disponivel_largura, disponivel_altura = panel._preview_available_box(aba, holder)
+            # Layout novo em colunas: o espaco do palco e' o da coluna de trabalho
+            # (workspace), nao o da aba inteira (que inclui a sidebar).
+            disponivel_largura, disponivel_altura = panel._preview_available_box(
+                panel.preview_parents[canvas], holder
+            )
             # 0) a aba inteira continua visível: o palco não empurra os controles
             #    para baixo da dobra (o desconto inclui pady e padding da aba).
-            painel_altura = panel.ffmpeg_scroll_canvas.winfo_height()
+            painel_altura = panel.tool_content.winfo_height()
             if aba.winfo_reqheight() > painel_altura + 6:
                 raise RuntimeError(
                     f"[{ferramenta}] conteudo da aba ({aba.winfo_reqheight()}px) passa do painel "
@@ -833,8 +837,9 @@ def _check_ffmpeg_preview_stage(app, root) -> None:
                     f"[{ferramenta}] palco {view.stage_width}x{view.stage_height} nao aproveita o espaco "
                     f"disponivel ({disponivel_largura:.0f}x{disponivel_altura:.0f})"
                 )
-            # 4) nunca fica em cima do widget seguinte da aba
-            irmaos = [filho for filho in aba.winfo_children() if filho is not holder]
+            # 4) nunca fica em cima do widget seguinte da coluna (coordenadas do
+            #    mesmo pai do palco).
+            irmaos = [filho for filho in holder.master.winfo_children() if filho is not holder]
             abaixo = [filho for filho in irmaos if filho.winfo_y() >= holder.winfo_y()]
             if abaixo:
                 primeiro = min(abaixo, key=lambda filho: filho.winfo_y())
@@ -942,9 +947,10 @@ def _check_ffmpeg_preview_stage(app, root) -> None:
 def _check_ffmpeg_output_rows(app, root) -> None:
     """Pasta de saída dentro de cada ferramenta (pedido de 12/09).
 
-    Botões "Abrir pasta"/"Escolher pasta" na MESMA linha de opções da ferramenta
-    e o caminho da pasta na linha de baixo. E, no Cortar, os campos Início/Fim
-    centralizados na mesma coluna do botão PLAY.
+    Layout novo em 3 colunas: cada ferramenta tem UM botão "Abrir Pasta" (o
+    menu "Alterar pasta…" abre no botão direito) no rodapé de saída da coluna
+    de opções e, na linha de baixo, "Pasta de saída:" com o caminho. E, no
+    Cortar, os campos Início/Fim centralizados na mesma coluna do botão PLAY.
     """
     from tkinter import ttk
 
@@ -978,47 +984,38 @@ def _check_ffmpeg_output_rows(app, root) -> None:
         ):
             panel._select_ffmpeg_tool(ferramenta)
             root.update()
-            botoes = por_texto(aba, ("Abrir pasta", "Escolher pasta"), ttk.Button)
+            botoes = por_texto(aba, ("Abrir Pasta",), ttk.Button)
             caminhos = por_texto(aba, ("Pasta de saída:",), ttk.Label)
-            if len(botoes) != 2:
-                raise RuntimeError(f"[{ferramenta}] esperava 2 botões de pasta, achei {len(botoes)}")
+            if len(botoes) != 1:
+                raise RuntimeError(f"[{ferramenta}] esperava 1 botão de pasta (Abrir Pasta), achei {len(botoes)}")
             if len(caminhos) != 1:
                 raise RuntimeError(f"[{ferramenta}] esperava 1 linha de caminho, achei {len(caminhos)}")
-            abrir, escolher = sorted(botoes, key=lambda widget: widget.winfo_rootx())
-            if abs(abrir.winfo_rooty() - escolher.winfo_rooty()) > 2:
-                raise RuntimeError(f"[{ferramenta}] os dois botões de pasta não estão na mesma linha")
-            pai = abrir.master
-            if escolher.master is not pai:
-                raise RuntimeError(f"[{ferramenta}] os botões de pasta estão em linhas diferentes")
-            # Mesma linha das OPÇÕES: algum controle da ferramenta divide a linha
-            # com os botões (nas abas com grade os botões ficam numa célula própria).
-            topo = abrir.winfo_rooty()
-            base = topo + abrir.winfo_height()
-            dividem = [
-                widget
-                for widget in descendentes(aba)
-                if isinstance(widget, (ttk.Label, ttk.Combobox, ttk.Checkbutton, ttk.Entry))
-                and widget.winfo_ismapped()
-                and widget is not abrir
-                and widget is not escolher
-                and widget.winfo_rooty() < base - 2
-                and widget.winfo_rooty() + widget.winfo_height() > topo + 2
-            ]
-            if not dividem:
+            abrir = botoes[0]
+            # Botão e caminho no MESMO rodapé de saída da coluna de opções
+            # (no layout novo o botão fica no rodapé, não na linha das opções).
+            if caminhos[0].master.master is not abrir.master:
                 raise RuntimeError(
-                    f"[{ferramenta}] os botões de pasta não estão na linha das opções"
+                    f"[{ferramenta}] o caminho da pasta não está no rodapé de saída do botão"
                 )
             if caminhos[0].winfo_rooty() <= abrir.winfo_rooty():
                 raise RuntimeError(f"[{ferramenta}] o caminho da pasta não está na linha de baixo")
+            # O menu de trocar pasta continua acessível no botão (botão direito).
+            if not abrir.bind("<Button-3>"):
+                raise RuntimeError(
+                    f"[{ferramenta}] o botão de pasta perdeu o menu de trocar pasta (botão direito)"
+                )
             # Adjacência exata onde o usuário pediu (Cortar): o caminho vem na
-            # linha imediatamente seguinte à dos botões.
+            # linha imediatamente seguinte à do botão.
             if ferramenta == "Cortar" and caminhos[0].master.winfo_rooty() >= abrir.winfo_rooty() + abrir.winfo_height() + 6:
                 raise RuntimeError(f"[{ferramenta}] o caminho da pasta ficou longe dos botões")
 
         # Início/Fim do Cortar alinhados com o botão PLAY (centro horizontal).
         panel._select_ffmpeg_tool("Cortar")
         root.update()
-        inicio = por_texto(panel.cut_tab, ("Início (segundos):",), ttk.Label)[0]
+        rotulos_inicio = por_texto(panel.cut_tab, ("Início (s):",), ttk.Label)
+        if not rotulos_inicio:
+            raise RuntimeError("o rótulo 'Início (s):' do Cortar sumiu")
+        inicio = rotulos_inicio[0]
         linha = inicio.master
         centro_linha = linha.winfo_rootx() + linha.winfo_width() / 2
         play = panel.cut_play_button
@@ -1098,11 +1095,15 @@ def _check_live_mic_icons(app, root) -> None:
 
 
 def _check_ffmpeg_stage_hints(app, root) -> None:
-    """Dica do palco: única, completa e centralizada no tamanho ATUAL (12/09).
+    """Dica do palco (12/09; contrato do layout novo).
 
-    Bug relatado: sobrava um pedaço do texto no meio da tela ("lizar" no Girar,
-    "ou ouvir" no Extrair) porque a dica era criada no tamanho mínimo do palco e
-    nunca redesenhada quando ele crescia.
+    O palco VAZIO das ferramentas fica limpo — sem texto nenhum (a orientação
+    fica na lateral, ex.: "Nenhum arquivo selecionado"; ver as capturas do
+    layout novo em build/ffmpeg-cut.png). O que a vacina protege:
+    - nenhum resto de texto pode sobrar quando o palco cresce sem mídia (o bug
+      do 12/09 era um pedaço da dica antiga preso no meio da tela);
+    - as dicas transitórias que AINDA existem ("Carregando prévia…", etc.)
+      continuam únicas, completas e centralizadas no tamanho ATUAL.
     """
     panel = app.ffmpeg_tools
     app.select_main_tab("ffmpeg")
@@ -1110,20 +1111,16 @@ def _check_ffmpeg_stage_hints(app, root) -> None:
     if not mapeado:
         root.deiconify()
         root.update()
-    esperado = {
-        "Cortar": "Selecione uma mídia para visualizar",
-        "Extrair áudio": "Escolha um arquivo para visualizar ou ouvir",
-        "Girar vídeo": "Selecione um vídeo para visualizar",
+    ferramentas = {
+        "Cortar": lambda: panel.cut_preview,
+        "Extrair áudio": lambda: panel.extract_preview,
+        "Girar vídeo": lambda: panel.rotate_preview,
     }
     try:
-        for ferramenta, texto in esperado.items():
+        for ferramenta in ferramentas:
             panel._select_ffmpeg_tool(ferramenta)
             root.update()
-            canvas = {
-                "Cortar": panel.cut_preview,
-                "Extrair áudio": panel.extract_preview,
-                "Girar vídeo": panel.rotate_preview,
-            }[ferramenta]
+            canvas = ferramentas[ferramenta]()
             # cenário real do bug: palco SEM mídia e que acabou de crescer
             panel.preview_frames.pop(canvas, None)
             panel.preview_stills.pop(canvas, None)
@@ -1131,26 +1128,43 @@ def _check_ffmpeg_stage_hints(app, root) -> None:
             panel.preview_viewports[canvas].stage_width = 0   # força reencaixe
             panel._reset_preview_view(canvas, 1920, 1080)
             root.update()
-            textos = [item for item in canvas.find_all() if canvas.type(item) == "text"]
-            if len(textos) != 1:
+            textos = [
+                item
+                for item in canvas.find_all()
+                if canvas.type(item) == "text"
+                and str(canvas.itemcget(item, "text")).strip()
+            ]
+            if textos:
                 raise RuntimeError(
-                    f"[{ferramenta}] esperava UMA dica no palco, achei {len(textos)}: "
+                    f"[{ferramenta}] palco vazio com texto sobrando (bug do 12/09): "
                     f"{[canvas.itemcget(item, 'text') for item in textos]}"
                 )
-            conteudo = str(canvas.itemcget(textos[0], "text"))
-            if conteudo != texto:
-                raise RuntimeError(f"[{ferramenta}] dica diferente do esperado: {conteudo!r}")
-            coords = canvas.coords(textos[0])
-            centro_x, centro_y = canvas.winfo_width() / 2, canvas.winfo_height() / 2
-            if abs(coords[0] - centro_x) > 3 or abs(coords[1] - centro_y) > 3:
-                raise RuntimeError(
-                    f"[{ferramenta}] dica fora do centro do palco: {coords} x centro "
-                    f"({centro_x:.0f}, {centro_y:.0f})"
-                )
-            # o texto tem que caber: a dica do Extrair é a mais longa
-            bbox = canvas.bbox(textos[0])
-            if bbox and (bbox[0] < 0 or bbox[2] > canvas.winfo_width() + 2):
-                raise RuntimeError(f"[{ferramenta}] dica cortada nas laterais: {bbox}")
+        # Dica transitória: continua única e centralizada no tamanho ATUAL.
+        panel._select_ffmpeg_tool("Cortar")
+        root.update()
+        canvas = ferramentas["Cortar"]()
+        panel._preview_show_hint(canvas, "Carregando prévia…")
+        root.update()
+        textos = [item for item in canvas.find_all() if canvas.type(item) == "text"]
+        if len(textos) != 1:
+            raise RuntimeError(
+                f"esperava UMA dica transitória no palco, achei {len(textos)}: "
+                f"{[canvas.itemcget(item, 'text') for item in textos]}"
+            )
+        conteudo = str(canvas.itemcget(textos[0], "text"))
+        if conteudo != "Carregando prévia…":
+            raise RuntimeError(f"dica transitória diferente do esperado: {conteudo!r}")
+        coords = canvas.coords(textos[0])
+        centro_x, centro_y = canvas.winfo_width() / 2, canvas.winfo_height() / 2
+        if abs(coords[0] - centro_x) > 3 or abs(coords[1] - centro_y) > 3:
+            raise RuntimeError(
+                f"dica transitória fora do centro do palco: {coords} x centro "
+                f"({centro_x:.0f}, {centro_y:.0f})"
+            )
+        # volta o palco ao estado limpo para os próximos checks
+        canvas.delete("all")
+        panel.preview_hint_text[canvas] = ""
+        root.update_idletasks()
     finally:
         if not mapeado:
             root.withdraw()
@@ -1897,20 +1911,31 @@ def _check_batch_send_totals_block(app, root) -> None:
             "==========",
             "Iniciando envio:",
         ]
-        if len(linhas) != len(esperado) or any(
+        # O app continua escrevendo sozinho durante os `root.update()` deste
+        # check (ex.: "Verificando atualizações", que nasce de um `after` do
+        # proprio app): comparar o log INTEIRO com 6 linhas era uma corrida.
+        # Isola o bloco pelas linhas esperadas e ignora o resto (mesmo padrao
+        # usado em _check_batch_log_lines).
+        do_bloco = [
+            linha
+            for linha in linhas
+            if any(linha[10:].startswith(prefixo) for prefixo in esperado)
+        ]
+        if len(do_bloco) != len(esperado) or any(
             not linha[10:].startswith(prefixo)
-            for linha, prefixo in zip(linhas, esperado)
+            for linha, prefixo in zip(do_bloco, esperado)
         ):
             raise RuntimeError(f"os totais do envio nao sairam no formato pedido: {linhas}")
+        n0 = linhas.index(do_bloco[0]) + 1  # numero da 1a linha do bloco no log
         # Separadores sem cor; os totais verdes.
-        for numero, separador in ((1, True), (5, True)):
+        for numero, separador in ((n0, True), (n0 + 4, True)):
             tags = log.tag_names(f"{numero}.0")
             if separador and "vad_total" in tags:
                 raise RuntimeError(f"o separador da linha {numero} nao pode sair verde")
-        for numero in (2, 3, 4):
+        for numero in (n0 + 1, n0 + 2, n0 + 3):
             if "vad_total" not in log.tag_names(f"{numero}.0"):
                 raise RuntimeError(f"a linha {numero} dos totais do envio nao ficou verde")
-        if "vad_total" not in log.tag_names("6.0"):
+        if "vad_total" not in log.tag_names(f"{n0 + 5}.0"):
             raise RuntimeError("a linha do inicio do envio nao ficou verde")
         # O arquivo SEM AUDIO nao pode entrar na contagem (so os validos).
         if any("Total de arquivos: 2" in linha for linha in linhas):

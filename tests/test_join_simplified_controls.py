@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from ffmpeg_tools_panel import FfmpegToolsPanel, MediaProfile
+from ffmpeg_tools_panel import EmbeddedMediaPlayer, FfmpegToolsPanel, MediaProfile
 
 
 def media(**changes):
@@ -25,6 +25,8 @@ class JoinSimplifiedControlsTests(unittest.TestCase):
         self.p.root = self.root
         self.p.tk = tk
         self.p.running = False
+        self.p.preview_player = EmbeddedMediaPlayer()
+        self.p.preview_context = None
         self.p.join_inputs = []
         self.p.join_media_profiles = {}
         self.p.join_tab = ttk.Frame(self.root)
@@ -33,10 +35,19 @@ class JoinSimplifiedControlsTests(unittest.TestCase):
             "join_stream_policy": "Primeira faixa (MP4)",
             "join_audio_policy": "Preservar áudio e preencher silêncio",
             "join_transition": "Fade in/out", "join_seconds": "0.5", "output_dir": "",
+            "join_preview_name": "", "join_current": "0:00", "preview_speed": "1.0x",
         }.items():
             setattr(self.p, name + "_var", tk.StringVar(master=self.root, value=value))
         for name, value in {"join_advanced": False, "join_reencode": False, "join_smart": True}.items():
             setattr(self.p, name + "_var", tk.BooleanVar(master=self.root, value=value))
+        # O __init__ real cria os contêineres de preview; como este teste monta só a
+        # aba de junção, espelha os que _build_join_tab/_create_preview_stage tocam.
+        for attr in ("preview_viewports", "preview_holders", "preview_parents",
+                     "preview_waveforms", "waveform_requests", "preview_stills",
+                     "preview_frames", "preview_frame_items", "preview_hint_text",
+                     "preview_still_key", "preview_selections", "preview_selection_drag",
+                     "preview_selection_filters", "preview_image_refs"):
+            setattr(self.p, attr, {})
         self.p._build_join_tab()
 
     def inputs(self, *profiles):
@@ -72,16 +83,17 @@ class JoinSimplifiedControlsTests(unittest.TestCase):
         self.root.deiconify()
         self.inputs(media(), media())
         self.root.update()
-        output_buttons = [widget for widget in self.p.join_advanced_check.master.winfo_children()
-                          if isinstance(widget, ttk.Button)]
-        self.assertEqual(2, len(output_buttons))
-        self.assertTrue(all(widget.winfo_viewable() for widget in output_buttons))
+        output_buttons = [button for frame in self.p.join_advanced_check.master.winfo_children()
+                          for button in frame.winfo_children()
+                          if isinstance(button, ttk.Button) and "pasta" in button.cget("text").lower()]
+        self.assertEqual(1, len(output_buttons))
+        self.assertTrue(output_buttons[0].winfo_viewable())
         self.p.join_advanced_check.invoke()
         self.root.update()
         self.assertTrue(self.p.join_audio_row.winfo_viewable())
         self.p.join_advanced_check.invoke()
         self.root.update()
-        self.assertTrue(all(widget.winfo_viewable() for widget in output_buttons))
+        self.assertTrue(output_buttons[0].winfo_viewable())
 
     def test_tracks_only_appear_for_multiple_tracks_and_remain_advanced(self):
         self.inputs(media(audio_streams=2), media())

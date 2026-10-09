@@ -113,7 +113,7 @@ class ArgumentosPorFaixaTests(unittest.TestCase):
         def execute(_rotulo, build, duration_seconds=None):
             command = build(panel.acceleration)
             capturado.append(command)
-            Path(command[-1]).touch()
+            Path(command[-1]).write_bytes(b"staged")
         panel._execute_video = execute
         with tempfile.TemporaryDirectory() as directory:
             panel._cut_video_precise(Path("entrada.mp4"), Path(directory) / "saida.mp4", 1.4, 4.6, midia_duas_faixas())
@@ -133,7 +133,7 @@ class ArgumentosPorFaixaTests(unittest.TestCase):
         def execute(_rotulo, build, duration_seconds=None):
             command = build(panel.acceleration)
             capturado.append(command)
-            Path(command[-1]).touch()
+            Path(command[-1]).write_bytes(b"staged")
         panel._execute_video = execute
         with tempfile.TemporaryDirectory() as directory:
             panel._cut_video_precise(

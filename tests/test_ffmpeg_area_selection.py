@@ -417,7 +417,7 @@ class SelectionWorkerTests(unittest.TestCase):
         panel._execute_video = MagicMock()
         panel.cancel_event = threading.Event()
         panel._get_ffprobe = lambda: None
-        panel._execute_video.side_effect = lambda _label, build, **_kw: Path(build(VideoAcceleration("cpu", "CPU", "libx264"))[-1]).touch()
+        panel._execute_video.side_effect = lambda _label, build, **_kw: Path(build(VideoAcceleration("cpu", "CPU", "libx264"))[-1]).write_bytes(b"staged")
         perfil = self._profile()
         with tempfile.TemporaryDirectory() as directory:
             panel._cut_video_precise(
@@ -440,7 +440,7 @@ class SelectionWorkerTests(unittest.TestCase):
         panel._execute_video = MagicMock()
         panel.cancel_event = threading.Event()
         panel._get_ffprobe = lambda: None
-        panel._execute_video.side_effect = lambda _label, build, **_kw: Path(build(VideoAcceleration("cpu", "CPU", "libx264"))[-1]).touch()
+        panel._execute_video.side_effect = lambda _label, build, **_kw: Path(build(VideoAcceleration("cpu", "CPU", "libx264"))[-1]).write_bytes(b"staged")
         with tempfile.TemporaryDirectory() as directory:
             panel._cut_video_precise(Path("entrada.mp4"), Path(directory) / "saida.mp4", 1.0, 5.0, self._profile())
         comando = panel._execute_video.call_args[0][1](VideoAcceleration("cpu", "CPU", "libx264"))

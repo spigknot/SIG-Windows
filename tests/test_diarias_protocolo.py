@@ -156,7 +156,7 @@ class DiariasWiringTest(unittest.TestCase):
             "_build_diarias_section",
             "_select_diarias_pdf",
             "_reload_diarias_pdf",
-            '"Total de vencimentos (R$)"',
+            '"Total (R$)"',
             '"Mês/ano"',
             '"Ida · data"',
             '"Volta · data"',

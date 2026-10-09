@@ -14,7 +14,15 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 from ffmpeg_tools_panel import FfmpegToolsPanel
 
-FF, FP=shutil.which('ffmpeg'),shutil.which('ffprobe')
+def _resolve_tool(name):
+    """Prefere o ffmpeg/ffprobe que o app distribui (dist/) para os testes usarem a mesma build do produto."""
+    local = ROOT / 'dist' / (name + '.exe')
+    if local.is_file():
+        return str(local)
+    return shutil.which(name)
+
+
+FF, FP=_resolve_tool('ffmpeg'),_resolve_tool('ffprobe')
 class Var:
     def __init__(self,value):self.value=value
     def get(self):return self.value
