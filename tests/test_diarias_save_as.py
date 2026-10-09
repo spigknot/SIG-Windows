@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import diarias_mapa  # noqa: E402
 import documents  # noqa: E402
 import sig_app  # noqa: E402
+from diarias_profiles import PROFILE_FIELDS
 from sig_app import (  # noqa: E402
     SigApp,
     next_available_diarias_requerimento_path,
@@ -34,8 +35,12 @@ class _Var:
 
 
 def _app(**values):
-    app = SimpleNamespace(root=object())
-    for name, value in values.items():
+    app = SimpleNamespace(root=object(), settings={"police_station": "DEL.POL.TAGUAI"})
+    defaults = dict(holerite_total="10.817,23", holerite_mes="12/2026", abertura_data="31/12/2026",
+                    abertura_hora="08:00", fechamento_data="31/12/2026", fechamento_hora="21:00",
+                    req="215626/2026", mapa="215627/2026", data="31/12/2026")
+    defaults.update(values)
+    for name, value in defaults.items():
         setattr(app, f"diarias_{name}_var", _Var(value))
     app._start_diarias_activity = Mock(return_value=0.0)
     app._finish_diarias_activity = Mock()
@@ -43,6 +48,13 @@ def _app(**values):
 
 
 class DiariasSaveAsUiTest(unittest.TestCase):
+    def setUp(self):
+        profile = {key: example for key, _label, example in PROFILE_FIELDS}
+        profile["classe"] = "1"
+        self.profile_patch = patch.object(sig_app.diarias_store, "load_diarias_profile", return_value=profile)
+        self.profile_patch.start()
+        self.addCleanup(self.profile_patch.stop)
+
     def test_requerimento_usa_o_caminho_escolhido(self):
         app = _app(
             abertura_data="31/12/2026",

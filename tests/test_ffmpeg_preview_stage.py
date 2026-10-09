@@ -256,7 +256,7 @@ class PreviewReserveTests(unittest.TestCase):
 class PreviewStageWiringTests(unittest.TestCase):
     def test_square_stage_is_gone(self):
         self.assertNotIn("_create_stable_preview", SOURCE)
-        self.assertEqual(SOURCE.count("self._create_preview_stage("), 3)
+        self.assertEqual(SOURCE.count("self._create_preview_stage("), 5)
 
     def test_stage_is_a_packed_widget_with_its_own_size(self):
         source = method_source("_create_preview_stage")
@@ -290,7 +290,7 @@ class PreviewStageWiringTests(unittest.TestCase):
         source = method_source("_preview_available_box")
         self.assertIn("winfo_children", source)
         self.assertIn("winfo_reqheight", source)
-        self.assertIn("ffmpeg_scroll_canvas", source)
+        self.assertIn("parent.winfo_height()", source)
 
     def test_frames_are_rendered_at_the_view_size(self):
         source = method_source("_start_canvas_preview")

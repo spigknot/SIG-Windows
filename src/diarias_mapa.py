@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import base64
+import copy
 import gc
 import os
 import re
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
 import time as time_module
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Mapping
 
 from app_env import app_base_dir
+from diarias_profiles import classe_padrao, format_profile_cargo, validate_diarias_profile
 
 
 TEMPLATE_RELATIVE_PATH = Path("modelos") / "modelo_mapa.xlsx"
+_B34_TEMPLATE_PREFIX = "_SIG_DIARIAS_B34_TEMPLATE_"
 _EXCEL_EPOCH = date(1899, 12, 30)
 _PORTUGUESE_MONTHS = (
     "janeiro",
@@ -49,6 +57,15 @@ class DiariasMapaData:
     meios_proprios: bool
     menos_de_12_horas: bool
     mes_ano_ida: str
+    indice_ufesp: float | None = None
+    nome: str = ""
+    rg: str = ""
+    delegacia_oitiva: str = ""
+    padrao: str = ""
+    cargo_classe: str = ""
+    cpf: str = ""
+    dados_bancarios: str = ""
+    cidade_plantao: str = ""
 
 
 def _parse_date(value: str, label: str) -> date:
@@ -112,6 +129,8 @@ def prepare_diarias_mapa(
     protocolo_requerimento: str,
     protocolo_mapa: str,
     meios_proprios: bool,
+    profile: Mapping[str, object] | None = None,
+    oitiva_delegacia: str = "",
 ) -> DiariasMapaData:
     """Valida os campos e calcula os valores do mapa."""
     ida = _parse_date(data_ida, "ida do talão")
@@ -131,6 +150,21 @@ def prepare_diarias_mapa(
     if not protocolo_map:
         raise ValueError("Extraia ou informe o protocolo do mapa.")
 
+    profile_values = {}
+    if profile is not None:
+        selected = validate_diarias_profile(profile)
+        profile_values = {
+            "indice_ufesp": float(Decimal(selected["ufesp_index"].replace(",", "."))),
+            "nome": selected["nome"].upper(),
+            "rg": selected["rg"],
+            "delegacia_oitiva": str(oitiva_delegacia or "").strip(),
+            "padrao": classe_padrao(selected["classe"]),
+            "cargo_classe": format_profile_cargo(selected["cargo"], selected["classe"]),
+            "cpf": selected["cpf"],
+            "dados_bancarios": f"001 / {selected['agencia']} / {selected['conta']}",
+            "cidade_plantao": selected["cidade_plantao"],
+        }
+
     return DiariasMapaData(
         total_vencimentos=_parse_brazilian_amount(
             total_vencimentos, "total de vencimentos do holerite"
@@ -146,6 +180,7 @@ def prepare_diarias_mapa(
         meios_proprios=bool(meios_proprios),
         menos_de_12_horas=(retorno - saida) < timedelta(hours=12),
         mes_ano_ida=f"{_PORTUGUESE_MONTHS[ida.month - 1]}/{ida.year}",
+        **profile_values,
     )
 
 
@@ -241,6 +276,55 @@ def next_available_diarias_mapa_path(directory: Path, data_ida: date) -> Path:
     return candidate
 
 
+def _prepare_mapa_template(template_path: Path, directory: Path) -> Path:
+    """Recupera o texto rico de B34 guardado no próprio modelo com marcadores x.
+
+    Os nomes ocultos guardam o texto editável e suas fontes, sem uma terceira
+    planilha nem texto de modelo duplicado no código. Modelos antigos com tags
+    continuam funcionando diretamente.
+    """
+    with zipfile.ZipFile(template_path) as source:
+        sheet_path = "xl/worksheets/sheet1.xml"
+        sheet_xml = source.read(sheet_path).decode("utf-8")
+        cell_pattern = r'<c\b[^>]*\br="B34"(?:[^>]*?/>|[^>]*?>.*?</c>)'
+        match = re.search(cell_pattern, sheet_xml, flags=re.DOTALL)
+        if match is None:
+            raise RuntimeError("A célula B34 não foi encontrada no modelo de mapa.")
+        cell = ET.fromstring(match.group())
+        if cell.get("t") == "s":
+            index = int(cell.findtext("v"))
+            ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            shared = ET.fromstring(source.read("xl/sharedStrings.xml")).findall("s:si", ns)
+            value = "".join(shared[index].itertext())
+        else:
+            value = "".join(cell.itertext())
+        if value.strip() != "x":
+            return template_path
+        workbook = ET.fromstring(source.read("xl/workbook.xml"))
+        pieces = sorted((node.get("name"), node.text or "") for node in workbook.iter()
+                        if (node.get("name") or "").startswith(_B34_TEMPLATE_PREFIX))
+        if not pieces:
+            raise RuntimeError("O modelo com x não contém o texto de preenchimento de B34.")
+        try:
+            encoded = "".join(text.strip().strip('"') for _name, text in pieces)
+            rich_text = base64.b64decode(encoded, validate=True).decode("utf-8")
+            if ET.fromstring(rich_text).tag != "is":
+                raise ValueError("Texto rico inválido")
+        except Exception as exc:
+            raise RuntimeError("O texto de B34 guardado no modelo está inválido.") from exc
+        opening = re.match(r'<c\b[^>]*>', match.group()).group()
+        opening = re.sub(r'\bt="[^"]*"', 't="inlineStr"', opening)
+        if 't="inlineStr"' not in opening:
+            opening = opening[:-1] + ' t="inlineStr">'
+        cell_xml = opening + rich_text + "</c>"
+        prepared_sheet = sheet_xml[:match.start()] + cell_xml + sheet_xml[match.end():]
+        prepared = directory / "modelo_mapa.xlsx"
+        with zipfile.ZipFile(prepared, "w") as destination:
+            for entry in source.infolist():
+                destination.writestr(copy.copy(entry), prepared_sheet.encode("utf-8") if entry.filename == sheet_path else source.read(entry))
+    return prepared
+
+
 def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
     """Gera o mapa como XLSX ou PDF a partir do modelo e dados da diária."""
     destination = Path(destination)
@@ -269,6 +353,7 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
         ) from exc
 
     workbook = None
+    temporary_template = tempfile.TemporaryDirectory(prefix=".sig-mapa-modelo-", dir=str(destination.parent))
     temporary_destination = destination.with_name(
         f".{destination.stem}_{uuid.uuid4().hex}{extension}"
     )
@@ -281,13 +366,28 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
         except Exception:
             pass
 
-        workbook = excel.Workbooks.Open(str(template_path), 0, True)
+        prepared_template = _prepare_mapa_template(template_path, Path(temporary_template.name))
+        workbook = excel.Workbooks.Open(str(prepared_template), 0, True)
         limite = workbook.Worksheets.Item("Limite 50%")
         verso = workbook.Worksheets.Item("Verso")
 
         limite.Range("K10").Value2 = values.total_vencimentos
         limite.Range("G16").Value2 = "PARTICULAR" if values.meios_proprios else "VIATURA"
+        limite.Range("B16").Value2 = values.cidade_plantao.upper()
         limite.Range("V10").Value2 = values.valor_ufesp
+        if getattr(values, "indice_ufesp", None) is not None:
+            # Value2 altera o conteúdo, mantendo a fonte e o estilo do modelo.
+            for address, value in (
+                ("Z10", values.indice_ufesp),
+                ("B8", values.nome),
+                ("N8", values.rg),
+                ("T8", values.delegacia_oitiva),
+                ("B10", values.padrao),
+                ("E10", values.cargo_classe),
+                ("J28", values.cpf),
+                ("T28", values.dados_bancarios),
+            ):
+                limite.Range(address).Value2 = value
         limite.Range("AC8").Value2 = _excel_date_serial(values.data_ida)
         # O modelo identifica essas colunas como DIA; mês/ano fica em AC8.
         limite.Range("J16").Value2 = values.data_ida.day
@@ -304,6 +404,14 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
 
         if _replace_cell_marker(limite.Range("B34"), "{{{data_ida}}}", values.mes_ano_ida) == 0:
             raise RuntimeError("A marca {{{data_ida}}} não foi encontrada na célula B34 do modelo.")
+
+        if getattr(values, "cidade_plantao", ""):
+            if _replace_cell_marker(
+                limite.Range("B34"), "{{{cidade_plantao}}}", values.cidade_plantao
+            ) == 0:
+                raise RuntimeError(
+                    "A marca {{{cidade_plantao}}} não foi encontrada na célula B34 do modelo."
+                )
 
         verso.Range("A16").Value2 = values.protocolo_requerimento
         marker_counts = _replace_shape_markers(
@@ -361,3 +469,4 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
         workbook = None
         excel = None
         gc.collect()
+        temporary_template.cleanup()

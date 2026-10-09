@@ -69,7 +69,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 import tkinter as tk
-from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, Canvas, IntVar, PhotoImage, StringVar, Text, Tk, Toplevel
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, urlencode, urlparse
 
@@ -88,11 +88,16 @@ from assistant_prompts import (
 import diarias_protocolo
 import diarias_mapa
 import diarias_store
+import diarias_workflow
+import pdf_printing
 import prompt_store
 import qr_encoder
 import smart_join_planner
 import stt_provider_rules
 from prompts_panel import PromptsPanel
+from diarias_profiles_panel import DiariasProfilesPanel
+from diarias_profiles import validate_diarias_profile
+from ui_widgets import diarias_action_icon_image, tool_action_icon_image
 from prompt_store import PROMPT_CONSTANTE_POR_SLOT as _PROMPT_CONSTANTE_POR_SLOT
 from stt_provider_rules import (
     alibaba_language_hints,
@@ -526,7 +531,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261008_002"
+APP_VERSION = "20261008_003"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -1359,6 +1364,8 @@ class SigApp:
         )
         self.diarias_protocolo_path = ""
         self.diarias_talao_path = ""
+        self.diarias_escala_path = ""
+        self.diarias_escala_file_var = StringVar(master=self.root, value="")
         self.diarias_holerite_file_var = StringVar(
             master=self.root, value=holerite_filename
         )
@@ -1515,9 +1522,10 @@ class SigApp:
             "Diarias.File.TLabel", background="#ffffff", foreground="#667371",
             font=("Segoe UI", 9),
         )
-        style.configure("Diarias.Pdf.TButton", padding=(8, 3))
+        style.configure("Diarias.Pdf.TButton", padding=(8, 3), background="#eef6f1", foreground="#24583c", bordercolor="#cdded3", lightcolor="#eef6f1", darkcolor="#eef6f1")
+        style.map("Diarias.Pdf.TButton", background=[("active", "#dcece2"), ("disabled", "#e9eeec")])
         style.configure(
-            "Diarias.Reload.TButton", foreground="#1565d8", padding=(6, 3),
+            "Diarias.Reload.TButton", foreground="#1565d8", background="#ffffff", bordercolor="#d1dfd8", lightcolor="#ffffff", darkcolor="#ffffff", padding=(6, 3),
         )
         style.configure(
             "Diarias.Primary.TButton", foreground="#ffffff", background="#16833a",
@@ -1528,6 +1536,12 @@ class SigApp:
             background=[("active", "#116b30"), ("disabled", "#7ea98a")],
             foreground=[("disabled", "#f1f4f2")],
         )
+        style.configure("Diarias.Output.TButton", foreground="#244a60", background="#ffffff", font=("Segoe UI Semibold", 10), padding=(12, 7))
+        style.map("Diarias.Output.TButton", background=[("active", "#e7efef"), ("disabled", "#e9eeec")])
+        style.configure("Diarias.Invalid.TEntry", fieldbackground="#fff1f0", bordercolor="#b42318")
+        style.configure("Diarias.Invalid.TCombobox", fieldbackground="#fff1f0", bordercolor="#b42318")
+        style.map("Diarias.Invalid.TCombobox", fieldbackground=[("readonly", "#fff1f0")])
+        style.configure("Diarias.Invalid.TSpinbox", fieldbackground="#fff1f0", bordercolor="#b42318")
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
         style.configure("TLabel", background="#f4f7f6", foreground="#1d2b2a", font=("Segoe UI", 10))
         # Keep the settings pages on the normal light surface. Each individual
@@ -3836,97 +3850,7 @@ class SigApp:
         self._set_live_assistant_names([])
         self.root.after(100, self._position_live_parts_button)
 
-        imei_frame = ttk.Frame(self.imei_tab)
-        imei_frame.pack(fill=BOTH, expand=True)
-        ttk.Label(imei_frame, text="IMEI", style="Muted.TLabel").pack(anchor="w", pady=(16, 4))
-
-        imei_inputs = ttk.Frame(imei_frame, width=900)
-        imei_inputs.pack(anchor="w")
-        tac_box = ttk.Frame(imei_inputs)
-        tac_box.pack(side=LEFT, padx=(0, 7))
-        self.imei_tac_entry = ttk.Entry(
-            tac_box,
-            textvariable=self.imei_tac_var,
-            font=("Consolas", 16),
-            justify="center",
-            width=48,
-        )
-        self.imei_tac_entry.pack()
-        ttk.Label(tac_box, text="tac", style="Muted.TLabel").pack(anchor="center", pady=(3, 0))
-
-        sn_box = ttk.Frame(imei_inputs)
-        sn_box.pack(side=LEFT, padx=(7, 0))
-        self.imei_sn_entry = ttk.Entry(
-            sn_box,
-            textvariable=self.imei_sn_var,
-            font=("Consolas", 16),
-            justify="center",
-            width=36,
-        )
-        self.imei_sn_entry.pack()
-        ttk.Label(sn_box, text="sn", style="Muted.TLabel").pack(anchor="center", pady=(3, 0))
-
-        self.imei_tac_var.trace_add("write", lambda *_args: self._update_imei_inputs())
-        self.imei_sn_var.trace_add("write", lambda *_args: self._update_imei_inputs())
-        self.imei_sn_entry.bind("<BackSpace>", self._imei_sn_backspace)
-
-        ttk.Label(
-            imei_frame,
-            textvariable=self.imei_result_var,
-            foreground="#c48a00",
-            font=("Segoe UI Semibold", 18),
-        ).pack(anchor="center", pady=(18, 0))
-        self._make_editor_icon_button(
-            imei_frame,
-            self.copy_icon,
-            "Copiar IMEI completo",
-            self.copy_full_imei,
-        ).pack(anchor="center", pady=(4, 0))
-        ttk.Label(
-            imei_frame,
-            textvariable=self.imei_model_var,
-            font=("Segoe UI", 11),
-            justify="center",
-        ).pack(fill=X, pady=(10, 0))
-        ttk.Label(
-            imei_frame,
-            textvariable=self.imei_status_var,
-            style="Muted.TLabel",
-        ).pack(anchor="center", pady=(4, 0))
-
-        self.imei_history_container = ttk.Frame(imei_frame, width=900)
-        self.imei_history_container.pack(anchor="w", pady=(28, 0))
-        history_header = ttk.Frame(self.imei_history_container)
-        history_header.pack(fill=X)
-        ttk.Button(history_header, text="Limpar histórico", command=self.clear_imei_history).pack(side=RIGHT)
-
-        history_frame = ttk.Frame(self.imei_history_container)
-        history_frame.pack(fill=X, pady=(10, 0))
-        self.imei_history_text = Text(
-            history_frame,
-            width=126,
-            height=10,
-            wrap="word",
-            font=("Segoe UI", 10),
-            background="#ffffff",
-            foreground="#10201f",
-            relief="solid",
-            borderwidth=1,
-            padx=10,
-            pady=10,
-        )
-        imei_history_scroll = ttk.Scrollbar(history_frame, orient="vertical", command=self.imei_history_text.yview)
-        self.imei_history_text.configure(yscrollcommand=imei_history_scroll.set, state="disabled")
-        self.imei_history_text.pack(side=LEFT)
-        imei_history_scroll.pack(side=RIGHT, fill=Y)
-
-        self.imei_toggle_button = ttk.Button(
-            self.imei_history_container,
-            textvariable=self.imei_toggle_var,
-            command=self.toggle_imei_history,
-        )
-        self.imei_toggle_button.pack(anchor="e", pady=(8, 0))
-        self.refresh_imei_history()
+        self._build_imei_tab()
 
         self.ffmpeg_tools = FfmpegToolsPanel(self.ffmpeg_tab, self)
         self._build_qualification_tab()
@@ -3938,14 +3862,20 @@ class SigApp:
         self.action_canvas = Canvas(file_top, width=74, height=74, highlightthickness=0, background="#f4f7f6")
         self.action_canvas.pack(side=RIGHT, padx=(16, 2))
         self.action_canvas.bind("<Button-1>", lambda _event: self.toggle_run())
+        self.action_canvas.bind("<Configure>", lambda _event: self._draw_action_button())
+        create_tooltip(self.action_canvas, "Executar ou cancelar a transcrição")
         self._draw_action_button()
 
         self.folder_canvas = Canvas(file_top, width=56, height=56, highlightthickness=0, background="#f4f7f6")
         self.folder_canvas.bind("<Button-1>", lambda _event: self._open_temp_folder())
+        self.folder_canvas.bind("<Configure>", lambda _event: self._draw_folder_button())
+        create_tooltip(self.folder_canvas, "Abrir pasta de saída")
         self._draw_folder_button()  # some ao limpar
 
         self.save_canvas = Canvas(file_top, width=56, height=56, highlightthickness=0, background="#f4f7f6")
         self.save_canvas.bind("<Button-1>", lambda _event: self.save_html_report())
+        self.save_canvas.bind("<Configure>", lambda _event: self._draw_save_button())
+        create_tooltip(self.save_canvas, "Salvar resultado da transcrição")
         self._draw_save_button()
         self.save_canvas.pack(side=RIGHT, padx=(16, 0), pady=(9, 0))
         # pasta à esquerda do disquete
@@ -4197,117 +4127,235 @@ class SigApp:
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(0, 8))
 
+    def _build_tool_styles(self) -> None:
+        style = ttk.Style(self.root)
+        style.configure("Tool.Title.TLabel", background="#f4f7f6", foreground="#193d32", font=("Segoe UI Semibold", 20))
+        style.configure("Tool.Card.TFrame", background="#ffffff", bordercolor="#dce6df", relief="solid", borderwidth=1)
+        style.configure("Tool.Result.TFrame", background="#edf6f0", bordercolor="#d5e5da", relief="solid", borderwidth=1)
+        style.configure("Tool.Section.TLabel", background="#ffffff", foreground="#244d3a", font=("Segoe UI Semibold", 11))
+        style.configure("Tool.Field.TLabel", background="#ffffff", foreground="#66766e", font=("Segoe UI", 9))
+        style.configure("Tool.Text.TLabel", background="#ffffff", foreground="#344d42", font=("Segoe UI", 10))
+        style.configure("Tool.Result.TLabel", background="#edf6f0", foreground="#315c48", font=("Segoe UI", 10))
+        style.configure("Tool.Imei.TLabel", background="#edf6f0", foreground="#193d32", font=("Consolas", 22))
+        style.configure("Tool.TEntry", padding=(8, 7), fieldbackground="#ffffff", bordercolor="#cbdad1")
+        style.configure("Tool.TCheckbutton", background="#ffffff", foreground="#344d42", font=("Segoe UI", 10))
+        style.map("Tool.TCheckbutton", background=[("active", "#ffffff")])
+        style.configure("Tool.Primary.TButton", background="#216b4a", foreground="#ffffff",
+                        bordercolor="#216b4a", lightcolor="#216b4a", darkcolor="#216b4a",
+                        font=("Segoe UI Semibold", 10), padding=(12, 9))
+        style.map("Tool.Primary.TButton", background=[("disabled", "#dce6df"), ("active", "#185638")],
+                  foreground=[("disabled", "#83958a")])
+        style.configure("Tool.Secondary.TButton", background="#f1f6f3", foreground="#315c48",
+                        bordercolor="#d5e2d9", lightcolor="#f1f6f3", darkcolor="#f1f6f3",
+                        font=("Segoe UI", 10), padding=(10, 6))
+        style.map("Tool.Secondary.TButton", background=[("disabled", "#f0f3f1"), ("active", "#e1eee5")],
+                  foreground=[("disabled", "#96a39a")])
+        style.configure("Compact.Tool.Secondary.TButton", font=("Segoe UI", 9), padding=(7, 5))
+
+    def _tool_icon_photo(self, kind: str, size: int = 24, *, enabled: bool = True, circular: bool = False, foreground: str | None = None):
+        cache = getattr(self, "_tool_icon_photos", None)
+        if cache is None:
+            self._tool_icon_photos = cache = {}
+        key = (kind, size, enabled, circular, foreground)
+        if key not in cache:
+            cache[key] = ImageTk.PhotoImage(tool_action_icon_image(
+                kind, size, enabled=enabled, circular=circular, foreground=foreground), master=self.root)
+        return cache[key]
+
+    def _build_imei_tab(self) -> None:
+        self._build_tool_styles()
+        frame = ttk.Frame(self.imei_tab)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="Consulta de IMEI", style="Tool.Title.TLabel").pack(anchor="w", pady=(4, 2))
+        ttk.Label(frame, text="Identifique o aparelho pelo TAC e pelo número de série.",
+                  style="Muted.TLabel").pack(anchor="w")
+        self.imei_cards = cards = ttk.Frame(frame)
+        cards.pack(fill=X, pady=(18, 0))
+        cards.columnconfigure(0, weight=1, uniform="imei")
+        cards.columnconfigure(1, weight=1, uniform="imei")
+        self.imei_input_card = inputs = ttk.Frame(cards, style="Tool.Card.TFrame", padding=18)
+        ttk.Label(inputs, text="Identificação", image=self._tool_icon_photo("phone"), compound=LEFT,
+                  style="Tool.Section.TLabel").pack(anchor="w", pady=(0, 14))
+        fields = ttk.Frame(inputs, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        fields.pack(fill=X)
+        fields.columnconfigure(0, weight=1, uniform="numbers")
+        fields.columnconfigure(1, weight=1, uniform="numbers")
+        ttk.Label(fields, text="TAC · 8 dígitos", style="Tool.Field.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(fields, text="Série · 6 dígitos", style="Tool.Field.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0), pady=(0, 6))
+        self.imei_tac_entry = ttk.Entry(fields, textvariable=self.imei_tac_var, font=("Consolas", 18),
+                                       justify="center", width=1, style="Tool.TEntry")
+        self.imei_tac_entry.grid(row=1, column=0, sticky="ew")
+        self.imei_sn_entry = ttk.Entry(fields, textvariable=self.imei_sn_var, font=("Consolas", 18),
+                                      justify="center", width=1, style="Tool.TEntry")
+        self.imei_sn_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0))
+        note = ttk.Label(inputs, text="O cálculo do dígito e a consulta do modelo são automáticos.",
+                         style="Tool.Field.TLabel", wraplength=260, justify="left")
+        note.pack(fill=X, pady=(12, 0))
+        inputs.bind("<Configure>", lambda event: note.configure(wraplength=max(120, event.width - 38)))
+        self.imei_tac_var.trace_add("write", lambda *_args: self._update_imei_inputs())
+        self.imei_sn_var.trace_add("write", lambda *_args: self._update_imei_inputs())
+        self.imei_sn_entry.bind("<BackSpace>", self._imei_sn_backspace)
+        create_tooltip(self.imei_tac_entry, "TAC de 8 dígitos. Você também pode colar os 14 primeiros dígitos do IMEI.")
+        create_tooltip(self.imei_sn_entry, "Número de série de 6 dígitos.")
+
+        self.imei_result_card = result = ttk.Frame(cards, style="Tool.Result.TFrame", padding=18)
+        self.imei_result_details = details = ttk.Frame(result, style="Tool.Result.TFrame", relief="flat", borderwidth=0)
+        details.pack(fill=X)
+        ttk.Label(details, text="IMEI completo", style="Tool.Result.TLabel").pack(anchor="w")
+        self.imei_full_var = StringVar(master=self.root, value="—")
+        ttk.Label(details, textvariable=self.imei_full_var, style="Tool.Imei.TLabel").pack(anchor="w", pady=(7, 3))
+        ttk.Label(details, textvariable=self.imei_result_var, style="Tool.Result.TLabel").pack(anchor="w")
+        self.imei_copy_button = ttk.Button(result, text="Copiar IMEI", image=self._tool_icon_photo("copy"),
+                                          compound=LEFT, style="Tool.Secondary.TButton", command=self.copy_full_imei,
+                                          state="disabled")
+        self.imei_copy_button.pack(fill=X, pady=(12, 0))
+        cards.bind("<Configure>", lambda event: self._layout_imei_cards(event.width))
+        self._layout_imei_cards(800)
+
+        model = ttk.Label(frame, textvariable=self.imei_model_var, style="Muted.TLabel", justify="left", wraplength=600)
+        model.pack(fill=X, pady=(12, 0))
+        frame.bind("<Configure>", lambda event: model.configure(wraplength=max(200, event.width - 8)))
+        self.imei_status_label = ttk.Label(frame, textvariable=self.imei_status_var, style="Muted.TLabel")
+        self.imei_status_var.trace_add("write", lambda *_args: self._refresh_imei_status_visibility())
+        self.imei_history_container = history = ttk.Frame(frame, style="Tool.Card.TFrame", padding=14)
+        history.pack(fill=BOTH, expand=True, pady=(14, 0))
+        header = ttk.Frame(history, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        header.pack(fill=X, pady=(0, 8))
+        ttk.Label(header, text="Histórico", image=self._tool_icon_photo("history", 22), compound=LEFT,
+                  style="Tool.Section.TLabel").pack(side=LEFT)
+        actions = ttk.Frame(header, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        actions.pack(side=RIGHT)
+        self.imei_toggle_button = ttk.Button(actions, textvariable=self.imei_toggle_var,
+                                            image=self._tool_icon_photo("history", 20), compound=LEFT,
+                                            style="Tool.Secondary.TButton", command=self.toggle_imei_history)
+        self.imei_clear_history_button = ttk.Button(actions, text="Limpar histórico",
+                                                   image=self._tool_icon_photo("clear", 20), compound=LEFT,
+                                                   style="Tool.Secondary.TButton", command=self.clear_imei_history)
+        self.imei_clear_history_button.pack(side=LEFT)
+        history_body = ttk.Frame(history, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        history_body.pack(fill=BOTH, expand=True)
+        self.imei_history_text = Text(history_body, width=1, height=5, wrap="word", font=("Segoe UI", 10),
+                                      background="#ffffff", foreground="#344d42", relief="flat", borderwidth=0,
+                                      padx=2, pady=6)
+        scroll = ttk.Scrollbar(history_body, orient="vertical", command=self.imei_history_text.yview)
+        self.imei_history_text.configure(yscrollcommand=scroll.set, state="disabled")
+        self.imei_history_text.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.pack(side=RIGHT, fill=Y)
+        self.imei_history_text.tag_configure("empty", foreground="#86978d", justify="center")
+        self.refresh_imei_history()
+        self._refresh_imei_status_visibility()
+
+    def _refresh_imei_status_visibility(self) -> None:
+        if self.imei_status_var.get():
+            self.imei_status_label.pack(anchor="w", pady=(2, 0), before=self.imei_history_container)
+        else:
+            self.imei_status_label.pack_forget()
+
+    def _layout_imei_cards(self, width: int) -> None:
+        columns = 2 if width >= 620 else 1
+        if getattr(self, "_imei_card_columns", None) == columns:
+            return
+        self._imei_card_columns = columns
+        self.imei_cards.columnconfigure(1, weight=1 if columns == 2 else 0)
+        self.imei_input_card.grid(row=0, column=0, columnspan=1 if columns == 2 else 2,
+                                  sticky="nsew", padx=(0, 12 if columns == 2 else 0))
+        self.imei_result_card.grid(row=0 if columns == 2 else 1, column=1 if columns == 2 else 0,
+                                   columnspan=1 if columns == 2 else 2, sticky="nsew",
+                                   pady=(0, 0 if columns == 2 else 12))
+        if columns == 1:
+            self.imei_result_card.grid_configure(pady=(12, 0))
+            self.imei_copy_button.pack(side=RIGHT, fill="none", padx=(16, 0), pady=0, before=self.imei_result_details)
+        else:
+            self.imei_copy_button.pack(side=TOP, fill=X, padx=0, pady=(12, 0), after=self.imei_result_details)
+
+
     def _build_qrcode_tab(self) -> None:
-        """Monta a tela de geracao de QR Code a partir de um link."""
-        frame = ttk.Frame(self.qrcode_tab, width=900)
-        frame.pack(fill=X, anchor="n")
-
-        ttk.Label(frame, text="QR Code", style="Muted.TLabel").pack(anchor="w", pady=(16, 4))
-
-        link_row = ttk.Frame(frame)
-        link_row.pack(fill=X)
-        ttk.Label(link_row, text="Link:").pack(side=LEFT, padx=(0, 8))
-        self.qrcode_link_entry = ttk.Entry(
-            link_row,
-            textvariable=self.qrcode_link_var,
-            font=("Segoe UI", 10),
-        )
-        self.qrcode_link_entry.pack(side=LEFT, fill=X, expand=True)
+        """Formulário à esquerda e prévia quadrada que acompanha o espaço disponível."""
+        self._build_tool_styles()
+        frame = ttk.Frame(self.qrcode_tab)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="QR Code", style="Tool.Title.TLabel").pack(anchor="w", pady=(4, 2))
+        ttk.Label(frame, text="Transforme um link em uma imagem pronta para compartilhar.",
+                  style="Muted.TLabel").pack(anchor="w")
+        cards = ttk.Frame(frame)
+        cards.pack(fill=BOTH, expand=True, pady=(18, 0))
+        cards.grid_propagate(False)
+        cards.rowconfigure(0, weight=1)
+        cards.columnconfigure(0, weight=1, uniform="qrcode")
+        cards.columnconfigure(1, weight=1, uniform="qrcode")
+        form = ttk.Frame(cards, style="Tool.Card.TFrame", padding=18)
+        form.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        ttk.Label(form, text="Link de destino", style="Tool.Section.TLabel").pack(anchor="w", pady=(0, 12))
+        self.qrcode_link_entry = ttk.Entry(form, textvariable=self.qrcode_link_var, font=("Segoe UI", 11),
+                                           width=1, style="Tool.TEntry")
+        self.qrcode_link_entry.pack(fill=X)
         self.qrcode_link_entry.bind("<Return>", lambda _event: self.generate_qrcode())
-        self._make_editor_icon_button(
-            link_row, self.paste_icon, "Colar", self.paste_qrcode_link
-        ).pack(side=LEFT, padx=(8, 0))
-        self._make_editor_icon_button(
-            link_row, self.clear_icon, "Limpar", self.clear_qrcode
-        ).pack(side=LEFT, padx=(4, 0))
-        self.qrcode_generate_button = ttk.Button(
-            link_row,
-            text="Gerar QR code",
-            style="Action.TButton",
-            width=15,
-            command=self.generate_qrcode,
-        )
-        self.qrcode_generate_button.pack(side=LEFT, padx=(10, 0))
-
-        shorten_row = ttk.Frame(frame)
-        shorten_row.pack(fill=X, pady=(8, 0))
-        self.qrcode_shorten_check = ttk.Checkbutton(
-            shorten_row,
-            text="Encurtar link",
-            variable=self.qrcode_shorten_var,
-            command=self._qrcode_shorten_toggled,
-        )
-        self.qrcode_shorten_check.pack(side=LEFT)
-        ttk.Label(shorten_row, text="Alias (opcional):").pack(side=LEFT, padx=(14, 6))
-        self.qrcode_alias_entry = ttk.Entry(
-            shorten_row,
-            textvariable=self.qrcode_alias_var,
-            font=("Segoe UI", 10),
-            width=30,
-        )
-        self.qrcode_alias_entry.pack(side=LEFT)
+        link_actions = ttk.Frame(form, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        link_actions.pack(fill=X, pady=(10, 20))
+        self.qrcode_paste_button = ttk.Button(link_actions, text="Colar", image=self._tool_icon_photo("paste", 22),
+                                             compound=LEFT, style="Compact.Tool.Secondary.TButton", command=self.paste_qrcode_link)
+        self.qrcode_paste_button.pack(side=LEFT, fill=X, expand=True, padx=(0, 6))
+        self.qrcode_clear_button = ttk.Button(link_actions, text="Limpar", image=self._tool_icon_photo("clear", 22),
+                                             compound=LEFT, style="Compact.Tool.Secondary.TButton", command=self.clear_qrcode)
+        self.qrcode_clear_button.pack(side=LEFT, fill=X, expand=True)
+        ttk.Separator(form).pack(fill=X, pady=(0, 18))
+        self.qrcode_shorten_check = ttk.Checkbutton(form, text="Encurtar link", variable=self.qrcode_shorten_var,
+                                                   style="Tool.TCheckbutton", command=self._qrcode_shorten_toggled)
+        self.qrcode_shorten_check.pack(anchor="w", pady=(0, 12))
+        ttk.Label(form, text="Alias (opcional)", style="Tool.Field.TLabel").pack(anchor="w", pady=(0, 6))
+        self.qrcode_alias_entry = ttk.Entry(form, textvariable=self.qrcode_alias_var, font=("Segoe UI", 10),
+                                            width=1, style="Tool.TEntry", state="disabled")
+        self.qrcode_alias_entry.pack(fill=X)
         self.qrcode_alias_entry.bind("<Return>", lambda _event: self.generate_qrcode())
-        self.qrcode_alias_entry.configure(state="disabled")
+        self.qrcode_form_actions = footer = ttk.Frame(form, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        footer.pack(side=BOTTOM, fill=X, pady=(24, 0))
+        self.qrcode_generate_button = ttk.Button(footer, text="Gerar QR Code",
+                                                 image=self._tool_icon_photo("qrcode", 24, foreground="#ffffff"), compound=LEFT,
+                                                 style="Tool.Primary.TButton", command=self.generate_qrcode)
+        self.qrcode_generate_button.pack(fill=X)
+        status = ttk.Label(footer, textvariable=self.qrcode_status_var, style="Tool.Field.TLabel",
+                           wraplength=260, justify="left")
+        status.pack(fill=X, pady=(10, 0))
+        form.bind("<Configure>", lambda event: status.configure(wraplength=max(120, event.width - 38)))
 
-        self.qrcode_shortened_row = ttk.Frame(frame)
-        ttk.Label(self.qrcode_shortened_row, text="Encurtado:").pack(side=LEFT)
-        self.qrcode_shortened_entry = ttk.Entry(
-            self.qrcode_shortened_row,
-            textvariable=self.qrcode_shortened_var,
-            font=("Segoe UI", 10),
-            state="readonly",
-        )
-        self.qrcode_shortened_entry.pack(side=LEFT, fill=X, expand=True, padx=(8, 8))
-        self.qrcode_shortened_copy_button = self._make_editor_icon_button(
-            self.qrcode_shortened_row, self.copy_icon, "Copiar", self.copy_shortened_link
-        )
-        self.qrcode_shortened_copy_button.pack(side=LEFT)
-        self.qrcode_shortened_copy_button.configure(state="disabled")
+        self.qrcode_shortened_row = ttk.Frame(form, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        ttk.Label(self.qrcode_shortened_row, text="Link encurtado", style="Tool.Field.TLabel").pack(anchor="w", pady=(0, 6))
+        shortened = ttk.Frame(self.qrcode_shortened_row, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        shortened.pack(fill=X)
+        self.qrcode_shortened_entry = ttk.Entry(shortened, textvariable=self.qrcode_shortened_var, font=("Segoe UI", 10),
+                                                state="readonly", width=1, style="Tool.TEntry")
+        self.qrcode_shortened_entry.pack(side=LEFT, fill=X, expand=True)
+        self.qrcode_shortened_copy_button = ttk.Button(shortened, image=self._tool_icon_photo("copy", 22),
+                                                       style="Tool.Secondary.TButton", command=self.copy_shortened_link,
+                                                       state="disabled")
+        self.qrcode_shortened_copy_button.pack(side=LEFT, padx=(6, 0))
+        create_tooltip(self.qrcode_shortened_copy_button, "Copiar link encurtado")
 
-        content = ttk.Frame(frame)
-        self.qrcode_content = content
-        content.pack(anchor="w", pady=(18, 0))
-
-        self.qrcode_canvas = Canvas(
-            content,
-            width=340,
-            height=340,
-            highlightthickness=0,
-            borderwidth=1,
-            relief="solid",
-            background="#ffffff",
-        )
-        self.qrcode_canvas.pack(side=LEFT)
-
-        self.qrcode_actions_frame = ttk.Frame(content)
-        self.qrcode_actions_frame.pack(side=LEFT, padx=(16, 0), anchor="n")
-
-        def qrcode_action_button(text, image, command):
-            holder = ttk.Frame(self.qrcode_actions_frame, width=66, height=66)
-            holder.pack(side=TOP, pady=(0, 8))
-            holder.pack_propagate(False)
-            button = ttk.Button(
-                holder,
-                text=text,
-                image=image,
-                compound=TOP,
-                style="DocumentAction.TButton",
-                command=command,
-            )
-            button.pack(fill=BOTH, expand=True)
-            return button
-
-        self.qrcode_copy_button = qrcode_action_button(
-            "Copiar", self.document_copy_icon, self.copy_qrcode_image
-        )
-        self.qrcode_copy_button.configure(state="disabled")
-
-        ttk.Label(
-            frame,
-            textvariable=self.qrcode_status_var,
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(12, 0))
+        self.qrcode_content = self.qrcode_preview_card = preview = ttk.Frame(cards, style="Tool.Card.TFrame", padding=18)
+        preview.grid(row=0, column=1, sticky="nsew")
+        self.qrcode_preview_heading = ttk.Label(preview, text="Prévia", style="Tool.Section.TLabel")
+        self.qrcode_preview_heading.pack(anchor="w")
+        self.qrcode_actions_frame = ttk.Frame(preview, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        self.qrcode_actions_frame.pack(side=BOTTOM, fill=X)
+        self.qrcode_copy_button = ttk.Button(self.qrcode_actions_frame, text="Copiar imagem",
+                                             image=self._tool_icon_photo("copy", 24), compound=LEFT,
+                                             style="Tool.Secondary.TButton", command=self.copy_qrcode_image,
+                                             state="disabled")
+        self.qrcode_copy_button.pack(fill=X)
+        self.qrcode_canvas = Canvas(preview, width=320, height=320, highlightthickness=0, borderwidth=0, background="#ffffff")
+        self.qrcode_canvas.pack(anchor="center", expand=True, pady=(16, 16))
+        preview.bind("<Configure>", lambda _event: self._fit_qrcode_preview())
         self._draw_qrcode_placeholder()
+        self.root.after_idle(self._fit_qrcode_preview)
+
+    def _fit_qrcode_preview(self) -> None:
+        card = self.qrcode_preview_card
+        if not card.winfo_ismapped():
+            return
+        size = max(180, min(420, card.winfo_width() - 40, card.winfo_height() - 132))
+        if int(self.qrcode_canvas["width"]) != size:
+            self.qrcode_canvas.configure(width=size, height=size)
+            self._render_qrcode()
 
     def _draw_qrcode_placeholder(self, message: str = "O QR Code aparece aqui.") -> None:
         canvas = getattr(self, "qrcode_canvas", None)
@@ -4843,141 +4891,600 @@ class SigApp:
 
     # --- Aba Diárias: holerite + talão + protocolo
     def _build_diarias_section(self):
-        """Organiza os dados em quatro cartões, com ações fora da área rolável."""
+        """Cartões compactos de anexos e dados; ações individuais e conjuntas."""
+        self.diarias_busy = False
+        self.diarias_task = None
+        self.diarias_job_events = queue.Queue()
+        self.diarias_job_after = None
+        if not hasattr(self, "diarias_escala_file_var"):
+            self.diarias_escala_file_var = StringVar(master=self.root)
+            self.diarias_escala_path = ""
+        self.diarias_validation_var = StringVar(master=self.root)
+        self.diarias_status_var = StringVar(master=self.root)
+        self.diarias_field_entries = {}
+        self.diarias_field_alerts = {}
+        self.diarias_attachment_alerts = {}
+        self.diarias_alert_icon = ImageTk.PhotoImage(diarias_action_icon_image("warning", 16), master=self.root)
+        self.diarias_fields_warned = False
+        self.diarias_attachment_buttons = []
         heading = ttk.Frame(self.diarias_tab)
-        heading.pack(fill=X, pady=(0, 12))
+        heading.pack(fill=X, pady=(0, 10))
         ttk.Label(heading, text="Diárias", style="Diarias.Title.TLabel").pack(anchor="w")
-        ttk.Label(
-            heading,
-            text="Confira os dados dos documentos antes de gerar o requerimento ou mapa.",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
+        ttk.Label(heading, text="Selecione o perfil, anexe os PDFs e confira os nove campos.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        profile_row = ttk.Frame(heading)
+        profile_row.pack(fill=X, pady=(10, 0))
+        ttk.Label(profile_row, text="Perfil").pack(side=LEFT, padx=(0, 8))
+        self.diarias_profile_var = StringVar(master=self.root)
+        self.diarias_profile_selector = ttk.Combobox(profile_row, textvariable=self.diarias_profile_var, state="readonly", width=22)
+        self.diarias_profile_selector.pack(side=LEFT)
+        self.diarias_profile_selector.bind("<<ComboboxSelected>>", self._select_diarias_profile)
+        self.diarias_profile_alert = ttk.Label(profile_row, image=self.diarias_alert_icon)
+        create_tooltip(self.diarias_profile_alert, "Confira o perfil selecionado e seus dados nas configurações.")
+        self.diarias_configure_button = ttk.Button(profile_row, text="Configurar perfis", command=lambda: self.open_settings(police_subtab="Diárias"))
+        self.diarias_configure_button.pack(side=LEFT, padx=(8, 0))
+        self._refresh_diarias_profiles()
+        ttk.Label(heading, textvariable=self.diarias_validation_var, foreground="#b42318", wraplength=820).pack(anchor="w", pady=(4, 0))
 
         footer = ttk.Frame(self.diarias_tab)
-        footer.pack(side="bottom", fill=X, pady=(12, 0))
-        ttk.Separator(footer).pack(fill=X, pady=(0, 10))
-        self.diarias_generate_button = ttk.Button(
-            footer, text="Gerar requerimento", style="Diarias.Primary.TButton",
-            cursor="hand2", command=self._generate_diarias_requerimento,
-        )
-        self.diarias_generate_button.pack(side=RIGHT)
-        self.diarias_generate_map_button = ttk.Button(
-            footer,
-            text="Gerar mapa",
-            style="Diarias.Primary.TButton",
-            cursor="hand2",
-            command=self._generate_diarias_mapa,
-        )
-        self.diarias_generate_map_button.pack(side=RIGHT, padx=(0, 8))
-        self.diarias_meios_proprios_button = ttk.Button(
-            footer,
-            text="Gerar declaração Meios Próprios",
-            style="Diarias.Primary.TButton",
-            cursor="hand2",
-            command=self._generate_diarias_meios_proprios,
-        )
-        self.diarias_meios_proprios_button.pack(side=RIGHT, padx=(0, 8))
-        ttk.Label(
-            footer, text="Word (.docx) e Excel (.xlsx)", style="Muted.TLabel",
-        ).pack(side=LEFT)
+        footer.pack(side="bottom", fill=X, pady=(10, 0))
+        ttk.Separator(footer).pack(fill=X, pady=(0, 8))
+        self.diarias_individual_actions = ttk.Frame(footer)
+        self.diarias_individual_actions.pack(fill=X)
+        self.diarias_generate_button = ttk.Button(self.diarias_individual_actions, text="Gerar requerimento", style="Diarias.Primary.TButton", cursor="hand2", command=self._generate_diarias_requerimento)
+        self.diarias_generate_map_button = ttk.Button(self.diarias_individual_actions, text="Gerar mapa", style="Diarias.Primary.TButton", cursor="hand2", command=self._generate_diarias_mapa)
+        self.diarias_meios_proprios_button = ttk.Button(self.diarias_individual_actions, text="Gerar declaração Meios Próprios", style="Diarias.Primary.TButton", cursor="hand2", command=self._generate_diarias_meios_proprios)
+        self.diarias_individual_buttons = [self.diarias_generate_button, self.diarias_generate_map_button, self.diarias_meios_proprios_button]
+        self.diarias_batch_actions = ttk.Frame(footer)
+        self.diarias_batch_actions.pack(fill=X, pady=(8, 0))
+        self.diarias_action_icons = {kind: ImageTk.PhotoImage(diarias_action_icon_image(kind), master=self.root) for kind in ("office", "pdf", "print")}
+        self.diarias_generate_bundle_button = ttk.Button(self.diarias_batch_actions, text="Gerar docx/xlsx", image=self.diarias_action_icons["office"], compound=LEFT, style="Diarias.Output.TButton", command=lambda: self._generate_diarias_bundle(pdf=False))
+        self.diarias_generate_pdfs_button = ttk.Button(self.diarias_batch_actions, text="Gerar PDFs", image=self.diarias_action_icons["pdf"], compound=LEFT, style="Diarias.Output.TButton", command=lambda: self._generate_diarias_bundle(pdf=True))
+        self.diarias_print_button = ttk.Button(self.diarias_batch_actions, text="Imprimir diária", image=self.diarias_action_icons["print"], compound=LEFT, style="Diarias.Output.TButton", command=self._print_diaria)
+        self.diarias_batch_buttons = [self.diarias_generate_bundle_button, self.diarias_generate_pdfs_button, self.diarias_print_button]
+        ttk.Label(footer, textvariable=self.diarias_status_var, style="Muted.TLabel", wraplength=820).pack(anchor="w", pady=(6, 0))
+
+        def arrange_actions(_event=None):
+            columns = 1 if footer.winfo_width() < 560 else 3
+            for controls in (self.diarias_individual_buttons, self.diarias_batch_buttons):
+                for index, button in enumerate(controls):
+                    button.grid(row=index // columns, column=index % columns, sticky="w", padx=(0, 8), pady=(0, 4))
+        footer.bind("<Configure>", arrange_actions)
+        arrange_actions()
 
         viewport = ttk.Frame(self.diarias_tab)
         viewport.pack(fill=BOTH, expand=True)
         canvas = Canvas(viewport, highlightthickness=0, background="#f4f7f6", width=1)
         scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
-        scrollbar.pack(side=RIGHT, fill=Y, padx=(8, 0))
         canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        canvas.configure(yscrollcommand=scrollbar.set)
+        def update_scrollbar(first, last):
+            scrollbar.set(first, last)
+            if float(first) <= 0 and float(last) >= 1:
+                scrollbar.pack_forget()
+            elif not scrollbar.winfo_manager():
+                scrollbar.pack(before=canvas, side=RIGHT, fill=Y, padx=(8, 0))
+        canvas.configure(yscrollcommand=update_scrollbar)
         body = ttk.Frame(canvas)
         body_window = canvas.create_window(0, 0, window=body, anchor="nw")
-        canvas.bind(
-            "<Configure>", lambda event: canvas.itemconfigure(body_window, width=event.width),
-        )
-        body.bind(
-            "<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
         self.diarias_sections = {}
+        def arrange_cards(event):
+            width = min(event.width, 900)
+            canvas.itemconfigure(body_window, width=width)
+            columns = 2 if width >= 760 else 1
+            for column in (0, 1):
+                body.columnconfigure(column, weight=1 if column < columns else 0, uniform="diarias" if column < columns else "")
+            for index, card in enumerate(self.diarias_sections.values()):
+                card.grid(row=index // columns, column=index % columns, sticky="new", padx=(0, 10 if columns == 2 and index % 2 == 0 else 0), pady=(0, 10))
+        canvas.bind("<Configure>", arrange_cards)
+        body.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        def section(title, kind=None, file_var=None):
-            card = ttk.Frame(body, style="Diarias.Card.TFrame", padding=(14, 10))
-            card.pack(fill=X, pady=(0, 10))
+        def section(title, kind, file_var):
+            card = ttk.Frame(body, style="Diarias.Card.TFrame", padding=(12, 10))
             self.diarias_sections[title] = card
             header = ttk.Frame(card, style="Diarias.Card.TFrame")
-            header.pack(fill=X, pady=(0, 8))
+            header.pack(fill=X, pady=(0, 8 if kind != "escala" else 0))
             header.columnconfigure(1, weight=1)
-            ttk.Label(header, text=title, style="Diarias.Section.TLabel").grid(
-                row=0, column=0, sticky="w",
-            )
-            if kind:
-                # A largura do arquivo é flexível: nomes longos não empurram as ações.
-                filename = ttk.Label(
-                    header, textvariable=file_var, width=1, anchor="w",
-                    style="Diarias.File.TLabel",
-                )
-                filename.grid(row=0, column=1, sticky="ew", padx=12)
-                select = ttk.Button(
-                    header, text="Selecionar PDF", style="Diarias.Pdf.TButton",
-                    command=lambda: self._select_diarias_pdf(kind),
-                )
-                select.grid(row=0, column=2)
-                create_tooltip(select, f"Selecionar o PDF de {title.lower()}")
-                reload_button = ttk.Button(
-                    header, text="⟳", width=3, style="Diarias.Reload.TButton",
-                    command=lambda: self._reload_diarias_pdf(kind),
-                )
-                reload_button.grid(row=0, column=3, padx=(6, 0))
+            title_row = ttk.Frame(header, style="Diarias.Card.TFrame")
+            title_row.grid(row=0, column=0, sticky="w")
+            ttk.Label(title_row, text=title, style="Diarias.Section.TLabel").pack(side=LEFT)
+            alert = ttk.Label(title_row, image=self.diarias_alert_icon, style="Diarias.Field.TLabel")
+            self.diarias_attachment_alerts[kind] = alert
+            create_tooltip(alert, f"Anexe o PDF de {title.lower()}.")
+            filename = ttk.Label(header, textvariable=file_var, width=1, anchor="w", style="Diarias.File.TLabel")
+            filename.grid(row=0, column=1, sticky="ew", padx=8)
+            select = ttk.Button(header, text="Selecionar PDF", style="Diarias.Pdf.TButton", command=lambda: self._select_diarias_pdf(kind))
+            select.grid(row=0, column=2)
+            self.diarias_attachment_buttons.append(select)
+            create_tooltip(select, f"Selecionar o PDF de {title.lower()}")
+            if kind != "escala":
+                reload_button = ttk.Button(header, text="⟳", width=3, style="Diarias.Reload.TButton", command=lambda: self._reload_diarias_pdf(kind))
+                reload_button.grid(row=0, column=3, padx=(4, 0))
+                self.diarias_attachment_buttons.append(reload_button)
                 create_tooltip(reload_button, "Extrair novamente os dados do PDF")
             fields = ttk.Frame(card, style="Diarias.Card.TFrame")
-            fields.pack(fill=X)
+            if kind != "escala":
+                fields.pack(fill=X)
             return fields
 
-        def field(parent, column, label, variable, width=16):
-            gap = (0, 14)
-            ttk.Label(parent, text=label, style="Diarias.Field.TLabel").grid(
-                row=0, column=column, sticky="w", padx=gap, pady=(0, 3),
-            )
-            ttk.Entry(parent, textvariable=variable, width=width).grid(
-                row=1, column=column, sticky="ew", padx=gap,
-            )
-
-        ufesp = section("UFESP")
-        field(ufesp, 0, "Índice", self.diarias_ufesp_index_var)
-        field(ufesp, 1, "Valor (R$)", self.diarias_ufesp_var)
+        def field(parent, column, label, key, width=12):
+            variable = getattr(self, f"diarias_{key}_var")
+            label_row = ttk.Frame(parent, style="Diarias.Card.TFrame")
+            label_row.grid(row=0, column=column, sticky="w", padx=(0, 8), pady=(0, 3))
+            ttk.Label(label_row, text=label, style="Diarias.Field.TLabel").pack(side=LEFT)
+            alert = ttk.Label(label_row, image=self.diarias_alert_icon, style="Diarias.Field.TLabel")
+            self.diarias_field_alerts[key] = alert
+            create_tooltip(alert, "Preencha este campo.")
+            entry = ttk.Entry(parent, textvariable=variable, width=width)
+            entry.grid(row=1, column=column, sticky="w", padx=(0, 8))
+            self.diarias_field_entries[key] = entry
+            variable.trace_add("write", self._update_diarias_required_fields)
 
         holerite = section("Holerite", "holerite", self.diarias_holerite_file_var)
-        field(holerite, 0, "Total de vencimentos (R$)", self.diarias_holerite_total_var, 22)
-        field(holerite, 1, "Mês/ano", self.diarias_holerite_mes_var)
-
+        field(holerite, 0, "Total (R$)", "holerite_total", 18)
+        field(holerite, 1, "Mês/ano", "holerite_mes", 10)
+        self.diarias_month_warning_var = StringVar(master=self.root)
+        self.diarias_month_warning_label = ttk.Label(holerite, textvariable=self.diarias_month_warning_var, style="Diarias.Field.TLabel", foreground="#b42318", wraplength=380)
+        self.diarias_month_warning_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        for variable in (self.diarias_holerite_mes_var, self.diarias_abertura_data_var):
+            variable.trace_add("write", self._update_diarias_month_warning)
+        self._update_diarias_month_warning()
         talao = section("Talão", "talao", self.diarias_talao_file_var)
-        field(talao, 0, "Ida · data", self.diarias_abertura_data_var)
-        field(talao, 1, "Ida · hora", self.diarias_abertura_hora_var, 9)
-        field(talao, 2, "Volta · data", self.diarias_fechamento_data_var)
-        field(talao, 3, "Volta · hora", self.diarias_fechamento_hora_var, 9)
-        ttk.Checkbutton(
-            talao,
-            text="Meios Próprios",
-            variable=self.diarias_meios_proprios_var,
-            style="Diarias.TCheckbutton",
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
-
+        field(talao, 0, "Ida · data", "abertura_data")
+        field(talao, 1, "Hora", "abertura_hora", 7)
+        field(talao, 2, "Volta · data", "fechamento_data")
+        field(talao, 3, "Hora", "fechamento_hora", 7)
+        self.diarias_meios_proprios_checkbox = ttk.Checkbutton(talao, text="Meios Próprios", variable=self.diarias_meios_proprios_var, style="Diarias.TCheckbutton")
+        self.diarias_meios_proprios_checkbox.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
         protocolo = section("Protocolo", "protocolo", self.diarias_protocolo_file_var)
-        field(protocolo, 0, "Requerimento", self.diarias_req_var)
-        field(protocolo, 1, "Mapa", self.diarias_mapa_var)
-        field(protocolo, 2, "Data", self.diarias_data_var)
-
+        field(protocolo, 0, "Requerimento", "req")
+        field(protocolo, 1, "Mapa", "mapa")
+        field(protocolo, 2, "Data", "data")
+        section("Escala", "escala", self.diarias_escala_file_var)
         def scroll(event):
-            # Não usar bind_all: a rolagem pertence somente à aba Diárias.
             if body.winfo_height() > canvas.winfo_height():
-                direction = -1 if event.delta > 0 else 1
-                canvas.yview_scroll(direction * max(1, abs(event.delta) // 120), "units")
+                canvas.yview_scroll((-1 if event.delta > 0 else 1) * max(1, abs(event.delta) // 120), "units")
             return "break"
-
         def bind_scroll(widget):
             widget.bind("<MouseWheel>", scroll, add="+")
             for child in widget.winfo_children():
                 bind_scroll(child)
-
         bind_scroll(canvas)
+
+    def _update_diarias_required_fields(self, *_trace_args):
+        if not self.diarias_fields_warned:
+            return
+        missing = []
+        for key, label in diarias_workflow.REQUIRED_FIELDS:
+            empty = not getattr(self, f"diarias_{key}_var").get().strip()
+            if empty:
+                missing.append(label)
+            entry = self.diarias_field_entries.get(key)
+            if entry is not None:
+                entry.configure(style="Diarias.Invalid.TEntry" if empty else "TEntry")
+            alert = self.diarias_field_alerts.get(key)
+            if alert is not None:
+                if empty:
+                    alert.pack(side=LEFT, padx=(4, 0))
+                else:
+                    alert.pack_forget()
+        self.diarias_validation_var.set(diarias_workflow.MISSING_FIELDS_MESSAGE if missing else "")
+
+    def _require_diarias_fields(self):
+        fields = {key: getattr(self, f"diarias_{key}_var").get() for key, _label in diarias_workflow.REQUIRED_FIELDS}
+        try:
+            return diarias_workflow.validate_fields(fields)
+        except ValueError:
+            self.diarias_fields_warned = True
+            if hasattr(self, "diarias_field_entries"):
+                self._update_diarias_required_fields()
+            if hasattr(self, "diarias_profile_selector") and not self.diarias_profile_var.get().strip():
+                self._mark_diarias_profile_missing()
+            raise
+
+    def _prepare_diarias_bundle_ui(self):
+        try:
+            fields = self._require_diarias_fields()
+            bundle = diarias_workflow.prepare_bundle(
+                fields, profile=self._required_diarias_profile(),
+                valor_ufesp=self.diarias_ufesp_var.get(),
+                oitiva_delegacia=self.settings.get("police_station", ""),
+                meios_proprios=self.diarias_meios_proprios_var.get(),
+            )
+        except ValueError as exc:
+            self.diarias_validation_var.set(str(exc))
+            self._append_activity_log(str(exc), "activity_step_warning")
+            return None
+        self.diarias_validation_var.set("")
+        return bundle
+
+    def _set_diarias_busy(self, busy):
+        self.diarias_busy = busy
+        controls = (self.diarias_individual_buttons + self.diarias_batch_buttons + self.diarias_attachment_buttons
+                    + list(self.diarias_field_entries.values())
+                    + [self.diarias_meios_proprios_checkbox, self.diarias_configure_button])
+        for control in controls:
+            control.configure(state="disabled" if busy else "normal")
+        self.diarias_profile_selector.configure(state="disabled" if busy else "readonly")
+
+    def _new_diarias_task(self, mode, bundle, directory, temporary=None):
+        task_id = uuid.uuid4().hex
+        label = "Preparando diária para impressão" if mode == "print" else "Gerando PDFs da diária" if mode == "pdf" else "Gerando documentos da diária"
+        key = f"diarias:lote:{task_id}"
+        task = {"id": task_id, "mode": mode, "bundle": bundle, "directory": Path(directory),
+                "temporary": temporary, "key": key, "started": self._start_diarias_activity(key, label),
+                "cancel": threading.Event(), "files": None, "printer": "", "accepted": False,
+                "printing": False, "dialog": None, "printers": [], "printer_error": "", "copies": None, "generation_done": False}
+        self.diarias_task = task
+        self.diarias_status_var.set(label + "…")
+        self._set_diarias_busy(True)
+        return task
+
+    def _start_diarias_bundle_worker(self, task):
+        events, task_id = self.diarias_job_events, task["id"]
+        def worker():
+            initialized = False
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                initialized = True
+                started = {}
+                def progress(event, key, label, detail):
+                    if event == "start":
+                        started[key] = time.perf_counter()
+                    events.put((task_id, "step", event, key, label, detail,
+                                max(0.0, time.perf_counter() - started.get(key, time.perf_counter()))))
+                files = diarias_workflow.generate_bundle(task["directory"], task["bundle"],
+                    pdf=task["mode"] != "office", progress=progress, cancel=task["cancel"])
+                events.put((task_id, "generated", files))
+            except diarias_workflow.DiariasCancelled:
+                events.put((task_id, "cancelled"))
+            except Exception as exc:
+                events.put((task_id, "failed", str(exc)))
+            finally:
+                if initialized:
+                    pythoncom.CoUninitialize()
+        threading.Thread(target=worker, daemon=True, name="Diarias-geracao").start()
+        if self.diarias_job_after is None:
+            self.diarias_job_after = self.root.after(80, self._poll_diarias_jobs)
+
+    def _generate_diarias_bundle(self, *, pdf):
+        if self.diarias_busy:
+            return
+        bundle = self._prepare_diarias_bundle_ui()
+        if bundle is None:
+            return
+        chosen = filedialog.askdirectory(parent=self.root, title="Salvar PDFs da diária" if pdf else "Salvar documentos da diária",
+            initialdir=str(diarias_store.load_output_directory()), mustexist=True)
+        if not chosen:
+            return
+        try:
+            diarias_store.save_output_directory(chosen)
+        except (OSError, ValueError) as exc:
+            self.diarias_validation_var.set(f"Não foi possível guardar a pasta escolhida: {exc}")
+            return
+        task = self._new_diarias_task("pdf" if pdf else "office", bundle, chosen)
+        self._start_diarias_bundle_worker(task)
+
+    def _print_diaria(self):
+        if self.diarias_busy:
+            return
+        bundle = self._prepare_diarias_bundle_ui()
+        if bundle is None:
+            return
+        attachments = {kind: getattr(self, f"diarias_{kind}_path", "") for kind in ("protocolo", "escala", "holerite")}
+        try:
+            diarias_workflow.validate_print_attachments(attachments)
+        except diarias_workflow.MissingDiariasFields as exc:
+            for field in exc.fields:
+                kind = field.split(":", 1)[1]
+                self.diarias_attachment_alerts[kind].pack(side=LEFT, padx=(4, 0))
+            self.diarias_validation_var.set(str(exc))
+            self._append_activity_log(str(exc), "activity_step_warning")
+            return
+        for kind in attachments:
+            self._clear_diarias_attachment_alert(kind)
+        temporary = tempfile.TemporaryDirectory(prefix="sig_diaria_print_")
+        task = self._new_diarias_task("print", bundle, temporary.name, temporary)
+        task["attachments"] = attachments
+        self._open_diarias_printer_dialog(task)
+        self._start_diarias_bundle_worker(task)
+        events, task_id = self.diarias_job_events, task["id"]
+        def find_printers():
+            try:
+                names, default = pdf_printing.list_printers()
+                events.put((task_id, "printers", names, default))
+            except Exception as exc:
+                events.put((task_id, "printers_error", str(exc)))
+        threading.Thread(target=find_printers, daemon=True, name="Diarias-impressoras").start()
+
+    def _open_diarias_printer_dialog(self, task):
+        win = Toplevel(self.root)
+        task["dialog"] = win
+        win.title("Imprimir diária")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=20)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="Imprimir diária", font=("Segoe UI Semibold", 14)).pack(anchor="w")
+        ttk.Label(frame, text="Escolha a impressora e as vias enquanto os PDFs são preparados.", style="Muted.TLabel").pack(anchor="w", pady=(4, 14))
+        task["printer_var"] = StringVar(master=win)
+        task["dialog_status"] = StringVar(master=win, value="Preparando PDFs e procurando impressoras…")
+        ttk.Label(frame, text="Impressora").pack(anchor="w", pady=(0, 4))
+        task["printer_selector"] = ttk.Combobox(frame, textvariable=task["printer_var"], width=48, state="disabled")
+        task["printer_selector"].pack(fill=X)
+
+        quantities = ttk.Frame(frame)
+        quantities.pack(fill=X, pady=(16, 14))
+        quantities.columnconfigure(0, weight=1)
+        ttk.Label(quantities, text="Documento", style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(quantities, text="Vias", style="Muted.TLabel").grid(row=0, column=1, sticky="w", pady=(0, 4))
+        task["copy_vars"], task["copy_entries"], task["copy_alerts"] = {}, {}, {}
+        task["copies_warned"] = False
+        task["copies_error"] = ""
+        rows = [row for row in diarias_workflow.PRINT_DOCUMENTS if row[0] != "declaracao" or task["bundle"].meios_proprios]
+        for index, (key, label, default) in enumerate(rows, 1):
+            ttk.Label(quantities, text=label).grid(row=index, column=0, sticky="w", padx=(0, 20), pady=3)
+            variable = StringVar(master=win, value=str(default))
+            task["copy_vars"][key] = variable
+            entry = ttk.Spinbox(quantities, from_=1, to=99, width=5, textvariable=variable)
+            entry.grid(row=index, column=1, sticky="w", pady=3)
+            task["copy_entries"][key] = entry
+            alert = ttk.Label(quantities, image=self.diarias_alert_icon)
+            alert.grid(row=index, column=2, padx=(5, 0))
+            alert.grid_remove()
+            create_tooltip(alert, "Informe a quantidade de vias.")
+            task["copy_alerts"][key] = alert
+            variable.trace_add("write", lambda *_args, current=task: self._update_diarias_print_copies(current))
+
+        ttk.Label(frame, textvariable=task["dialog_status"], wraplength=440).pack(anchor="w", pady=(0, 14))
+        actions = ttk.Frame(frame)
+        actions.pack(fill=X)
+        task["cancel_button"] = ttk.Button(actions, text="Cancelar", command=lambda: self._cancel_diarias_print(task))
+        task["cancel_button"].pack(side=RIGHT)
+        task["ok_button"] = ttk.Button(actions, text="OK", style="Diarias.Primary.TButton", state="disabled", command=lambda: self._accept_diarias_printer(task))
+        task["ok_button"].pack(side=RIGHT, padx=(0, 8))
+        win.protocol("WM_DELETE_WINDOW", lambda: self._cancel_diarias_print(task))
+        win.bind("<Escape>", lambda _event: self._cancel_diarias_print(task))
+        win.bind("<Return>", lambda _event: self._accept_diarias_printer(task))
+        win.transient(self.root)
+        win.update_idletasks()
+        x = max(0, self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_reqwidth()) // 2)
+        y = max(0, self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_reqheight()) // 2)
+        win.geometry(f"+{x}+{y}")
+        win.grab_set()
+
+    def _update_diarias_print_copies(self, task):
+        if not task["copies_warned"]:
+            return
+        for key, variable in task["copy_vars"].items():
+            value = variable.get().strip()
+            valid = value.isascii() and value.isdigit() and 1 <= int(value) <= 99
+            task["copy_entries"][key].configure(style="TSpinbox" if valid else "Diarias.Invalid.TSpinbox")
+            if valid:
+                task["copy_alerts"][key].grid_remove()
+            else:
+                task["copy_alerts"][key].grid()
+        try:
+            diarias_workflow.validate_print_copies({key: var.get() for key, var in task["copy_vars"].items()}, meios_proprios=task["bundle"].meios_proprios)
+        except ValueError as exc:
+            task["copies_error"] = str(exc)
+            task["dialog_status"].set(str(exc))
+        else:
+            task["copies_error"] = ""
+            task["dialog_status"].set(task["printer_error"] or ("PDFs prontos. Confirme em OK." if task["files"] is not None else "Os PDFs estão sendo preparados…"))
+
+    def _accept_diarias_printer(self, task):
+        selected = task["printer_var"].get()
+        if selected not in task["printers"] or task["accepted"]:
+            return
+        try:
+            copies = diarias_workflow.validate_print_copies(
+                {key: variable.get() for key, variable in task["copy_vars"].items()},
+                meios_proprios=task["bundle"].meios_proprios)
+        except ValueError as exc:
+            task["copies_warned"] = True
+            self._update_diarias_print_copies(task)
+            task["dialog_status"].set(str(exc))
+            return
+        task["printer"], task["accepted"], task["copies"] = selected, True, copies
+        task["printer_selector"].configure(state="disabled")
+        for entry in task["copy_entries"].values():
+            entry.configure(state="disabled")
+        task["ok_button"].configure(state="disabled")
+        task["cancel_button"].configure(state="disabled")
+        task["dialog_status"].set("Concluindo os PDFs antes de enviar à impressora…")
+        self._submit_diarias_print(task)
+
+    def _cancel_diarias_print(self, task):
+        if task["accepted"]:
+            return
+        task["cancel"].set()
+        win = task.get("dialog")
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        task["dialog"] = None
+        self.diarias_status_var.set("Cancelando a preparação da diária…")
+        if task["generation_done"]:
+            self._finish_diarias_task(cancelled=True)
+
+    def _submit_diarias_print(self, task):
+        if task["files"] is None or not task["accepted"] or task["printing"]:
+            return
+        task["printing"] = True
+        label = f"Enviando diária para {task['printer']}"
+        task["print_started"] = self._start_diarias_activity(task["key"] + ":print", label)
+        task["dialog_status"].set(label + "…")
+        self.diarias_status_var.set(label + "…")
+        events, task_id = self.diarias_job_events, task["id"]
+        def worker():
+            try:
+                plan = diarias_workflow.build_print_plan(task["files"], task["attachments"], copies=task["copies"])
+                result = pdf_printing.print_plan(task["printer"], plan, job_name=f"Diária {task['bundle'].fields['abertura_data']}")
+                events.put((task_id, "printed", result))
+            except Exception as exc:
+                events.put((task_id, "print_error", str(exc)))
+        threading.Thread(target=worker, daemon=True, name="Diarias-impressao").start()
+
+    def _finish_diarias_task(self, *, error=None, cancelled=False, message=""):
+        task = self.diarias_task
+        if task is None:
+            return
+        if cancelled:
+            self._finish_diarias_activity(task["key"], task["started"], suffix="- cancelado", tag="activity_step_warning")
+            self.diarias_status_var.set("Impressão cancelada. Nenhum documento foi enviado.")
+        elif error:
+            self._finish_diarias_activity(task["key"], task["started"], error=error)
+            self.diarias_status_var.set("A diária não foi concluída. Confira o log.")
+            self.diarias_validation_var.set(error)
+        else:
+            self._finish_diarias_activity(task["key"], task["started"], suffix=message)
+            self.diarias_status_var.set(message)
+        win = task.get("dialog")
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        if task.get("temporary") is not None:
+            try:
+                task["temporary"].cleanup()
+            except OSError as exc:
+                self._append_activity_log(f"Limpeza dos arquivos temporários: {exc}", "activity_step_warning")
+        self.diarias_task = None
+        self._set_diarias_busy(False)
+
+    def _poll_diarias_jobs(self):
+        self.diarias_job_after = None
+        while True:
+            try:
+                message = self.diarias_job_events.get_nowait()
+            except queue.Empty:
+                break
+            task = self.diarias_task
+            if task is None or message[0] != task["id"]:
+                continue
+            event = message[1]
+            if event == "step":
+                action, key, label, detail, elapsed = message[2:]
+                activity_key = task["key"] + ":" + key
+                if action == "start":
+                    self._begin_activity_step(activity_key, label)
+                    self.diarias_status_var.set(label + "…")
+                else:
+                    self._finish_activity_step(activity_key, elapsed, error=detail if action == "error" else None,
+                                               suffix=f"- pronto: {detail}" if action == "finish" else None)
+            elif event == "generated":
+                task["files"], task["generation_done"] = message[2], True
+                if task["cancel"].is_set():
+                    self._finish_diarias_task(cancelled=True)
+                elif task["mode"] == "print":
+                    task["dialog_status"].set(task.get("copies_error") or task["printer_error"] or (
+                        "PDFs prontos. Confira a impressora e as vias e confirme em OK." if task["printers"]
+                        else "PDFs prontos. Procurando impressoras…"))
+                    self.diarias_status_var.set("PDFs prontos para impressão.")
+                    self._submit_diarias_print(task)
+                else:
+                    self._finish_diarias_task(message=f"{len(task['files'])} documentos salvos em {task['directory']}.")
+            elif event == "cancelled":
+                self._finish_diarias_task(cancelled=True)
+            elif event == "failed":
+                self._finish_diarias_task(error=message[2])
+            elif event == "printers":
+                if task["cancel"].is_set():
+                    continue
+                names, default = message[2:]
+                task["printers"] = names
+                task["printer_selector"].configure(values=names, state="readonly" if names else "disabled")
+                task["printer_var"].set(default if default in names else names[0] if names else "")
+                task["ok_button"].configure(state="normal" if names else "disabled")
+                if not names:
+                    task["printer_error"] = "Nenhuma impressora instalada. Cancele e configure uma impressora no Windows."
+                    task["dialog_status"].set(task.get("copies_error") or task["printer_error"])
+                elif task.get("copies_error"):
+                    task["dialog_status"].set(task["copies_error"])
+                elif task["files"] is None:
+                    task["dialog_status"].set("Escolha a impressora e confira as vias. Os PDFs estão sendo preparados…")
+                else:
+                    task["dialog_status"].set("PDFs prontos. Confira a impressora e as vias e confirme em OK.")
+            elif event == "printers_error":
+                if not task["cancel"].is_set():
+                    task["printer_error"] = "Não foi possível listar as impressoras: " + message[2]
+                    task["dialog_status"].set(task["printer_error"])
+            elif event == "printed":
+                self._finish_diarias_activity(task["key"] + ":print", task["print_started"])
+                self._finish_diarias_task(message=f"{message[2]['pages']} páginas enviadas à fila de {task['printer']}.")
+            elif event == "print_error":
+                self._finish_diarias_activity(task["key"] + ":print", task["print_started"], error=message[2])
+                self._finish_diarias_task(error=message[2])
+        if self.diarias_busy:
+            self.diarias_job_after = self.root.after(80, self._poll_diarias_jobs)
+
+    def _update_diarias_month_warning(self, *_trace_args):
+        """Avisa na tela quando o mês/ano do holerite difere da ida do talão."""
+        try:
+            holerite = datetime.strptime(self.diarias_holerite_mes_var.get().strip(), "%m/%Y")
+            ida = datetime.strptime(self.diarias_abertura_data_var.get().strip(), "%d/%m/%Y")
+        except ValueError:
+            differs = False
+        else:
+            differs = (holerite.year, holerite.month) != (ida.year, ida.month)
+        self.diarias_month_warning_var.set(
+            "Atenção: o mês do holerite difere do mês do talão." if differs else ""
+        )
+        if differs:
+            self.diarias_month_warning_label.grid()
+        else:
+            self.diarias_month_warning_label.grid_remove()
+
+    def _refresh_diarias_profiles(self):
+        """Sincroniza a seleção da tela principal com os perfis persistidos."""
+        self._diarias_profiles = diarias_store.list_diarias_profiles()
+        active = diarias_store.load_active_diarias_profile_id()
+        selected = next((p for p in self._diarias_profiles if p["id"] == active), None)
+        self.diarias_profile_selector.configure(
+            values=[p["profile_name"] for p in self._diarias_profiles],
+        )
+        self.diarias_profile_var.set(selected["profile_name"] if selected else "")
+        if selected is not None and hasattr(self, "diarias_profile_alert"):
+            self.diarias_profile_alert.pack_forget()
+            self.diarias_profile_selector.configure(style="TCombobox")
+        panel = getattr(self, "diarias_profiles_panel", None)
+        if panel is not None and panel.parent.winfo_exists():
+            panel.refresh()
+
+    def _select_diarias_profile(self, _event=None):
+        selected = next(
+            (p for p in self._diarias_profiles if p["profile_name"] == self.diarias_profile_var.get()),
+            None,
+        )
+        if selected is None:
+            return
+        started_at = self._start_diarias_activity("diarias:perfil", "Selecionando perfil de Diárias")
+        try:
+            diarias_store.select_diarias_profile(selected["id"])
+        except (OSError, ValueError) as exc:
+            self._finish_diarias_activity("diarias:perfil", started_at, error=str(exc))
+            messagebox.showerror("Diárias", str(exc), parent=self.root)
+        else:
+            self._finish_diarias_activity("diarias:perfil", started_at)
+        self._refresh_diarias_profiles()
+
+    def _on_diarias_profiles_changed(self):
+        started_at = self._start_diarias_activity("diarias:perfil", "Atualizando perfis de Diárias")
+        self._refresh_diarias_profiles()
+        self._finish_diarias_activity("diarias:perfil", started_at)
+
+    def _mark_diarias_profile_missing(self):
+        if hasattr(self, "diarias_profile_alert"):
+            self.diarias_profile_selector.configure(style="Diarias.Invalid.TCombobox")
+            self.diarias_profile_alert.pack(before=self.diarias_configure_button, side=LEFT, padx=(4, 0))
+
+    def _clear_diarias_attachment_alert(self, kind):
+        alert = getattr(self, "diarias_attachment_alerts", {}).get(kind)
+        if alert is not None:
+            alert.pack_forget()
+
+    def _required_diarias_profile(self):
+        profile = diarias_store.load_diarias_profile()
+        if profile is None:
+            SigApp._mark_diarias_profile_missing(self)
+            raise diarias_workflow.MissingDiariasFields(("profile",))
+        return validate_diarias_profile(profile)
 
     def _start_diarias_activity(self, key: str, label: str) -> float:
         """Abre uma linha de atividade para uma ação da aba Diárias."""
@@ -5010,6 +5517,7 @@ class SigApp:
             activity_key, "Gerando requerimento de diária"
         )
         try:
+            SigApp._require_diarias_fields(self)
             template_kind, replacements = prepare_diarias_requerimento(
                 data_abertura=self.diarias_abertura_data_var.get(),
                 hora_abertura=self.diarias_abertura_hora_var.get(),
@@ -5018,6 +5526,7 @@ class SigApp:
                 total_vencimentos=self.diarias_holerite_total_var.get(),
                 data_protocolo=self.diarias_data_var.get(),
                 protocolo_requerimento=self.diarias_req_var.get(),
+                perfil=SigApp._required_diarias_profile(self),
             )
         except ValueError as exc:
             self._finish_diarias_activity(
@@ -5106,6 +5615,7 @@ class SigApp:
             activity_key, "Gerando mapa de diária"
         )
         try:
+            SigApp._require_diarias_fields(self)
             values = diarias_mapa.prepare_diarias_mapa(
                 total_vencimentos=self.diarias_holerite_total_var.get(),
                 valor_ufesp=self.diarias_ufesp_var.get(),
@@ -5117,6 +5627,8 @@ class SigApp:
                 protocolo_requerimento=self.diarias_req_var.get(),
                 protocolo_mapa=self.diarias_mapa_var.get(),
                 meios_proprios=self.diarias_meios_proprios_var.get(),
+                profile=SigApp._required_diarias_profile(self),
+                oitiva_delegacia=self.settings.get("police_station", ""),
             )
         except ValueError as exc:
             self._finish_diarias_activity(
@@ -5197,9 +5709,11 @@ class SigApp:
         )
         data_ida = self.diarias_abertura_data_var.get()
         try:
+            SigApp._require_diarias_fields(self)
             replacements = prepare_declaracao_meios_proprios(
                 data_ida=data_ida,
                 data_protocolo=self.diarias_data_var.get(),
+                perfil=SigApp._required_diarias_profile(self),
             )
         except ValueError as exc:
             self._finish_diarias_activity(
@@ -5280,6 +5794,7 @@ class SigApp:
             "holerite": "Selecionar o PDF do holerite",
             "protocolo": "Selecionar o PDF do protocolo",
             "talao": "Selecionar o PDF do talão",
+            "escala": "Selecionar o PDF da escala",
         }
         selecionado = filedialog.askopenfilename(
             parent=self.root,
@@ -5291,6 +5806,19 @@ class SigApp:
         )
         if not selecionado:
             return
+        if kind == "escala":
+            key = "diarias:escala:anexar"
+            started = self._start_diarias_activity(key, "Anexando escala")
+            path = Path(selecionado)
+            if path.suffix.casefold() != ".pdf" or not path.is_file():
+                self._finish_diarias_activity(key, started, error="Selecione um arquivo PDF existente.")
+                self.diarias_validation_var.set("A escala precisa ser um arquivo PDF.")
+                return
+            self.diarias_escala_path = str(path)
+            self.diarias_escala_file_var.set(path.name)
+            SigApp._clear_diarias_attachment_alert(self, kind)
+            self._finish_diarias_activity(key, started, suffix=f"- anexado: {path.name}")
+            return
         if kind == "holerite":
             self._attach_diarias_holerite_pdf(selecionado)
             return
@@ -5300,6 +5828,7 @@ class SigApp:
         else:
             self.diarias_protocolo_path = selecionado
             self.diarias_protocolo_file_var.set(Path(selecionado).name)
+        SigApp._clear_diarias_attachment_alert(self, kind)
         self._reload_diarias_pdf(kind)
 
     def _attach_diarias_holerite_pdf(self, source_path):
@@ -5346,6 +5875,7 @@ class SigApp:
             return
 
         self.diarias_holerite_path = stored_path
+        SigApp._clear_diarias_attachment_alert(self, "holerite")
         self.diarias_holerite_file_var.set(display_name)
         self.diarias_holerite_total_var.set(total)
         self.diarias_holerite_mes_var.set(mes)
@@ -5511,10 +6041,14 @@ class SigApp:
         except Exception as exc:
             if not self.diarias_ufesp_save_error_shown:
                 self.diarias_ufesp_save_error_shown = True
+                profile_panel = getattr(self, "diarias_profiles_panel", None)
+                warning_parent = self.root
+                if profile_panel is not None and profile_panel.parent.winfo_exists():
+                    warning_parent = profile_panel.parent.winfo_toplevel()
                 messagebox.showerror(
                     "Diárias",
                     f"Não foi possível salvar o valor UFESP localmente: {exc}",
-                    parent=self.root,
+                    parent=warning_parent,
                 )
         else:
             self.diarias_ufesp_save_error_shown = False
@@ -5590,6 +6124,9 @@ class SigApp:
         self.status_var.set(f"IMEI completo copiado: {full_imei}.")
 
     def process_imei_digits(self, digits: str):
+        if len(digits) != 14 and hasattr(self, "imei_full_var"):
+            self.imei_full_var.set("—")
+            self.imei_copy_button.configure(state="disabled")
         if len(digits) < 14:
             self.imei_result_var.set("Dígito: —")
             self.imei_model_var.set("")
@@ -5606,6 +6143,9 @@ class SigApp:
         check = compute_imei_luhn_digit(digits)
         full_imei = f"{digits}{check}"
         self.imei_result_var.set(f"Dígito: {check}")
+        if hasattr(self, "imei_full_var"):
+            self.imei_full_var.set(full_imei)
+            self.imei_copy_button.configure(state="normal")
         if full_imei == self.imei_last_processed:
             return
         self.imei_last_processed = full_imei
@@ -5643,13 +6183,11 @@ class SigApp:
     def refresh_imei_history(self):
         records = read_imei_history_records()
         if not records:
-            self.imei_history_container.pack_forget()
-            text = ""
+            text = "Nenhuma consulta registrada."
             self.imei_toggle_var.set("")
             self.imei_toggle_button.configure(state="disabled")
+            self.imei_toggle_button.pack_forget()
         else:
-            if not self.imei_history_container.winfo_ismapped():
-                self.imei_history_container.pack(fill=BOTH, expand=True, pady=(28, 0))
             reversed_records = list(reversed(records))
             visible = (
                 reversed_records
@@ -5660,15 +6198,16 @@ class SigApp:
             if len(reversed_records) > IMEI_HISTORY_COLLAPSED_LIMIT:
                 self.imei_toggle_var.set("ver menos" if self.imei_history_expanded else "ver mais")
                 if not self.imei_toggle_button.winfo_ismapped():
-                    self.imei_toggle_button.pack(anchor="e", pady=(8, 0))
+                    self.imei_toggle_button.pack(side=LEFT, padx=(0, 8), before=self.imei_clear_history_button)
                 self.imei_toggle_button.configure(state="normal")
             else:
                 self.imei_toggle_var.set("")
                 self.imei_toggle_button.pack_forget()
+        self.imei_clear_history_button.configure(state="normal" if records else "disabled")
         self.imei_history_text.configure(state="normal")
         self.imei_history_text.delete("1.0", END)
         if text:
-            self.imei_history_text.insert("1.0", text)
+            self.imei_history_text.insert("1.0", text, () if records else ("empty",))
         self.imei_history_text.configure(state="disabled")
 
     def toggle_imei_history(self):
@@ -7004,68 +7543,26 @@ class SigApp:
         self._assistant_target_status(self.assistant_target).set("Tarefa de texto cancelada.")
         self.qualification_status_var.set("Organização cancelada.")
 
-    def _draw_action_button(self):
-        canvas = self.action_canvas
+    def _draw_transcription_action(self, canvas, kind: str, *, enabled: bool = True) -> None:
+        width = canvas.winfo_width() if canvas.winfo_width() > 1 else canvas.winfo_reqwidth()
+        height = canvas.winfo_height() if canvas.winfo_height() > 1 else canvas.winfo_reqheight()
+        photo = self._tool_icon_photo(kind, min(width, height), enabled=enabled, circular=True)
+        canvas.action_icon_photo = photo
         canvas.delete("all")
-        canvas.create_oval(5, 5, 69, 69, fill="#13201e", outline="#2c403d", width=2)
-        if self.running:
-            canvas.create_line(25, 24, 49, 50, fill="#ff4b4b", width=7, capstyle="round")
-            canvas.create_line(49, 24, 25, 50, fill="#ff4b4b", width=7, capstyle="round")
-        else:
-            canvas.create_polygon(
-                42,
-                12,
-                22,
-                41,
-                36,
-                41,
-                29,
-                62,
-                53,
-                30,
-                38,
-                30,
-                fill="#ffd21f",
-                outline="#ffe789",
-                width=2,
-            )
+        canvas.create_image(width / 2, height / 2, image=photo)
+        canvas.configure(cursor="hand2" if enabled else "arrow")
+
+    def _draw_action_button(self):
+        self._draw_transcription_action(self.action_canvas, "cancel" if self.running else "execute")
 
     def _draw_save_button(self):
-        canvas = self.save_canvas
-        canvas.delete("all")
         enabled = bool(self.last_html_path and self.last_html_path.exists())
-        outer = "#1f3d52" if enabled else "#d6dddd"
-        body = "#2f8fcc" if enabled else "#aab5b5"
-        detail = "#f4fbff" if enabled else "#dbe1e1"
-        notch = "#103044" if enabled else "#879191"
-        canvas.create_oval(4, 4, 52, 52, fill=outer, outline="")
-        canvas.create_rectangle(16, 13, 40, 42, fill=body, outline=detail, width=2)
-        canvas.create_rectangle(20, 15, 35, 24, fill=detail, outline="")
-        canvas.create_rectangle(33, 15, 37, 24, fill=notch, outline="")
-        canvas.create_rectangle(21, 32, 35, 42, fill=detail, outline="")
-        canvas.create_line(23, 35, 33, 35, fill=notch, width=2)
+        self._draw_transcription_action(self.save_canvas, "save", enabled=enabled)
 
     def _draw_folder_button(self):
-        """Desenha (ou esconde) o botão de pasta, redondo como o disquete."""
-        canvas = self.folder_canvas
-        canvas.delete("all")
-        visible = getattr(self, "folder_button_visible", False)
-        if not visible:
-            return
-        outer = "#1f3d52"
-        body = "#d6a22b"
-        light = "#fdf3d6"
-        # círculo externo
-        canvas.create_oval(4, 4, 52, 52, fill=outer, outline="")
-        # corpo da pasta
-        canvas.create_rectangle(15, 20, 44, 46, fill=body, outline=light, width=2)
-        # aba
-        canvas.create_polygon(15, 20, 31, 20, 33, 14, 19, 14, fill=body, outline=light, width=2)
-        # recorte no canto superior
-        canvas.create_rectangle(16, 16, 30, 18, fill=outer, outline="")
-        # detalhe do centro
-        canvas.create_line(17, 33, 42, 33, fill=light, width=1)
-        canvas.create_line(17, 38, 42, 38, fill=light, width=1)
+        self.folder_canvas.delete("all")
+        if getattr(self, "folder_button_visible", False):
+            self._draw_transcription_action(self.folder_canvas, "folder")
 
     def _show_folder_button(self, *, visible: bool = True):
         """Mostra ou esconde o botão de pasta (limpa ao perder a referência)."""
@@ -9439,7 +9936,9 @@ try {
         pass
 
 
-    def open_settings(self):
+    def open_settings(self, *, police_subtab=None):
+        if getattr(self, "diarias_busy", False):
+            return
         if self.running or self.live_state != "idle" or self.assistant_busy or (getattr(self, "ffmpeg_tools", None) and self.ffmpeg_tools.running):
             messagebox.showinfo("sig", "Conclua ou cancele a tarefa em andamento antes de alterar as configurações.")
             return
@@ -9618,8 +10117,48 @@ try {
             extraction_frame,
         ) = model_sections
 
+        police_subtab_bar = ttk.Frame(police_tab, style="Settings.Inner.TFrame")
+        police_subtab_bar.pack(fill=X, pady=(0, 8))
+        police_subtab_content = ttk.Frame(police_tab, style="Settings.Inner.TFrame")
+        police_subtab_content.pack(fill=BOTH, expand=True)
+        police_subtab_pages = {}
+        police_subtab_buttons = {}
+        for name in ("Oitiva", "Diárias"):
+            police_subtab_pages[name] = ttk.Frame(police_subtab_content, style="Settings.Inner.TFrame")
+            button = tk.Label(
+                police_subtab_bar, text=name, width=12, height=1, borderwidth=1,
+                relief="solid", font=settings_tab_font, cursor="hand2",
+            )
+            button.pack(side=LEFT, padx=(0 if not police_subtab_buttons else 4, 0))
+            police_subtab_buttons[name] = button
+
+        def select_police_subtab(name):
+            for page in police_subtab_pages.values():
+                page.pack_forget()
+            police_subtab_pages[name].pack(fill=BOTH, expand=True)
+            for label, button in police_subtab_buttons.items():
+                button.configure(
+                    background=settings_active_bg if label == name else settings_inactive_bg,
+                    foreground=settings_active_fg if label == name else settings_inactive_fg,
+                )
+            if janela_montada["pronta"]:
+                ajustar_janela_ao_conteudo()
+
+        for name, button in police_subtab_buttons.items():
+            button.bind("<Button-1>", lambda _event, label=name: select_police_subtab(label))
+        select_police_subtab("Oitiva")
+        self.diarias_profiles_panel = DiariasProfilesPanel(
+            police_subtab_pages["Diárias"], ufesp_var=self.diarias_ufesp_var,
+            on_change=self._on_diarias_profiles_changed,
+            on_resize=lambda: ajustar_janela_ao_conteudo() if janela_montada["pronta"] else None,
+        )
+        # Expostos no diálogo para navegação e verificações da interface.
+        win.police_subtab_pages = police_subtab_pages
+        win.police_subtab_buttons = police_subtab_buttons
+        win.diarias_profiles_panel = self.diarias_profiles_panel
+
         police_frame = ttk.LabelFrame(
-            police_tab,
+            police_subtab_pages["Oitiva"],
             text="Policial",
             padding=(12, 8),
             style="Settings.TLabelframe",
@@ -10989,6 +11528,11 @@ try {
         buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(6, 0))
 
         def save_and_close():
+            if self.diarias_profiles_panel.editing:
+                select_settings_tab("Policial")
+                select_police_subtab("Diárias")
+                if not self.diarias_profiles_panel.save_profile():
+                    return
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
             selected_history = history_ui["labels"].get(history_model_var.get(), "")
             selected_statement = statement_ui["labels"].get(statement_model_var.get(), "")
@@ -11233,6 +11777,9 @@ try {
         # Conteúdo completo: agora sim o tamanho da janela é fixado no conteúdo
         # da aba ativa (ver `ajustar_janela_ao_conteudo`).
         janela_montada["pronta"] = True
+        if police_subtab in police_subtab_pages:
+            select_settings_tab("Policial")
+            select_police_subtab(police_subtab)
         ajustar_janela_ao_conteudo()
         win.transient(self.root)
         win.grab_set()
@@ -16829,7 +17376,7 @@ try {
                     self.qrcode_generate_button.configure(state="normal")
                     self.qrcode_shortened_var.set(short)
                     self.qrcode_shortened_row.pack(
-                        fill=X, pady=(8, 0), before=self.qrcode_content
+                        fill=X, pady=(16, 0), before=getattr(self, "qrcode_form_actions", None)
                     )
                     self.qrcode_shortened_copy_button.configure(state="normal")
                     self.qrcode_link_var.set(short)
@@ -16941,6 +17488,9 @@ try {
                 pass
 
     def _on_close(self):
+        if getattr(self, "diarias_busy", False):
+            messagebox.showinfo("Diárias", "Aguarde a geração ou o envio da diária terminar antes de fechar.", parent=self.root)
+            return
         self._app_closing = True
         self.live_recovery_cancel_event.set()
         self.live_audio_recovery_available = False
@@ -16963,6 +17513,8 @@ try {
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--sig-print-job":
+        raise SystemExit(pdf_printing.execute_print_job_file(sys.argv[2]))
     root = Tk()
     app = SigApp(root)
     root.mainloop()

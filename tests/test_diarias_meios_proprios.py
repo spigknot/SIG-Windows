@@ -1,13 +1,4 @@
-"""Declaração de meios próprios: datas por extenso, modelo embutido e botão verde.
-
-O modelo `modelos/modelo_meios_proprios.docx` é o arquivo da Desktop convertido
-para DOCX e incorporado ao app (a pasta `modelos/` é entregue ao lado do
-executável). As chaves do modelo usam o formato de três chaves:
-
-    {{{mes_e_ano}}}      -> "dezembro/2026"        (mês/ano da ida do talão)
-    {{{data_ida}}}       -> "31 de dezembro de 2026" (ida do talão)
-    {{{data_protocolo}}} -> "31 de dezembro de 2026" (data do protocolo)
-"""
+"""Declaração de meios próprios: perfil, datas, modelo externo e botão verde."""
 from __future__ import annotations
 
 import html
@@ -16,6 +7,7 @@ import tempfile
 import tkinter as tk
 import unittest
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from tkinter import ttk
 from unittest.mock import Mock, patch
@@ -32,6 +24,9 @@ from documents import (  # noqa: E402
     prepare_declaracao_meios_proprios,
 )
 from sig_app import SigApp  # noqa: E402
+from diarias_profiles import PROFILE_FIELDS
+
+PROFILE = {key: ("1" if key == "classe" else example) for key, _label, example in PROFILE_FIELDS}
 
 
 def _texto_do_docx(path: Path) -> str:
@@ -46,7 +41,7 @@ class PrepareDeclaracaoMeiosPropriosTest(unittest.TestCase):
         self.assertEqual(
             {
                 "mes_e_ano": "dezembro/2026",
-                "data_ida": "31 de dezembro de 2026",
+                "data_ida": "31/12/2026",
                 "data_protocolo": "31 de dezembro de 2026",
             },
             prepare_declaracao_meios_proprios(
@@ -59,7 +54,7 @@ class PrepareDeclaracaoMeiosPropriosTest(unittest.TestCase):
             data_ida="01/03/2027", data_protocolo="05/01/2027"
         )
         self.assertEqual("março/2027", replacements["mes_e_ano"])
-        self.assertEqual("1 de março de 2027", replacements["data_ida"])
+        self.assertEqual("01/03/2027", replacements["data_ida"])
         self.assertEqual("5 de janeiro de 2027", replacements["data_protocolo"])
 
     def test_data_de_ida_invalida_reprova_apontando_o_talao(self):
@@ -74,29 +69,63 @@ class PrepareDeclaracaoMeiosPropriosTest(unittest.TestCase):
 
 
 class ModeloMeiosPropriosTest(unittest.TestCase):
-    def test_modelo_incorporado_tem_exatamente_as_tres_chaves(self):
+    def test_modelo_contem_as_novas_chaves(self):
         template = ROOT / "modelos" / MEIOS_PROPRIOS_TEMPLATE_NAME
         self.assertTrue(template.is_file(), "o modelo precisa estar em modelos/")
         texto = _texto_do_docx(template)
         chaves = sorted(
             {tripla or dupla for tripla, dupla in documents.WORD_MARKER_RE.findall(texto)}
         )
-        self.assertEqual(["data_ida", "data_protocolo", "mes_e_ano"], chaves)
+        self.assertEqual(sorted({"nome", "rg", "cpf", "cargo", "classe", "padrão", "delegacia", "estado_civil", "nascimento", "natural_de", "pai", "mae", "endereco", "cidade_plantao", "mes_e_ano", "data_ida", "cidade_atual", "data_protocolo"}), chaves)
 
     def test_gera_docx_real_sem_sobrar_marcador(self):
         replacements = prepare_declaracao_meios_proprios(
-            data_ida="31/12/2026", data_protocolo="31/12/2026"
+            data_ida="31/12/2026", data_protocolo="31/12/2026", perfil=PROFILE
         )
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "declaracao_meios_proprios.docx"
             changes = generate_declaracao_meios_proprios(destination, replacements)
-            self.assertEqual(3, changes)
+            self.assertGreater(changes, 18)
             self.assertIsNone(zipfile.ZipFile(destination).testzip())
             texto = _texto_do_docx(destination)
             self.assertNotIn("{{", texto)
             self.assertIn("referente dezembro/2026", texto)
-            self.assertIn("no dia 31 de dezembro de 2026", texto)
+            self.assertIn("no dia 31/12/2026", texto)
             self.assertIn("Taguaí, 31 de dezembro de 2026", texto)
+
+    def test_perfil_ocorrencias_e_fontes_do_modelo_sao_preservados(self):
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        template = ROOT / "modelos" / MEIOS_PROPRIOS_TEMPLATE_NAME
+        with zipfile.ZipFile(template) as original:
+            before = ET.fromstring(original.read("word/document.xml"))
+        for pai in ("Antônio da Silva", ""):
+            with self.subTest(pai=pai), tempfile.TemporaryDirectory() as temporary:
+                values = prepare_declaracao_meios_proprios(data_ida="31/12/2026", data_protocolo="02/01/2027", perfil={**PROFILE, "pai": pai})
+                output = Path(temporary) / "declaracao.docx"
+                generate_declaracao_meios_proprios(output, values)
+                with zipfile.ZipFile(output) as filled:
+                    after = ET.fromstring(filled.read("word/document.xml"))
+                props = lambda tree: [ET.tostring(pr) for pr in tree.findall(".//w:rPr", ns)]
+                self.assertEqual(props(before), props(after))
+                runs = after.findall(".//w:r", ns)
+                text = lambda run: "".join(t.text or "" for t in run.findall("w:t", ns))
+                names = [run for run in runs if PROFILE["nome"].upper() in text(run)]
+                self.assertEqual(len(names), 2)
+                self.assertIsNone(names[0].find("w:rPr/w:b", ns))
+                self.assertIsNotNone(names[1].find("w:rPr/w:b", ns))
+                plain = _texto_do_docx(output)
+                self.assertIn(PROFILE["cargo"], plain)
+                self.assertIn(PROFILE["cargo"].upper(), plain)
+                self.assertIn("filho de " + (pai + " e de " if pai else "") + PROFILE["mae"], plain)
+                self.assertIn("no dia 31/12/2026", plain)
+                self.assertIn("Taguaí, 2 de janeiro de 2027", plain)
+                self.assertNotIn("{{", plain)
+                self.assertNotIn("}}", plain)
+        for classe, padrao in (("1", "III"), ("2", "II"), ("3", "I"), ("Especial", "IV")):
+            values = prepare_declaracao_meios_proprios(data_ida="31/12/2026", data_protocolo="31/12/2026", perfil={**PROFILE, "classe": classe})
+            self.assertEqual(values["padrao"], f"Padrão {padrao}")
+            self.assertEqual(values["padrão"], f"Padrão {padrao}")
+            self.assertEqual(values["classe"], "Classe Especial" if classe == "Especial" else f"{classe}ª Classe")
 
     def test_modelo_ausente_aponta_a_atualizacao(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -124,6 +153,9 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
         self.addCleanup(self.root.destroy)
         self.root.geometry("1260x960")
         self.app = SigApp.__new__(SigApp)
+        profile_patch = patch.object(sig_app.diarias_store, "load_diarias_profile", return_value=PROFILE)
+        profile_patch.start()
+        self.addCleanup(profile_patch.stop)
         self.app.root = self.root
         self.app.diarias_tab = ttk.Frame(self.root, padding=14)
         self.app.diarias_tab.pack(fill="both", expand=True)
@@ -137,6 +169,10 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
                      "fechamento_data", "fechamento_hora", "protocolo_file", "req",
                      "mapa", "data"):
             setattr(self.app, f"diarias_{name}_var", tk.StringVar(master=self.root))
+        for key, value in dict(holerite_total="10.817,23", holerite_mes="12/2026", abertura_data="31/12/2026",
+                               abertura_hora="08:00", fechamento_data="31/12/2026", fechamento_hora="21:00",
+                               req="215626/2026", mapa="215627/2026", data="31/12/2026").items():
+            getattr(self.app, f"diarias_{key}_var").set(value)
         self.app.diarias_meios_proprios_var = tk.BooleanVar(master=self.root, value=False)
         with patch.object(tk, "_default_root", self.root):
             self.app._build_style()
@@ -221,7 +257,7 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
 
     def test_exportacao_pdf_falha_sem_apagar_arquivo_existente(self):
         replacements = prepare_declaracao_meios_proprios(
-            data_ida="31/12/2026", data_protocolo="31/12/2026"
+            data_ida="31/12/2026", data_protocolo="31/12/2026", perfil=PROFILE
         )
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "declaracao.pdf"
@@ -236,7 +272,7 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
                 changes = documents.generate_declaracao_meios_proprios_pdf(
                     destination, replacements
                 )
-            self.assertEqual(3, changes)
+            self.assertGreater(changes, 18)
             self.assertEqual(b"%PDF-1.7\ndeclaracao", destination.read_bytes())
             destination.write_bytes(b"pdf valido anterior")
             with patch.object(
@@ -251,6 +287,15 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
             self.assertEqual(b"pdf valido anterior", destination.read_bytes())
             self.assertEqual([destination], list(destination.parent.iterdir()))
 
+    def test_sem_perfil_mostra_aviso_generico_sem_abrir_salvar(self):
+        self.app.diarias_abertura_data_var.set("31/12/2026")
+        self.app.diarias_data_var.set("31/12/2026")
+        with patch.object(sig_app.diarias_store, "load_diarias_profile", return_value=None), patch.object(sig_app.filedialog, "asksaveasfilename") as ask, patch.object(sig_app.messagebox, "showwarning") as warning:
+            self._botao().invoke()
+        ask.assert_not_called()
+        warning.assert_called_once()
+        self.assertEqual("Há campos sem preencher.", warning.call_args.args[1])
+
     def test_datas_invalidas_avisam_sem_perder_dados(self):
         self.app.diarias_abertura_data_var.set("")
         self.app.diarias_data_var.set("")
@@ -259,7 +304,7 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
         ) as showwarning:
             self._botao().invoke()
         ask.assert_not_called()
-        self.assertEqual("Confira a data de ida do talão.", showwarning.call_args.args[1])
+        self.assertEqual("Há campos sem preencher.", showwarning.call_args.args[1])
         self.app._finish_diarias_activity.assert_called_once()
 
 

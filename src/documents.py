@@ -17,10 +17,11 @@ import tempfile
 import time
 import urllib.request
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 from app_env import app_base_dir
 from pathlib import Path
+from diarias_profiles import classe_padrao, format_profile_name
 
 
 DOCUMENT_TEMPLATE_NAMES = {
@@ -434,6 +435,9 @@ def portuguese_number_words(value: int) -> str:
 
 WORD_PARAGRAPH_RE = re.compile(r"<w:p(?:\s[^>]*)?>.*?</w:p>", re.DOTALL)
 
+# Split on paragraph boundaries instead of matching nested paragraphs as a pair.
+WORD_PARAGRAPH_BOUNDARY_RE = re.compile(r"</?w:p(?:\s[^>]*)?>")
+
 
 WORD_TEXT_RE = re.compile(r"(<w:t(?:\s[^>]*)?>)(.*?)(</w:t>)", re.DOTALL)
 
@@ -449,6 +453,9 @@ WORD_MARKER_RE = re.compile(r"\{\{\{([^{}]+)\}\}\}|\{\{([^{}]+)\}\}")
 def _replace_word_paragraph_markers(
     paragraph_xml: str,
     replacements: dict[str, str],
+    *,
+    marker_occurrences: dict[str, int] | None = None,
+    occurrence_value: Callable[[str, int, str], str] | None = None,
 ) -> tuple[str, int]:
     matches = list(WORD_TEXT_RE.finditer(paragraph_xml))
     if not matches:
@@ -458,19 +465,28 @@ def _replace_word_paragraph_markers(
         str(marker): str(replacement or "")
         for marker, replacement in replacements.items()
     }
-    changed = 0
-    while True:
-        joined = "".join(text_values)
-        candidates = [
-            match
-            for match in WORD_MARKER_RE.finditer(joined)
-            if (match.group(1) or match.group(2)) in replacement_by_marker
-        ]
-        if not candidates:
-            break
-        marker_match = candidates[-1]
+    joined = "".join(text_values)
+    candidates = [
+        match
+        for match in WORD_MARKER_RE.finditer(joined)
+        if (match.group(1) or match.group(2)) in replacement_by_marker
+    ]
+    occurrences = marker_occurrences if marker_occurrences is not None else {}
+    values = []
+    # Count in document order, then edit backwards so earlier offsets stay valid.
+    # Inserted text is not scanned again as a template marker.
+    for marker_match in candidates:
         marker_name = marker_match.group(1) or marker_match.group(2)
+        occurrences[marker_name] = occurrences.get(marker_name, 0) + 1
         replacement = replacement_by_marker[marker_name]
+        if occurrence_value is not None:
+            replacement = occurrence_value(
+                marker_name, occurrences[marker_name], replacement
+            )
+        values.append((marker_match, replacement))
+    changed = 0
+    for marker_match, replacement in reversed(values):
+        joined = "".join(text_values)
         start, end = marker_match.span()
         spans = []
         cursor = 0
@@ -559,12 +575,45 @@ def _replace_word_paragraph_markers(
     return "".join(pieces), changed
 
 
+def _replace_word_xml_markers(
+    xml_text: str,
+    replacements: dict[str, str],
+    *,
+    marker_occurrences: dict[str, int],
+    occurrence_value: Callable[[str, int, str], str] | None = None,
+) -> tuple[str, int]:
+    """Preenche fluxos de texto, inclusive antes/depois de caixas aninhadas.
+
+    Cada limite de parágrafo separa o fluxo sem reserializar o XML. Assim o
+    texto do parágrafo externo após uma caixa de texto também é processado,
+    e nenhuma tag pode atravessar parágrafos distintos.
+    """
+    pieces = []
+    cursor = 0
+    changes = 0
+    for boundary in WORD_PARAGRAPH_BOUNDARY_RE.finditer(xml_text):
+        updated, count = _replace_word_paragraph_markers(
+            xml_text[cursor:boundary.start()], replacements,
+            marker_occurrences=marker_occurrences, occurrence_value=occurrence_value,
+        )
+        pieces.extend((updated, boundary.group(0)))
+        changes += count
+        cursor = boundary.end()
+    updated, count = _replace_word_paragraph_markers(
+        xml_text[cursor:], replacements,
+        marker_occurrences=marker_occurrences, occurrence_value=occurrence_value,
+    )
+    pieces.append(updated)
+    return "".join(pieces), changes + count
+
+
 def generate_docx_from_template(
     template_path: Path,
     output_path: Path,
     replacements: dict[str, str],
     *,
     allow_unresolved_markers: bool = False,
+    occurrence_value: Callable[[str, int, str], str] | None = None,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     file_descriptor, temporary_name = tempfile.mkstemp(
@@ -576,6 +625,7 @@ def generate_docx_from_template(
     temporary_path = Path(temporary_name)
     total_changes = 0
     unresolved: list[str] = []
+    marker_occurrences: dict[str, int] = {}
     try:
         with zipfile.ZipFile(template_path, "r") as source:
             with zipfile.ZipFile(temporary_path, "w") as destination:
@@ -587,18 +637,11 @@ def generate_docx_from_template(
                         except UnicodeDecodeError:
                             xml_text = ""
                         if xml_text and "<w:t" in xml_text:
-                            changes = 0
-
-                            def replace_paragraph(match):
-                                nonlocal changes
-                                updated, count = _replace_word_paragraph_markers(
-                                    match.group(0),
-                                    replacements,
-                                )
-                                changes += count
-                                return updated
-
-                            xml_text = WORD_PARAGRAPH_RE.sub(replace_paragraph, xml_text)
+                            xml_text, changes = _replace_word_xml_markers(
+                                xml_text, replacements,
+                                marker_occurrences=marker_occurrences,
+                                occurrence_value=occurrence_value,
+                            )
                             if changes:
                                 data = xml_text.encode("utf-8")
                                 total_changes += changes
@@ -671,6 +714,7 @@ def prepare_diarias_requerimento(
     total_vencimentos: str = "",
     data_protocolo: str = "",
     protocolo_requerimento: str = "",
+    perfil: Mapping[str, str] | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Escolhe o modelo e monta substituições só para valores disponíveis."""
     try:
@@ -715,7 +759,47 @@ def prepare_diarias_requerimento(
     if protocol_number:
         replacements["protocolo_requerimento"] = protocol_number
 
+    if perfil is not None:
+        replacements.update(prepare_diarias_profile_replacements(perfil))
+
     return template_kind, replacements
+
+
+def prepare_diarias_profile_replacements(perfil: Mapping[str, str]) -> dict[str, str]:
+    """Mapeia o perfil às tags dos requerimentos sem alterar o modelo."""
+    fields = {
+        "rg": "rg", "cpf": "cpf", "cargo": "cargo", "classe": "classe",
+        "delegacia": "delegacia", "estado_civil": "estado_civil",
+        "nascimento": "nascimento", "natural_de": "naturalidade", "mae": "mae",
+        "endereço": "endereco", "cidade_plantao": "cidade_plantao",
+        "banco_cidade": "banco", "conta": "conta", "agencia": "agencia",
+        "cidade_atual": "cidade_trabalho",
+    }
+    replacements = {
+        marker: str(perfil.get(field) or "").strip()
+        for marker, field in fields.items()
+    }
+    nome = str(perfil.get("nome") or "").strip()
+    pai = str(perfil.get("pai") or "").strip()
+    replacements.update({
+        "nome": nome.upper(),
+        "nome2": format_profile_name(nome),
+        "padrao": classe_padrao(replacements["classe"]),
+        "pai": f"{pai} e de " if pai else "",
+    })
+    # O novo modelo tem as duas grafias; ambas representam o mesmo padrão.
+    replacements["padrão"] = replacements["padrao"]
+    return replacements
+
+
+def _diarias_requerimento_occurrence_value(
+    marker: str, occurrence: int, value: str
+) -> str:
+    # A caixa final tem duas representações (DrawingML e VML fallback).
+    # Ambas têm negrito no próprio modelo e precisam receber o texto maiúsculo.
+    if marker == "delegacia" and occurrence >= 3:
+        return value.upper()
+    return value
 
 
 def ensure_diarias_requerimento_templates() -> dict[str, Path]:
@@ -746,6 +830,7 @@ def generate_diarias_requerimento(
         Path(output_path),
         replacements,
         allow_unresolved_markers=True,
+        occurrence_value=_diarias_requerimento_occurrence_value,
     )
 
 
@@ -803,11 +888,12 @@ def prepare_declaracao_meios_proprios(
     *,
     data_ida: str,
     data_protocolo: str,
+    perfil: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Monta as substituições da declaração de meios próprios.
 
     As duas datas chegam dos PDFs (talão e protocolo) no formato ``dd/mm/aaaa``;
-    a declaração usa o mês/ano da ida e as duas datas por extenso.
+    a declaração usa a ida numérica e a data do protocolo por extenso.
     """
     try:
         ida = datetime.strptime(str(data_ida or "").strip(), "%d/%m/%Y")
@@ -817,11 +903,27 @@ def prepare_declaracao_meios_proprios(
         protocolo = datetime.strptime(str(data_protocolo or "").strip(), "%d/%m/%Y")
     except (TypeError, ValueError) as exc:
         raise ValueError("Confira a data do protocolo.") from exc
-    return {
+    replacements = {
         "mes_e_ano": _diarias_month_year(ida),
-        "data_ida": _diarias_long_date(ida),
+        "data_ida": ida.strftime("%d/%m/%Y"),
         "data_protocolo": _diarias_long_date(protocolo),
     }
+
+    if perfil is not None:
+        replacements.update(prepare_diarias_profile_replacements(perfil))
+        replacements["endereco"] = replacements["endereço"]
+        classe = replacements["classe"]
+        replacements["classe"] = "Classe Especial" if classe == "Especial" else f"{classe}ª Classe"
+        replacements["padrao"] = f"Padrão {replacements['padrao']}"
+        replacements["padrão"] = replacements["padrao"]
+    return replacements
+
+
+def _declaracao_meios_proprios_occurrence_value(
+    marker: str, occurrence: int, value: str
+) -> str:
+    """Mantém o cargo informado no corpo e usa maiúsculas na assinatura."""
+    return value.upper() if marker == "cargo" and occurrence >= 2 else value
 
 
 def ensure_meios_proprios_template() -> Path:
@@ -845,6 +947,7 @@ def generate_declaracao_meios_proprios(
         ensure_meios_proprios_template(),
         Path(output_path),
         replacements,
+        occurrence_value=_declaracao_meios_proprios_occurrence_value,
     )
 
 

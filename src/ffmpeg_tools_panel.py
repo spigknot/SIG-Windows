@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from array import array
 from PIL import Image, ImageTk
 from app_env import app_base_dir
 from dataclasses import dataclass, replace
@@ -38,6 +39,7 @@ from media_files import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from pathlib import Path
 from tkinter import (
     BOTH,
+    BOTTOM,
     BooleanVar,
     Canvas,
     END,
@@ -111,6 +113,9 @@ PREVIEW_ZOOM_MAX = 5.0
 PREVIEW_ZOOM_STEP = 1.25
 PREVIEW_ZOOM_RESTART_MS = 250
 PREVIEW_SPEED_VALUES = (0.25, 0.5, 1.0, 2.0, 4.0)
+FFMPEG_SIDEBAR_WIDTH = 252
+WAVEFORM_POINTS = 1200
+WAVEFORM_SAMPLE_RATE = 8000
 
 # Modos de corte da aba Cortar (na ordem exibida; SmartCut é o padrão).
 CUT_MODE_SMART = "SmartCut"
@@ -819,16 +824,33 @@ def extract_can_copy(
     return True
 
 
+def waveform_amplitudes(levels: tuple[float, ...], start: float, end: float, count: int) -> list[float]:
+    """Picos por barra, preservando os transientes ao reduzir a resolução."""
+    if not levels or count <= 0:
+        return [0.0] * max(0, count)
+    first = max(0.0, min(1.0, start)) * len(levels)
+    last = max(first, min(1.0, end) * len(levels))
+    values = []
+    for index in range(count):
+        left = min(len(levels) - 1, int(first + (last - first) * index / count))
+        right = min(len(levels), max(left + 1, math.ceil(first + (last - first) * (index + 1) / count)))
+        values.append(max(levels[left:right], default=0.0))
+    return values
+
+
 class RangeTimeline(Canvas):
     """Linha do tempo simples com playhead e marcadores de início/fim arrastáveis."""
 
-    def __init__(self, parent, on_change, **kwargs):
+    def __init__(self, parent, on_change, select_range: bool = True, **kwargs):
         super().__init__(parent, height=52, highlightthickness=0, background="#ffffff", **kwargs)
         self.duration = 0.0
         self.start = 0.0
         self.end = 0.0
         self.position = 0.0
         self.on_change = on_change
+        self.select_range = select_range
+        self.transition_points: tuple[float, ...] = ()
+        self.transition_label = ""
         self.drag_target: str | None = None
         self.bind("<Configure>", lambda _event: self.draw())
         self.bind("<Button-1>", self._press)
@@ -841,6 +863,8 @@ class RangeTimeline(Canvas):
         self.start = 0.0
         self.end = self.duration
         self.position = 0.0
+        self.transition_points = ()
+        self.transition_label = ""
         self.draw()
 
     def set_range(self, start: float, end: float) -> None:
@@ -860,6 +884,13 @@ class RangeTimeline(Canvas):
         else:
             self.position = min(max(self.start, min(position, self.duration)), self.end)
         self.draw()
+
+    def set_transition_points(self, points: tuple[float, ...], label: str = "") -> None:
+        points = tuple(point for point in points if math.isfinite(point) and 0 < point < self.duration)
+        if points != self.transition_points or label != self.transition_label:
+            self.transition_points = points
+            self.transition_label = label
+            self.draw()
 
     def _left(self) -> int:
         return 18
@@ -883,14 +914,19 @@ class RangeTimeline(Canvas):
         left, right, center = self._left(), self._right(), 27
         self.create_line(left, center, right, center, fill="#c8d0cd", width=6, capstyle="round")
         if self.duration <= 0:
-            self.create_text(self.winfo_width() / 2, center, text="Selecione uma mídia para carregar a linha do tempo", fill="#667371", font=("Segoe UI", 9))
             return
         start_x, end_x, position_x = self._x_for(self.start), self._x_for(self.end), self._x_for(self.position)
         self.create_line(start_x, center, end_x, center, fill="#4b9d79", width=6, capstyle="round")
         # Os dois triângulos apontam PARA A BARRA (o de início para baixo, o de
         # fim para cima): a ponta marca exatamente o tempo na régua.
-        self.create_polygon(start_x, 19, start_x - 7, 8, start_x + 7, 8, fill="#2e7d5a", outline="")
-        self.create_polygon(end_x, 35, end_x - 7, 46, end_x + 7, 46, fill="#c64a42", outline="")
+        if self.select_range:
+            self.create_polygon(start_x, 19, start_x - 7, 8, start_x + 7, 8, fill="#2e7d5a", outline="")
+            self.create_polygon(end_x, 35, end_x - 7, 46, end_x + 7, 46, fill="#c64a42", outline="")
+        for seconds in self.transition_points:
+            x = self._x_for(seconds)
+            self.create_line(x, 17, x, center + 7, fill="#b1842d", width=2, tags="transition_marker")
+            self.create_polygon(x, 7, x + 5, 12, x, 17, x - 5, 12,
+                                fill="#e5b747", outline="#9b7426", tags="transition_marker")
         self.create_line(position_x, 7, position_x, 47, fill="#243230", width=2)
         self.create_text(left, 48, text="0:00", anchor="w", fill="#667371", font=("Consolas", 8))
         self.create_text(right, 48, text=self._format_time(self.duration), anchor="e", fill="#667371", font=("Consolas", 8))
@@ -901,9 +937,9 @@ class RangeTimeline(Canvas):
         # Os triângulos são os únicos pontos que movem o recorte. Um clique
         # normal na faixa sempre reposiciona a cabeça de reprodução.
         marker_radius = 9
-        if event.y <= 23 and abs(self._x_for(self.start) - event.x) <= marker_radius:
+        if self.select_range and event.y <= 23 and abs(self._x_for(self.start) - event.x) <= marker_radius:
             self.drag_target = "start"
-        elif event.y >= 31 and abs(self._x_for(self.end) - event.x) <= marker_radius:
+        elif self.select_range and event.y >= 31 and abs(self._x_for(self.end) - event.x) <= marker_radius:
             self.drag_target = "end"
         else:
             self.drag_target = "position"
@@ -946,6 +982,8 @@ class InsertAudioTimeline(Canvas):
         self.on_insert = on_insert
         self.main_name = ""
         self.inserted_name = ""
+        self.main_levels: tuple[float, ...] = ()
+        self.inserted_levels: tuple[float, ...] = ()
         self.main_duration = 0.0
         self.inserted_duration = 0.0
         self.insertion = 0.0
@@ -1011,10 +1049,12 @@ class InsertAudioTimeline(Canvas):
             return
         first_end = self._x_for(self.insertion)
         inserted_end = self._x_for(self.insertion + self.inserted_duration)
-        self._draw_wave(left, first_end if self.inserted_duration else right, top + 4, bottom - 4, "#5edaf2", self._seed(self.main_name))
+        split = self.insertion / self.main_duration if self.main_duration > 0 else 0.0
+        self._draw_wave(left, first_end if self.inserted_duration else right, top + 4, bottom - 4,
+                        "#5edaf2", self.main_levels, 0.0, split if self.inserted_duration else 1.0)
         if self.inserted_duration > 0:
-            self._draw_wave(first_end, inserted_end, top + 4, bottom - 4, "#ffc24a", self._seed(self.inserted_name))
-            self._draw_wave(inserted_end, right, top + 4, bottom - 4, "#5edaf2", self._seed(self.main_name) + 7919)
+            self._draw_wave(first_end, inserted_end, top + 4, bottom - 4, "#ffc24a", self.inserted_levels)
+            self._draw_wave(inserted_end, right, top + 4, bottom - 4, "#5edaf2", self.main_levels, split, 1.0)
             self.create_line(first_end, top, first_end, bottom, fill="#596966", width=1)
             self.create_line(inserted_end, top, inserted_end, bottom, fill="#596966", width=1)
             self.create_polygon(
@@ -1029,22 +1069,17 @@ class InsertAudioTimeline(Canvas):
         if self.inserted_duration > 0:
             self.create_text((first_end + inserted_end) / 2, top + 2, text="áudio inserido", anchor="s", fill="#9a741f", font=("Segoe UI", 8))
 
-    def _draw_wave(self, left: float, right: float, top: float, bottom: float, color: str, seed: int) -> None:
+    def _draw_wave(self, left: float, right: float, top: float, bottom: float, color: str,
+                   levels: tuple[float, ...], start: float = 0.0, end: float = 1.0) -> None:
         if right - left < 2:
             return
         center = (top + bottom) / 2
-        count = max(2, int((right - left) / 5))
+        count = max(2, int((right - left) / 4))
         gap = (right - left) / count
-        value = seed or 1
-        for index in range(count):
-            value = (value * 1103515245 + 12345) & 0x7FFFFFFF
-            amplitude = (bottom - top) * (0.10 + (value % 1000) / 1000 * 0.38)
+        for index, peak in enumerate(waveform_amplitudes(levels, start, end, count)):
+            amplitude = max(1.0, (bottom - top) * 0.43 * math.sqrt(peak))
             x = left + gap * (index + 0.5)
             self.create_line(x, center - amplitude, x, center + amplitude, fill=color, width=2)
-
-    @staticmethod
-    def _seed(value: str) -> int:
-        return sum((index + 1) * ord(char) for index, char in enumerate(value)) or 1
 
     @staticmethod
     def _format_time(value: float) -> str:
@@ -1413,7 +1448,8 @@ class FfmpegToolsPanel:
         self.video_speed_var = StringVar(value="Equilibrada")
         self.output_dir = app_base_dir() / "temp" / "ffmpeg"
         self.output_dir_var = StringVar(value=str(self.output_dir))
-        self.status_var = StringVar(value="Escolha uma ferramenta e os arquivos de entrada.")
+        self.output_dir_chosen = False
+        self.status_var = StringVar(value="")
         self.progress_var = IntVar(value=0)
         self.max_progress_seen = 0
         self.active_tool_var = StringVar(value="Cortar")
@@ -1468,6 +1504,7 @@ class FfmpegToolsPanel:
         self.join_orientation_reference_var = StringVar(value="")
         self._join_rotation_answer: dict | None = None
         self.join_seconds_var.trace_add("write", lambda *_: self._on_join_seconds_changed())
+        self.join_transition_var.trace_add("write", lambda *_: self._update_join_transition_markers())
 
         self.insert_main_input: Path | None = None
         self.insert_secondary_input: Path | None = None
@@ -1486,6 +1523,19 @@ class FfmpegToolsPanel:
         self.clean_input: Path | None = None
         self.clean_input_var = StringVar(value="Nenhum áudio selecionado")
         self.clean_mode_var = StringVar(value="equilibrado")
+        self.clean_current_var = StringVar(value="0:00")
+        self.join_current_var = StringVar(value="0:00")
+        self.join_preview_name_var = StringVar(value="")
+        self.tool_preview_contexts: dict[str, dict] = {}
+        self.preview_waveforms: dict[Canvas, dict] = {}
+        self.waveform_requests: dict[object, tuple] = {}
+        self.waveform_cache: dict[tuple, tuple[float, ...]] = {}
+        self.waveform_pending: set[tuple] = set()
+        self.waveform_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="sig-waveform")
+        self.waveform_queue: queue.Queue = queue.Queue()
+        self.waveform_stop_event = threading.Event()
+        self.waveform_processes: set[subprocess.Popen] = set()
+        self.waveform_lock = threading.Lock()
         self.preview_player = EmbeddedMediaPlayer()
         self.preview_context: dict | None = None
         self.preview_playing = False
@@ -1510,6 +1560,7 @@ class FfmpegToolsPanel:
         self.preview_selection_drag: dict[Canvas, dict] = {}
         self.preview_selection_filters: dict[Canvas, str] = {}
         self.preview_restart_id = None
+        self.audio_preview_process: subprocess.Popen | None = None
         self.external_preview_process: subprocess.Popen | None = None
         self.external_preview_started_at = 0.0
         self.external_preview_offset = 0.0
@@ -1535,20 +1586,19 @@ class FfmpegToolsPanel:
     def _build(self, parent) -> None:
         outer = ttk.Frame(parent)
         outer.pack(fill=BOTH, expand=True)
-        self.ffmpeg_scroll_canvas = Canvas(outer, highlightthickness=0, background="#f4f7f6")
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self.ffmpeg_scroll_canvas.yview)
-        self.ffmpeg_scroll_canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=RIGHT, fill=Y)
-        self.ffmpeg_scroll_canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        frame = ttk.Frame(self.ffmpeg_scroll_canvas)
-        self.ffmpeg_scroll_window = self.ffmpeg_scroll_canvas.create_window((0, 0), window=frame, anchor="nw")
-        frame.bind("<Configure>", self._update_ffmpeg_scroll_region)
-        self.ffmpeg_scroll_canvas.bind("<Configure>", self._resize_ffmpeg_scroll_content)
-        self.ffmpeg_scroll_canvas.bind("<Enter>", lambda _event: self.ffmpeg_scroll_canvas.bind_all("<MouseWheel>", self._scroll_ffmpeg_panel))
-        self.ffmpeg_scroll_canvas.bind("<Leave>", lambda _event: self.ffmpeg_scroll_canvas.unbind_all("<MouseWheel>"))
+        style = ttk.Style(self.root)
+        style.configure("Ffmpeg.Sidebar.TButton", font=("Segoe UI", 9), padding=(6, -1))
+        frame = ttk.Frame(outer)
+        frame.pack(fill=BOTH, expand=True)
+        frame.pack_propagate(False)
+        frame.bind("<Configure>", lambda _event: self._fit_visible_preview_stages())
 
+        tool_tabs = self.tk.Frame(frame, background="#f4f7f6")
+        tool_tabs.pack(fill=X, pady=(0, 6))
         tool_tab_bar = self.tk.Frame(frame, background="#f4f7f6")
         tool_tab_bar.pack(fill=X, pady=(0, 8))
+        encoder_message = ttk.Frame(frame)
+        encoder_message.pack(fill=X)
 
         # Pack right-to-left so the encoder label is visually before its selector.
         self.acceleration_combo = ttk.Combobox(
@@ -1564,16 +1614,16 @@ class FfmpegToolsPanel:
             tool_tab_bar,
             textvariable=self.encoder_advanced_var,
             state="readonly",
-            width=16,
+            width=12,
         )
         self.encoder_advanced_label = ttk.Label(tool_tab_bar, text="Avançado:", style="Muted.TLabel")
         self.encoder_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_encoder_help)
-        self.encoder_effective_label = ttk.Label(tool_tab_bar, textvariable=self.encoder_effective_var, style="Muted.TLabel")
+        self.encoder_effective_label = ttk.Label(encoder_message, textvariable=self.encoder_effective_var, style="Muted.TLabel", wraplength=730)
         self.acceleration_label = ttk.Label(tool_tab_bar, text="Encoder de vídeo:", style="Muted.TLabel")
         self.acceleration_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
         self.quality_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_quality_help)
         self.quality_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
-        self.quality_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_quality_var, width=11)
+        self.quality_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_quality_var, width=9)
         self.quality_menu = self.tk.Menu(self.quality_menu_button, tearoff=False)
         for quality in VIDEO_QUALITY_LEVELS:
             self.quality_menu.add_radiobutton(
@@ -1587,7 +1637,7 @@ class FfmpegToolsPanel:
         self.quality_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
         self.speed_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_speed_help)
         self.speed_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
-        self.speed_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_speed_var, width=16)
+        self.speed_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_speed_var, width=13)
         self.speed_menu = self.tk.Menu(self.speed_menu_button, tearoff=False)
         for speed in VIDEO_SPEED_LEVELS:
             self.speed_menu.add_radiobutton(
@@ -1612,7 +1662,7 @@ class FfmpegToolsPanel:
         )
         for name, display_name in tab_specs:
             button = self.tk.Label(
-                tool_tab_bar,
+                tool_tabs,
                 text=display_name,
                 width=ffmpeg_tab_width,
                 height=1,
@@ -1651,54 +1701,77 @@ class FfmpegToolsPanel:
         self._select_ffmpeg_tool("Cortar")
 
         bottom = ttk.Frame(frame)
-        bottom.pack(fill=X, pady=(10, 0))
+        bottom.pack(side=BOTTOM, fill=X, pady=(8, 0), before=self.tool_content)
         self.progress = ttk.Progressbar(bottom, maximum=100, variable=self.progress_var)
         self.progress.pack(fill=X)
         ttk.Label(bottom, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
 
         actions = ttk.Frame(frame)
-        actions.pack(fill=X, pady=(8, 0))
+        actions.pack(side=BOTTOM, fill=X, pady=(8, 0), before=bottom)
         self.run_button = ttk.Button(actions, text="Executar", style="Execute.TButton", command=self.run_current_tool)
         self.run_button.pack(side=LEFT)
         self.cancel_button = ttk.Button(actions, text="Cancelar", command=self.cancel, state="disabled")
         self.cancel_button.pack(side=LEFT, padx=(8, 0))
 
 
-    def _update_ffmpeg_scroll_region(self, _event=None) -> None:
-        self.ffmpeg_scroll_canvas.configure(scrollregion=self.ffmpeg_scroll_canvas.bbox("all"))
+    def _tool_columns(self, tab):
+        """Coluna fixa de opções e área de prévia que recebe o espaço restante."""
+        body = ttk.Frame(tab)
+        body.pack(fill=BOTH, expand=True)
+        body.grid_propagate(False)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(2, weight=1)
+        sidebar = ttk.Frame(body, width=FFMPEG_SIDEBAR_WIDTH, padding=(0, 0, 12, 0))
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.pack_propagate(False)
+        ttk.Separator(body, orient="vertical").grid(row=0, column=1, sticky="ns", padx=(0, 16))
+        workspace = ttk.Frame(body)
+        workspace.grid(row=0, column=2, sticky="nsew")
+        workspace.pack_propagate(False)
+        output = ttk.Frame(sidebar)
+        output.pack(side=BOTTOM, fill=X, pady=(10, 0))
+        ttk.Separator(output).pack(fill=X, pady=(0, 8))
+        return sidebar, workspace, output
 
-    def _resize_ffmpeg_scroll_content(self, event) -> None:
-        self.ffmpeg_scroll_canvas.itemconfigure(self.ffmpeg_scroll_window, width=event.width)
-        # A altura visível do painel muda junto: o palco da prévia precisa ser
-        # reencaixado (senão ele fica no tamanho da janela anterior).
-        self._fit_visible_preview_stages()
-
-    def _scroll_ffmpeg_panel(self, event) -> None:
-        self.ffmpeg_scroll_canvas.yview_scroll(-max(1, event.delta // 120), "units")
+    @staticmethod
+    def _option_row(parent, label: str):
+        row = ttk.Frame(parent)
+        row.pack(fill=X, pady=(0, 8))
+        ttk.Label(row, text=label, style="Muted.TLabel").pack(anchor="w", pady=(0, 3))
+        return row
 
     def _file_row(self, parent, variable: StringVar, command, label: str = "Selecionar arquivo") -> None:
         row = ttk.Frame(parent)
-        row.pack(fill=X, pady=(0, 12))
-        ttk.Button(row, text=label, command=command).pack(side=LEFT)
-        ttk.Label(row, textvariable=variable, style="Muted.TLabel", wraplength=720).pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
+        row.pack(fill=X, pady=(0, 14))
+        ttk.Button(row, text=label, command=command, style="Ffmpeg.Sidebar.TButton").pack(fill=X)
+        name = ttk.Label(row, textvariable=variable, style="Muted.TLabel", width=1, anchor="w")
+        name.pack(fill=X, pady=(6, 0))
+        create_tooltip(name, variable.get)
 
     def _output_buttons(self, row) -> None:
-        """Botões da pasta de saída — entram na MESMA linha das opções da ferramenta."""
-        ttk.Button(row, text="Escolher pasta", command=self.choose_output_dir).pack(side=RIGHT, padx=(6, 0))
-        ttk.Button(row, text="Abrir pasta", command=self.open_output_dir).pack(side=RIGHT, padx=(16, 0))
+        button = ttk.Button(row, text="Abrir Pasta", command=self.open_or_choose_output_dir,
+                            style="Ffmpeg.Sidebar.TButton")
+        button.pack(fill=X)
+        create_tooltip(button, lambda: (
+            "Abrir a pasta escolhida. Botão direito para trocar."
+            if self.output_dir_chosen else "Escolher a pasta de saída."
+        ))
+        menu = self.tk.Menu(button, tearoff=False)
+        menu.add_command(label="Alterar pasta…", command=self.choose_output_dir)
+        def show_menu(event):
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+        button.bind("<Button-3>", show_menu)
 
     def _output_path_row(self, parent) -> None:
-        """Caminho da pasta de saída, na linha logo abaixo dos botões."""
         row = ttk.Frame(parent)
-        row.pack(fill=X, pady=(4, 0))
-        ttk.Label(row, text="Pasta de saída:", style="Muted.TLabel").pack(side=LEFT)
-        ttk.Label(
-            row,
-            textvariable=self.output_dir_var,
-            style="Muted.TLabel",
-            wraplength=780,
-            justify="left",
-        ).pack(side=LEFT, padx=(6, 0))
+        row.pack(fill=X, pady=(2, 0))
+        ttk.Label(row, text="Pasta de saída:", style="Muted.TLabel").pack(anchor="w")
+        path = ttk.Label(row, textvariable=self.output_dir_var, style="Muted.TLabel", width=1, anchor="w")
+        path.pack(fill=X, pady=(2, 0))
+        create_tooltip(path, self.output_dir_var.get)
 
     def _create_preview_stage(self, parent, message: str) -> Canvas:
         """Palco do player: o canvas abraça a proporção da mídia e preenche a aba.
@@ -1747,6 +1820,8 @@ class FfmpegToolsPanel:
         após um `holder.configure` o `winfo_width()` do canvas ainda é o antigo.
         """
         self.preview_hint_text[canvas] = message
+        self.preview_waveforms.pop(canvas, None)
+        self.waveform_requests.pop(canvas, None)
         canvas.delete("all")
         self.preview_frame_items.pop(canvas, None)
         self.preview_frames.pop(canvas, None)
@@ -1772,7 +1847,7 @@ class FfmpegToolsPanel:
         (ex.: "lizar") no meio da tela, como se fosse um texto solto.
         """
         message = self.preview_hint_text.get(canvas)
-        if not message:
+        if canvas in self.preview_waveforms or not message:
             return
         if self.preview_frames.get(canvas) is not None or self.preview_stills.get(canvas) is not None:
             return
@@ -1783,29 +1858,20 @@ class FfmpegToolsPanel:
             self._preview_show_hint(canvas, message)
 
     def _preview_available_box(self, parent, holder) -> tuple[int, int]:
-        """Espaço que sobra para o palco: largura da aba e altura visível menos os controles.
-
-        O desconto soma a altura PEDIDA de cada outra linha mais os espaçamentos
-        (pady) e o padding interno da aba — sem eles o palco come a folga e as
-        últimas linhas da ferramenta caem abaixo da dobra. A conta NÃO depende da
-        altura do palco (senão o Tk entra em laço de reencaixe).
-        """
-        available_width = parent.winfo_width() - PREVIEW_STAGE_MARGIN * 2
+        """Usa a altura real da coluna e reserva as linhas dos controles."""
+        available_width = parent.winfo_width()
         reserved = 0
         for widget in parent.winfo_children():
-            if widget is holder:
+            if widget is holder or not widget.winfo_manager():
                 continue
             reserved += max(0, int(widget.winfo_reqheight()))
             if widget.winfo_manager() == "pack":
                 reserved += vertical_padding_total(widget.pack_info().get("pady", 0))
-        try:
-            reserved += frame_vertical_padding(parent.cget("padding"))
-        except Exception:
-            reserved += PREVIEW_STAGE_MARGIN * 2
-        panel_height = self.ffmpeg_scroll_canvas.winfo_height()
-        available_height = panel_height - reserved - PREVIEW_STAGE_MARGIN * 2
-        available_height = max(PREVIEW_STAGE_MIN_HEIGHT, min(PREVIEW_STAGE_MAX_HEIGHT, available_height))
-        return max(PREVIEW_STAGE_MIN_WIDTH, available_width), available_height
+        reserved += frame_vertical_padding(parent.cget("padding"))
+        available_height = parent.winfo_height() - reserved - 8
+        return max(PREVIEW_STAGE_MIN_WIDTH, available_width), max(
+            PREVIEW_STAGE_MIN_HEIGHT, min(PREVIEW_STAGE_MAX_HEIGHT, available_height)
+        )
 
     def _fit_preview_stage(self, canvas: Canvas) -> None:
         """Recalcula o tamanho do palco para ocupar todo o espaço disponível."""
@@ -1815,9 +1881,15 @@ class FfmpegToolsPanel:
         if view is None or holder is None or parent is None:
             return
         available_width, available_height = self._preview_available_box(parent, holder)
-        width, height = preview_stage_size(
-            available_width, available_height, view.media_width, view.media_height
-        )
+        if canvas in self.preview_waveforms:
+            width, height = available_width, available_height
+        else:
+            width, height = preview_stage_size(
+                available_width, available_height, view.media_width, view.media_height
+            )
+        # Em retrato, a altura disponível vence o mínimo de largura do vídeo.
+        scale = min(1.0, available_width / width, available_height / height)
+        width, height = max(4, round(width * scale)), max(4, round(height * scale))
         changed = (width, height) != (view.stage_width, view.stage_height)
         if changed:
             view.stage_width, view.stage_height = width, height
@@ -1843,6 +1915,9 @@ class FfmpegToolsPanel:
         """Desenha o quadro atual (vivo ou congelado) na geometria de zoom/deslocamento."""
         view = self.preview_viewports.get(canvas)
         if view is None or view.stage_width <= 0 or view.stage_height <= 0:
+            return
+        if canvas in getattr(self, "preview_waveforms", {}):
+            self._draw_audio_waveform(canvas)
             return
         source = self.preview_frames.get(canvas) or self.preview_stills.get(canvas)
         if source is None:
@@ -2048,11 +2123,15 @@ class FfmpegToolsPanel:
         return selection_crop_pixels(selection, video_width, video_height)
 
     def _preview_press(self, canvas: Canvas, event) -> str:
-        """Botão ESQUERDO: arrasta o vídeo ampliado."""
+        """Botão esquerdo: percorre o áudio ou arrasta o vídeo ampliado."""
+        if canvas in self.preview_waveforms:
+            return self._seek_waveform(canvas, event.x)
         return self._preview_pan_start(canvas, event)
 
     def _preview_motion(self, canvas: Canvas, event) -> str:
-        """Arrasto com o botão esquerdo: movimenta o quadro (pan)."""
+        """Arrasto com o botão esquerdo: seek de áudio ou pan de vídeo."""
+        if canvas in self.preview_waveforms:
+            return self._seek_waveform(canvas, event.x)
         return self._preview_pan_move(canvas, event)
 
     def _preview_release(self, canvas: Canvas, event) -> str:
@@ -2064,6 +2143,8 @@ class FfmpegToolsPanel:
         Um clique SEM arrastar sobre a seleção abre o menu "Desfazer seleção" —
         é o que decide entre desenhar e abrir o menu.
         """
+        if canvas in self.preview_waveforms:
+            return "break"
         view = self.preview_viewports.get(canvas)
         if view is None:
             return "break"
@@ -2174,6 +2255,9 @@ class FfmpegToolsPanel:
 
     def _preview_hover(self, canvas: Canvas, event) -> str:
         """Feedback do cursor: alças para redimensionar, mãozinha para mover."""
+        if canvas in self.preview_waveforms:
+            canvas.configure(cursor="hand2")
+            return "break"
         rect = self._preview_selection_view_rect(canvas)
         if rect is None:
             canvas.configure(cursor="crosshair")
@@ -2263,6 +2347,8 @@ class FfmpegToolsPanel:
         self.frame_preview_stop_event.set()
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
+        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+        self.audio_preview_process = None
         self._terminate_preview_process(self.frame_preview_process)
         self.frame_preview_process = None
         self.preview_playing = False
@@ -2320,175 +2406,147 @@ class FfmpegToolsPanel:
             self._toggle_preview()
 
     def _build_cut_tab(self) -> None:
-        self._file_row(self.cut_tab, self.cut_input_var, self.select_cut_input)
-        self.cut_preview = self._create_preview_stage(self.cut_tab, "Selecione uma mídia para visualizar")
-        self.cut_play_button = self._add_preview_speed_controls(self.cut_tab)
-        self.cut_timeline = RangeTimeline(self.cut_tab, self._cut_timeline_changed)
+        sidebar, workspace, output = self._tool_columns(self.cut_tab)
+        self._file_row(sidebar, self.cut_input_var, self.select_cut_input)
+        self.cut_preview = self._create_preview_stage(workspace, "")
+        self.cut_play_button = self._add_preview_speed_controls(workspace)
+        self.cut_timeline = RangeTimeline(workspace, self._cut_timeline_changed)
         self.cut_timeline.pack(fill=X, pady=(0, 4))
-        self._add_preview_time_label(self.cut_tab, self.cut_current_var)
-        values = ttk.Frame(self.cut_tab)
+        self._add_preview_time_label(workspace, self.cut_current_var)
+        values = ttk.Frame(workspace)
         values.pack(anchor="center", pady=(2, 0))
-        ttk.Label(values, text="Início (segundos):").grid(row=0, column=0, sticky="w")
-        cut_start_entry = ttk.Entry(values, textvariable=self.cut_start_var, width=12)
-        cut_start_entry.grid(row=0, column=1, padx=(8, 20))
-        ttk.Label(values, text="Fim (segundos):").grid(row=0, column=2, sticky="w")
-        cut_end_entry = ttk.Entry(values, textvariable=self.cut_end_var, width=12)
-        cut_end_entry.grid(row=0, column=3, padx=(8, 0))
+        ttk.Label(values, text="Início (s):").grid(row=0, column=0, sticky="w")
+        cut_start_entry = ttk.Entry(values, textvariable=self.cut_start_var, width=10)
+        cut_start_entry.grid(row=0, column=1, padx=(6, 14))
+        ttk.Label(values, text="Fim (s):").grid(row=0, column=2, sticky="w")
+        cut_end_entry = ttk.Entry(values, textvariable=self.cut_end_var, width=10)
+        cut_end_entry.grid(row=0, column=3, padx=(6, 0))
         cut_start_entry.bind("<FocusOut>", lambda _event: self._sync_cut_range_from_entries())
         cut_end_entry.bind("<FocusOut>", lambda _event: self._sync_cut_range_from_entries())
-        mode = ttk.Frame(self.cut_tab)
-        mode.pack(fill=X, pady=(8, 0))
-        ttk.Label(mode, text="Modo:").pack(side=LEFT)
-        self.cut_mode_combo = ttk.Combobox(
-            mode,
-            textvariable=self.cut_mode_var,
-            values=CUT_MODES,
-            state="readonly",
-            width=20,
-        )
-        self.cut_mode_combo.pack(side=LEFT, padx=(6, 0))
+        mode = self._option_row(sidebar, "Modo de corte")
+        mode_controls = ttk.Frame(mode)
+        mode_controls.pack(fill=X)
+        self.cut_mode_combo = ttk.Combobox(mode_controls, textvariable=self.cut_mode_var,
+                                          values=CUT_MODES, state="readonly", width=18)
+        self.cut_mode_combo.pack(side=LEFT, fill=X, expand=True)
         self.cut_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_cut_controls())
-        self.cut_mode_help_button = ttk.Button(mode, text="?", width=3, command=self._show_cut_mode_help)
+        self.cut_mode_help_button = ttk.Button(mode_controls, text="?", width=3, command=self._show_cut_mode_help)
         self.cut_mode_help_button.pack(side=LEFT, padx=(4, 0))
-        ttk.Label(mode, text="Áudio do vídeo:").pack(side=LEFT, padx=(18, 0))
+        audio = self._option_row(sidebar, "Áudio do vídeo")
         self.cut_audio_policy_combo = ttk.Combobox(
-            mode,
-            textvariable=self.cut_audio_policy_var,
+            audio, textvariable=self.cut_audio_policy_var,
             values=("Precisão máxima (AAC)", "Copiar áudio (limites por pacote)"),
-            state="readonly",
-            width=29,
+            state="readonly", width=20,
         )
-        self.cut_audio_policy_combo.pack(side=LEFT, padx=(6, 0))
-        self._output_buttons(mode)
-        self._output_path_row(self.cut_tab)
-        streams = ttk.Frame(self.cut_tab)
-        streams.pack(anchor="w", pady=(6, 0))
-        ttk.Label(streams, text="Streams:").pack(side=LEFT)
+        self.cut_audio_policy_combo.pack(fill=X)
+        create_tooltip(self.cut_audio_policy_combo, self.cut_audio_policy_var.get)
+        streams = self._option_row(sidebar, "Streams")
         self.cut_stream_policy_combo = ttk.Combobox(
-            streams,
-            textvariable=self.cut_stream_policy_var,
+            streams, textvariable=self.cut_stream_policy_var,
             values=("Vídeo e áudio", "Todos os streams (somente modo rápido)"),
-            state="readonly",
-            width=39,
+            state="readonly", width=20,
         )
-        self.cut_stream_policy_combo.pack(side=LEFT, padx=(6, 0))
+        self.cut_stream_policy_combo.pack(fill=X)
+        create_tooltip(self.cut_stream_policy_combo, self.cut_stream_policy_var.get)
         self.cut_audio_hint_var = StringVar(master=self.root, value="")
-        ttk.Label(self.cut_tab, textvariable=self.cut_audio_hint_var, wraplength=850).pack(anchor="w", pady=(6, 0))
+        ttk.Label(sidebar, textvariable=self.cut_audio_hint_var, style="Muted.TLabel",
+                  wraplength=FFMPEG_SIDEBAR_WIDTH - 16).pack(fill=X, pady=(4, 0))
+        self._output_buttons(output)
+        self._output_path_row(output)
         self._update_cut_controls()
 
     def _build_extract_tab(self) -> None:
-        self._file_row(self.extract_tab, self.extract_summary_var, self.select_extract_inputs, "Selecionar arquivos")
-        self.extract_preview = self._create_preview_stage(self.extract_tab, "Escolha um arquivo para visualizar ou ouvir")
-        self.extract_play_button = self._add_preview_speed_controls(self.extract_tab)
-        self.extract_timeline = RangeTimeline(self.extract_tab, self._extract_timeline_changed)
+        sidebar, workspace, output = self._tool_columns(self.extract_tab)
+        self._file_row(sidebar, self.extract_summary_var, self.select_extract_inputs, "Selecionar arquivos")
+        self.extract_preview = self._create_preview_stage(workspace, "")
+        self.extract_play_button = self._add_preview_speed_controls(workspace)
+        self.extract_timeline = RangeTimeline(workspace, self._extract_timeline_changed)
         self.extract_timeline.pack(fill=X, pady=(0, 4))
-        self._add_preview_time_label(self.extract_tab, self.extract_current_var)
-        presets = ttk.Frame(self.extract_tab)
-        presets.pack(anchor="w", pady=(0, 10))
-        ttk.Checkbutton(
-            presets,
-            text="Padrão para transcrição",
-            variable=self.extract_transcription_preset_var,
-            command=lambda: self._set_extract_preset("transcription"),
-        ).pack(side=LEFT)
-        ttk.Checkbutton(
-            presets,
-            text="Padrão compacto",
-            variable=self.extract_compact_preset_var,
-            command=lambda: self._set_extract_preset("compact"),
-        ).pack(side=LEFT, padx=(16, 0))
-        settings = ttk.Frame(self.extract_tab)
-        settings.pack(fill=X)
-        fields = (
-            ("Formato:", self.extract_extension_var, ("wav", "m4a", "mp3", "aac", "ogg", "opus", "flac")),
-            ("Hz:", self.extract_rate_var, ("8000", "16000", "22050", "44100", "48000")),
-            ("Canais:", self.extract_channels_var, ("1", "2")),
-            ("Bitrate:", self.extract_bitrate_var, ("32k", "48k", "64k", "96k", "128k", "192k", "256k")),
-        )
-        self.extract_custom_widgets = []
-        for column, (label, variable, choices) in enumerate(fields):
-            ttk.Label(settings, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 12, 5))
-            combo = ttk.Combobox(settings, textvariable=variable, values=choices, state="readonly", width=8)
-            combo.grid(row=0, column=column * 2 + 1)
-            self.extract_custom_widgets.append(combo)
-        self.extract_extension_combo = self.extract_custom_widgets[0]
-        self.extract_rate_combo = self.extract_custom_widgets[1]
-        self.extract_channels_combo = self.extract_custom_widgets[2]
-        self.extract_bitrate_combo = self.extract_custom_widgets[3]
-        self.extract_extension_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_extract_format_changed())
-        self.extract_rate_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
-        self.extract_channels_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
-        self._on_extract_format_changed()
-        # A grade dos parâmetros recebe os botões da pasta (frame próprio: pack
-        # dentro de um widget que já é gerenciado por grid).
-        extract_output_buttons = ttk.Frame(settings)
-        extract_output_buttons.grid(row=0, column=8, sticky="e", padx=(24, 0))
-        self._output_buttons(extract_output_buttons)
-        self._output_path_row(self.extract_tab)
-        trim = ttk.Frame(self.extract_tab)
-        trim.pack(anchor="center", pady=(12, 0))
-        ttk.Label(trim, text="Recorte opcional - início (s):").grid(row=0, column=0, sticky="w")
+        self._add_preview_time_label(workspace, self.extract_current_var)
+        trim = ttk.Frame(workspace)
+        trim.pack(anchor="center", pady=(2, 0))
+        ttk.Label(trim, text="Início (s):").grid(row=0, column=0, sticky="w")
         extract_start_entry = ttk.Entry(trim, textvariable=self.extract_start_var, width=10)
-        extract_start_entry.grid(row=0, column=1, padx=(6, 16))
-        ttk.Label(trim, text="fim (s):").grid(row=0, column=2, sticky="w")
+        extract_start_entry.grid(row=0, column=1, padx=(6, 14))
+        ttk.Label(trim, text="Fim (s):").grid(row=0, column=2, sticky="w")
         extract_end_entry = ttk.Entry(trim, textvariable=self.extract_end_var, width=10)
         extract_end_entry.grid(row=0, column=3, padx=(6, 0))
         extract_start_entry.bind("<FocusOut>", lambda _event: self._sync_extract_range_from_entries())
         extract_end_entry.bind("<FocusOut>", lambda _event: self._sync_extract_range_from_entries())
+        presets = ttk.Frame(sidebar)
+        presets.pack(fill=X, pady=(0, 12))
+        ttk.Checkbutton(
+            presets, text="Padrão para transcrição", variable=self.extract_transcription_preset_var,
+            command=lambda: self._set_extract_preset("transcription"),
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Checkbutton(
+            presets, text="Padrão compacto", variable=self.extract_compact_preset_var,
+            command=lambda: self._set_extract_preset("compact"),
+        ).pack(anchor="w")
+        fields = (
+            ("Formato", self.extract_extension_var, ("wav", "m4a", "mp3", "aac", "ogg", "opus", "flac")),
+            ("Taxa de amostragem (Hz)", self.extract_rate_var, ("8000", "16000", "22050", "44100", "48000")),
+            ("Canais", self.extract_channels_var, ("1", "2")),
+            ("Bitrate", self.extract_bitrate_var, ("32k", "48k", "64k", "96k", "128k", "192k", "256k")),
+        )
+        self.extract_custom_widgets = []
+        for label, variable, choices in fields:
+            row = self._option_row(sidebar, label)
+            combo = ttk.Combobox(row, textvariable=variable, values=choices, state="readonly", width=20)
+            combo.pack(fill=X)
+            self.extract_custom_widgets.append(combo)
+        self.extract_extension_combo, self.extract_rate_combo, self.extract_channels_combo, self.extract_bitrate_combo = self.extract_custom_widgets
+        self.extract_extension_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_extract_format_changed())
+        self.extract_rate_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
+        self.extract_channels_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_extract_bitrate_choices())
+        self._on_extract_format_changed()
+        self._output_buttons(output)
+        self._output_path_row(output)
 
     def _build_rotate_tab(self) -> None:
-        self._file_row(self.rotate_tab, self.rotate_input_var, self.select_rotate_input, "Selecionar vídeo")
-        self.rotate_preview = self._create_preview_stage(self.rotate_tab, "Selecione um vídeo para visualizar")
-        self.rotate_play_button = self._add_preview_speed_controls(self.rotate_tab)
-        self.rotate_timeline = RangeTimeline(self.rotate_tab, self._rotate_timeline_changed)
+        sidebar, workspace, output = self._tool_columns(self.rotate_tab)
+        self._file_row(sidebar, self.rotate_input_var, self.select_rotate_input, "Selecionar vídeo")
+        self.rotate_preview = self._create_preview_stage(workspace, "")
+        self.rotate_play_button = self._add_preview_speed_controls(workspace)
+        self.rotate_timeline = RangeTimeline(workspace, self._rotate_timeline_changed)
         self.rotate_timeline.pack(fill=X, pady=(0, 4))
-        self._add_preview_time_label(self.rotate_tab, self.rotate_current_var)
-        trim = ttk.Frame(self.rotate_tab)
-        trim.pack(anchor="center", pady=(0, 10))
-        ttk.Label(trim, text="Início (segundos):").grid(row=0, column=0, sticky="w")
-        rotate_start_entry = ttk.Entry(trim, textvariable=self.rotate_start_var, width=12)
-        rotate_start_entry.grid(row=0, column=1, padx=(6, 18))
-        ttk.Label(trim, text="Fim (segundos):").grid(row=0, column=2, sticky="w")
-        rotate_end_entry = ttk.Entry(trim, textvariable=self.rotate_end_var, width=12)
+        self._add_preview_time_label(workspace, self.rotate_current_var)
+        trim = ttk.Frame(workspace)
+        trim.pack(anchor="center", pady=(2, 0))
+        ttk.Label(trim, text="Início (s):").grid(row=0, column=0, sticky="w")
+        rotate_start_entry = ttk.Entry(trim, textvariable=self.rotate_start_var, width=10)
+        rotate_start_entry.grid(row=0, column=1, padx=(6, 14))
+        ttk.Label(trim, text="Fim (s):").grid(row=0, column=2, sticky="w")
+        rotate_end_entry = ttk.Entry(trim, textvariable=self.rotate_end_var, width=10)
         rotate_end_entry.grid(row=0, column=3, padx=(6, 0))
         rotate_start_entry.bind("<FocusOut>", lambda _event: self._sync_rotate_range_from_entries())
         rotate_end_entry.bind("<FocusOut>", lambda _event: self._sync_rotate_range_from_entries())
-        row = ttk.Frame(self.rotate_tab)
-        row.pack(anchor="w")
-        ttk.Label(row, text="Giro:").pack(side=LEFT)
-        rotate_combo = ttk.Combobox(row, textvariable=self.rotate_degrees_var, values=("-90", "0", "90", "180"), state="readonly", width=7)
-        rotate_combo.pack(side=LEFT, padx=(6, 18))
+        row = self._option_row(sidebar, "Giro (graus)")
+        rotate_combo = ttk.Combobox(row, textvariable=self.rotate_degrees_var,
+                                    values=("-90", "0", "90", "180"), state="readonly", width=20)
+        rotate_combo.pack(fill=X)
         rotate_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_rotate_transform_changed())
-        self.rotate_hflip_check = ttk.Checkbutton(row, text="Espelhar horizontal", variable=self.rotate_hflip_var, command=self._on_rotate_transform_changed)
-        self.rotate_hflip_check.pack(side=LEFT, padx=(0, 12))
-        self.rotate_vflip_check = ttk.Checkbutton(row, text="Espelhar vertical", variable=self.rotate_vflip_var, command=self._on_rotate_transform_changed)
-        self.rotate_vflip_check.pack(side=LEFT, padx=(0, 12))
-        rotate_options = ttk.Frame(self.rotate_tab)
-        rotate_options.pack(fill=X, pady=(12, 0))
+        self.rotate_hflip_check = ttk.Checkbutton(sidebar, text="Espelhar horizontal", variable=self.rotate_hflip_var, command=self._on_rotate_transform_changed)
+        self.rotate_hflip_check.pack(anchor="w", pady=(0, 6))
+        self.rotate_vflip_check = ttk.Checkbutton(sidebar, text="Espelhar vertical", variable=self.rotate_vflip_var, command=self._on_rotate_transform_changed)
+        self.rotate_vflip_check.pack(anchor="w", pady=(0, 12))
         self.rotate_metadata_check = ttk.Checkbutton(
-            rotate_options,
-            text="Somente metadados de rotação (rápido, sem reencodar)",
-            variable=self.rotate_metadata_var,
+            sidebar, text="Somente metadados de rotação", variable=self.rotate_metadata_var,
             command=self._update_rotate_control_state,
         )
-        self.rotate_metadata_check.pack(side=LEFT)
+        self.rotate_metadata_check.pack(anchor="w", pady=(0, 6))
+        create_tooltip(self.rotate_metadata_check, "Rápido, sem reencodar. Aplica apenas a orientação do vídeo.")
         self.rotate_parallel_check = ttk.Checkbutton(
-            rotate_options,
-            text="Processar trechos em paralelo",
-            variable=self.rotate_parallel_var,
+            sidebar, text="Processar trechos em paralelo", variable=self.rotate_parallel_var,
             command=self._update_rotate_control_state,
         )
-        self.rotate_parallel_check.pack(side=LEFT, padx=(18, 0))
-        self._output_buttons(rotate_options)
-        self._output_path_row(self.rotate_tab)
-        self.rotate_parallel_frame = ttk.Frame(self.rotate_tab)
-        ttk.Label(self.rotate_parallel_frame, text="Trechos:").pack(side=LEFT)
+        self.rotate_parallel_check.pack(anchor="w")
+        self.rotate_parallel_frame = ttk.Frame(sidebar)
+        ttk.Label(self.rotate_parallel_frame, text="Trechos:", style="Muted.TLabel").pack(side=LEFT)
         self.rotate_segments_entry = ttk.Entry(self.rotate_parallel_frame, textvariable=self.rotate_segments_var, width=8)
         self.rotate_segments_entry.pack(side=LEFT, padx=(6, 4))
         ttk.Button(
-            self.rotate_parallel_frame,
-            text="?",
-            width=3,
+            self.rotate_parallel_frame, text="?", width=3,
             command=lambda: messagebox.showinfo(
                 "Trechos em paralelo",
                 "O valor define quantos trechos serão criados e quantos poderão ser processados simultaneamente. "
@@ -2498,39 +2556,56 @@ class FfmpegToolsPanel:
             ),
         ).pack(side=LEFT)
         self.rotate_device_limit_var = StringVar(value="")
-        self.rotate_device_limit_label = ttk.Label(self.rotate_tab, textvariable=self.rotate_device_limit_var, foreground="#b3261e")
+        self.rotate_device_limit_label = ttk.Label(sidebar, textvariable=self.rotate_device_limit_var,
+                                                   foreground="#b3261e", wraplength=FFMPEG_SIDEBAR_WIDTH - 16)
+        self._output_buttons(output)
+        self._output_path_row(output)
         self._update_rotate_control_state()
 
     def _build_join_tab(self) -> None:
-        controls = ttk.Frame(self.join_tab)
-        controls.pack(fill=X)
-        ttk.Button(controls, text="Adicionar áudios/vídeos", command=self.add_join_inputs).pack(side=LEFT)
-        ttk.Button(controls, text="Remover", command=self.remove_join_input).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(controls, text="Subir", command=lambda: self.move_join_input(-1)).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(controls, text="Descer", command=lambda: self.move_join_input(1)).pack(side=LEFT, padx=(8, 0))
-        list_frame = ttk.Frame(self.join_tab)
-        list_frame.pack(fill=BOTH, expand=True, pady=(10, 12))
-        self.join_list = self.tk.Listbox(list_frame, height=6, activestyle="none", font=("Segoe UI", 9))
+        sidebar, workspace, output = self._tool_columns(self.join_tab)
+        ttk.Button(sidebar, text="Adicionar áudios/vídeos", command=self.add_join_inputs,
+                   style="Ffmpeg.Sidebar.TButton").pack(fill=X, pady=(0, 2))
+        self.join_sidebar = sidebar
+        self.join_list_frame = list_frame = ttk.Frame(sidebar)
+        list_frame.pack(fill=X, pady=(0, 2))
+        sidebar.bind("<Configure>", lambda _event: self._fit_join_list())
+        self.join_list = self.tk.Listbox(
+            list_frame, height=3, activestyle="none", font=("Segoe UI", 9), exportselection=False,
+            background="#ffffff", foreground="#243230", selectbackground="#dceee6",
+            selectforeground="#193d32", relief="flat", highlightthickness=1, highlightbackground="#d7e1dc",
+        )
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.join_list.yview)
         self.join_list.configure(yscrollcommand=scroll.set)
-        self.join_list.pack(side=LEFT, fill=BOTH, expand=True)
+        self.join_list.pack(side=LEFT, fill=X, expand=True)
         scroll.pack(side=RIGHT, fill=Y)
-        join_checks = ttk.Frame(self.join_tab)
-        join_checks.pack(anchor="w")
+        self.join_list.bind("<<ListboxSelect>>", lambda _event: self._select_join_preview())
+        create_tooltip(self.join_list, self.join_preview_name_var.get)
+        self.join_preview = self._create_preview_stage(workspace, "")
+        self.join_play_button = self._add_preview_speed_controls(workspace)
+        self.join_timeline = RangeTimeline(workspace, self._join_timeline_changed, select_range=False)
+        self.join_timeline.pack(fill=X, pady=(0, 2))
+        create_tooltip(self.join_timeline, "Losangos dourados indicam as transições entre os clipes.")
+        self._add_preview_time_label(workspace, self.join_current_var)
+        clip_actions = ttk.Frame(sidebar)
+        clip_actions.pack(fill=X, pady=(0, 5))
+        for column, (label, command) in enumerate((
+            ("Remover", self.remove_join_input),
+            ("Subir", lambda: self.move_join_input(-1)),
+            ("Descer", lambda: self.move_join_input(1)),
+        )):
+            clip_actions.columnconfigure(column, weight=1, uniform="clip_actions")
+            ttk.Button(clip_actions, text=label, command=command, width=1,
+                       style="Ffmpeg.Sidebar.TButton").grid(row=0, column=column, sticky="ew",
+                                                          padx=(0, 4) if column < 2 else 0)
         self.join_reencode_check = ttk.Checkbutton(
-            join_checks,
-            text="Reencode Completo",
-            variable=self.join_reencode_var,
-            command=self._on_toggle_join_reencode,
+            sidebar, text="Reencode Completo", variable=self.join_reencode_var, command=self._on_toggle_join_reencode,
         )
-        self.join_reencode_check.pack(side=LEFT)
+        self.join_reencode_check.pack(anchor="w", pady=(0, 2))
         self.join_smart_check = ttk.Checkbutton(
-            join_checks,
-            text="SmartJoin (Experimental)",
-            variable=self.join_smart_var,
-            command=self._on_toggle_join_smart,
+            sidebar, text="SmartJoin (Experimental)", variable=self.join_smart_var, command=self._on_toggle_join_smart,
         )
-        self.join_smart_check.pack(side=LEFT, padx=(18, 0))
+        self.join_smart_check.pack(anchor="w", pady=(0, 2))
         create_tooltip(
             self.join_smart_check,
             "Copia os corpos compatíveis e recodifica as emendas e os clipes incompatíveis com o perfil escolhido. "
@@ -2538,147 +2613,147 @@ class FfmpegToolsPanel:
             "as demais transições sobrepõem o tempo escolhido. Se não houver um plano seguro com ganho de cópia, "
             "a tarefa será interrompida, sem trocar automaticamente para Reencode Completo.",
         )
-        options = ttk.Frame(self.join_tab)
-        options.pack(anchor="w", pady=(8, 0))
-        ttk.Label(options, text="Transição:").grid(row=0, column=0, sticky="w")
-        self.join_transition_combo = ttk.Combobox(options, textvariable=self.join_transition_var, values=self.TRANSITIONS, state="readonly", width=15)
-        self.join_transition_combo.grid(row=0, column=1, padx=(6, 16))
-        ttk.Label(options, text="Tempo (s):").grid(row=0, column=2, sticky="w")
-        self.join_seconds_entry = ttk.Entry(options, textvariable=self.join_seconds_var, width=7)
-        self.join_seconds_entry.grid(row=0, column=3, padx=(6, 0))
-        advanced_row = ttk.Frame(self.join_tab)
-        advanced_row.pack(fill=X, pady=(8, 0))
+        options = ttk.Frame(sidebar)
+        options.pack(fill=X, pady=(0, 2))
+        ttk.Label(options, text="Transição:", style="Muted.TLabel", width=9).pack(side=LEFT)
+        self.join_transition_combo = ttk.Combobox(options, textvariable=self.join_transition_var,
+                                                 values=self.TRANSITIONS, state="readonly", width=20)
+        self.join_transition_combo.pack(side=LEFT, fill=X, expand=True)
+        seconds = ttk.Frame(sidebar)
+        seconds.pack(fill=X, pady=(0, 4))
+        ttk.Label(seconds, text="Tempo (s):", style="Muted.TLabel").pack(side=LEFT)
+        self.join_seconds_entry = ttk.Entry(seconds, textvariable=self.join_seconds_var, width=8)
+        self.join_seconds_entry.pack(side=RIGHT)
         self.join_advanced_check = ttk.Checkbutton(
-            advanced_row, text="Avançado", variable=self.join_advanced_var,
-            command=self._update_join_controls,
+            sidebar, text="Avançado", variable=self.join_advanced_var, command=self._update_join_controls,
         )
-        self.join_advanced_check.pack(side=LEFT)
-        self._output_buttons(advanced_row)
-        self.join_policies_frame = ttk.Frame(self.join_tab)
-        self.join_policies_frame.pack(anchor="w")
+        self.join_advanced_check.pack(anchor="w")
+        self.join_policies_frame = ttk.Frame(sidebar)
+        self.join_policies_frame.pack(fill=X)
         self.join_profile_row = ttk.Frame(self.join_policies_frame)
-        ttk.Label(self.join_profile_row, text="Perfil de saída:").pack(side=LEFT)
+        ttk.Label(self.join_profile_row, text="Perfil:", style="Muted.TLabel", width=7).pack(side=LEFT)
         self.join_profile_combo = ttk.Combobox(
-            self.join_profile_row,
-            textvariable=self.join_profile_var,
+            self.join_profile_row, textvariable=self.join_profile_var,
             values=("Automático (preservar mais vídeo)", "Primeiro clipe", "Maior resolução", "Menor resolução (sem upscale)"),
-            state="readonly",
-            width=34,
+            state="readonly", width=20,
         )
-        self.join_profile_combo.pack(side=LEFT, padx=(6, 0))
+        self.join_profile_combo.pack(side=LEFT, fill=X, expand=True)
         self.join_stream_row = ttk.Frame(self.join_policies_frame)
-        ttk.Label(self.join_stream_row, text="Faixas:").pack(side=LEFT)
+        ttk.Label(self.join_stream_row, text="Faixas:", style="Muted.TLabel", width=7).pack(side=LEFT)
         self.join_stream_policy_combo = ttk.Combobox(
-            self.join_stream_row,
-            textvariable=self.join_stream_policy_var,
-            values=("Primeira faixa (MP4)", "Todas as faixas (MKV, sem transição)"),
-            state="readonly",
-            width=34,
+            self.join_stream_row, textvariable=self.join_stream_policy_var,
+            values=("Primeira faixa (MP4)", "Todas as faixas (MKV, sem transição)"), state="readonly", width=20,
         )
-        self.join_stream_policy_combo.pack(side=LEFT, padx=(6, 0))
+        self.join_stream_policy_combo.pack(side=LEFT, fill=X, expand=True)
         self.join_stream_policy_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_join_controls())
         self.join_audio_row = ttk.Frame(self.join_policies_frame)
-        ttk.Label(self.join_audio_row, text="Áudio:").pack(side=LEFT)
+        ttk.Label(self.join_audio_row, text="Áudio:", style="Muted.TLabel", width=7).pack(side=LEFT)
         self.join_audio_policy_combo = ttk.Combobox(
-            self.join_audio_row,
-            textvariable=self.join_audio_policy_var,
-            values=("Preservar áudio e preencher silêncio", "Gerar saída sem áudio"),
-            state="readonly",
-            width=32,
+            self.join_audio_row, textvariable=self.join_audio_policy_var,
+            values=("Preservar áudio e preencher silêncio", "Gerar saída sem áudio"), state="readonly", width=20,
         )
-        self.join_audio_policy_combo.pack(side=LEFT, padx=(6, 0))
+        self.join_audio_policy_combo.pack(side=LEFT, fill=X, expand=True)
         self.join_audio_policy_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_join_controls())
-        self._output_path_row(self.join_tab)
+        for combo, variable in (
+            (self.join_profile_combo, self.join_profile_var),
+            (self.join_stream_policy_combo, self.join_stream_policy_var),
+            (self.join_audio_policy_combo, self.join_audio_policy_var),
+        ):
+            create_tooltip(combo, variable.get)
+        self._output_buttons(output)
+        self._output_path_row(output)
         self._update_join_controls()
 
     def _build_insert_tab(self) -> None:
-        select_row = ttk.Frame(self.insert_tab)
-        select_row.pack(anchor="w", pady=(0, 6))
-        self.insert_main_button = ttk.Button(select_row, text="+ Áudio principal", command=self.select_insert_main_input)
-        self.insert_main_button.pack(side=LEFT)
-        self.insert_secondary_button = ttk.Button(select_row, text="+ Inserir áudio", command=self.select_insert_secondary_input, state="disabled")
-        self.insert_secondary_button.pack(side=LEFT, padx=(10, 0))
-        names = ttk.Frame(self.insert_tab)
-        names.pack(fill=X, pady=(0, 8))
-        ttk.Label(names, textvariable=self.insert_main_var, style="Muted.TLabel", wraplength=780).pack(anchor="w")
-        self.insert_secondary_label = ttk.Label(names, textvariable=self.insert_secondary_var, style="Muted.TLabel", wraplength=780)
-        self.insert_secondary_label.pack(anchor="w", pady=(2, 0))
-
-        self.insert_play_button = self._add_preview_speed_controls(self.insert_tab)
-        self.insert_timeline = InsertAudioTimeline(
-            self.insert_tab,
-            self._insert_timeline_changed,
-            self._insert_position_changed,
+        sidebar, workspace, output = self._tool_columns(self.insert_tab)
+        self.insert_main_button = ttk.Button(sidebar, text="+ Áudio principal", command=self.select_insert_main_input)
+        self.insert_main_button.pack(fill=X)
+        main_name = ttk.Label(sidebar, textvariable=self.insert_main_var, style="Muted.TLabel", width=1)
+        main_name.pack(fill=X, pady=(6, 12))
+        create_tooltip(main_name, self.insert_main_var.get)
+        self.insert_secondary_button = ttk.Button(
+            sidebar, text="+ Inserir áudio", command=self.select_insert_secondary_input, state="disabled",
         )
-        self.insert_timeline.pack(fill=X, pady=(2, 4))
-        self._add_preview_time_label(self.insert_tab, self.insert_current_var)
-
-        time_row = ttk.Frame(self.insert_tab)
-        time_row.pack(fill=X, pady=(0, 8))
-        ttk.Label(time_row, text="Ponto de inserção no áudio principal:").pack(side=LEFT)
+        self.insert_secondary_button.pack(fill=X)
+        self.insert_secondary_label = ttk.Label(sidebar, textvariable=self.insert_secondary_var, style="Muted.TLabel", width=1)
+        self.insert_secondary_label.pack(fill=X, pady=(6, 16))
+        create_tooltip(self.insert_secondary_label, self.insert_secondary_var.get)
+        self.insert_timeline = InsertAudioTimeline(
+            workspace, self._insert_timeline_changed, self._insert_position_changed,
+        )
+        self.insert_timeline.pack(fill=BOTH, expand=True, pady=(0, 8))
+        self.insert_play_button = self._add_preview_speed_controls(workspace)
+        self._add_preview_time_label(workspace, self.insert_current_var)
+        time_row = self._option_row(sidebar, "Ponto de inserção no principal")
         self.insert_time_entry = ttk.Entry(time_row, textvariable=self.insert_time_var, width=14)
-        self.insert_time_entry.pack(side=LEFT, padx=(8, 0))
+        self.insert_time_entry.pack(fill=X)
         self.insert_time_entry.bind("<FocusOut>", lambda _event: self._apply_insert_time())
         self.insert_time_entry.bind("<Return>", lambda _event: self._apply_insert_time())
-        self._output_buttons(time_row)
-        self._output_path_row(self.insert_tab)
-
-        self.insert_options_frame = ttk.Frame(self.insert_tab)
-        self.insert_options_frame.pack(anchor="w", pady=(4, 0))
-        transition_row = ttk.Frame(self.insert_options_frame)
-        transition_row.pack(anchor="w")
-        ttk.Label(transition_row, text="Transição:").pack(side=LEFT)
-        self.insert_transition_combo = ttk.Combobox(
-            transition_row,
-            textvariable=self.insert_transition_var,
-            values=self.insert_transition_labels(True),
-            state="disabled",
-            width=30,
-        )
-        self.insert_transition_combo.pack(side=LEFT, padx=(6, 12))
-        self.insert_transition_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_insert_controls())
-        ttk.Label(transition_row, text="Tempo (s):").pack(side=LEFT)
-        self.insert_seconds_entry = ttk.Entry(transition_row, textvariable=self.insert_seconds_var, width=7, state="disabled")
-        self.insert_seconds_entry.pack(side=LEFT, padx=(6, 0))
+        self.insert_options_frame = ttk.Frame(sidebar)
         checks = ttk.Frame(self.insert_options_frame)
-        checks.pack(anchor="w", pady=(8, 0))
+        checks.pack(fill=X, pady=(2, 12))
         self.insert_reencode_check = ttk.Checkbutton(
-            checks,
-            text="Reencode Completo",
-            variable=self.insert_reencode_var,
-            command=self._on_toggle_insert_reencode,
+            checks, text="Reencode Completo", variable=self.insert_reencode_var, command=self._on_toggle_insert_reencode,
         )
-        self.insert_reencode_check.pack(side=LEFT)
+        self.insert_reencode_check.pack(anchor="w", pady=(0, 4))
         self.insert_smart_check = ttk.Checkbutton(
-            checks,
-            text="Smart Insert",
-            variable=self.insert_smart_var,
-            command=self._on_toggle_insert_smart,
+            checks, text="Smart Insert", variable=self.insert_smart_var, command=self._on_toggle_insert_smart,
         )
-        self.insert_smart_check.pack(side=LEFT, padx=(18, 0))
+        self.insert_smart_check.pack(anchor="w")
+        transition_row = self._option_row(self.insert_options_frame, "Transição")
+        self.insert_transition_combo = ttk.Combobox(
+            transition_row, textvariable=self.insert_transition_var,
+            values=self.insert_transition_labels(True), state="disabled", width=20,
+        )
+        self.insert_transition_combo.pack(fill=X)
+        self.insert_transition_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_insert_controls())
+        create_tooltip(self.insert_transition_combo, self.insert_transition_var.get)
+        seconds = ttk.Frame(self.insert_options_frame)
+        seconds.pack(fill=X, pady=(0, 8))
+        ttk.Label(seconds, text="Tempo (s):", style="Muted.TLabel").pack(side=LEFT)
+        self.insert_seconds_entry = ttk.Entry(seconds, textvariable=self.insert_seconds_var, width=8, state="disabled")
+        self.insert_seconds_entry.pack(side=RIGHT)
         self.insert_processing_hint_var = StringVar(master=self.root, value="")
-        ttk.Label(self.insert_options_frame, textvariable=self.insert_processing_hint_var,
-                  style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(8, 0))
         ttk.Label(
-            self.insert_options_frame,
-            text="Sem reencodar, o ponto pode variar até o frame/pacote disponível e transições não são aplicadas. Quando uma transição está ativa, a prévia usa o mesmo filtro da saída.",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(8, 0))
-        self.insert_options_frame.pack_forget()
+            self.insert_options_frame, textvariable=self.insert_processing_hint_var,
+            style="Muted.TLabel", wraplength=FFMPEG_SIDEBAR_WIDTH - 16,
+        ).pack(fill=X, pady=(4, 0))
+        create_tooltip(
+            self.insert_reencode_check,
+            "Sem reencodar, o ponto pode variar até o frame/pacote disponível e transições não são aplicadas. "
+            "Quando uma transição está ativa, a prévia usa o mesmo filtro da saída.",
+        )
+        self._output_buttons(output)
+        self._output_path_row(output)
 
     def _build_clean_tab(self) -> None:
-        self._file_row(self.clean_tab, self.clean_input_var, self.select_clean_input)
-        row = ttk.Frame(self.clean_tab)
-        row.pack(fill=X)
-        ttk.Label(row, text="Filtro:").pack(side=LEFT)
-        ttk.Combobox(row, textvariable=self.clean_mode_var, values=("equilibrado", "forte"), state="readonly", width=15).pack(side=LEFT, padx=(6, 0))
-        # F9: a saída SEMPRE preserva a taxa e os canais da fonte — limpar ruído
-        # não deve reduzir canais nem taxa de amostragem (decisão do usuário).
-        ttk.Label(row, text="Saída: WAV PCM com a taxa e os canais da fonte").pack(side=LEFT, padx=(18, 0))
-        self._output_buttons(row)
-        self._output_path_row(self.clean_tab)
+        sidebar, workspace, output = self._tool_columns(self.clean_tab)
+        self._file_row(sidebar, self.clean_input_var, self.select_clean_input)
+        self.clean_preview = self._create_preview_stage(workspace, "")
+        self.clean_play_button = self._add_preview_speed_controls(workspace)
+        self.clean_timeline = RangeTimeline(workspace, self._clean_timeline_changed, select_range=False)
+        self.clean_timeline.pack(fill=X, pady=(0, 4))
+        self._add_preview_time_label(workspace, self.clean_current_var)
+        row = self._option_row(sidebar, "Filtro de limpeza")
+        ttk.Combobox(row, textvariable=self.clean_mode_var, values=("equilibrado", "forte"),
+                     state="readonly", width=20).pack(fill=X)
+        # A limpeza preserva a taxa e os canais da fonte.
+        ttk.Label(
+            sidebar, text="Saída: WAV PCM\nTaxa e canais preservados da fonte.",
+            style="Muted.TLabel", wraplength=FFMPEG_SIDEBAR_WIDTH - 16, justify="left",
+        ).pack(fill=X, pady=(6, 0))
+        self._output_buttons(output)
+        self._output_path_row(output)
+
+    PREVIEW_TOOL_KEYS = {
+        "Cortar": "cut", "Extrair áudio": "extract", "Girar vídeo": "rotate",
+        "Juntar áudios/vídeos": "join", "Inserir áudio": "insert_audio", "Limpar áudio": "clean",
+    }
 
     def _select_ffmpeg_tool(self, selected: str) -> None:
+        if selected != self.active_tool_var.get():
+            self._stop_preview()
+        self.preview_context = self.tool_preview_contexts.get(self.PREVIEW_TOOL_KEYS[selected])
         active_bg = "#ffffff"
         inactive_bg = "#d6d2c7"
         active_fg = "#10201f"
@@ -2702,7 +2777,7 @@ class FfmpegToolsPanel:
         if active is None:
             return
         for canvas, parent in list(self.preview_parents.items()):
-            if parent is active:
+            if parent.winfo_toplevel() is active.winfo_toplevel() and str(parent).startswith(str(active) + "."):
                 self.root.after_idle(lambda target=canvas: self._fit_preview_stage(target))
 
     @staticmethod
@@ -3189,6 +3264,32 @@ class FfmpegToolsPanel:
                     self.join_transition_var.set("Fundir")
 
         self._update_join_advanced_controls(known_profiles, is_audio_only)
+        self._update_join_transition_markers()
+        if hasattr(self, "join_sidebar"):
+            self.root.after_idle(self._fit_join_list)
+
+    def _update_join_transition_markers(self) -> None:
+        if not hasattr(self, "join_timeline"):
+            return
+        try:
+            seconds = float(self.join_seconds_var.get().replace(",", "."))
+        except ValueError:
+            seconds = 0.0
+        label = self.join_transition_var.get()
+        enabled = (self.join_reencode_var.get() or self.join_smart_var.get()) and (
+            math.isfinite(seconds) and seconds > 0.001 and label != "Sem transição"
+        )
+        boundaries = []
+        if enabled:
+            elapsed = 0.0
+            for path in self.join_inputs[:-1]:
+                media = self.join_media_profiles.get(path)
+                if media is None:
+                    boundaries.clear()
+                    break
+                elapsed += media.duration
+                boundaries.append(elapsed)
+        self.join_timeline.set_transition_points(tuple(boundaries), label if boundaries else "")
 
     def _update_join_advanced_controls(self, profiles: list[MediaProfile], is_audio_only: bool) -> None:
         if not hasattr(self, "join_policies_frame"):
@@ -3217,7 +3318,22 @@ class FfmpegToolsPanel:
             row.pack_forget()
         for row, visible in rows:
             if visible:
-                row.pack(anchor="w", pady=(6, 0))
+                row.pack(fill=X, pady=(6, 0))
+
+    def _fit_join_list(self) -> None:
+        """A lista cresce na folga da coluna, preservando as opções e a saída."""
+        from tkinter import font
+        sidebar = self.join_sidebar
+        reserved = 0
+        for widget in sidebar.winfo_children():
+            if widget is self.join_list_frame or not widget.winfo_manager():
+                continue
+            reserved += widget.winfo_reqheight() + vertical_padding_total(widget.pack_info().get("pady", 0))
+        line_height = max(1, font.Font(font=self.join_list.cget("font")).metrics("linespace"))
+        available = sidebar.winfo_height() - reserved - 10
+        rows = max(2, min(8, available // line_height))
+        if int(self.join_list.cget("height")) != rows:
+            self.join_list.configure(height=rows)
 
     def _on_toggle_insert_reencode(self) -> None:
         if self.insert_reencode_var.get():
@@ -3276,7 +3392,7 @@ class FfmpegToolsPanel:
     def _show_insert_options(self, visible: bool) -> None:
         if visible:
             if not self.insert_options_frame.winfo_ismapped():
-                self.insert_options_frame.pack(anchor="w", pady=(4, 0))
+                self.insert_options_frame.pack(fill=X, pady=(4, 0))
         else:
             self.insert_options_frame.pack_forget()
         self._update_insert_controls()
@@ -3287,36 +3403,189 @@ class FfmpegToolsPanel:
         total, millis = divmod(milliseconds, 1000)
         return f"{total // 60}:{total % 60:02d}.{millis:03d}"
 
-    def _activate_preview(self, source: Path, canvas: Canvas, timeline: RangeTimeline, current_var: StringVar, button, tool: str) -> None:
+    def _request_waveform(self, target, source: Path, duration: float) -> None:
+        """Cache por arquivo; a extração nunca roda no thread do Tk."""
+        self.waveform_requests.pop(target, None)
+        try:
+            stat = source.stat()
+        except OSError:
+            self._apply_waveform(target, None)
+            return
+        key = (str(source), stat.st_mtime_ns, stat.st_size, duration)
+        self.waveform_requests[target] = key
+        if key in self.waveform_cache:
+            self._apply_waveform(target, self.waveform_cache[key])
+        elif key not in self.waveform_pending:
+            self.waveform_pending.add(key)
+            self.waveform_executor.submit(self._waveform_worker, key, source, duration)
+
+    def _waveform_worker(self, key: tuple, source: Path, duration: float) -> None:
+        process = None
+        levels = None
+        try:
+            if self.waveform_stop_event.is_set():
+                return
+            command = [
+                str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-i", str(source),
+                "-map", "0:a:0", "-vn", "-ac", "2", "-ar", str(WAVEFORM_SAMPLE_RATE),
+                "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1",
+            ]
+            self._record_ffmpeg_command(command, probe=True)
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            with self.waveform_lock:
+                self.waveform_processes.add(process)
+            samples_per_bin = max(1, math.ceil(max(0.0, duration) * WAVEFORM_SAMPLE_RATE / WAVEFORM_POINTS))
+            peaks = []
+            started = time.monotonic()
+            while not self.waveform_stop_event.is_set():
+                raw = process.stdout.read(samples_per_bin * 4)
+                if not raw:
+                    break
+                samples = array("h")
+                samples.frombytes(raw[:len(raw) - len(raw) % 2])
+                if samples:
+                    peaks.append(max(abs(min(samples)), abs(max(samples))) / 32768.0)
+                if time.monotonic() - started > 90:
+                    raise TimeoutError("Tempo excedido ao carregar waveform")
+            if not self.waveform_stop_event.is_set() and process.wait(timeout=5) == 0:
+                levels = tuple(peaks)
+        except Exception:
+            levels = None
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                if process.stdout:
+                    process.stdout.close()
+                with self.waveform_lock:
+                    self.waveform_processes.discard(process)
+            self.waveform_queue.put((key, levels))
+
+    def _apply_pending_waveforms(self) -> None:
+        try:
+            while True:
+                key, levels = self.waveform_queue.get_nowait()
+                self.waveform_pending.discard(key)
+                if levels is not None:
+                    self.waveform_cache[key] = levels
+                    while len(self.waveform_cache) > 8:
+                        self.waveform_cache.pop(next(iter(self.waveform_cache)))
+                for target, requested in list(self.waveform_requests.items()):
+                    if requested == key:
+                        self._apply_waveform(target, levels)
+        except queue.Empty:
+            pass
+
+    def _apply_waveform(self, target, levels: tuple[float, ...] | None) -> None:
+        if target == "insert_main":
+            self.insert_timeline.main_levels = levels or ()
+            self.insert_timeline.draw()
+        elif target == "insert_secondary":
+            self.insert_timeline.inserted_levels = levels or ()
+            self.insert_timeline.draw()
+        elif isinstance(target, tuple) and target[0] == "join":
+            data = self.preview_waveforms.get(self.join_preview)
+            if data and "segments" in data and target[1] < len(data["segments"]):
+                data["segments"][target[1]]["levels"] = levels or ()
+                self._draw_audio_waveform(self.join_preview)
+        elif target in self.preview_waveforms:
+            self.preview_waveforms[target]["levels"] = levels or ()
+            self._draw_audio_waveform(target)
+
+    def _draw_audio_waveform(self, canvas: Canvas) -> None:
+        data = self.preview_waveforms.get(canvas)
+        if not data:
+            return
+        view = self.preview_viewports[canvas]
+        width, height = max(1, view.stage_width), max(1, view.stage_height)
+        left, right, center = 18, max(19, width - 18), height / 2
+        canvas.delete("all")
+        canvas.configure(background="#ffffff", cursor="hand2")
+        canvas.create_line(left, center, right, center, fill="#dce7e2")
+        levels = data["levels"]
+        segments = data.get("segments")
+        if segments:
+            elapsed = 0.0
+            for segment in segments:
+                segment_left = left + (right - left) * elapsed / max(0.01, data["duration"])
+                elapsed += segment["duration"]
+                segment_right = left + (right - left) * elapsed / max(0.01, data["duration"])
+                count = max(1, int((segment_right - segment_left) / 4))
+                for index, peak in enumerate(waveform_amplitudes(segment["levels"] or (), 0, 1, count)):
+                    x = segment_left + (segment_right - segment_left) * (index + 0.5) / count
+                    amplitude = max(1.0, (height - 48) * 0.43 * math.sqrt(peak))
+                    canvas.create_line(x, center - amplitude, x, center + amplitude, fill="#5edaf2", width=2)
+                if elapsed < data["duration"]:
+                    canvas.create_line(segment_right, 24, segment_right, height - 24, fill="#dce7e2")
+        elif levels:
+            count = max(2, int((right - left) / 4))
+            for index, peak in enumerate(waveform_amplitudes(levels, 0, 1, count)):
+                x = left + (right - left) * (index + 0.5) / count
+                amplitude = max(1.0, (height - 48) * 0.43 * math.sqrt(peak))
+                canvas.create_line(x, center - amplitude, x, center + amplitude, fill="#5edaf2", width=2)
+        else:
+            canvas.create_text(
+                width / 2, center, text="Carregando waveform…" if levels is None else "Waveform indisponível",
+                fill="#667371", font=("Segoe UI", 10),
+            )
+        context = next((item for item in self.tool_preview_contexts.values() if item.get("canvas") is canvas), None)
+        if context:
+            self._update_waveform_position(context)
+
+    def _update_waveform_position(self, context: dict) -> None:
+        canvas = context.get("canvas")
+        data = getattr(self, "preview_waveforms", {}).get(canvas)
+        if not data or data["duration"] <= 0:
+            return
+        width = self.preview_viewports[canvas].stage_width
+        height = self.preview_viewports[canvas].stage_height
+        x = 18 + max(1, width - 36) * context["timeline"].position / data["duration"]
+        canvas.delete("waveform_position")
+        canvas.create_line(x, 16, x, height - 16, fill="#dca42a", width=2, tags="waveform_position")
+        canvas.create_polygon(x, 16, x - 5, 8, x + 5, 8, fill="#dca42a", outline="", tags="waveform_position")
+
+    def _seek_waveform(self, canvas: Canvas, x: float) -> str:
+        context = self.preview_context
+        if not context or context.get("canvas") is not canvas:
+            return "break"
+        data = self.preview_waveforms[canvas]
+        width = self.preview_viewports[canvas].stage_width
+        seconds = max(0, min(1, (x - 18) / max(1, width - 36))) * data["duration"]
+        context["timeline"].set_position(seconds)
+        self._timeline_changed("position", context["timeline"].position, context["current_var"])
+        return "break"
+
+    def _activate_preview(self, source: Path, canvas: Canvas, timeline: RangeTimeline,
+                          current_var: StringVar, button, tool: str, media: MediaProfile | None = None) -> None:
         self._stop_preview()
-        media = self._probe_media(source)
+        media = media or self._probe_media(source)
         duration = media.duration
         timeline.set_media(duration)
         current_var.set(self._clock(0))
+        audio_only = not media.has_video or tool == "clean"
         self.preview_context = {
-            "source": source,
-            "canvas": canvas,
-            "timeline": timeline,
-            "current_var": current_var,
-            "button": button,
-            "duration": duration,
-            "tool": tool,
-            "audio_only": not media.has_video,
-            "has_video": media.has_video,
-            "has_audio": media.has_audio,
+            "source": source, "canvas": canvas, "timeline": timeline, "current_var": current_var,
+            "button": button, "duration": duration, "tool": tool, "audio_only": audio_only,
+            "has_video": not audio_only, "has_audio": media.has_audio,
         }
-        display_width, display_height = media.width, media.height
+        self.tool_preview_contexts[tool] = self.preview_context
+        display_width, display_height = self._cut_display_size(media)
         if tool == "rotate":
             self.rotate_media_profile = media
             display_width, display_height = self._rotated_media_size(media, self._rotate_preview_filter())
         elif tool == "cut":
             self.cut_media_profile = media
-            display_width, display_height = self._cut_display_size(media)
-        self._reset_preview_view(canvas, display_width, display_height)
-        if not self.preview_context["audio_only"]:
-            self._show_video_thumbnail(canvas, source, 0.0, self._rotate_preview_filter() if tool == "rotate" else "")
+        self._preview_show_hint(canvas, "Carregando waveform…" if audio_only else "Carregando prévia…")
+        if audio_only:
+            self.preview_waveforms[canvas] = {"source": source, "duration": duration, "levels": None}
+            self._reset_preview_view(canvas, 0, 0)
+            self._request_waveform(canvas, source, duration)
         else:
-            self._preview_show_hint(canvas, "Prévia de áudio")
+            self._reset_preview_view(canvas, display_width, display_height)
+            self._show_video_thumbnail(canvas, source, 0.0, self._rotate_preview_filter() if tool == "rotate" else "")
 
     @staticmethod
     def _rotated_media_size(media: MediaProfile, filters: str) -> tuple[int, int]:
@@ -3367,6 +3636,8 @@ class FfmpegToolsPanel:
         self.preview_player.close()
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
+        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+        self.audio_preview_process = None
         self.frame_preview_stop_event.set()
         self._terminate_preview_process(self.frame_preview_process)
         self.frame_preview_process = None
@@ -3384,6 +3655,8 @@ class FfmpegToolsPanel:
             self.preview_player.pause()
             self._terminate_preview_process(self.external_preview_process)
             self.external_preview_process = None
+            self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+            self.audio_preview_process = None
             self.frame_preview_stop_event.set()
             self._terminate_preview_process(self.frame_preview_process)
             self.frame_preview_process = None
@@ -3397,10 +3670,12 @@ class FfmpegToolsPanel:
             try:
                 self._start_canvas_preview(context, position)
             except Exception as exc:
+                self._stop_preview()
                 messagebox.showerror("sig", f"Não foi possível reproduzir o áudio:\n{exc}")
             return
         use_canvas = (
             self.preview_speed != 1.0
+            or context["tool"] == "join"
             or (context["tool"] == "rotate" and bool(self._rotate_preview_filter()))
             or not self._preview_view_is_fitted(context["canvas"])
         )
@@ -3408,6 +3683,7 @@ class FfmpegToolsPanel:
             try:
                 self._start_canvas_preview(context, position)
             except Exception as exc:
+                self._stop_preview()
                 messagebox.showerror("sig", f"Não foi possível reproduzir a mídia:\n{exc}")
             return
         if self.preview_player.play(position):
@@ -3429,6 +3705,8 @@ class FfmpegToolsPanel:
                 self.preview_after_id = None
             self._terminate_preview_process(self.external_preview_process)
             self.external_preview_process = None
+            self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+            self.audio_preview_process = None
             self._terminate_preview_process(self.frame_preview_process)
             self.frame_preview_process = None
             self.preview_playing = False
@@ -3446,7 +3724,7 @@ class FfmpegToolsPanel:
         O filtro aceita apenas fatores entre 0.5 e 2.0 por instância; por isso
         3x e 4x são compostos por mais de uma etapa.
         """
-        target = max(0.5, min(4.0, float(self.preview_speed)))
+        target = max(PREVIEW_SPEED_VALUES[0], min(PREVIEW_SPEED_VALUES[-1], float(self.preview_speed)))
         factors: list[float] = []
         while target > 2.0:
             factors.append(2.0)
@@ -3630,6 +3908,8 @@ class FfmpegToolsPanel:
         generation = self.preview_generation
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
+        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+        self.audio_preview_process = None
         self._terminate_preview_process(self.frame_preview_process)
         self.frame_preview_process = None
         if self._start_insert_filtered_preview(context, composite_position):
@@ -3720,6 +4000,8 @@ class FfmpegToolsPanel:
     def _finish_insert_preview(self, context: dict) -> None:
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
+        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+        self.audio_preview_process = None
         self._terminate_preview_process(self.frame_preview_process)
         self.frame_preview_process = None
         self.preview_playing = False
@@ -3792,13 +4074,17 @@ class FfmpegToolsPanel:
             self.frame_preview_stop_event.clear()
             self.external_preview_started_at = time.monotonic()
             self.external_preview_offset = offset
-            self.external_preview_process = subprocess.Popen(
-                [
-                    str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
-                    "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)), "-af", self._preview_atempo_filter(), str(context["source"]),
-                ],
-                creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
-            )
+            if context["tool"] == "join":
+                self._start_join_audio_preview(context, offset)
+            else:
+                self.external_preview_process = subprocess.Popen(
+                    [
+                        str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
+                        "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)),
+                        "-af", self._preview_atempo_filter(), str(context["source"]),
+                    ],
+                    creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+                )
             self.preview_playing = True
             context["button"].configure(text="||")
             self.status_var.set("Reproduzindo áudio dentro da ferramenta.")
@@ -3817,6 +4103,8 @@ class FfmpegToolsPanel:
             str(self._ffmpeg()), "-hide_banner", "-loglevel", "error", "-ss", self._fmt_seconds(offset),
             "-i", str(context["source"]), "-t", self._fmt_seconds(play_duration), "-an", "-vf", ",".join(filters), "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
         ]
+        if context["tool"] == "join":
+            video_command = self._join_preview_arguments(context, offset, video=True, width=width, height=height, fps=fps)
         self._record_ffmpeg_command(video_command, force=True)
         self.frame_preview_process = subprocess.Popen(
             video_command,
@@ -3828,26 +4116,32 @@ class FfmpegToolsPanel:
             audio_command = [
                 str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp", "-ss", self._fmt_seconds(offset), "-t", self._fmt_seconds(self._audio_preview_media_duration(timeline.end, offset)), "-af", self._preview_atempo_filter(), str(context["source"]),
             ]
-            self.external_preview_process = subprocess.Popen(
-                audio_command,
-                creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
-            )
+            if context["tool"] == "join":
+                self._start_join_audio_preview(context, offset)
+            else:
+                self.external_preview_process = subprocess.Popen(
+                    audio_command,
+                    creationflags=flags | (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
+                )
         else:
             self.external_preview_process = None
         self.preview_playing = True
         context["button"].configure(text="||")
         self.status_var.set("Prévia reproduzida dentro da ferramenta.")
 
+        frame_process = self.frame_preview_process
         def render_frames():
-            process = self.frame_preview_process
+            process = frame_process
             frame_size = width * height * 3
             index = 0
-            started_at = time.monotonic()
+            started_at = None
             try:
                 while process and process.stdout and not self.frame_preview_stop_event.is_set():
                     raw = process.stdout.read(frame_size)
                     if len(raw) != frame_size:
                         break
+                    if started_at is None:
+                        started_at = time.monotonic()
                     target_time = started_at + index / fps
                     remaining = target_time - time.monotonic()
                     if remaining > 0 and self.frame_preview_stop_event.wait(remaining):
@@ -3869,6 +4163,10 @@ class FfmpegToolsPanel:
                         except queue.Full:
                             pass
             finally:
+                if started_at is not None and index:
+                    remaining = started_at + index / fps - time.monotonic()
+                    if remaining > 0:
+                        self.frame_preview_stop_event.wait(remaining)
                 while True:
                     try:
                         self.preview_frame_queue.put_nowait((context, generation, None, 0.0, True))
@@ -3895,10 +4193,13 @@ class FfmpegToolsPanel:
         position = min(timeline.end, self.external_preview_offset + elapsed)
         timeline.set_position(position)
         context["current_var"].set(self._clock(position))
+        self._update_waveform_position(context)
         process = self.external_preview_process
         if not process or process.poll() is not None or position >= timeline.end - 0.03:
             self._terminate_preview_process(process)
             self.external_preview_process = None
+            self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+            self.audio_preview_process = None
             self.preview_playing = False
             context["button"].configure(text=">")
             return
@@ -3915,6 +4216,7 @@ class FfmpegToolsPanel:
         except queue.Empty:
             pass
         self._apply_pending_stills()
+        self._apply_pending_waveforms()
         try:
             self.root.after(33, self._poll_preview_frames)
         except Exception:
@@ -3936,6 +4238,11 @@ class FfmpegToolsPanel:
         self.frame_preview_process = None
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
+        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+        self.audio_preview_process = None
+        if context["tool"] == "join":
+            context["timeline"].set_position(context["timeline"].end)
+            context["current_var"].set(self._clock(context["timeline"].end))
         context["button"].configure(text=">")
 
     def _seek_preview(self, seconds: float, current_var: StringVar, restart_playback: bool = False) -> None:
@@ -3953,6 +4260,7 @@ class FfmpegToolsPanel:
             current_var.set(self._clock(seconds))
             return
         timeline = context["timeline"]
+        self._update_waveform_position(context)
         if target == "position":
             is_canvas = bool(self.frame_preview_process or self.external_preview_process)
             if self.preview_playing and (is_canvas or not self.preview_player.opened):
@@ -3971,6 +4279,10 @@ class FfmpegToolsPanel:
         timeline = context["timeline"]
         timeline.set_position(seconds)
         context["current_var"].set(self._clock(seconds))
+        if seconds >= timeline.end:
+            self._stop_preview()
+            self._update_waveform_position(context)
+            return
         is_canvas = bool(self.frame_preview_process or self.external_preview_process)
         if self.preview_player.opened and not is_canvas:
             self.preview_player.pause()
@@ -3982,6 +4294,8 @@ class FfmpegToolsPanel:
         self.frame_preview_stop_event.set()
         self._terminate_preview_process(self.external_preview_process)
         self.external_preview_process = None
+        self._terminate_preview_process(getattr(self, "audio_preview_process", None))
+        self.audio_preview_process = None
         self._terminate_preview_process(self.frame_preview_process)
         self.frame_preview_process = None
         self.preview_playing = False
@@ -4251,6 +4565,8 @@ class FfmpegToolsPanel:
                 self.extract_end_var.set(self._fmt_seconds(self.extract_timeline.duration))
             else:
                 self._stop_preview()
+                self.tool_preview_contexts.pop("extract", None)
+                self.preview_context = None
                 self.extract_timeline.set_media(0)
                 self._reset_preview_view(self.extract_preview, 0, 0)
                 self._preview_show_hint(
@@ -4273,8 +4589,15 @@ class FfmpegToolsPanel:
     def select_clean_input(self) -> None:
         selected = filedialog.askopenfilename(title="Selecionar áudio", filetypes=self._filetypes())
         if selected:
-            self.clean_input = Path(selected)
-            self.clean_input_var.set(self.clean_input.name)
+            source = Path(selected)
+            media = self._probe_media(source)
+            if not media.has_audio:
+                messagebox.showerror("sig", "O arquivo selecionado não contém uma faixa de áudio.")
+                return
+            self.clean_input = source
+            self.clean_input_var.set(source.name)
+            self._activate_preview(source, self.clean_preview, self.clean_timeline,
+                                   self.clean_current_var, self.clean_play_button, "clean", media)
 
     def select_insert_main_input(self) -> None:
         selected = filedialog.askopenfilename(
@@ -4294,7 +4617,11 @@ class FfmpegToolsPanel:
         self.insert_secondary_input = None
         self.insert_main_var.set(source.name)
         self.insert_secondary_var.set("Nenhum áudio para inserir")
+        self.insert_timeline.main_levels = ()
+        self.insert_timeline.inserted_levels = ()
+        self.waveform_requests.pop("insert_secondary", None)
         self.insert_timeline.configure_media(source.name, media.duration)
+        self._request_waveform("insert_main", source, media.duration)
         self.insert_timeline.configure(state="normal")
         self.insert_current_var.set(self._clock(0.0))
         self.insert_time_var.set(self._clock(0.0))
@@ -4319,6 +4646,8 @@ class FfmpegToolsPanel:
         insertion = self.insert_timeline.composite_to_main(self.insert_timeline.position)
         self._stop_preview()
         self.insert_secondary_input = source
+        self.insert_timeline.inserted_levels = ()
+        self._request_waveform("insert_secondary", source, media.duration)
         self.insert_secondary_var.set(f"Inserir: {source.name}")
         main_media = self._insert_probe_profile(self.insert_main_input)
         self.insert_timeline.configure_media(self.insert_main_input.name, main_media.duration, source.name, media.duration, insertion)
@@ -4345,6 +4674,7 @@ class FfmpegToolsPanel:
             "insertion": self.insert_timeline.insertion,
             "inserted_duration": self.insert_timeline.inserted_duration,
         }
+        self.tool_preview_contexts["insert_audio"] = self.preview_context
 
     def _insert_timeline_changed(self, composite_position: float) -> None:
         if not self.preview_context or self.preview_context.get("tool") != "insert_audio":
@@ -4502,19 +4832,191 @@ class FfmpegToolsPanel:
         self._refresh_join_list(other)
 
     def _refresh_join_list(self, selected_index: int | None = None) -> None:
+        selection = self.join_list.curselection()
+        if selected_index is None:
+            selected_index = selection[0] if selection else 0
         self.join_list.delete(0, END)
         for index, path in enumerate(self.join_inputs, start=1):
             self.join_list.insert(END, f"{index}. {path.name}")
-        if selected_index is not None and self.join_inputs:
+        if self.join_inputs:
+            selected_index = min(selected_index, len(self.join_inputs) - 1)
             self.join_list.selection_set(selected_index)
+            self.join_list.activate(selected_index)
+            self.join_list.see(selected_index)
+        self._rebuild_join_preview(selected_index)
         self._update_join_controls()
         self._refresh_encoder_control_state()
+
+    def _rebuild_join_preview(self, selected_index: int = 0) -> None:
+        self._stop_preview()
+        self.tool_preview_contexts.pop("join", None)
+        if not self.join_inputs:
+            self.preview_context = None
+            self.join_timeline.set_media(0)
+            self.join_current_var.set(self._clock(0))
+            self.join_preview_name_var.set("")
+            self._preview_show_hint(self.join_preview, "")
+            self.preview_still_key.pop(self.join_preview, None)
+            return
+        playlist = tuple((path, self.join_media_profiles[path]) for path in self.join_inputs)
+        duration = sum(media.duration for _path, media in playlist)
+        has_video = any(media.has_video for _path, media in playlist)
+        has_audio = any(media.has_audio for _path, media in playlist)
+        self.join_timeline.set_media(duration)
+        self.preview_context = {
+            "source": playlist[0][0], "canvas": self.join_preview, "timeline": self.join_timeline,
+            "current_var": self.join_current_var, "button": self.join_play_button, "duration": duration,
+            "tool": "join", "audio_only": not has_video, "has_video": has_video, "has_audio": has_audio,
+            "playlist": playlist,
+        }
+        self.tool_preview_contexts["join"] = self.preview_context
+        self._preview_show_hint(self.join_preview, "")
+        # Clear obsolete waveform requests before installing the new order.
+        for target in list(self.waveform_requests):
+            if isinstance(target, tuple) and target[0] == "join":
+                self.waveform_requests.pop(target)
+        if not has_video:
+            self.preview_waveforms[self.join_preview] = {
+                "duration": duration, "levels": None,
+                "segments": [{"source": path, "duration": media.duration, "levels": None} for path, media in playlist],
+            }
+            self._reset_preview_view(self.join_preview, 0, 0)
+            for index, (path, media) in enumerate(playlist):
+                self._request_waveform(("join", index), path, media.duration)
+        else:
+            media = next(media for _path, media in playlist if media.has_video)
+            self._reset_preview_view(self.join_preview, *self._cut_display_size(media))
+        seconds = sum(media.duration for _path, media in playlist[:selected_index])
+        self.join_timeline.set_position(seconds)
+        self.join_current_var.set(self._clock(seconds))
+        self._show_join_position(self.preview_context, seconds)
+
+    @staticmethod
+    def _join_preview_clips(context: dict, offset: float) -> list[tuple[Path, MediaProfile, float, float]]:
+        """Sufixo da sequência a partir do marcador, sem aplicar transições."""
+        clips = []
+        elapsed = 0.0
+        for path, media in context["playlist"]:
+            start = max(0.0, offset - elapsed)
+            remaining = media.duration - start
+            if remaining > 0.000001:
+                clips.append((path, media, start, remaining))
+            elapsed += media.duration
+        return clips
+
+    def _show_join_position(self, context: dict, seconds: float) -> None:
+        clips = self._join_preview_clips(context, seconds)
+        if not clips:
+            path, media = context["playlist"][-1]
+            local = max(0, media.duration - 0.04)
+        else:
+            path, media, local, _remaining = clips[0]
+        self.join_preview_name_var.set(path.name)
+        context["source"] = path
+        if context["audio_only"]:
+            self._draw_audio_waveform(self.join_preview)
+        elif media.has_video:
+            self._show_video_thumbnail(self.join_preview, path, local, "")
+        else:
+            self._preview_show_hint(self.join_preview, "")
+
+    def _join_preview_arguments(self, context: dict, offset: float, *, video: bool = False,
+                                width: int = 0, height: int = 0, fps: int = 15) -> list[str]:
+        """Um fluxo contínuo FFmpeg, inclusive entre arquivos de formatos diferentes."""
+        clips = self._join_preview_clips(context, offset)
+        if not clips:
+            raise RuntimeError("Não há mídia para reproduzir nesta posição.")
+        command = [str(self._ffmpeg()), "-hide_banner", "-loglevel", "error"]
+        filters = []
+        for index, (path, media, start, remaining) in enumerate(clips):
+            if start > 0:
+                command += ["-ss", self._precise_seconds(start)]
+            command += ["-i", str(path)]
+            duration = self._precise_seconds(remaining)
+            if video:
+                if media.has_video:
+                    stream = f"[{index}:v:0]setpts=PTS-STARTPTS,"
+                    stream += f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    stream += f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+                    stream += f"tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration},setpts=PTS-STARTPTS"
+                elif media.has_audio:
+                    stream = f"[{index}:a:0]showwaves=s={width}x{height}:r={fps}:mode=line:colors=0x5edaf2,"
+                    stream += f"format=yuv420p,tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration},setpts=PTS-STARTPTS"
+                else:
+                    stream = f"color=c=0xf4f7f6:s={width}x{height}:r={fps}:d={duration}"
+                filters.append(f"{stream}[v{index}]")
+            else:
+                if media.has_audio:
+                    stream = f"[{index}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    stream += f"asetpts=PTS-STARTPTS,apad,atrim=duration={duration}"
+                else:
+                    stream = f"anullsrc=r=48000:cl=stereo,atrim=duration={duration}"
+                filters.append(f"{stream}[a{index}]")
+        if video:
+            labels = "".join(f"[v{i}]" for i in range(len(clips)))
+            filters.append(f"{labels}concat=n={len(clips)}:v=1:a=0,setpts=PTS/{self.preview_speed},fps={fps}[preview]")
+            command += ["-filter_complex", ";".join(filters), "-map", "[preview]", "-an",
+                        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
+        else:
+            labels = "".join(f"[a{i}]" for i in range(len(clips)))
+            filters.append(f"{labels}concat=n={len(clips)}:v=0:a=1[preview]")
+            command += ["-filter_complex", ";".join(filters), "-map", "[preview]",
+                        "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
+        return command
+
+    def _start_join_audio_preview(self, context: dict, offset: float) -> None:
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        command = self._join_preview_arguments(context, offset)
+        self._record_ffmpeg_command(command, probe=True)
+        self.audio_preview_process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=flags,
+        )
+        try:
+            self.external_preview_process = subprocess.Popen(
+                [str(self._ffplay()), "-hide_banner", "-loglevel", "warning", "-autoexit", "-nodisp",
+                 "-af", self._preview_atempo_filter(), "pipe:0"],
+                stdin=self.audio_preview_process.stdout, creationflags=flags,
+            )
+        except Exception:
+            self._terminate_preview_process(self.audio_preview_process)
+            self.audio_preview_process = None
+            raise
+        finally:
+            if self.audio_preview_process and self.audio_preview_process.stdout:
+                self.audio_preview_process.stdout.close()
+
+    def _select_join_preview(self) -> None:
+        selection = self.join_list.curselection()
+        context = self.tool_preview_contexts.get("join")
+        if not selection or not context:
+            return
+        seconds = sum(media.duration for _path, media in context["playlist"][:selection[0]])
+        self.join_timeline.set_position(seconds)
+        self._join_timeline_changed("position", seconds)
+
+    def _join_timeline_changed(self, target: str, seconds: float) -> None:
+        context = self.preview_context
+        if not context or context.get("tool") != "join":
+            return
+        self._timeline_changed(target, seconds, self.join_current_var)
+        if not self.preview_playing:
+            self._show_join_position(context, seconds)
+
+    def _clean_timeline_changed(self, target: str, seconds: float) -> None:
+        self._timeline_changed(target, seconds, self.clean_current_var)
 
     def choose_output_dir(self) -> None:
         chosen = filedialog.askdirectory(title="Selecionar pasta de saída do FFmpeg", initialdir=str(self.output_dir))
         if chosen:
             self.output_dir = Path(chosen)
             self.output_dir_var.set(str(self.output_dir))
+            self.output_dir_chosen = True
+
+    def open_or_choose_output_dir(self) -> None:
+        if self.output_dir_chosen:
+            self.open_output_dir()
+        else:
+            self.choose_output_dir()
 
     def open_output_dir(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -4912,6 +5414,13 @@ class FfmpegToolsPanel:
     def shutdown(self) -> None:
         self.cancel()
         self._stop_preview()
+        self.waveform_stop_event.set()
+        self.waveform_executor.shutdown(wait=False, cancel_futures=True)
+        with self.waveform_lock:
+            processes = list(self.waveform_processes)
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
 
     def _ffmpeg(self) -> Path:
         path = app_base_dir() / "ffmpeg.exe"

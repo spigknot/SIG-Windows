@@ -14,7 +14,7 @@ Processamento . transcription_parsing.py, log_formatting.py, documents.py,
                 reporting.py, qualification.py, name_database.py, audio_io.py,
                 batch_errors.py, media_probe.py, diarias_protocolo.py,
                 diarias_mapa.py
-Config ........ providers.py, settings_store.py, prompt_store.py
+Config ........ providers.py, settings_store.py, prompt_store.py, diarias_profiles.py
 Persistencia .. diarias_store.py
 Dominio ....... domain_models.py
 Ambiente ...... app_env.py
@@ -52,8 +52,12 @@ Ambiente ...... app_env.py
 | `name_database.py` | Base de nomes: extracao, normalizacao, chave fonetica | UI |
 | `qualification.py` | Qualificacao de ocorrencias: parsing de JSON, labels, status | UI |
 | `diarias_protocolo.py` | Extracao dos campos dos PDFs de protocolo, talão e holerite | UI, persistencia |
-| `diarias_mapa.py` | Validação dos dados e preenchimento do modelo Excel de mapa de diária, preservando o formato `.xls` | UI, extração de PDFs |
-| `diarias_store.py` | Persistencia local do UFESP, dos valores e do PDF ativo do holerite da aba Diarias | Leitura de PDF, UI |
+| `diarias_mapa.py` | Validação dos dados e preenchimento do modelo Excel de mapa de diária, preservando fontes, fórmulas e o formato `.xlsx` | UI, extração de PDFs |
+| `diarias_workflow.py` | Nove campos obrigatórios, geração conjunta e plano de impressão (vias/ordem/primeira página da escala) | UI, persistência |
+| `pdf_printing.py` | Impressoras Windows e envio de PDFs ao GDI em processo isolado | Dados do perfil, Tkinter |
+| `diarias_store.py` | Persistencia local dos perfis/seleção de Diárias, UFESP, pasta de saída e valores/PDF ativo do holerite | Leitura de PDF, UI |
+| `diarias_profiles.py` | Campos e validação dos perfis de Diárias, nomes e relação classe/padrão | UI, persistência |
+| `diarias_profiles_panel.py` | Formulário, seletor e tabela dos perfis em Configurações → Policial → Diárias | Regras de documento, persistência em disco |
 | `ui_widgets.py` | Widgets reutilizaveis (`create_tooltip`, `PreviewIconButton`) | Regra de negocio |
 | `ffmpeg_tools_panel.py` | Aba FFmpeg: conversao, corte, juncao, aceleracao, player, linha do tempo | STT/transcricao |
 | `ffmpeg_recovery.py` | Checkpoints locais, integridade de entradas e reutilização das etapas FFmpeg concluídas | UI, execução de FFmpeg |

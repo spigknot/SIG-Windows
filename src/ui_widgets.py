@@ -10,8 +10,9 @@ atracao magnetica. Mantido igual para as duas aplicacoes terem o mesmo visual.
 from tkinter import Canvas, Toplevel, ttk
 
 import math
+from typing import Callable
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 MAGIC_WAND_SIZE = 20
 MAGIC_WAND_SCALE = 8
@@ -455,7 +456,7 @@ class NodeSlider(Canvas):
         return "break"
 
 
-def create_tooltip(widget, message: str) -> None:
+def create_tooltip(widget, message: str | Callable[[], str]) -> None:
     tooltip = None
 
     def show(_event=None):
@@ -465,7 +466,7 @@ def create_tooltip(widget, message: str) -> None:
         tooltip = Toplevel(widget)
         tooltip.overrideredirect(True)
         tooltip.attributes("-topmost", True)
-        label = ttk.Label(tooltip, text=message, padding=(7, 4), relief="solid")
+        label = ttk.Label(tooltip, text=message() if callable(message) else message, padding=(7, 4), relief="solid")
         label.pack()
         tooltip.geometry(f"+{widget.winfo_rootx() + widget.winfo_width() + 4}+{widget.winfo_rooty() + 2}")
 
@@ -478,6 +479,123 @@ def create_tooltip(widget, message: str) -> None:
     widget.bind("<Enter>", show, add="+")
     widget.bind("<Leave>", hide, add="+")
     widget.bind("<ButtonPress>", hide, add="+")
+
+
+def tool_action_icon_image(kind: str, size: int = 24, *, enabled: bool = True,
+                           circular: bool = False, foreground: str | None = None) -> Image.Image:
+    """Ícones de ação desenhados em oito vezes o tamanho para bordas suaves."""
+    scale = 8
+    factor = size * scale / 64
+    image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    ink = foreground or ("#315c48" if enabled else "#a0aeaa")
+    pale = "#e6f2ec" if enabled else "#eef1ef"
+    gold = "#e9b94d" if enabled else "#b9c2bd"
+    blue = "#397b9e" if enabled else "#a0aeaa"
+    def box(values):
+        return tuple(round(value * factor) for value in values)
+    def rounded(values, fill=None, outline=ink, radius=4, stroke=2):
+        draw.rounded_rectangle(box(values), radius=round(radius * factor),
+                               fill=fill, outline=outline, width=max(1, round(stroke * factor)))
+    def stroke_path(values, fill=ink, stroke=2.5):
+        points = [(round(x * factor), round(y * factor)) for x, y in values]
+        draw.line(points, fill=fill, width=max(1, round(stroke * factor)), joint="curve")
+        radius = stroke * factor / 2
+        for x, y in (points[0], points[-1]):
+            draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=fill)
+    if circular:
+        dark = kind in ("execute", "cancel")
+        draw.ellipse(box((4, 6, 60, 62)), fill="#dce5df")
+        draw.ellipse(box((3, 3, 61, 61)), fill="#193d32" if dark else "#eef5f1",
+                     outline="#2f5d4a" if dark else "#d5e3da", width=max(1, round(factor)))
+    if kind == "execute":
+        draw.polygon([box(point) for point in ((37, 10), (19, 35), (30, 35), (26, 54), (46, 27), (34, 27))],
+                     fill="#f4cc56", outline="#ffe8a0", width=max(1, round(factor)))
+    elif kind == "cancel":
+        stroke_path(((23, 23), (41, 41)), fill="#ff817d", stroke=5)
+        stroke_path(((41, 23), (23, 41)), fill="#ff817d", stroke=5)
+    elif kind == "save":
+        rounded((15, 12, 49, 52), fill=blue, outline="#295b78" if enabled else ink, radius=4)
+        rounded((21, 13, 42, 28), fill="#edf6fb", outline=None, radius=1)
+        rounded((36, 15, 40, 25), fill=blue, outline=None, radius=1)
+        rounded((21, 37, 43, 51), fill="#edf6fb", outline=None, radius=2)
+        stroke_path(((26, 42), (38, 42)), fill=blue, stroke=1.7)
+        stroke_path(((26, 46), (35, 46)), fill=blue, stroke=1.7)
+    elif kind == "folder":
+        draw.polygon([box(point) for point in ((12, 20), (12, 15), (27, 15), (33, 21), (52, 21), (52, 47), (12, 47))],
+                     fill="#d69b32" if enabled else ink)
+        rounded((11, 23, 53, 49), fill=gold, outline="#bd8b2e" if enabled else ink, radius=4)
+        stroke_path(((18, 30), (46, 30)), fill="#fff0ba", stroke=2)
+    elif kind == "copy":
+        rounded((23, 10, 53, 42), fill=pale, radius=4)
+        rounded((11, 23, 41, 55), fill="#ffffff", radius=4)
+        stroke_path(((19, 34), (33, 34)), stroke=2)
+        stroke_path(((19, 42), (30, 42)), stroke=2)
+    elif kind == "paste":
+        rounded((15, 14, 49, 55), fill=pale, radius=4)
+        rounded((24, 8, 40, 21), fill="#ffffff", radius=3)
+        stroke_path(((23, 31), (41, 31)), stroke=2)
+        stroke_path(((23, 39), (41, 39)), stroke=2)
+        stroke_path(((23, 47), (35, 47)), stroke=2)
+    elif kind == "clear":
+        rounded((19, 21, 45, 54), fill=pale, radius=4)
+        stroke_path(((14, 19), (50, 19)), stroke=3)
+        rounded((25, 10, 39, 19), fill=None, radius=3)
+        stroke_path(((28, 29), (28, 45)), stroke=2)
+        stroke_path(((36, 29), (36, 45)), stroke=2)
+    elif kind == "qrcode":
+        for x, y in ((9, 9), (37, 9), (9, 37)):
+            rounded((x, y, x+18, y+18), fill=None, radius=2, stroke=3)
+            rounded((x+6, y+6, x+12, y+12), fill=ink, outline=None, radius=1)
+        for x, y, w, h in ((37, 37, 7, 7), (49, 37, 6, 13), (37, 49, 13, 6), (49, 52, 6, 3)):
+            rounded((x, y, x+w, y+h), fill=ink, outline=None, radius=1)
+    elif kind == "phone":
+        rounded((17, 6, 47, 58), fill=pale, radius=7)
+        rounded((24, 7, 40, 13), fill=ink, outline=None, radius=2)
+        stroke_path(((27, 50), (37, 50)), stroke=2)
+        stroke_path(((25, 24), (39, 24)), stroke=2)
+        stroke_path(((25, 31), (35, 31)), stroke=2)
+    elif kind == "history":
+        draw.arc(box((10, 10, 54, 54)), start=210, end=535, fill=ink, width=max(1, round(3 * factor)))
+        stroke_path(((32, 19), (32, 33), (42, 39)), stroke=3)
+        stroke_path(((10, 12), (10, 26), (23, 26)), stroke=3)
+    else:
+        raise ValueError(f"Ícone de ação desconhecido: {kind}")
+    return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def preview_control_icon_image(kind: str, width: int, height: int, playing: bool = False,
+                               hovered: bool = False, background: str = "#f4f7f6") -> Image.Image:
+    """Ícones vetoriais rasterizados em 8x e reduzidos com antialiasing."""
+    scale = 8
+    image = Image.new("RGB", (width * scale, height * scale), background)
+    draw = ImageDraw.Draw(image)
+    color = "#16833a" if hovered else "#365b4d"
+    def coords(values):
+        return tuple(round(value * scale) for value in values)
+    center_x, center_y = width / 2, height / 2
+    if kind == "play":
+        radius = min(width, height) * 0.36
+        draw.ellipse(coords((center_x-radius, center_y-radius, center_x+radius, center_y+radius)),
+                     fill="#dceee3" if hovered else "#e8f0eb", outline=color, width=2 * scale)
+        if playing:
+            for x in (center_x - 7, center_x + 3):
+                draw.rounded_rectangle(coords((x, center_y - 9, x + 4, center_y + 9)),
+                                       radius=scale, fill=color)
+        else:
+            draw.polygon([coords((center_x - 5, center_y - 10)),
+                          coords((center_x + 10, center_y)), coords((center_x - 5, center_y + 10))], fill=color)
+    else:
+        direction = -1 if kind == "slower" else 1
+        for offset in (-7, 7):
+            points = [coords((center_x + offset - direction * 6, center_y - 10)),
+                      coords((center_x + offset + direction * 6, center_y)),
+                      coords((center_x + offset - direction * 6, center_y + 10))]
+            draw.line(points, fill=color, width=3 * scale, joint="curve")
+            for x, y in points:
+                radius = 1.5 * scale
+                draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=color)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
 class PreviewIconButton(Canvas):
@@ -500,6 +618,8 @@ class PreviewIconButton(Canvas):
             **kwargs,
         )
         self._background = background
+        self._icon_cache = {}
+        self.bind("<Configure>", lambda _event: self._draw())
         self.bind("<Button-1>", lambda _event: self.command())
         self.bind("<Enter>", lambda _event: self._set_hover(True))
         self.bind("<Leave>", lambda _event: self._set_hover(False))
@@ -521,58 +641,54 @@ class PreviewIconButton(Canvas):
         self._draw()
 
     def _draw(self) -> None:
-        self.delete("all")
-        width = max(1, self.winfo_reqwidth())
-        height = max(1, self.winfo_reqheight())
-        color = "#16833a" if self.hovered else "#536565"
-        if self.kind == "play":
-            center_x, center_y = width / 2, height / 2
-            radius = min(width, height) * 0.34
-            self.create_oval(
-                center_x - radius,
-                center_y - radius,
-                center_x + radius,
-                center_y + radius,
-                outline=color,
-                width=3,
+        width = self.winfo_width() if self.winfo_width() > 1 else self.winfo_reqwidth()
+        height = self.winfo_height() if self.winfo_height() > 1 else self.winfo_reqheight()
+        key = (width, height, self.playing, self.hovered)
+        if key not in self._icon_cache:
+            rendered = preview_control_icon_image(
+                self.kind, width, height, self.playing, self.hovered, self._background,
             )
-            if self.playing:
-                bar_height = radius * 0.82
-                self.create_line(center_x - 6, center_y - bar_height / 2, center_x - 6, center_y + bar_height / 2, fill=color, width=4, capstyle="round")
-                self.create_line(center_x + 6, center_y - bar_height / 2, center_x + 6, center_y + bar_height / 2, fill=color, width=4, capstyle="round")
-            else:
-                self.create_polygon(
-                    center_x - 6,
-                    center_y - 12,
-                    center_x + 13,
-                    center_y,
-                    center_x - 6,
-                    center_y + 12,
-                    fill=color,
-                    outline="",
-                )
-            return
-        direction = -1 if self.kind == "slower" else 1
-        center_x, center_y = width / 2, height / 2
-        chevron_width = 15
-        gap = 8
-        for offset in (-gap, gap):
-            if direction < 0:
-                points = (
-                    center_x + offset + chevron_width / 2,
-                    center_y - 13,
-                    center_x + offset - chevron_width / 2,
-                    center_y,
-                    center_x + offset + chevron_width / 2,
-                    center_y + 13,
-                )
-            else:
-                points = (
-                    center_x + offset - chevron_width / 2,
-                    center_y - 13,
-                    center_x + offset + chevron_width / 2,
-                    center_y,
-                    center_x + offset - chevron_width / 2,
-                    center_y + 13,
-                )
-            self.create_line(*points, fill=color, width=3, capstyle="round", joinstyle="round")
+            self._icon_cache[key] = ImageTk.PhotoImage(rendered, master=self)
+            while len(self._icon_cache) > 12:
+                self._icon_cache.pop(next(iter(self._icon_cache)))
+        self._icon_image = self._icon_cache[key]
+        self.delete("all")
+        self.create_image(width / 2, height / 2, image=self._icon_image)
+
+
+def diarias_action_icon_image(kind: str, size: int = 26) -> Image.Image:
+    """Ícones de arquivo, PDF e impressora com traços suaves em oito vezes o tamanho."""
+    scale = 8
+    image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    def box(coords):
+        return tuple(round(value * scale * size / 28) for value in coords)
+    navy, green, red = "#29485b", "#16833a", "#bc4149"
+    stroke = max(1, round(1.5 * scale * size / 28))
+    if kind == "warning":
+        draw.polygon([box((14, 2)), box((27, 26)), box((1, 26))], fill="#f4bb45", outline="#ac751d", width=stroke)
+        draw.line(box((14, 9, 14, 17)), fill="#533b0c", width=stroke * 2)
+        draw.ellipse(box((13, 20, 15, 22)), fill="#533b0c")
+    elif kind == "print":
+        draw.rounded_rectangle(box((6, 2, 22, 14)), radius=scale, fill="#ffffff", outline=navy, width=stroke)
+        draw.rounded_rectangle(box((2, 10, 26, 22)), radius=2 * scale, fill="#dce9e9", outline=navy, width=stroke)
+        draw.ellipse(box((21, 13, 23, 15)), fill=green)
+        draw.rectangle(box((7, 18, 21, 27)), fill="#ffffff", outline=navy, width=stroke)
+        for y in (21, 24):
+            draw.line(box((10, y, 18, y)), fill=navy, width=stroke)
+    else:
+        color = green if kind == "office" else red
+        draw.rounded_rectangle(box((5, 2, 23, 26)), radius=2 * scale, fill="#ffffff", outline=navy, width=stroke)
+        draw.polygon([box((17, 2)), box((23, 8)), box((17, 8))], fill="#dce9e9", outline=navy)
+        draw.rounded_rectangle(box((2, 10, 20, 20)), radius=scale, fill=color)
+        if kind == "office":
+            draw.line(box((5, 13, 5, 17, 8, 15, 11, 17, 11, 13)), fill="#ffffff", width=stroke, joint="curve")
+            draw.line(box((14, 13, 17, 17)), fill="#ffffff", width=stroke)
+            draw.line(box((17, 13, 14, 17)), fill="#ffffff", width=stroke)
+        elif kind == "pdf":
+            draw.line(box((6, 17, 6, 13, 9, 13, 9, 15, 6, 15)), fill="#ffffff", width=stroke)
+            draw.line(box((12, 17, 12, 13, 15, 13, 16, 14, 16, 16, 15, 17, 12, 17)), fill="#ffffff", width=stroke)
+        else:
+            raise ValueError("Ícone de Diárias desconhecido.")
+        draw.line(box((9, 23, 19, 23)), fill=navy, width=stroke)
+    return image.resize((size, size), Image.Resampling.LANCZOS)

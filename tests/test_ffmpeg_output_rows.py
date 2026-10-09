@@ -2,8 +2,7 @@
 
 Regras do usuário que estes testes travam:
 - os textos explicativos do corte saíram da tela (economizar espaço);
-- os botões "Abrir pasta"/"Escolher pasta" ficam na MESMA linha das opções da
-  ferramenta e o caminho da pasta de saída na linha LOGO ABAIXO;
+- o botão "Abrir Pasta" e o caminho ficam na coluna esquerda;
 - a linha global de pasta foi removida (a informação aparece uma vez só, dentro
   de cada ferramenta);
 - a conclusão da ferramenta não repete "arquivo salvo" na barra de status: vai
@@ -58,11 +57,10 @@ class FfmpegLayoutTests(unittest.TestCase):
         # O caminho da pasta entra na mensagem (o usuário precisa saber onde ficou).
         self.assertIn("self.output_dir", log)
 
-    def test_botoes_de_pasta_entram_na_linha_de_opcoes(self):
+    def test_botoes_e_caminho_de_pasta_continuam_disponiveis(self):
         botoes = method_source("_output_buttons")
-        self.assertIn("Escolher pasta", botoes)
-        self.assertIn("Abrir pasta", botoes)
-        self.assertIn('side=RIGHT', botoes)
+        self.assertIn("open_or_choose_output_dir", botoes)
+        self.assertIn("Abrir Pasta", botoes)
         caminho = method_source("_output_path_row")
         self.assertIn("Pasta de saída:", caminho)
         self.assertIn("self.output_dir_var", caminho)
@@ -80,23 +78,15 @@ class FfmpegLayoutTests(unittest.TestCase):
 
     def test_cortar_alinha_campos_com_o_botao_play(self):
         origem = method_source("_build_cut_tab")
-        # Início/Fim centralizados (mesma coluna do botão PLAY) e botões de pasta
-        # na linha do Modo/Áudio do vídeo, com o caminho logo abaixo.
+        # Início/Fim permanecem centralizados abaixo do player; a pasta
+        # agora pertence ao painel de opções à esquerda.
         self.assertIn('values.pack(anchor="center"', origem)
-        self.assertIn("mode.pack(fill=X", origem)
-        self.assertIn("self._output_buttons(mode)", origem)
-        self.assertLess(origem.index("self._output_buttons(mode)"), origem.index("self._output_path_row("))
+        self.assertLess(origem.index("self._output_buttons(output)"), origem.index("self._output_path_row("))
 
     def test_outras_ferramentas_centralizam_os_campos_de_tempo(self):
         self.assertIn('trim.pack(anchor="center"', method_source("_build_extract_tab"))
         self.assertIn('trim.pack(anchor="center"', method_source("_build_rotate_tab"))
 
-    def test_juntar_nao_mistura_grid_com_pack(self):
-        origem = method_source("_build_join_tab")
-        # A linha de políticas é uma grade: os botões entram num frame próprio
-        # (pack por dentro), nunca soltos na grade.
-        self.assertIn("join_output_buttons.grid(", origem)
-        self.assertIn("self._output_buttons(join_output_buttons)", origem)
 
 
 if __name__ == "__main__":
