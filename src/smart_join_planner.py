@@ -14,7 +14,6 @@ from typing import List, Optional, Tuple
 
 EPSILON_SECONDS = 0.002
 NO_TRANSITION_SECONDS = 0.001
-MAX_FPS_DELTA = 0.01
 FIRST_KEYFRAME_TOLERANCE_SECONDS = 0.500
 SUPPORTED_CODECS = {"h264", "hevc"}
 SUPPORTED_PIXEL_FORMATS = {"yuv420p"}
@@ -40,6 +39,7 @@ class Source:
     # Open GOP: quadros anteriores ao CRA/IDR podem ser armazenados depois
     # dele. Esses quadros ficam na emenda, sem copiar uma referência ausente.
     safe_copy_ends: List[Tuple[float, float]] = field(default_factory=list)
+    tail_repair_start_seconds: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,12 @@ class ClipPlan:
     body_start_seconds: float
     body_end_seconds: float
     incompatibility_reason: Optional[str] = None
+    tail_start_seconds: Optional[float] = None
+    tail_end_seconds: Optional[float] = None
+
+    @property
+    def tail_duration_seconds(self) -> float:
+        return max(0.0, (self.tail_end_seconds or 0.0) - (self.tail_start_seconds or 0.0))
 
     @property
     def body_duration_seconds(self) -> float:
@@ -118,8 +124,6 @@ def video_incompatibility(base: VideoProfile, candidate: VideoProfile) -> Option
         return "codec diferente"
     if base.width != candidate.width or base.height != candidate.height:
         return "resolução diferente"
-    if abs(base.fps - candidate.fps) > MAX_FPS_DELTA:
-        return "framerate diferente"
     if _normalize_rotation(base.rotation_degrees) != _normalize_rotation(candidate.rotation_degrees):
         return "rotação diferente"
     if _normalize_pixel_format(base.pixel_format) != _normalize_pixel_format(candidate.pixel_format):
@@ -155,12 +159,14 @@ def choose_target_index(sources: List[Source]) -> int:
         return total
 
     best_index = 0
-    best_score = -1.0
+    best_score = (-1.0, -1.0)
     for candidate in range(len(sources)):
-        score = compat_sum(candidate)
-        # Kotlin: compareBy{score}.thenByDescending{it} -> em empate o MAIOR
-        # indice e considerado MENOR (descending inverte); o max mantem o
-        # menor indice.
+        profile = sources[candidate].profile
+        rate_score = sum(source.duration_seconds for source in sources
+                         if video_incompatibility(profile, source.profile) is None
+                         and abs(profile.fps - source.profile.fps) < .02)
+        score = (compat_sum(candidate), rate_score)
+        # No empate de cópia, as emendas usam a taxa predominante.
         if score > best_score or (score == best_score and candidate < best_index):
             best_score = score
             best_index = candidate
@@ -256,7 +262,13 @@ def plan(
         reason = video_incompatibility(target, source.profile)
         # MP4 com edit-list costuma expor o primeiro quadro de vídeo em
         # 100-200 ms, embora esse quadro já seja o primeiro IDR do stream.
-        first_kf = source.keyframes_seconds[0] if source.keyframes_seconds else None
+        # Edit-lists de câmeras podem expor um keyframe de preroll com PTS
+        # negativo (e descarte), seguido pelo IDR visível em zero. O preroll
+        # não torna esse IDR nem os GOPs seguintes incompatíveis.
+        first_kf = next(
+            (keyframe for keyframe in source.keyframes_seconds if keyframe >= -EPSILON_SECONDS),
+            None,
+        )
         starts_with_keyframe = (
             first_kf is not None and -EPSILON_SECONDS <= first_kf <= FIRST_KEYFRAME_TOLERANCE_SECONDS
         )
@@ -291,6 +303,10 @@ def plan(
                 body_end = dict(source.safe_copy_ends).get(body_end, body_end)
         if body_start is None or body_end is None or body_start > body_end + EPSILON_SECONDS:
             return None
+        repair = source.tail_repair_start_seconds
+        if repair is not None and body_end >= source.duration_seconds - EPSILON_SECONDS and repair < body_end - EPSILON_SECONDS:
+            tail_start = max(body_start, repair)
+            return ClipPlan(index, True, body_start, tail_start, reason, tail_start, body_end)
         return ClipPlan(index, True, body_start, body_end, reason)
 
     clip_plans: List[ClipPlan] = []

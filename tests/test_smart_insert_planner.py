@@ -47,3 +47,23 @@ class SmartInsertPlannerTests(unittest.TestCase):
     def test_flac_tiny_internal_bridge_includes_a_main_packet(self):
         p=plan(info(),.25,1/48000,4000/48000,48000,16)
         self.assertGreaterEqual(p.right-p.left+p.inserted_samples,16)
+
+    def test_negative_and_shifted_clocks_keep_copy_and_correct_seek_origin(self):
+        for origin, container in ((-2,-2), (5,4.5), (0,.2)):
+            sample=info();sample['streams'][0]['start_time']=str(origin)
+            sample['format']={'start_time':str(container)}
+            for packet in sample['packets']:packet['pts_time']=str(float(packet['pts_time'])+origin)
+            result=plan(sample,.25,.1,.12,48000)
+            self.assertEqual(result.prefix_packets,1)
+            self.assertAlmostEqual(result.seek_offset,origin-container)
+
+    def test_partial_first_and_last_packets_encode_only_small_edges(self):
+        sample=info()
+        sample['packets']=[{'pts_time':str(n/48000),'duration_time':str(4000/48000)} for n in (-1000,3000,7000,11000)]
+        for point in (0,.12,.25):
+            result=plan(sample,.25,.1,point,48000)
+            self.assertGreaterEqual(result.left,0);self.assertLessEqual(result.right,12000)
+            self.assertEqual(result.head_end+(result.left-result.head_end)+(result.right-result.left)+
+                             (result.tail_start-result.right)+(12000-result.tail_start),12000)
+            self.assertEqual((result.prefix_packets+result.suffix_packets)*4000,
+                             result.left-result.head_end+result.tail_start-result.right)

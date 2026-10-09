@@ -58,6 +58,7 @@ import smart_cut_planner
 import smart_insert_planner
 import smart_insert_flac
 import smart_insert_wave
+from ffmpeg_recovery import RecoveryJob
 from video_encoders import (
     CATALOG,
     ENCODER_ADVANCED_AUTO,
@@ -1459,7 +1460,8 @@ class FfmpegToolsPanel:
         self.join_smart_var = BooleanVar(value=False)
         self.join_transition_var = StringVar(value="Fade in/out")
         self.join_seconds_var = StringVar(value="0.5")
-        self.join_profile_var = StringVar(value="Primeiro clipe")
+        self.join_profile_var = StringVar(value="Automático (preservar mais vídeo)")
+        self.join_advanced_var = BooleanVar(master=self.root, value=False)
         self.join_stream_policy_var = StringVar(value="Primeira faixa (MP4)")
         self.join_audio_policy_var = StringVar(value="Preservar áudio e preencher silêncio")
         self.join_orientation_mode_var = StringVar(value="bake")  # bake | preserve
@@ -1518,6 +1520,8 @@ class FfmpegToolsPanel:
         self.preview_generation = 0
 
         self._build(parent)
+        self.recovery_job = None
+        self.root.after(600, self._offer_ffmpeg_recovery)
         self.root.after(33, self._poll_preview_frames)
         threading.Thread(target=self._load_available_accelerations, daemon=True).start()
 
@@ -2542,42 +2546,48 @@ class FfmpegToolsPanel:
         ttk.Label(options, text="Tempo (s):").grid(row=0, column=2, sticky="w")
         self.join_seconds_entry = ttk.Entry(options, textvariable=self.join_seconds_var, width=7)
         self.join_seconds_entry.grid(row=0, column=3, padx=(6, 0))
-        policies = ttk.Frame(self.join_tab)
-        policies.pack(anchor="w", pady=(8, 0))
-        ttk.Label(policies, text="Perfil de saída:").grid(row=0, column=0, sticky="w")
-        self.join_profile_combo = ttk.Combobox(
-            policies,
-            textvariable=self.join_profile_var,
-            values=("Primeiro clipe", "Maior resolução", "Menor resolução (sem upscale)"),
-            state="readonly",
-            width=28,
+        advanced_row = ttk.Frame(self.join_tab)
+        advanced_row.pack(fill=X, pady=(8, 0))
+        self.join_advanced_check = ttk.Checkbutton(
+            advanced_row, text="Avançado", variable=self.join_advanced_var,
+            command=self._update_join_controls,
         )
-        self.join_profile_combo.grid(row=0, column=1, padx=(6, 16))
-        ttk.Label(policies, text="Streams:").grid(row=0, column=2, sticky="w")
+        self.join_advanced_check.pack(side=LEFT)
+        self._output_buttons(advanced_row)
+        self.join_policies_frame = ttk.Frame(self.join_tab)
+        self.join_policies_frame.pack(anchor="w")
+        self.join_profile_row = ttk.Frame(self.join_policies_frame)
+        ttk.Label(self.join_profile_row, text="Perfil de saída:").pack(side=LEFT)
+        self.join_profile_combo = ttk.Combobox(
+            self.join_profile_row,
+            textvariable=self.join_profile_var,
+            values=("Automático (preservar mais vídeo)", "Primeiro clipe", "Maior resolução", "Menor resolução (sem upscale)"),
+            state="readonly",
+            width=34,
+        )
+        self.join_profile_combo.pack(side=LEFT, padx=(6, 0))
+        self.join_stream_row = ttk.Frame(self.join_policies_frame)
+        ttk.Label(self.join_stream_row, text="Faixas:").pack(side=LEFT)
         self.join_stream_policy_combo = ttk.Combobox(
-            policies,
+            self.join_stream_row,
             textvariable=self.join_stream_policy_var,
             values=("Primeira faixa (MP4)", "Todas as faixas (MKV, sem transição)"),
             state="readonly",
             width=34,
         )
-        self.join_stream_policy_combo.grid(row=0, column=3, padx=(6, 0))
+        self.join_stream_policy_combo.pack(side=LEFT, padx=(6, 0))
         self.join_stream_policy_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_join_controls())
-        ttk.Label(policies, text="Áudio ausente:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.join_audio_row = ttk.Frame(self.join_policies_frame)
+        ttk.Label(self.join_audio_row, text="Áudio:").pack(side=LEFT)
         self.join_audio_policy_combo = ttk.Combobox(
-            policies,
+            self.join_audio_row,
             textvariable=self.join_audio_policy_var,
             values=("Preservar áudio e preencher silêncio", "Gerar saída sem áudio"),
             state="readonly",
             width=32,
         )
-        self.join_audio_policy_combo.grid(row=1, column=1, columnspan=2, sticky="w", padx=(6, 0), pady=(6, 0))
+        self.join_audio_policy_combo.pack(side=LEFT, padx=(6, 0))
         self.join_audio_policy_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_join_controls())
-        # A grade das políticas recebe os botões da pasta (o frame interno usa pack,
-        # então nada de empilhar pack com grid no mesmo container).
-        join_output_buttons = ttk.Frame(policies)
-        join_output_buttons.grid(row=0, column=4, rowspan=2, sticky="e", padx=(24, 0))
-        self._output_buttons(join_output_buttons)
         self._output_path_row(self.join_tab)
         self._update_join_controls()
 
@@ -3177,6 +3187,37 @@ class FfmpegToolsPanel:
                 self.join_transition_combo.configure(values=choices)
                 if self.join_transition_var.get() == "Fade in/out" or self.join_transition_var.get() not in choices:
                     self.join_transition_var.set("Fundir")
+
+        self._update_join_advanced_controls(known_profiles, is_audio_only)
+
+    def _update_join_advanced_controls(self, profiles: list[MediaProfile], is_audio_only: bool) -> None:
+        if not hasattr(self, "join_policies_frame"):
+            return
+        advanced = self.join_advanced_var.get()
+        videos = [profile for profile in profiles if profile.has_video]
+        # O banner de câmeras VFR pode mostrar médias diferentes para gravações
+        # com a mesma taxa nominal. Isso sozinho não deve abrir outro controle.
+        video_profiles = [self._smart_join_video_profile(
+            replace(profile, fps=profile.average_rate or profile.fps)
+        ) for profile in videos]
+        mixed_profiles = bool(videos) and any(
+            smart_join_planner.video_incompatibility(video_profiles[0], profile) is not None
+            for profile in video_profiles[1:]
+        )
+        multiple_tracks = any(
+            profile.audio_streams > 1 or profile.subtitle_streams or profile.data_streams
+            for profile in profiles
+        )
+        rows = (
+            (self.join_profile_row, not is_audio_only and (advanced or mixed_profiles)),
+            (self.join_stream_row, advanced and multiple_tracks),
+            (self.join_audio_row, advanced and not is_audio_only),
+        )
+        for row, _visible in rows:
+            row.pack_forget()
+        for row, visible in rows:
+            if visible:
+                row.pack(anchor="w", pady=(6, 0))
 
     def _on_toggle_insert_reencode(self) -> None:
         if self.insert_reencode_var.get():
@@ -4669,6 +4710,29 @@ class FfmpegToolsPanel:
         worker = workers.get(tool)
         if worker is None:
             return
+        from app_env import settings_path
+        fields = {}
+        for name in ("cut_input", "rotate_input", "insert_main_input", "insert_secondary_input", "clean_input"):
+            value = getattr(self, name, None)
+            fields[name] = str(value) if value else None
+        fields["extract_inputs"] = [str(p) for p in self.extract_inputs]
+        fields["join_inputs"] = [str(p) for p in self.join_inputs]
+        selected_inputs = {
+            "Cortar": [self.cut_input], "Extrair áudio": self.extract_inputs,
+            "Girar vídeo": [self.rotate_input], "Juntar áudios/vídeos": self.join_inputs,
+            "Inserir áudio": [self.insert_main_input, self.insert_secondary_input], "Limpar áudio": [self.clean_input],
+        }[tool]
+        request = {"tool": tool, "output_dir": str(self.output_dir), "fields": fields,
+                   "options": self.worker_options, "insertion": self.insert_timeline.insertion,
+                   "quality": self.selected_video_quality, "speed": self.selected_video_speed,
+                   "encoder_label": self.selected_acceleration_label,
+                   "acceleration": vars(self.worker_acceleration) if self.worker_acceleration else None,
+                   "uses_encoder": self.worker_tool_uses_video_encoder}
+        self.recovery_job = RecoveryJob.create(settings_path().parent / "ffmpeg_recovery", request,
+                                              [Path(p) for p in selected_inputs if p])
+        self._launch_ffmpeg_worker(worker, tool)
+
+    def _launch_ffmpeg_worker(self, worker, tool) -> None:
         self.cancel_event.clear()
         self.progress_var.set(0)
         self.max_progress_seen = 0
@@ -4704,6 +4768,7 @@ class FfmpegToolsPanel:
                 self._set_status("Encoder de vídeo: não aplicável", 0)
             worker()
             if not self.cancel_event.is_set():
+                if getattr(self, "recovery_job", None): self.recovery_job.finish("complete")
                 # Regra do usuário: a barra de status não repete "arquivo salvo";
                 # a conclusão (verde) vai para o log de atividade.
                 self._log_saved_output()
@@ -4711,13 +4776,98 @@ class FfmpegToolsPanel:
                 encoder = self.acceleration.encoder if (self.acceleration and tool_uses_video_encoder) else "não aplicável"
                 self.task_tracker.success(f"Tempo de processamento: {elapsed:.1f}s\nEncoder: {encoder}") if self.task_tracker else None
         except Cancelled:
+            if getattr(self, "recovery_job", None): self.recovery_job.finish("cancelled")
             self._set_status("Operação cancelada.")
             if self.task_tracker: self.task_tracker.fail("Operação cancelada pelo usuário.")
         except Exception as exc:
+            if getattr(self, "recovery_job", None): self.recovery_job.finish("failed")
             self._set_status(f"Erro: {exc}")
             if self.task_tracker: self.task_tracker.fail(str(exc))
         finally:
             self.root.after(0, lambda: self._set_running_ui(False))
+            self.recovery_job = None
+
+    def _offer_ffmpeg_recovery(self) -> None:
+        from app_env import settings_path
+        pending = RecoveryJob.pending(settings_path().parent / "ffmpeg_recovery")
+        if self.running or not pending:
+            return
+        if not messagebox.askyesno("Retomar FFmpeg", "Há uma tarefa interrompida. Retomar reutiliza as etapas concluídas "
+                                  "e refaz somente a etapa interrompida. Deseja retomar?"):
+            return
+        try:
+            job = RecoveryJob.load(pending[0])
+            request = job.state["request"]
+            workers = {"Cortar": self._cut_worker, "Extrair áudio": self._extract_worker, "Girar vídeo": self._rotate_worker,
+                       "Juntar áudios/vídeos": self._join_worker, "Inserir áudio": self._insert_worker, "Limpar áudio": self._clean_worker}
+            worker = workers[request["tool"]]
+            for name in ("cut_input", "rotate_input", "insert_main_input", "insert_secondary_input", "clean_input"):
+                raw = request["fields"].get(name)
+                setattr(self, name, Path(raw) if raw else None)
+            self.extract_inputs = [Path(p) for p in request["fields"].get("extract_inputs", [])]
+            self.join_inputs = [Path(p) for p in request["fields"].get("join_inputs", [])]
+            self.join_media_profiles = {}
+            self.cut_media_profile = self.rotate_media_profile = None
+            self.worker_options = request["options"]
+            self.insert_timeline.insertion = request["insertion"]
+            self.selected_video_quality, self.selected_video_speed = request["quality"], request["speed"]
+            self.selected_acceleration_label = request["encoder_label"]
+            self.worker_acceleration = VideoAcceleration(**request["acceleration"]) if request.get("acceleration") else None
+            self.worker_tool_uses_video_encoder = request["uses_encoder"]
+            self.output_dir = Path(request["output_dir"])
+            self.active_tool_var.set(request["tool"])
+            self.output_dir_var.set(str(self.output_dir))
+            self.recovery_job = job
+            self._launch_ffmpeg_worker(worker, request["tool"])
+        except (KeyError, OSError, ValueError) as error:
+            messagebox.showerror("Retomar FFmpeg", f"Não foi possível retomar: {error}")
+
+    def _work_directory(self, prefix: str, parent: Path) -> Path:
+        job = getattr(self, "recovery_job", None)
+        return job.directory(prefix + str(parent)) if job else parent / f"{prefix}_{uuid.uuid4().hex}"
+
+    def _remove_work_directory(self, directory: Path) -> None:
+        job = getattr(self, "recovery_job", None)
+        if job and directory.resolve().is_relative_to(job.work_root.resolve()):
+            return
+        shutil.rmtree(directory, ignore_errors=True)
+
+    def _work_file(self, parent: Path, prefix: str, extension: str) -> Path:
+        job = getattr(self, "recovery_job", None)
+        if job:
+            return job.allocate("file:" + str(parent) + prefix + extension,
+                                lambda: job.directory("manifests") / f"{prefix}{extension}")
+        return parent / f"{prefix}_{uuid.uuid4().hex}{extension}"
+
+    def _recoverable_output(self, base: Path, suffix: str, extension: str) -> Path:
+        job = getattr(self, "recovery_job", None)
+        factory = lambda: self._safe_output(base, suffix, extension)
+        return job.allocate("output:" + str(base) + suffix + extension, factory) if job else factory()
+
+    def _publish_completed_output(self, staged: Path, output: Path) -> None:
+        job = getattr(self, "recovery_job", None)
+        if job:
+            job.publish(staged, output)
+        else:
+            staged.replace(output)
+
+    def _validate_completed_output(self, path: Path, validate) -> None:
+        """Uma saída concluída fica disponível mesmo com divergências na validação."""
+        if self.cancel_event.is_set():
+            raise Cancelled()
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError("O processamento não produziu um arquivo final utilizável.")
+        try:
+            validate()
+        except Cancelled:
+            raise
+        except Exception as error:
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            warning = (f"Arquivo concluído com aviso: {error}\n"
+                       "O arquivo será salvo. Confira o trecho indicado antes de usá-lo ou compartilhá-lo.")
+            self._append_log(warning)
+            self.root.after(0, lambda message=warning: messagebox.showwarning("Verificação do arquivo", message))
 
     def _worker_value(self, name: str, variable):
         options = getattr(self, "worker_options", None)
@@ -4968,6 +5118,13 @@ class FfmpegToolsPanel:
     def _execute(self, command: list[str], label: str, progress: int, total: int, duration_seconds: float = 0.0, progress_callback=None) -> None:
         if self.cancel_event.is_set():
             raise Cancelled()
+        job = getattr(self, "recovery_job", None)
+        if job and job.can_reuse(command):
+            self._append_log(f"Retomada: reutilizando {label} já concluído.")
+            if self.task_tracker: self.task_tracker.complete(re.sub(r"/\d+", "", label))
+            if progress_callback: progress_callback(100, "retomado")
+            return
+        if job: job.begin_step(command)
         tracker = self.task_tracker
         tracker_label = re.sub(r"/\d+", "", label)
         if tracker:
@@ -5027,6 +5184,10 @@ class FfmpegToolsPanel:
                 self.current_process = None
             with self.app.process_lock:
                 self.app.active_processes.discard(process)
+            stderr_reader.join(timeout=2)
+            if process.poll() is not None:
+                if process.stdout: process.stdout.close()
+                if process.stderr: process.stderr.close()
         if process.returncode != 0:
             detail = "\n".join(output[-8:]) or f"FFmpeg retornou código {process.returncode}"
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -5039,6 +5200,7 @@ class FfmpegToolsPanel:
             raise RuntimeError(detail)
         if tracker:
             tracker.complete(tracker_label)
+        if job: job.complete_step(command)
         self._set_status(f"{label} concluído ({progress}/{total})", int(progress * 100 / max(total, 1)))
 
     def _cpu_encoder_for(self, encoder: str) -> VideoAcceleration:
@@ -5204,7 +5366,7 @@ class FfmpegToolsPanel:
             extension = self._metadata_rotate_output_suffix(source.suffix) if fast_copy else ".mp4"
         else:
             extension = self._audio_only_output_extension(source)
-        output = self._safe_output(self.output_dir, f"{source.stem}_cortado", extension)
+        output = self._recoverable_output(self.output_dir, f"{source.stem}_cortado", extension)
 
         if not fast_copy and is_video:
             aviso_cor = color_depth_warning(getattr(media, "pix_fmt", ""))
@@ -5315,7 +5477,7 @@ class FfmpegToolsPanel:
         Emendas de áudio comprimido podem acrescentar priming/padding e exigir
         novos parâmetros de decoder. Uma passagem contínua evita essas perdas.
         """
-        work = output.parent / f"audio_cut_{uuid.uuid4().hex}"
+        work = self._work_directory("audio_cut", output.parent)
         work.mkdir(parents=True, exist_ok=True)
         staged = work / output.name
         try:
@@ -5328,13 +5490,12 @@ class FfmpegToolsPanel:
                        *codec, "-map_metadata", "0", "-map_chapters", "-1", str(staged)]
             self._execute(command, "Cortando áudio com precisão", 1, 1, end - start)
             if self._get_ffprobe():
-                info = self._smart_join_probe(staged)
-                self._smartcut_validate_audio(info, end - start, 1)
+                self._validate_completed_output(staged, lambda: self._smartcut_validate_audio(self._smart_join_probe(staged), end - start, 1))
             if self.cancel_event.is_set():
                 raise Cancelled()
-            staged.replace(output)
+            self._publish_completed_output(staged, output)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            self._remove_work_directory(work)
 
     @staticmethod
     def _smartcut_validate_audio(info: dict, duration: float, tracks: int, copied: bool = False) -> None:
@@ -5447,7 +5608,7 @@ class FfmpegToolsPanel:
         self._append_log(f"SmartCut: {copied}/{len(plan.timestamps)} quadros em cópia; somente as bordas serão recodificadas.")
         if media.has_audio:
             self._append_log("SmartCut: áudio contínuo da fonte, " + ("cortado por amostras em AAC." if audio_precise else "copiado nos limites de pacote."))
-        work = output.parent / f"smartcut_{uuid.uuid4().hex}"
+        work = self._work_directory("smartcut", output.parent)
         work.mkdir(parents=True, exist_ok=True)
         staged = work / output.name
         steps = len(plan.segments) * 2 + 1
@@ -5548,26 +5709,28 @@ class FfmpegToolsPanel:
             if family == "hevc":
                 concat += ["-tag:v", "hev1"]
             self._execute(concat + [str(staged)], "Montando o arquivo final", steps, steps, total)
-            result = self._smart_join_probe(staged, packets=True)
-            actual = sorted(float(p["pts_time"]) for p in result.get("packets", []))
-            expected = [t - start for t in plan.timestamps]
-            if len(actual) != len(expected) or any(abs(a - b) > .0001 for a, b in zip(actual, expected)):
-                raise RuntimeError("SmartCut: a saída não contém exatamente os quadros e timestamps escolhidos.")
-            dts = [float(p["dts_time"]) for p in result["packets"]]
-            if any(b <= a for a, b in zip(dts, dts[1:])):
-                raise RuntimeError("SmartCut: timestamps de decodificação fora de ordem.")
-            self._smartcut_validate_audio(self._smart_join_probe(staged), total,
-                                          (media.audio_streams or 1) if media.has_audio else 0, not audio_precise)
-            position = plan.first_gap
-            for s in plan.segments:
-                if not s.copy:
-                    self._smart_join_validate_decoded_junction(staged, position, s.end - s.start, fps)
-                position += s.end - s.start
+            def validate_final():
+                result = self._smart_join_probe(staged, packets=True)
+                actual = sorted(float(p["pts_time"]) for p in result.get("packets", []))
+                expected = [t - start for t in plan.timestamps]
+                if len(actual) != len(expected) or any(abs(a - b) > .0001 for a, b in zip(actual, expected)):
+                    raise RuntimeError("SmartCut: a saída não contém exatamente os quadros e timestamps escolhidos.")
+                dts = [float(p["dts_time"]) for p in result["packets"]]
+                if any(b <= a for a, b in zip(dts, dts[1:])):
+                    raise RuntimeError("SmartCut: timestamps de decodificação fora de ordem.")
+                self._smartcut_validate_audio(self._smart_join_probe(staged), total,
+                                              (media.audio_streams or 1) if media.has_audio else 0, not audio_precise)
+                position = plan.first_gap
+                for s in plan.segments:
+                    if not s.copy:
+                        self._smart_join_validate_decoded_junction(staged, position, s.end - s.start, fps)
+                    position += s.end - s.start
+            self._validate_completed_output(staged, validate_final)
             if self.cancel_event.is_set():
                 raise Cancelled()
-            staged.replace(output)
+            self._publish_completed_output(staged, output)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            self._remove_work_directory(work)
 
     def _cut_video_precise(
         self, source: Path, output: Path, start: float, end: float, media: MediaProfile,
@@ -5599,7 +5762,7 @@ class FfmpegToolsPanel:
             seek_offset = plan.seek_offset
         delta = start - anchor
         limit = self._precise_seconds(end - start)
-        work = output.parent / f"precise_cut_{uuid.uuid4().hex}"
+        work = self._work_directory("precise_cut", output.parent)
         work.mkdir(parents=True, exist_ok=True)
         staged = work / output.name
         def build(profile: VideoAcceleration):
@@ -5629,19 +5792,21 @@ class FfmpegToolsPanel:
                               "-movflags", "+faststart", str(staged)]
         try:
             self._execute_video("Cortando vídeo com precisão", build, duration_seconds=end - start)
-            if info:
-                result = self._smart_join_probe(staged, packets=True)
-                actual = sorted(float(p["pts_time"]) for p in result.get("packets", []))
-                expected = [t - start for t in plan.timestamps]
-                if len(actual) != len(expected) or any(abs(a - b) > .0001 for a, b in zip(actual, expected)):
-                    raise RuntimeError("Corte: o encoder não preservou os quadros/timestamps escolhidos.")
-                self._smartcut_validate_audio(self._smart_join_probe(staged), end - start,
-                                              (media.audio_streams or 1) if media.has_audio else 0, copy_audio)
+            def validate_final():
+                if info:
+                    result = self._smart_join_probe(staged, packets=True)
+                    actual = sorted(float(p["pts_time"]) for p in result.get("packets", []))
+                    expected = [t - start for t in plan.timestamps]
+                    if len(actual) != len(expected) or any(abs(a - b) > .0001 for a, b in zip(actual, expected)):
+                        raise RuntimeError("Corte: o encoder não preservou os quadros/timestamps escolhidos.")
+                    self._smartcut_validate_audio(self._smart_join_probe(staged), end - start,
+                                                  (media.audio_streams or 1) if media.has_audio else 0, copy_audio)
+            self._validate_completed_output(staged, validate_final)
             if self.cancel_event.is_set():
                 raise Cancelled()
-            staged.replace(output)
+            self._publish_completed_output(staged, output)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            self._remove_work_directory(work)
 
     def _extract_keyframes(self, source: Path) -> list[float]:
         command = [str(self._ffmpeg()), "-hide_banner", "-skip_frame", "nokey", "-i", str(source),
@@ -5714,7 +5879,7 @@ class FfmpegToolsPanel:
             has_trim = start is not None and end is not None and (
                 start > 0.001 or media.duration <= 0 or effective_end < media.duration - 0.05
             )
-            output = self._safe_output(self.output_dir, f"{source.stem}_audio", f".{extension}")
+            output = self._recoverable_output(self.output_dir, f"{source.stem}_audio", f".{extension}")
             # F4b: quando o pedido é o próprio stream, extrair é COPIAR (sem
             # perdas) — o Android já fazia assim; aqui sempre reencodava.
             copiar = extract_can_copy(media, extension, rate, channels, has_trim=has_trim)
@@ -5780,7 +5945,7 @@ class FfmpegToolsPanel:
         has_trim = start > 0.001 or (media.duration > 0 and end < media.duration - 0.05)
         trim_duration = end - start
         suffix = f"{source.stem}_girado_cortado" if has_trim else f"{source.stem}_girado"
-        output = self._safe_output(self.output_dir, suffix, ".mp4")
+        output = self._recoverable_output(self.output_dir, suffix, ".mp4")
         seek_args = ["-ss", self._fmt_seconds(start)] if has_trim else []
         duration_args = ["-t", self._fmt_seconds(trim_duration)] if has_trim else []
         crop = self._worker_crop("rotate_crop")
@@ -5798,7 +5963,7 @@ class FfmpegToolsPanel:
             # A UI usa +90 como giro horário (transpose=1), enquanto
             # -display_rotation usa ângulo positivo anti-horário.
             target_rotation = (media.rotation - degrees) % 360
-            output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
+            output = self._recoverable_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
             # F-02/F-03: -metadata:s:v:0 rotate=N não grava display matrix em MP4 (falha
             # silenciosa no FFmpeg 8). Usar -display_rotation ANTES de -i, que o muxer MP4
             # converte em display matrix de verdade. Para containers com codecs sem tag no
@@ -5825,7 +5990,7 @@ class FfmpegToolsPanel:
         if crop:
             filters.append(selection_crop_filter(crop))
         if not filters:
-            output = self._safe_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
+            output = self._recoverable_output(self.output_dir, suffix, self._metadata_rotate_output_suffix(source.suffix))
             if output.suffix.lower() == ".mp4":
                 self._validate_mp4_copy_codecs(media)
             timestamp_args = [] if has_trim else ["-avoid_negative_ts", "make_zero"]
@@ -5909,7 +6074,7 @@ class FfmpegToolsPanel:
         if not split_points:
             raise RuntimeError("não foi possível escolher pontos de divisão")
 
-        work_dir = self.output_dir / f"rotate_parallel_{uuid.uuid4().hex}"
+        work_dir = self._work_directory("rotate_parallel", self.output_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
             pattern = work_dir / "parte_%05d.mkv"
@@ -5983,9 +6148,7 @@ class FfmpegToolsPanel:
             self._execute(concat_command, "Juntando vídeo final", len(segments) + 2, len(segments) + 2, duration)
             self._append_log(f"Giro paralelo concluído: {len(segments)} trechos, até {worker_count} em paralelo.")
         finally:
-            for path in work_dir.glob("*"):
-                path.unlink(missing_ok=True)
-            work_dir.rmdir()
+            self._remove_work_directory(work_dir)
 
     # Layouts nomeados que o FFmpeg reporta na linha de áudio ("48000 Hz, 5.1, ...").
     _CHANNEL_LAYOUT_COUNTS = {
@@ -6066,7 +6229,7 @@ class FfmpegToolsPanel:
         self._record_ffmpeg_command(command, probe=True)
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         text = result.stderr + result.stdout
-        container_start_match = re.search(r"Duration: [^,]+, start: (\d+(?:\.\d+)?)", text)
+        container_start_match = re.search(r"Duration: [^,]+, start: (-?\d+(?:\.\d+)?)", text)
         container_start = float(container_start_match.group(1)) if container_start_match else 0.0
         duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
         duration = 0.0
@@ -6087,7 +6250,7 @@ class FfmpegToolsPanel:
             fps = fps_match.group(1) if fps_match else "30"
 
         video_rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", video_line)
-        audio_start_match = re.search(r"start\s+(\d+(?:\.\d+)?)", audio_line)
+        audio_start_match = re.search(r"start\s+(-?\d+(?:\.\d+)?)", audio_line)
         audio_start = float(audio_start_match.group(1)) if audio_start_match else 0.0
         audio_rates = re.findall(r"(\d+(?:\.\d+)?)\s*kb/s", audio_line)
         audio_bitrate = f"{float(audio_rates[-1]):g}k" if audio_rates and float(audio_rates[-1]) > 0 else "128k"
@@ -6164,6 +6327,11 @@ class FfmpegToolsPanel:
 
     @staticmethod
     def _select_join_base(clips: list[MediaProfile], choice: str) -> MediaProfile:
+        if choice.startswith("Automático"):
+            sources = [smart_join_planner.Source(
+                clip.duration, FfmpegToolsPanel._smart_join_video_profile(clip), []
+            ) for clip in clips]
+            return clips[smart_join_planner.choose_target_index(sources)]
         if choice.startswith("Maior"):
             return max(clips, key=lambda clip: clip.width * clip.height)
         if choice.startswith("Menor"):
@@ -6332,8 +6500,8 @@ class FfmpegToolsPanel:
                     )
             if preserve_all_streams and len({clip.audio_streams for clip in clips}) != 1:
                 raise RuntimeError("Para preservar todas as faixas, todos os arquivos precisam ter a mesma quantidade de streams de áudio.")
-            output = self._safe_output(self.output_dir, "audios_juntos", extension)
-            list_file = self.output_dir / f"join_audio_{uuid.uuid4().hex}.txt"
+            output = self._recoverable_output(self.output_dir, "audios_juntos", extension)
+            list_file = self._work_file(self.output_dir, "join_audio", ".txt")
             list_file.write_text(
                 "\n".join(f"file '{self._concat_escape(str(path.resolve()))}'" for path in self.join_inputs),
                 encoding="utf-8",
@@ -6359,7 +6527,7 @@ class FfmpegToolsPanel:
         transition_choice = str(self._worker_value("join_transition", self.join_transition_var))
         transition_code = dict(self.AUDIO_TRANSITIONS).get(transition_choice, "tri")
         extension = self._audio_only_output_extension(self.join_inputs[0])
-        output = self._safe_output(self.output_dir, "audios_juntos", extension)
+        output = self._recoverable_output(self.output_dir, "audios_juntos", extension)
         command = [str(self._ffmpeg()), "-hide_banner", "-y"]
         for path in self.join_inputs:
             command += ["-i", str(path)]
@@ -6506,7 +6674,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("Junte somente áudios ou somente vídeos na mesma tarefa")
         join_reencode = bool(self._worker_value("join_reencode", self.join_reencode_var))
         join_smart = bool(self._worker_value("join_smart", self.join_smart_var))
-        profile_choice = str(self._worker_value_default("join_profile", "join_profile_var", "Primeiro clipe"))
+        profile_choice = str(self._worker_value_default("join_profile", "join_profile_var", "Automático (preservar mais vídeo)"))
         stream_policy = str(self._worker_value_default("join_stream_policy", "join_stream_policy_var", "Primeira faixa (MP4)"))
         audio_policy = str(self._worker_value_default("join_audio_policy", "join_audio_policy_var", "Preservar áudio e preencher silêncio"))
         preserve_all_streams = stream_policy.startswith("Todas")
@@ -6526,7 +6694,7 @@ class FfmpegToolsPanel:
             join_reencode = True
             join_smart = False
             self._append_log("Há clipes com e sem áudio; a saída será reencodada para preencher silêncio sem deslocar a timeline.")
-        output = self._safe_output(self.output_dir, "videos_juntos", ".mkv" if preserve_all_streams else ".mp4")
+        output = self._recoverable_output(self.output_dir, "videos_juntos", ".mkv" if preserve_all_streams else ".mp4")
         extra_streams = any(item.audio_streams > 1 or item.subtitle_streams or item.data_streams for item in clips)
         if extra_streams:
             self._append_log(
@@ -6544,7 +6712,7 @@ class FfmpegToolsPanel:
                     raise RuntimeError("Para preservar todas as faixas sem reencode, todos os clipes precisam ter a mesma quantidade de áudio, legendas e dados/anexos.")
             if extra_streams and not preserve_all_streams:
                 self._append_log("O join sem reencode preserva o primeiro vídeo e o primeiro áudio; faixas extras, legendas e dados não são incluídos.")
-            list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
+            list_file = self._work_file(self.output_dir, "join_list", ".txt")
             lines = []
             for path in self.join_inputs:
                 lines.append(f"file '{self._concat_escape(str(path.resolve()))}'")
@@ -6581,13 +6749,13 @@ class FfmpegToolsPanel:
                 "Preservar todas as faixas exige cópia sem transição e faixas compatíveis. "
                 "Transições ou preenchimento de silêncio exigem uma política por faixa; escolha Primeira faixa (MP4)."
             )
-        if strategy == "Smart Join" and transition_seconds <= smart_join_planner.NO_TRANSITION_SECONDS and not smart_audio_only_reencode:
+        if strategy == "Smart Join" and transition_seconds <= smart_join_planner.NO_TRANSITION_SECONDS and not smart_audio_only_reencode and preserve_all_streams:
             self._validate_video_copy_compatibility(clips, require_mp4=not preserve_all_streams, ignore_audio=not copy_audio)
             if preserve_all_streams:
                 topology = {((clip.audio_streams if copy_audio else 0), clip.subtitle_streams, clip.data_streams) for clip in clips}
                 if len(topology) != 1:
                     raise RuntimeError("Para preservar todas as faixas sem reencode, todos os clipes precisam ter a mesma quantidade de áudio, legendas e dados/anexos.")
-            list_file = self.output_dir / f"join_list_{uuid.uuid4().hex}.txt"
+            list_file = self._work_file(self.output_dir, "join_list", ".txt")
             lines = []
             for path in self.join_inputs:
                 lines.append(f"file '{self._concat_escape(str(path.resolve()))}'")
@@ -6821,7 +6989,8 @@ class FfmpegToolsPanel:
             return ["hflip", "vflip"]
         return []
 
-    def _smart_join_video_profile(self, media: MediaProfile) -> "smart_join_planner.VideoProfile":
+    @staticmethod
+    def _smart_join_video_profile(media: MediaProfile) -> "smart_join_planner.VideoProfile":
         try:
             fps = float(Fraction(media.fps)) if media.fps else 30.0
         except (TypeError, ValueError, ZeroDivisionError):
@@ -7459,16 +7628,25 @@ class FfmpegToolsPanel:
                 raise RuntimeError(f"Não consegui identificar os quadros de {path.name}.")
             stream = info["streams"][0]
             origin = float(stream.get("start_time", 0))
-            times = sorted(float(p["pts_time"]) - origin for p in packets if "pts_time" in p)
-            if len(times) != len(packets):
-                raise RuntimeError(f"Há quadros sem timestamp em {path.name}; SmartJoin não pode copiá-los com segurança.")
-            keyframes = [float(p["pts_time"]) - origin for p in packets if "K" in p.get("flags", "")]
+            if any("pts_time" not in p or not math.isfinite(float(p["pts_time"])) for p in packets):
+                raise RuntimeError(f"Há quadros sem timestamp válido em {path.name}.")
             ordered_times = [float(p["pts_time"]) - origin for p in packets]
-            key_indices = [i for i, packet in enumerate(packets) if "K" in packet.get("flags", "")]
-            safe_ends = []
-            leading = {}
-            key_delays = {}
+            visible_indices = [i for i,p in enumerate(packets) if "D" not in p.get("flags", "") and ordered_times[i] >= -0.000001]
+            times = sorted(ordered_times[i] for i in visible_indices)
+            if not times:
+                raise RuntimeError(f"Não há quadros visíveis em {path.name}.")
+            key_indices = [i for i,p in enumerate(packets) if "K" in p.get("flags", "")]
+            keyframes = [ordered_times[i] for i in key_indices if "D" not in packets[i].get("flags", "")]
+            safe_ends, leading, key_delays = [], {}, {}
+            tail_repair = None
+            hidden_reference = next((i for i,p in enumerate(packets) if i < max(visible_indices) and "D" in p.get("flags", "") and ordered_times[i] >= -0.000001), None)
+            if hidden_reference is not None:
+                group_start = max((i for i in key_indices if i <= hidden_reference),default=0)
+                group_end = next((i for i in key_indices if i > group_start),len(packets))
+                tail_repair = max(0.0,min(ordered_times[group_start:group_end]))
             for number, packet_index in enumerate(key_indices):
+                if "D" in packets[packet_index].get("flags", ""):
+                    continue
                 key_time = ordered_times[packet_index]
                 next_index = key_indices[number + 1] if number + 1 < len(key_indices) else len(packets)
                 group = ordered_times[packet_index:next_index]
@@ -7494,6 +7672,7 @@ class FfmpegToolsPanel:
                     profile=self._smart_join_video_profile(media),
                     keyframes_seconds=keyframes,
                     safe_copy_ends=safe_ends,
+                    tail_repair_start_seconds=tail_repair,
                 )
             )
             prepared_sources[path] = (media, sources[-1], packet_infos[-1], source_gap)
@@ -7501,7 +7680,7 @@ class FfmpegToolsPanel:
             # de vários vídeos longos consumiria centenas de MB desnecessários.
             del info, packets
 
-        choice = str(self._worker_value_default("join_profile", "join_profile_var", "Primeiro clipe"))
+        choice = str(self._worker_value_default("join_profile", "join_profile_var", "Automático (preservar mais vídeo)"))
         base = self._select_join_base(medias, choice)
         target_index = next(index for index, media in enumerate(medias) if media is base)
         fps = float(Fraction(base.fps))
@@ -7568,6 +7747,13 @@ class FfmpegToolsPanel:
             len(plan_result.clips), [c.body_duration_seconds > 0.000001 for c in plan_result.clips],
             [j.index for j in plan_result.junctions],
         )
+        order = [entry for original in order for entry in
+                 ([original, ("tail", original[1])] if original[0] == "body" and plan_result.clips[original[1]].tail_duration_seconds > 0.000001 else [original])]
+        # A clip with no copied body can still contribute a repaired tail.
+        for clip in plan_result.clips:
+            if clip.body_duration_seconds <= 0.000001 and clip.tail_duration_seconds > 0.000001:
+                before = next((i for i,(kind,index) in enumerate(order) if kind == "bridge" and index == clip.index),len(order))
+                order.insert(before,("tail",clip.index))
         durations = {}
         counts = {}
         logical_end = 0.0
@@ -7576,6 +7762,8 @@ class FfmpegToolsPanel:
             if kind == "body":
                 clip = plan_result.clips[index]
                 duration = clip.body_duration_seconds
+            elif kind == "tail":
+                duration = plan_result.clips[index].tail_duration_seconds
             else:
                 duration = smart_join_planner.junction_duration_seconds(plan_result.junctions[index], fade_in_out)
             logical_end += duration
@@ -7591,10 +7779,10 @@ class FfmpegToolsPanel:
             counts[kind, index] = count
             scheduled_end += duration
 
-        work_dir = self.output_dir / f"smart_join_{uuid.uuid4().hex}"
+        work_dir = self._work_directory("smart_join", self.output_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         pieces: list[Path] = []
-        total_steps = sum(1 if c.copy_video else 2 for c in plan_result.clips if c.body_duration_seconds > 0.000001) + len(plan_result.junctions) * 2 + 1
+        total_steps = sum(1 if c.copy_video else 2 for c in plan_result.clips if c.body_duration_seconds > 0.000001) + len(plan_result.junctions) * 2 + sum(c.tail_duration_seconds > 0.000001 for c in plan_result.clips) * 2 + 1
         staged_output = work_dir / "resultado.mp4"
         step = 0
         try:
@@ -7676,6 +7864,22 @@ class FfmpegToolsPanel:
                 )
                 self._smart_join_validate_piece(ts_path, target)
 
+            for clip in plan_result.clips:
+                if clip.tail_duration_seconds <= 0.000001:
+                    continue
+                index = clip.index
+                mp4_path, ts_path = work_dir / f"tail_{index:03d}.mp4", work_dir / f"tail_{index:03d}.ts"
+                command = self._smart_join_body_arguments(paths[index],medias[index],clip.tail_start_seconds,durations["tail",index],
+                    copy_video=False,target=target,include_audio=False,output_file=mp4_path,output_as_mpeg_ts=False,
+                    frame_count=counts["tail",index],seek_offset=packet_infos[index][2])
+                step += 1
+                self._execute(command,f"SmartJoin reparando último GOP do clipe {index+1}",step,total_steps,clip.tail_duration_seconds)
+                step += 1
+                self._execute(self._smart_join_ts_arguments(mp4_path,ts_path,target["codec_family"],False,
+                    decode_delay=max(0.0,decode_delay-self._smart_join_encoded_delay(mp4_path))),
+                    f"SmartJoin preparando cauda {index+1}",step,total_steps,clip.tail_duration_seconds)
+                self._smart_join_validate_piece(ts_path,target)
+
             # F7: a ORDEM dos segmentos é o que define o arquivo final. Os dois
             # laços acima só criam os arquivos; aqui eles entram intercalados —
             # corpo 1, emenda 1, corpo 2, emenda 2, … (a junção j fica entre o
@@ -7684,14 +7888,14 @@ class FfmpegToolsPanel:
             # medido no N4, a linha do tempo foi 2>3>4>5>1.
             pieces = []
             for tipo, index in order:
-                arquivo = work_dir / f"{'body' if tipo == 'body' else 'bridge'}_{index:03d}.ts"
+                arquivo = work_dir / f"{tipo}_{index:03d}.ts"
                 if not arquivo.exists():
                     raise RuntimeError(f"SmartJoin: segmento ausente ({arquivo.name}).")
                 pieces.append(arquivo)
             if not pieces:
                 raise RuntimeError("O SmartJoin não gerou segmentos.")
             step += 1
-            manifest_path = work_dir / f"manifest_{uuid.uuid4().hex}.txt"
+            manifest_path = self._work_file(work_dir, "manifest", ".txt")
             concat_cmd = self._smart_join_concat_arguments(
                 pieces, staged_output, target, include_audio, manifest_path,
                 durations=[durations[key] for key in order], paths=paths, medias=medias,
@@ -7705,30 +7909,32 @@ class FfmpegToolsPanel:
             except OSError:
                 pass
 
-            self._smart_join_validate_video(staged_output, expected, sum(counts.values()), fps, max_source_gap)
-            position = 0.0
-            for key in order:
-                if key[0] == "bridge":
-                    self._smart_join_validate_decoded_junction(staged_output, position, durations[key], fps)
-                position += durations[key]
-            final_info = self._smart_join_probe(staged_output)
-            audio_streams = [s for s in final_info.get("streams", []) if s.get("codec_type") == "audio"]
-            if include_audio:
-                if len(audio_streams) != 1:
-                    raise RuntimeError("SmartJoin: a faixa de áudio final está ausente.")
-                audio = audio_streams[0]
-                tolerance = max(1.1 / fps, 2048 / target["audio_rate"])
-                if abs(float(audio.get("start_time", 0))) > tolerance or abs(float(audio.get("duration", 0)) - expected) > tolerance:
-                    raise RuntimeError("SmartJoin: a duração do áudio não acompanha o vídeo.")
-            elif audio_streams:
-                raise RuntimeError("SmartJoin: a saída deveria estar sem áudio.")
+            def validate_final():
+                self._smart_join_validate_video(staged_output, expected, sum(counts.values()), fps, max_source_gap)
+                position = 0.0
+                for key in order:
+                    if key[0] in {"bridge", "tail"}:
+                        self._smart_join_validate_decoded_junction(staged_output, position, durations[key], fps)
+                    position += durations[key]
+                final_info = self._smart_join_probe(staged_output)
+                audio_streams = [s for s in final_info.get("streams", []) if s.get("codec_type") == "audio"]
+                if include_audio:
+                    if len(audio_streams) != 1:
+                        raise RuntimeError("SmartJoin: a faixa de áudio final está ausente.")
+                    audio = audio_streams[0]
+                    tolerance = max(1.1 / fps, 2048 / target["audio_rate"])
+                    if abs(float(audio.get("start_time", 0))) > tolerance or abs(float(audio.get("duration", 0)) - expected) > tolerance:
+                        raise RuntimeError("SmartJoin: a duração do áudio não acompanha o vídeo.")
+                elif audio_streams:
+                    raise RuntimeError("SmartJoin: a saída deveria estar sem áudio.")
+            self._validate_completed_output(staged_output, validate_final)
             if self.cancel_event.is_set():
                 raise Cancelled()
-            staged_output.replace(output)
+            self._publish_completed_output(staged_output, output)
             self._append_log(f"SmartJoin concluído: {expected:.2f}s em {len(pieces)} segmento(s).")
         finally:
             try:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                self._remove_work_directory(work_dir)
             except Exception:
                 pass
 
@@ -7763,7 +7969,7 @@ class FfmpegToolsPanel:
         full_reencode = bool(self._worker_value("insert_reencode", self.insert_reencode_var))
         use_smart = bool(self._worker_value("insert_smart", self.insert_smart_var))
         extension = main.suffix.lower() if main.suffix.lower() in AUDIO_EXTENSIONS else ".m4a"
-        output = self._safe_output(self.output_dir, f"{main.stem}_com_audio", extension)
+        output = self._recoverable_output(self.output_dir, f"{main.stem}_com_audio", extension)
         total_duration = main_profile.duration + inserted_profile.duration
         if full_reencode and transition_code not in {"none", "fade"} and transition_seconds > 0:
             effective = self._insert_effective_transition(
@@ -7808,7 +8014,7 @@ class FfmpegToolsPanel:
                 f"vs {inserted_profile.audio_rate}Hz/{inserted_profile.audio_channels}ch/{inserted_profile.audio_layout}/{inserted_profile.audio_codec}). "
                 "Para inseri-los sem distorção, marque 'Smart Insert' ou 'Reencode Completo'."
             )
-        work_dir = self.output_dir / f"insert_copy_{uuid.uuid4().hex}"
+        work_dir = self._work_directory("insert_copy", self.output_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         extension = output.suffix or ".m4a"
         pieces: list[Path] = []
@@ -7845,9 +8051,7 @@ class FfmpegToolsPanel:
                 pieces.append(right)
             self._concat_insert_pieces(pieces, output, "Juntando áudio inserido", 4, 4, total_duration)
         finally:
-            for path in work_dir.glob("*"):
-                path.unlink(missing_ok=True)
-            work_dir.rmdir()
+            self._remove_work_directory(work_dir)
 
     def _insert_probe_profile(self, path: Path) -> MediaProfile:
         key = (str(path.resolve()), path.stat().st_mtime_ns, path.stat().st_size)
@@ -7957,7 +8161,7 @@ class FfmpegToolsPanel:
 
     def _insert_render_continuous(self, main: Path, inserted: Path, output: Path, profile: MediaProfile,
                                    insertion: float, seconds: float, code: str, smart: bool) -> None:
-        work = output.parent / f"insert_encode_{uuid.uuid4().hex}"
+        work = self._work_directory("insert_encode", output.parent)
         work.mkdir(parents=True, exist_ok=True)
         staged = work / output.name
         try:
@@ -7966,12 +8170,12 @@ class FfmpegToolsPanel:
             _, samples = self._insert_audio_filter(profile, self._insert_duration(inserted), insertion, seconds, code, smart)
             self._execute(command, "Inserindo áudio (compatibilização contínua)" if smart else "Inserindo áudio (Reencode Completo)",
                           1, 1, samples / profile.audio_rate)
-            self._insert_validate(staged, profile, samples)
+            self._validate_completed_output(staged, lambda: self._insert_validate(staged, profile, samples))
             if self.cancel_event.is_set():
                 raise Cancelled()
-            staged.replace(output)
+            self._publish_completed_output(staged, output)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            self._remove_work_directory(work)
 
     @staticmethod
     def _insert_partial_supported(profile: MediaProfile, main: Path, output: Path) -> bool:
@@ -8004,30 +8208,40 @@ class FfmpegToolsPanel:
             self._insert_render_continuous(main, inserted, output, profile, insertion, transition_seconds, transition_code, True)
             return
         rate = plan.rate
-        self._append_log(f"Smart Insert: {(plan.main_samples - plan.right + plan.left) / rate:.6f}s do principal em cópia; "
+        self._append_log(f"Smart Insert: {(plan.tail_start - plan.right + plan.left - plan.head_end) / rate:.6f}s do principal em cópia; "
                          f"somente o inserido e {(plan.right - plan.left) / rate:.6f}s da emenda serão recodificados.")
-        work = output.parent / f"smart_insert_{uuid.uuid4().hex}"
+        work = self._work_directory("smart_insert", output.parent)
         work.mkdir(parents=True, exist_ok=True)
         staged = work / output.name
         pieces, durations = [], []
         def copy_piece(start, samples, packets, label):
             path = work / f"{len(pieces):03d}{output.suffix}"
-            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(start / rate),
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(start / rate + plan.seek_offset),
                        "-i", str(main), "-ss", "0", "-map", "0:a:0", "-c:a", "copy", "-frames:a", str(packets),
                        "-bsf:a", "setts=pts=PTS-STARTPTS:dts=DTS-STARTPTS", "-avoid_negative_ts", "disabled", str(path)]
             self._execute(command, label, len(pieces) + 1, 4, samples / rate)
             self._insert_validate(path, profile, samples)
             pieces.append(path)
             durations.append(samples / rate)
+        def encode_edge(start, samples):
+            path = work / f"{len(pieces):03d}{output.suffix}"
+            command = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(start / rate + plan.seek_offset),
+                       "-i", str(main), "-map", "0:a:0", "-vn", "-af", f"apad,atrim=end_sample={samples},asetpts=N/SR/TB",
+                       "-ar", str(rate), "-ac", str(profile.audio_channels), *self._insert_codec_args(profile, output.suffix), str(path)]
+            self._execute(command, "Smart Insert: preservando borda da edit-list", len(pieces)+1, 6, samples / rate)
+            self._insert_validate(path, profile, samples)
+            pieces.append(path); durations.append(samples / rate)
         try:
-            if plan.left and profile.audio_codec != "flac":
-                copy_piece(0, plan.left, plan.prefix_packets, "Smart Insert: trecho inicial")
+            if plan.head_end:
+                encode_edge(0, plan.head_end)
+            if plan.prefix_packets and profile.audio_codec != "flac":
+                copy_piece(plan.head_end, plan.left-plan.head_end, plan.prefix_packets, "Smart Insert: trecho inicial")
             middle = work / f"{len(pieces):03d}{output.suffix}"
             bridge_profile = replace(profile, duration=(plan.right - plan.left) / rate)
             filters, samples = self._insert_audio_filter(bridge_profile, plan.inserted_samples / rate,
                                                         (plan.insertion - plan.left) / rate,
                                                         transition_seconds, transition_code, True)
-            middle_cmd = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(plan.left / rate),
+            middle_cmd = [str(self._ffmpeg()), "-hide_banner", "-y", "-ss", self._precise_seconds(plan.left / rate + plan.seek_offset),
                           "-i", str(main), "-i", str(inserted), "-filter_complex", filters, "-map", "[aout]", "-vn",
                           "-ar", str(rate), "-ac", str(profile.audio_channels), *self._insert_codec_args(profile, output.suffix),
                           "-map_metadata", "0", "-map_chapters", "-1", str(middle)]
@@ -8035,8 +8249,10 @@ class FfmpegToolsPanel:
             self._insert_validate(middle, profile, samples)
             pieces.append(middle)
             durations.append(samples / rate)
-            if plan.right < plan.main_samples and profile.audio_codec != "flac":
-                copy_piece(plan.right, plan.main_samples - plan.right, plan.suffix_packets, "Smart Insert: trecho final")
+            if plan.suffix_packets and profile.audio_codec != "flac":
+                copy_piece(plan.right, plan.tail_start-plan.right, plan.suffix_packets, "Smart Insert: trecho final")
+            if plan.tail_start < plan.main_samples:
+                encode_edge(plan.tail_start, plan.main_samples-plan.tail_start)
             if profile.audio_codec == "flac":
                 parts = []
                 if plan.prefix_packets:
@@ -8051,12 +8267,12 @@ class FfmpegToolsPanel:
             else:
                 self._concat_insert_pieces(pieces, staged, "Smart Insert: juntando áudio", 4, 4, plan.total_samples / rate,
                                            durations=durations, metadata_source=main)
-            self._insert_validate(staged, profile, plan.total_samples)
+            self._validate_completed_output(staged, lambda: self._insert_validate(staged, profile, plan.total_samples))
             if self.cancel_event.is_set():
                 raise Cancelled()
-            staged.replace(output)
+            self._publish_completed_output(staged, output)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            self._remove_work_directory(work)
 
     def _insert_pcm_worker(self, main: Path, inserted: Path, output: Path, profile: MediaProfile,
                            insertion: float, seconds: float, code: str) -> None:
@@ -8064,7 +8280,7 @@ class FfmpegToolsPanel:
         cut = max(0, min(round(insertion * rate), round(profile.duration * rate)))
         middle_samples = round(self._insert_duration(inserted) * rate)
         total = round(profile.duration * rate) + middle_samples
-        work = output.parent / f"smart_insert_{uuid.uuid4().hex}"
+        work = self._work_directory("smart_insert", output.parent)
         work.mkdir(parents=True, exist_ok=True)
         staged, middle = work / output.name, work / "inserted.wav"
         try:
@@ -8080,20 +8296,20 @@ class FfmpegToolsPanel:
                 if self.cancel_event.is_set():
                     raise Cancelled()
             smart_insert_wave.assemble(main, middle, staged, cut, total, check_cancelled)
-            self._insert_validate(staged, profile, total)
+            self._validate_completed_output(staged, lambda: self._insert_validate(staged, profile, total))
             check_cancelled()
-            staged.replace(output)
+            self._publish_completed_output(staged, output)
         except ValueError as exc:
             self._append_log(f"Smart Insert: {exc}; usando compatibilização contínua para este WAV.")
             self._insert_render_continuous(main, inserted, output, profile, insertion, seconds, code, True)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            self._remove_work_directory(work)
 
     def _concat_insert_pieces(self, pieces: list[Path], output: Path, label: str, progress: int, total: int, duration: float,
                               durations: list[float] | None = None, metadata_source: Path | None = None) -> None:
         if not pieces:
             raise RuntimeError("Nenhum trecho foi criado para a inserção")
-        list_file = output.parent / f"{output.stem}_pieces_{uuid.uuid4().hex}.txt"
+        list_file = self._work_file(output.parent, output.stem + "_pieces", ".txt")
         list_file.write_text(
             "\n".join(f"file '{self._concat_escape(str(piece.resolve()))}'" +
                       (f"\nduration {self._precise_seconds(durations[i])}" if durations else "")
@@ -8143,7 +8359,7 @@ class FfmpegToolsPanel:
             raise RuntimeError("O arquivo selecionado não possui trilha de áudio.")
         clean_mode = str(self._worker_value("clean_mode", self.clean_mode_var))
         filter_value = "afftdn=nf=-25" if clean_mode == "equilibrado" else "afftdn=nr=18:nf=-35:tn=1"
-        output = self._safe_output(self.output_dir, f"{source.stem}_limpo", ".wav")
+        output = self._recoverable_output(self.output_dir, f"{source.stem}_limpo", ".wav")
         # F9: a saída preserva a taxa e os canais da FONTE (o perfil que forçava
         # 16 kHz mono saiu; reduzir canais/taxa é outra decisão, não "limpar").
         format_args = ["-ar", str(media.audio_rate), "-ac", str(media.audio_channels)]

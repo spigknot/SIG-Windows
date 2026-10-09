@@ -45,6 +45,16 @@ def source(
 
 
 class SmartJoinPlannerTests(unittest.TestCase):
+    def test_nominal_frame_rate_difference_does_not_force_body_encode(self):
+        result=plan([source(12,profile(fps=25)),source(12,profile(fps=30))],.5,False)
+        self.assertTrue(all(clip.copy_video for clip in result.clips))
+
+    def test_hidden_reference_repairs_only_tail_at_zero_transition(self):
+        camera=replace(source(12),tail_repair_start_seconds=10)
+        result=plan([camera,source(12)],0,False)
+        self.assertEqual((result.clips[0].body_end_seconds,result.clips[0].tail_duration_seconds),(10,2))
+        self.assertEqual(result.junctions,[])
+
     def test_transition_margins_use_previous_and_next_keyframes(self):
         plan_result = plan(
             sources=[
@@ -91,6 +101,19 @@ class SmartJoinPlannerTests(unittest.TestCase):
         plan_result = plan([shifted, shifted], 0.5, fade_in_out=True)
         self.assertTrue(all(clip.copy_video for clip in plan_result.clips))
 
+    def test_camera_negative_preroll_does_not_hide_visible_keyframe(self):
+        camera_clip = source(12.0, keyframes=[-.033756, 0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+        for transition in (0.0, .2, .5, 1.0):
+            with self.subTest(transition=transition):
+                result = plan([source(10.0), camera_clip], transition, fade_in_out=False)
+                self.assertTrue(all(clip.copy_video for clip in result.clips))
+
+    def test_negative_preroll_without_visible_initial_keyframe_is_rejected(self):
+        camera_clip = source(12.0, keyframes=[-.033756, 3.0, 6.0, 9.0])
+        result = plan([source(10.0), camera_clip], .5, fade_in_out=False)
+        self.assertFalse(result.clips[1].copy_video)
+        self.assertIn("keyframe", result.clips[1].incompatibility_reason)
+
     def test_incompatible_clip_is_reencoded_while_compatible_clips_remain_copied(self):
         incompatible = profile(width=1280, height=720)
         plan_result = plan(
@@ -112,6 +135,10 @@ class SmartJoinPlannerTests(unittest.TestCase):
             source(20.0, hevc),
             source(15.0, hevc),
         ]
+        self.assertEqual(1, choose_target_index(sources))
+
+    def test_nominal_fps_tie_uses_dominant_rate_for_bridges(self):
+        sources = [source(6.0, profile(fps=25)), source(6.0, profile(fps=60)), source(6.0, profile(fps=60))]
         self.assertEqual(1, choose_target_index(sources))
 
     def test_sparse_keyframes_reencode_only_affected_clip(self):
@@ -151,11 +178,11 @@ class SmartJoinPlannerTests(unittest.TestCase):
         self.assertFalse(plan_result.can_smart_join)
         self.assertIn("formato de pixel", plan_result.ineligibility_reason or "")
 
-    def test_compatibility_checks_codec_fps_rotation_pixel_format_and_sar(self):
+    def test_compatibility_checks_codec_rotation_pixel_format_and_sar(self):
         base = profile()
         self.assertIsNone(video_incompatibility(base, replace(base, fps=30.005)))
         self.assertEqual("codec diferente", video_incompatibility(base, replace(base, codec_family="hevc")))
-        self.assertEqual("framerate diferente", video_incompatibility(base, replace(base, fps=29.97)))
+        self.assertIsNone(video_incompatibility(base, replace(base, fps=29.97)))
         self.assertEqual("rotação diferente", video_incompatibility(base, replace(base, rotation_degrees=90)))
         self.assertEqual("formato de pixel diferente", video_incompatibility(base, replace(base, pixel_format="yuv422p")))
         self.assertEqual("SAR/DAR diferente", video_incompatibility(base, replace(base, sample_aspect_ratio="4:3")))

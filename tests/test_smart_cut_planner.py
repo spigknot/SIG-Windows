@@ -73,6 +73,27 @@ class SmartCutPlannerTests(unittest.TestCase):
             with self.subTest(times=times), self.assertRaises(ValueError):
                 plan(timeline(times), 0, .1, 25)
 
+    def test_negative_discarded_keyframe_does_not_replace_visible_zero_keyframe(self):
+        info = timeline(origin=5)
+        info["packets"].insert(0, {"pts_time": "4.96", "dts_time": "4.88", "flags": "KD", "duration_time": ".04"})
+        result = plan(info, 0, 6, 25)
+        self.assertEqual(len(result.timestamps), 150)
+        self.assertTrue(result.segments[0].copy)
+        self.assertEqual(result.segments[0].packet_start, 1)
+
+    def test_discarded_reference_before_final_visible_b_frame_repairs_only_last_gop(self):
+        info = timeline()
+        hidden = {"pts_time": "6.0", "dts_time": "5.84", "duration_time": ".04", "flags": "D"}
+        info["packets"].insert(-1, hidden)
+        result = plan(info, 0, 6, 25)
+        self.assertEqual([(s.start, s.end, s.copy) for s in result.segments], [(0, 4, True), (4, 6, False)])
+        self.assertEqual(sum(s.frames for s in result.segments), 150)
+
+    def test_discarded_packet_after_last_visible_frame_needs_no_repair(self):
+        info = timeline()
+        info["packets"].append({"pts_time": "6.0", "dts_time": "5.92", "duration_time": ".04", "flags": "D"})
+        self.assertTrue(plan(info, 0, 6, 25).segments[0].copy)
+
     def test_nonfinite_intervals_are_rejected(self):
         with self.assertRaises(ValueError):
             plan(timeline(), 0, math.inf, 25)

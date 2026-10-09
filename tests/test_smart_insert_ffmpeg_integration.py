@@ -116,6 +116,20 @@ class SmartInsertFfmpegIntegrationTests(unittest.TestCase):
                     else:
                         self.assertTrue(any('recodificação contínua' in line for line in logs))
 
+    def test_edited_alac_preserves_samples_without_full_reencode(self):
+        source=self.directory/'edited.m4a'
+        original=self.directory/'longer-alac.m4a'
+        self.run_command([FF,'-v','error','-y','-f','lavfi','-i','sine=frequency=997:sample_rate=48000:duration=6.2','-c:a','alac',original])
+        self.run_command([FF,'-v','error','-y','-ss','0.037','-i',original,'-t','5.951',
+                          '-c:a','copy','-avoid_negative_ts','disabled',source])
+        for seconds in (0,.2,.5):
+            with self.subTest(seconds=seconds):
+                output,info,commands,logs=self.insert(source,position=2.123,seconds=seconds)
+                reference,*_=self.insert(source,position=2.123,seconds=seconds,reference=True)
+                self.assertEqual(self.pcm(output),self.pcm(reference))
+                self.assertTrue(any('-c:a' in command and command[command.index('-c:a')+1]=='copy' for command in commands))
+                self.assertFalse(any('recodificação contínua' in message for message in logs))
+
     def test_lossless_start_end_and_small_edges_match_continuous_reference(self):
         for codec in ('pcm_s16le','alac','flac'):
             source=self.sources[codec]

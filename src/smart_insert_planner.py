@@ -16,6 +16,9 @@ class InsertPlan:
     right: int
     prefix_packets: int
     suffix_packets: int
+    seek_offset: float = 0.0
+    head_end: int = 0
+    tail_start: int = 0
 
     @property
     def total_samples(self):
@@ -54,13 +57,23 @@ def plan(info: dict, main_duration: float, inserted_duration: float, insertion: 
     origin = float(stream.get("start_time") or 0)
     starts = [round((float(p["pts_time"]) - origin) * rate) for p in packets]
     ends = [a + round(float(p.get("duration_time") or 0) * rate) for a, p in zip(starts, packets)]
-    if (not starts or starts[0] != 0 or ends[-1] != main or
+    end_tolerance = math.ceil(rate / 1000) if stream.get("codec_name") == "alac" else 0
+    if (not starts or starts[0] > 0 or ends[-1] < main - end_tolerance or
         any(b <= a for a, b in zip(starts, ends)) or
         any(a != b for a, b in zip(ends[:-1], starts[1:]))):
         raise ValueError("Os pacotes não formam uma sequência contínua de amostras.")
-    boundaries = [*starts, main]
+    head = next((b for a,b in zip(starts,ends) if a < 0 < b), 0)
+    tail = next((a for a,b in zip(starts,ends) if a < main < b), main)
+    if ends[-1] < main:
+        tail = starts[-1]
+    head, tail = min(main, head), max(0, tail)
+    boundaries = sorted({0, main, *(a for a in starts if 0 < a < main)})
     left = max(t for t in boundaries if t <= cut)
     right = min(t for t in boundaries if t >= cut)
+    if cut < head:
+        right = max(right, head)
+    if cut > tail:
+        left = min(left, tail)
     if minimum_bridge:
         if left == main and main - starts[-1] < minimum_bridge:
             left = starts[-1]
@@ -69,5 +82,8 @@ def plan(info: dict, main_duration: float, inserted_duration: float, insertion: 
                 right = min(t for t in boundaries if t > right)
             elif left:
                 left = max(t for t in boundaries if t < left)
+    head, tail = min(head, left), max(tail, right)
     return InsertPlan(rate, main, middle, cut, left, right,
-                      sum(t < left for t in starts), sum(t >= right for t in starts))
+                      sum(head <= a < left and b <= main for a,b in zip(starts,ends)),
+                      sum(right <= a and b <= tail for a,b in zip(starts,ends)),
+                      origin - float(info.get("format", {}).get("start_time") or 0), head, tail)

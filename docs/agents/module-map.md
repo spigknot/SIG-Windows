@@ -56,6 +56,7 @@ Ambiente ...... app_env.py
 | `diarias_store.py` | Persistencia local do UFESP, dos valores e do PDF ativo do holerite da aba Diarias | Leitura de PDF, UI |
 | `ui_widgets.py` | Widgets reutilizaveis (`create_tooltip`, `PreviewIconButton`) | Regra de negocio |
 | `ffmpeg_tools_panel.py` | Aba FFmpeg: conversao, corte, juncao, aceleracao, player, linha do tempo | STT/transcricao |
+| `ffmpeg_recovery.py` | Checkpoints locais, integridade de entradas e reutilização das etapas FFmpeg concluídas | UI, execução de FFmpeg |
 | `smart_cut_planner.py` | Intervalos e fronteiras de GOP do SmartCut pelos timestamps dos pacotes | UI, execução de FFmpeg |
 | `smart_insert_planner.py` | Duração e limites de pacotes/amostras do Smart Insert de áudio | UI, execução de FFmpeg |
 | `smart_insert_flac.py` | Remontagem dos headers e metadados FLAC, preservando subframes comprimidos | UI, encode de áudio |

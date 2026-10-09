@@ -98,7 +98,7 @@ class SmartJoinFfmpegIntegrationTests(unittest.TestCase):
         p._join_worker()
         path = next(directory.glob("videos_juntos*.mp4"))
         info = json.loads(self.run_command([FFPROBE, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)]).stdout)
-        decoded = self.run_command([FFMPEG, "-v", "warning", "-i", str(path), "-f", "null", "-"])
+        decoded = self.run_command([FFMPEG, "-v", "warning", "-i", str(path), "-fps_mode", "passthrough", "-enc_time_base", "1/90000", "-f", "null", "-"])
         self.assertEqual(decoded.stderr, b"", decoded.stderr.decode("utf-8", "replace"))
         self.assertFalse(list(directory.glob("smart_join_*")))
         return path, info, commands
@@ -125,6 +125,17 @@ class SmartJoinFfmpegIntegrationTests(unittest.TestCase):
             cosine = sum(x * math.cos(2 * math.pi * frequency * i / 8000) for i, x in enumerate(samples))
             scores[frequency] = sine*sine + cosine*cosine
         return max(scores, key=scores.get), rms
+
+    def test_different_nominal_rates_preserve_both_bodies_as_vfr(self):
+        other=self.source("thirty","lime",rate="30")
+        for seconds in (0,.3,.75):
+            with self.subTest(seconds=seconds):
+                output,info,commands=self.join([self.red,other],transition="Dissolver",seconds=seconds)
+                self.assertAlmostEqual(float(info['format']['duration']),12-seconds,delta=.045)
+                bodies=[command for command in commands if Path(command[-1]).name.startswith('body_')]
+                self.assertEqual(len(bodies),2)
+                self.assertTrue(all(command[command.index('-c:v')+1]=='copy' for command in bodies))
+                if seconds==0:self.assertEqual(int(info['streams'][0]['nb_frames']),330)
 
     def test_updated_installation_without_top_level_ffprobe(self):
         runtime = self.directory / "old_installation"
@@ -177,6 +188,17 @@ class SmartJoinFfmpegIntegrationTests(unittest.TestCase):
                         self.assertFalse(any("-c:v" in c and c[c.index("-c:v") + 1] != "copy" for c in commands))
                     for timestamp, tone in ((1, 440), (7, 880), (duration - 1, 1320)):
                         self.assertEqual(self.tone(path, timestamp)[0], tone)
+
+    def test_automatic_profile_keeps_majority_video_bodies_in_copy(self):
+        _, info, commands = self.join([self.red, self.large, self.large],
+                                      profile="Automático (preservar mais vídeo)")
+        video = next(stream for stream in info["streams"] if stream["codec_type"] == "video")
+        self.assertEqual((256, 144), (video["width"], video["height"]))
+        self.assert_timeline(info, 18, 450)
+        copies = [command for command in commands
+                  if "-c:v" in command and command[command.index("-c:v") + 1] == "copy"
+                  and command[-1].endswith(".ts")]
+        self.assertEqual(2, len(copies))
 
     def test_output_without_audio(self):
         _, info, _ = self.join([self.red, self.green, self.blue], audio="Gerar saída sem áudio")
