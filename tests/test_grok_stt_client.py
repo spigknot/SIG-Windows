@@ -121,6 +121,13 @@ class GrokRetryTest(unittest.TestCase):
         self.assertEqual(self.uploader._rate_limiter.defer.call_count, 5)
         self.assertEqual(self.uploader.on_retry.call_count, 4)
 
+    def test_error_count_updates_before_retry_and_keeps_recovered_errors(self):
+        counts = []
+        self.uploader.on_error = lambda: counts.append(self.uploader.error_count)
+        self.send([(429, b"busy", {}), (503, b"capacity", {}), (200, b"ok", {})])
+        self.assertEqual(counts, [1, 2])
+        self.assertEqual(self.uploader.error_count, 2)
+
     def test_retry_after_seconds_overrides_shorter_backoff_case_insensitively(self):
         result, request = self.send([(429, b"busy", {"rEtRy-AfTeR": "12"}), (200, b"ok", {})])
         self.assertEqual(result[0], 200)
@@ -240,8 +247,9 @@ class GrokJobTest(unittest.TestCase):
         self.assertEqual(self.job.txt_path.read_text(encoding="utf-8"), "ok")
         events = [call.args for call in self.app._queue.call_args_list]
         self.assertTrue(any(event[0] == "activity" and "HTTP 429" in event[1] for event in events))
-        self.assertTrue(any(event[0] == "activity_line" and "sucesso 1 (50%)" in event[2]
-                            and "429 1 (50%)" in event[2] for event in events))
+        self.assertEqual(self.app.uploader.error_count, 1)
+        self.assertFalse(any(event[0] == "activity_line" and event[1] == "grok_rate_limit"
+                             for event in events))
 
     def test_legacy_expired_auth_retry_cannot_exceed_five_attempts(self):
         response = (503, b'{"error":"auth context expired"}', {})

@@ -95,6 +95,12 @@ class GrokTranscriptionUploader(GraniteUploader):
         self._successes = 0
         self._rate_limited = 0
         self.on_retry = None
+        self.on_error = None
+
+    @property
+    def error_count(self) -> int:
+        with self._metrics_lock:
+            return self._responses - self._successes
 
     def _start_request(self, conn) -> None:
         def send_headers():
@@ -133,6 +139,8 @@ class GrokTranscriptionUploader(GraniteUploader):
                 self._successes += int(200 <= status < 300)
                 self._rate_limited += int(status == 429)
             _LOGGER.info(self.statistics_text())
+            if not 200 <= status < 300 and self.on_error is not None:
+                self.on_error()
             if status not in _RETRYABLE_STATUS:
                 return status, raw, headers
             delay = max(2 ** attempt + random.uniform(0, 0.5), _retry_after_seconds(headers))

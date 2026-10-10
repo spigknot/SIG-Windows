@@ -16869,10 +16869,11 @@ try {
         model_reported = [False] * len(model_settings)
         model_labels = list(model_names)
 
-        def update_progress(index: int):
+        def update_progress(index: int, advance: bool = True):
             now = time.perf_counter()
             with progress_lock:
-                done[index - 1] += 1
+                if advance:
+                    done[index - 1] += 1
                 snapshot = list(done)
                 if snapshot[index - 1] >= total and model_end_times[index - 1] is None:
                     model_end_times[index - 1] = now - model_starts[index - 1]
@@ -16888,12 +16889,14 @@ try {
                 for model_index, count in enumerate(snapshot, start=1)
                 if count >= total and not model_reported[model_index - 1]
             ]
-            emit_lines = bool(pending) or now - throttles.get("all", 0.0) >= 0.1
+            emit_lines = not advance or bool(pending) or now - throttles.get("all", 0.0) >= 0.1
             if not emit_lines:
                 return
             throttles["all"] = now
             for model_index, count in enumerate(snapshot, start=1):
                 label = model_labels[model_index - 1]
+                model_uploader = uploaders[model_index - 1]
+                errors = f" - {model_uploader.error_count} erros" if isinstance(model_uploader, GrokTranscriptionUploader) else ""
                 if count >= total:
                     # Linha FECHADA: escrita UMA única vez, com o tempo do
                     # próprio modelo — reescrever aqui faria o relógio continuar
@@ -16909,15 +16912,19 @@ try {
                     self._queue(
                         "activity_line",
                         f"model:{model_index}",
-                        f"{label} {count}/{total} ({format_duration(end)})",
+                        f"{label} {count}/{total}{errors} ({format_duration(end)})",
                         "vad_total",
                     )
                 else:
                     percent = int(count / max(total, 1) * 100 + 0.5)
-                    self._queue("activity_line", f"model:{model_index}", f"{label} {count}/{total} ({percent}%)", None)
+                    self._queue("activity_line", f"model:{model_index}", f"{label} {count}/{total}{errors} ({percent}%)", None)
 
         for model_index, label in enumerate(model_labels, start=1):
-            self._queue("activity_line", f"model:{model_index}", f"{label} 0/{total} (0%)", None)
+            uploader = uploaders[model_index - 1]
+            errors = " - 0 erros" if isinstance(uploader, GrokTranscriptionUploader) else ""
+            if isinstance(uploader, GrokTranscriptionUploader):
+                uploader.on_error = lambda index=model_index: update_progress(index, advance=False)
+            self._queue("activity_line", f"model:{model_index}", f"{label} 0/{total}{errors} (0%)", None)
 
         def job_attr(job: AudioJob, base: str, index: int):
             return audio_job_attr(job, base, index)
@@ -17108,11 +17115,7 @@ try {
         protected_grok = isinstance(uploader, GrokTranscriptionUploader)
         if protected_grok:
             uploader.on_retry = lambda notice: self._queue("activity", notice, "warning")
-        try:
-            status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
-        finally:
-            if protected_grok:
-                self._queue("activity_line", "grok_rate_limit", uploader.statistics_text(), None)
+        status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
         if status != 200 and is_grok_transcription(request_settings) and not protected_grok:
             raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
             if "auth context expired" in raw.casefold():
