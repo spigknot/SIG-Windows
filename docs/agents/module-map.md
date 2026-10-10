@@ -9,7 +9,7 @@ edite o modulo dono — nunca duplique logica em `sig_app.py`.
 ```
 UI ............ sig_app.py, ffmpeg_tools_panel.py, ui_widgets.py, prompts_panel.py
 Orquestracao .. sig_app.py (classe SigApp), vad_worker.py, batch_execution.py
-Integracoes ... stt_clients.py, gemini_stt_client.py, http_clients.py,
+Integracoes ... stt_clients.py, gemini_stt_client.py, grok_stt_client.py, http_clients.py,
                 text_models.py, imei_lookup.py
 Processamento . transcription_parsing.py, log_formatting.py, documents.py,
                 reporting.py, qualification.py, name_database.py, audio_io.py,
@@ -22,7 +22,7 @@ Ambiente ...... app_env.py
 ```
 
 `domain_models`, `providers`, `settings_store`, `prompt_store`,
-`transcription_parsing`, `text_models`, `http_clients`, `stt_clients`, `gemini_stt_client`,
+`transcription_parsing`, `text_models`, `http_clients`, `stt_clients`, `gemini_stt_client`, `grok_stt_client`,
 `log_formatting`, `reporting`, `qualification`, `name_database`, `imei_lookup`,
 `documents`, `media_files`, `audio_io`, `batch_errors`, `batch_execution` e
 `app_env` **nao podem** importar `tkinter` nem `sig_app` (testado em
@@ -42,6 +42,7 @@ Ambiente ...... app_env.py
 | `http_clients.py` | `GraniteUploader` e `TextModelClient` (transporte HTTP, cancelamento) | Formato de cada provedor STT |
 | `stt_clients.py` | Protocolo STT: URLs, form fields, deteccao de provedor, REST/WS (Alibaba, MetaMuse, Deepgram...) | UI e persistencia |
 | `gemini_stt_client.py` | Gemini 3.5 Transcribe: Files/Interactions REST, protocolo Live WebSocket, configuração e cancelamento | UI, persistência de chaves |
+| `grok_stt_client.py` | Grok STT na Transcrição: pacing compartilhado de 8 RPS, cooldown de 429, Retry-After, backoff e métricas HTTP | UI, persistência, outros provedores e streaming |
 | `log_formatting.py` | Formatacao de comandos FFmpeg e de parametros para log; `format_bytes`, `format_duration`, `format_audio_total` | Execucao de FFmpeg |
 | `media_probe.py` | Duracao de midia: cabecalho do WAV (barato) e sonda externa `ffprobe`/`ffmpeg -i` (para o resumo antes do envio) | UI, contagem de lote |
 | `batch_errors.py` | Rotulos curtos dos erros do lote (uma linha viva por TIPO de erro, com contagem) e texto das linhas "ja estavam prontos/compactados" | UI, contagem de estado |

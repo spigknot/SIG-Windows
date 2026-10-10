@@ -71,6 +71,10 @@ class GraniteUploader:
             except Exception:
                 pass
 
+    def _start_request(self, conn: http.client.HTTPConnection) -> None:
+        """Envia os headers; provedores podem controlar a taxa neste ponto."""
+        conn.endheaders()
+
     def post_file(
         self,
         url: str,
@@ -171,7 +175,7 @@ class GraniteUploader:
             conn.putheader("Content-Length", str(content_length))
             for header, value in self.extra_headers.items():
                 conn.putheader(header, value)
-            conn.endheaders()
+            self._start_request(conn)
             conn.send(preamble)
             with file_path.open("rb") as handle:
                 while True:

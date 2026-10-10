@@ -352,6 +352,7 @@ from stt_clients import (  # noqa: F401
     alibaba_vocabulary_records,
     alibaba_vocabulary_record_update,
 )
+from grok_stt_client import GrokTranscriptionUploader
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
@@ -3985,6 +3986,15 @@ class SigApp:
         self.files_models_button.configure(menu=self.files_models_menu)
         self.files_models_button.pack(side=LEFT, padx=(16, 0))
 
+        self.files_grok_limit_warning = tk.Label(
+            options2, text="!", fg="#d5a000", background="#f4f7f6",
+            font=("Segoe UI", 13, "bold"), cursor="hand2", takefocus=True,
+        )
+        self.files_grok_limit_warning.bind("<Button-1>", self._show_files_grok_limit_help)
+        self.files_grok_limit_warning.bind("<Return>", self._show_files_grok_limit_help)
+        self.files_grok_limit_warning.bind("<space>", self._show_files_grok_limit_help)
+        create_tooltip(self.files_grok_limit_warning, "Grok STT: limite de 10 requisições por segundo")
+
         # Checkbox "Um modelo por vez" (entre o botão "Modelos" e o seletor de
         # Idioma, regra do usuário 13/09): marcada, o lote NÃO manda os áudios
         # para os modelos ao mesmo tempo — a fila inteira vai para um modelo e
@@ -4032,6 +4042,7 @@ class SigApp:
         self.files_keywords_help.pack(side=LEFT, padx=(4, 0))
         self._rebuild_keywords_menus()
         self._refresh_files_language_label()
+        self._refresh_files_grok_limit_warning()
 
         # VAD removido da tela principal (teste na aba própria)
         self.zip_level_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_tree_modes())
@@ -9549,6 +9560,35 @@ try {
 
     def _multi_transcription_model_changed(self, name: str):
         self.settings["multi_transcription_models"] = self._selected_multi_transcription_model_names()
+        self._refresh_files_grok_limit_warning()
+
+    def _refresh_files_grok_limit_warning(self):
+        marker = getattr(self, "files_grok_limit_warning", None)
+        if marker is None:
+            return
+        names = (
+            self._selected_multi_transcription_model_names()
+            if self.multi_transcription_model_vars
+            else self.settings.get("multi_transcription_models") or []
+        )
+        if GROK_API_NAME in names:
+            marker.pack(side=LEFT, padx=(4, 0), before=self.files_one_model_check)
+        else:
+            marker.pack_forget()
+
+    def _show_files_grok_limit_help(self, _event=None):
+        messagebox.showinfo(
+            "Grok STT — limite de requisições",
+            "O Grok STT permite até 10 requisições por segundo (10 RPS) no tier "
+            "considerado pelo SIG.\n\n"
+            "Para manter uma margem, o SIG inicia até 8 requisições por segundo, "
+            "inclusive reenvios. As respostas continuam sendo processadas em paralelo. "
+            "Por isso, pode haver um atraso no envio de muitos arquivos curtos.\n\n"
+            "Se a xAI limitar a taxa ou a capacidade (por exemplo, por outras instâncias "
+            "usando a mesma cota), o SIG aguarda e tenta novamente, até 5 tentativas. "
+            "O botão Parar também interrompe essa espera.",
+            parent=self.root,
+        )
 
     def _populate_models_menu(self):
         """Popula o menu do Menubutton 'Modelos' (postcommand) com a
@@ -9592,6 +9632,7 @@ try {
                 variable=variable,
                 command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
             )
+        self._refresh_files_grok_limit_warning()
 
     def _default_transcription_model_name(self) -> str:
         """Modelo padrão da aba Transcrição quando o menu 'Modelos' está vazio.
@@ -11866,6 +11907,7 @@ try {
             )
             self._refresh_server_label()
             self._refresh_live_grok_controls()
+            self._refresh_files_grok_limit_warning()
             win.destroy()
 
         ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
@@ -17063,8 +17105,15 @@ try {
             audio_job_set(job, "transcription", model_index, result)
             txt_path.write_text(result, encoding="utf-8")
             return
-        status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
-        if status != 200 and is_grok_transcription(request_settings):
+        protected_grok = isinstance(uploader, GrokTranscriptionUploader)
+        if protected_grok:
+            uploader.on_retry = lambda notice: self._queue("activity", notice, "warning")
+        try:
+            status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
+        finally:
+            if protected_grok:
+                self._queue("activity_line", "grok_rate_limit", uploader.statistics_text(), None)
+        if status != 200 and is_grok_transcription(request_settings) and not protected_grok:
             raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
             if "auth context expired" in raw.casefold():
                 self._queue("job", job.original_path, "Aguardando reenvio")

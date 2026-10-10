@@ -187,6 +187,13 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
         api_key = str(settings.get("grok_api_key") or "").strip()
         if not api_key:
             raise RuntimeError("Insira a chave API do Grok nas configurações.")
+        if settings.get("_multi_transcription"):
+            from grok_stt_client import GrokTranscriptionUploader
+            return GrokTranscriptionUploader(
+                cancel_event,
+                transcription_form_fields(settings),
+                {"Authorization": f"Bearer {api_key}"},
+            )
         return GraniteUploader(
             cancel_event,
             transcription_form_fields(settings),
