@@ -9,6 +9,7 @@ import unittest
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 from tkinter import ttk
 from unittest.mock import Mock, patch
 
@@ -146,7 +147,7 @@ class ModeloMeiosPropriosTest(unittest.TestCase):
 
 
 class BotaoMeiosPropriosTest(unittest.TestCase):
-    """Exercita o botão verde de ponta a ponta na seção real de Diárias."""
+    """Exercita a opção D.M.P. no menu real de Diárias."""
 
     def setUp(self):
         self.root = tk.Tk()
@@ -180,16 +181,13 @@ class BotaoMeiosPropriosTest(unittest.TestCase):
         self.root.update()
 
     def _botao(self):
-        return getattr(self.app, "diarias_meios_proprios_button", None)
+        return SimpleNamespace(invoke=lambda: self.app.diarias_generate_menu.invoke(2))
 
-    def test_botao_verde_no_rodape_junto_do_requerimento(self):
-        button = self._botao()
-        self.assertIsNotNone(button, "o botão da declaração precisa existir")
-        self.assertEqual("Gerar declaração Meios Próprios", button["text"])
-        self.assertEqual(button.master, self.app.diarias_generate_button.master)
-        style = ttk.Style(self.root)
-        self.assertEqual("#16833a", style.lookup(button["style"], "background"))
-        self.assertEqual("#ffffff", style.lookup(button["style"], "foreground"))
+    def test_menu_discreto_na_mesma_linha_de_gerenciar_perfis(self):
+        button = self.app.diarias_generate_menu_button
+        self.assertEqual("Gerar", button["text"])
+        self.assertEqual("D.M.P.", self.app.diarias_generate_menu.entrycget(2, "label"))
+        self.assertEqual(button.master, self.app.diarias_configure_button.master)
         self.assertEqual("normal", str(button["state"]))
 
     def test_clique_abre_salvar_com_nome_padrao_e_permite_nomear_arquivo(self):

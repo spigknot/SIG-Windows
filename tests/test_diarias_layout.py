@@ -18,6 +18,7 @@ VARIABLES = (
     "ufesp_index", "ufesp", "holerite_file", "holerite_total", "holerite_mes",
     "talao_file", "abertura_data", "abertura_hora", "fechamento_data",
     "fechamento_hora", "protocolo_file", "req", "mapa", "data",
+    "escala_mes",
 )
 
 
@@ -39,6 +40,7 @@ class DiariasLayoutTest(unittest.TestCase):
         self.app._select_diarias_pdf = Mock()
         self.app._reload_diarias_pdf = Mock()
         self.app._generate_diarias_requerimento = Mock()
+        self.app._generate_diarias_mapa = Mock()
         self.app._generate_diarias_meios_proprios = Mock()
         self.app._generate_diarias_bundle = Mock()
         self.app._print_diaria = Mock()
@@ -54,19 +56,20 @@ class DiariasLayoutTest(unittest.TestCase):
     def test_secoes_sao_cartoes_independentes_com_campos_alinhados(self):
         cards = getattr(self.app, "diarias_sections", {})
         self.assertEqual(list(cards), ["Holerite", "Talão", "Protocolo", "Escala"])
-        style = ttk.Style(self.root)
+        self.assertEqual(len({(c.winfo_width(), c.winfo_height()) for c in cards.values()}), 1)
         previous_bottom = None
         for title, card in cards.items():
             with self.subTest(section=title):
-                self.assertEqual(style.lookup(card["style"], "background"), "#ffffff")
+                self.assertEqual(card["background"], "#ffffff")
+                self.assertEqual(card["highlightbackground"], "#000000")
+                self.assertEqual(int(card["highlightthickness"]), 1)
                 self.assertTrue(card.winfo_ismapped())
                 if previous_bottom is not None:
                     self.assertGreaterEqual(card.winfo_rooty() - previous_bottom, 8)
                 previous_bottom = card.winfo_rooty() + card.winfo_height()
                 entries = [w for w in descendants(card) if isinstance(w, ttk.Entry)]
                 if title == "Escala":
-                    self.assertEqual(entries, [])
-                    continue
+                    self.assertEqual(len(entries), 1)
                 self.assertTrue(entries)
                 self.assertEqual(len({w.winfo_rooty() for w in entries}), 1)
                 for entry in entries:
@@ -113,14 +116,18 @@ class DiariasLayoutTest(unittest.TestCase):
             self.app._select_diarias_pdf.assert_called_with(kind)
             buttons[1].invoke()
             self.app._reload_diarias_pdf.assert_called_with(kind)
-        self.app.diarias_generate_button.invoke()
+        self.app.diarias_generate_menu.invoke(0)
         self.app._generate_diarias_requerimento.assert_called_once_with()
-        self.app.diarias_meios_proprios_button.invoke()
+        self.app.diarias_generate_menu.invoke(1)
+        self.app._generate_diarias_mapa.assert_called_once_with()
+        self.app.diarias_generate_menu.invoke(2)
         self.app._generate_diarias_meios_proprios.assert_called_once_with()
-        self.assertEqual(
-            self.app.diarias_meios_proprios_button.master,
-            self.app.diarias_generate_button.master,
-        )
+        self.assertEqual([self.app.diarias_generate_menu.entrycget(i, "label") for i in range(3)],
+                         ["Requerimento", "Mapa", "D.M.P."])
+        self.assertEqual(self.app.diarias_generate_menu_button.master, self.app.diarias_configure_button.master)
+        self.assertEqual(self.app.diarias_generate_menu_button.winfo_y(), self.app.diarias_configure_button.winfo_y())
+        self.assertEqual(self.app.diarias_generate_menu_button.winfo_x(),
+                         self.app.diarias_configure_button.winfo_x() + self.app.diarias_configure_button.winfo_width() + 8)
 
     def test_novas_acoes_tem_icones_e_preservam_callbacks(self):
         self.app.diarias_generate_bundle_button.invoke()
@@ -132,7 +139,7 @@ class DiariasLayoutTest(unittest.TestCase):
         for button in self.app.diarias_batch_buttons:
             self.assertTrue(button.cget("image"))
         self.assertEqual(int(self.app.diarias_profile_selector.cget("width")), 22)
-        self.assertEqual(self.app.diarias_generate_button.winfo_x(), 0)
+        self.assertEqual(self.app.diarias_generate_bundle_button.winfo_x(), 0)
         scale_buttons = [child for child in descendants(self.app.diarias_sections["Escala"]) if isinstance(child, ttk.Button)]
         self.assertEqual(len(scale_buttons), 1)
         scale_buttons[0].invoke()
@@ -146,17 +153,21 @@ class DiariasLayoutTest(unittest.TestCase):
         self.assertNotEqual(cards["Holerite"].grid_info()["column"], cards["Talão"].grid_info()["column"])
         self.assertLessEqual(cards["Holerite"].winfo_width(), 450)
         self.assertLessEqual(cards["Talão"].winfo_width(), 450)
+        self.assertEqual(len({(c.winfo_width(), c.winfo_height()) for c in cards.values()}), 1)
         for card in cards.values():
             for child in descendants(card):
                 if isinstance(child, (ttk.Entry, ttk.Button)):
                     self.assertLessEqual(child.winfo_rootx() + child.winfo_width(), card.winfo_rootx() + card.winfo_width())
+        self.root.geometry("815x720")
+        self.root.update()
+        self.assertEqual(len({(c.winfo_width(), c.winfo_height()) for c in cards.values()}), 1)
 
     def test_arquivo_longo_nao_empurra_botoes_e_rodape_fica_visivel(self):
         for kind in ("holerite", "talao", "protocolo"):
             getattr(self.app, f"diarias_{kind}_file_var").set("arquivo_muito_longo_" * 20 + ".pdf")
         self.root.geometry("680x440")
         self.root.update()
-        button = self.app.diarias_generate_button
+        button = self.app.diarias_generate_bundle_button
         self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
                              self.root.winfo_rooty() + self.root.winfo_height())
         for card in self.app.diarias_sections.values():
@@ -174,6 +185,19 @@ class DiariasLayoutTest(unittest.TestCase):
         self.assertLessEqual(card.winfo_rooty() + card.winfo_height(),
                              canvas.winfo_rooty() + canvas.winfo_height())
         self.assertTrue(button.winfo_ismapped())
+
+    def test_escala_avisa_divergencia_sem_popup_e_preserva_dimensoes_dos_quadros(self):
+        self.root.geometry("1400x720")
+        with patch("sig_app.messagebox.showwarning") as popup:
+            self.app.diarias_abertura_data_var.set("05/10/2026")
+            for month, differs in (("10/2026", False), ("09/2026", True), ("10/2025", True), ("", False), ("inválido", False)):
+                self.app.diarias_escala_mes_var.set(month)
+                self.root.update()
+                self.assertEqual(bool(self.app.diarias_escala_month_warning_var.get()), differs)
+                self.assertEqual(bool(self.app.diarias_escala_month_warning_label.winfo_ismapped()), differs)
+                self.assertEqual(len({(c.winfo_width(), c.winfo_height()) for c in self.app.diarias_sections.values()}), 1)
+            popup.assert_not_called()
+        self.assertEqual(str(self.app.diarias_escala_month_warning_label.cget("foreground")), "#b42318")
 
 
 if __name__ == "__main__":

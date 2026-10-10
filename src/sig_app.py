@@ -1364,8 +1364,11 @@ class SigApp:
         )
         self.diarias_protocolo_path = ""
         self.diarias_talao_path = ""
-        self.diarias_escala_path = ""
-        self.diarias_escala_file_var = StringVar(master=self.root, value="")
+        self.diarias_escala_path, escala_filename, escala_mes = diarias_store.load_escala()
+        self.diarias_escala_file_var = StringVar(master=self.root, value=escala_filename)
+        self.diarias_escala_mes_var = StringVar(master=self.root, value=escala_mes)
+        self.diarias_escala_save_error_shown = False
+        self.diarias_escala_mes_var.trace_add("write", self._save_diarias_escala_data)
         self.diarias_holerite_file_var = StringVar(
             master=self.root, value=holerite_filename
         )
@@ -4896,9 +4899,13 @@ class SigApp:
         self.diarias_task = None
         self.diarias_job_events = queue.Queue()
         self.diarias_job_after = None
+        self.diarias_card_size_after = None
+        self.diarias_tab.bind("<Destroy>", self._cancel_diarias_card_size, add="+")
         if not hasattr(self, "diarias_escala_file_var"):
             self.diarias_escala_file_var = StringVar(master=self.root)
             self.diarias_escala_path = ""
+        if not hasattr(self, "diarias_escala_mes_var"):
+            self.diarias_escala_mes_var = StringVar(master=self.root)
         self.diarias_validation_var = StringVar(master=self.root)
         self.diarias_status_var = StringVar(master=self.root)
         self.diarias_field_entries = {}
@@ -4910,7 +4917,7 @@ class SigApp:
         heading = ttk.Frame(self.diarias_tab)
         heading.pack(fill=X, pady=(0, 10))
         ttk.Label(heading, text="Diárias", style="Diarias.Title.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="Selecione o perfil, anexe os PDFs e confira os nove campos.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(heading, text="Selecione o perfil, anexe os PDFs e confira os dados.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
         profile_row = ttk.Frame(heading)
         profile_row.pack(fill=X, pady=(10, 0))
         ttk.Label(profile_row, text="Perfil").pack(side=LEFT, padx=(0, 8))
@@ -4920,22 +4927,24 @@ class SigApp:
         self.diarias_profile_selector.bind("<<ComboboxSelected>>", self._select_diarias_profile)
         self.diarias_profile_alert = ttk.Label(profile_row, image=self.diarias_alert_icon)
         create_tooltip(self.diarias_profile_alert, "Confira o perfil selecionado e seus dados nas configurações.")
-        self.diarias_configure_button = ttk.Button(profile_row, text="Configurar perfis", command=lambda: self.open_settings(police_subtab="Diárias"))
+        self.diarias_configure_button = ttk.Button(profile_row, text="Gerenciar perfis", command=lambda: self.open_settings(police_subtab="Diárias"))
         self.diarias_configure_button.pack(side=LEFT, padx=(8, 0))
+        self.diarias_generate_menu_button = ttk.Menubutton(profile_row, text="Gerar", cursor="hand2")
+        self.diarias_generate_menu = tk.Menu(self.diarias_generate_menu_button, tearoff=False)
+        for label, command in (("Requerimento", self._generate_diarias_requerimento),
+                               ("Mapa", self._generate_diarias_mapa),
+                               ("D.M.P.", self._generate_diarias_meios_proprios)):
+            self.diarias_generate_menu.add_command(label=label, command=command)
+        self.diarias_generate_menu_button.configure(menu=self.diarias_generate_menu)
+        self.diarias_generate_menu_button.pack(side=LEFT, padx=(8, 0))
         self._refresh_diarias_profiles()
         ttk.Label(heading, textvariable=self.diarias_validation_var, foreground="#b42318", wraplength=820).pack(anchor="w", pady=(4, 0))
 
         footer = ttk.Frame(self.diarias_tab)
         footer.pack(side="bottom", fill=X, pady=(10, 0))
         ttk.Separator(footer).pack(fill=X, pady=(0, 8))
-        self.diarias_individual_actions = ttk.Frame(footer)
-        self.diarias_individual_actions.pack(fill=X)
-        self.diarias_generate_button = ttk.Button(self.diarias_individual_actions, text="Gerar requerimento", style="Diarias.Primary.TButton", cursor="hand2", command=self._generate_diarias_requerimento)
-        self.diarias_generate_map_button = ttk.Button(self.diarias_individual_actions, text="Gerar mapa", style="Diarias.Primary.TButton", cursor="hand2", command=self._generate_diarias_mapa)
-        self.diarias_meios_proprios_button = ttk.Button(self.diarias_individual_actions, text="Gerar declaração Meios Próprios", style="Diarias.Primary.TButton", cursor="hand2", command=self._generate_diarias_meios_proprios)
-        self.diarias_individual_buttons = [self.diarias_generate_button, self.diarias_generate_map_button, self.diarias_meios_proprios_button]
         self.diarias_batch_actions = ttk.Frame(footer)
-        self.diarias_batch_actions.pack(fill=X, pady=(8, 0))
+        self.diarias_batch_actions.pack(fill=X)
         self.diarias_action_icons = {kind: ImageTk.PhotoImage(diarias_action_icon_image(kind), master=self.root) for kind in ("office", "pdf", "print")}
         self.diarias_generate_bundle_button = ttk.Button(self.diarias_batch_actions, text="Gerar docx/xlsx", image=self.diarias_action_icons["office"], compound=LEFT, style="Diarias.Output.TButton", command=lambda: self._generate_diarias_bundle(pdf=False))
         self.diarias_generate_pdfs_button = ttk.Button(self.diarias_batch_actions, text="Gerar PDFs", image=self.diarias_action_icons["pdf"], compound=LEFT, style="Diarias.Output.TButton", command=lambda: self._generate_diarias_bundle(pdf=True))
@@ -4945,9 +4954,8 @@ class SigApp:
 
         def arrange_actions(_event=None):
             columns = 1 if footer.winfo_width() < 560 else 3
-            for controls in (self.diarias_individual_buttons, self.diarias_batch_buttons):
-                for index, button in enumerate(controls):
-                    button.grid(row=index // columns, column=index % columns, sticky="w", padx=(0, 8), pady=(0, 4))
+            for index, button in enumerate(self.diarias_batch_buttons):
+                button.grid(row=index // columns, column=index % columns, sticky="w", padx=(0, 8), pady=(0, 4))
         footer.bind("<Configure>", arrange_actions)
         arrange_actions()
 
@@ -4966,22 +4974,34 @@ class SigApp:
         body = ttk.Frame(canvas)
         body_window = canvas.create_window(0, 0, window=body, anchor="nw")
         self.diarias_sections = {}
+        self.diarias_card_contents = {}
         def arrange_cards(event):
             width = min(event.width, 900)
+            if width >= 760:
+                width -= width % 2  # Duas colunas têm exatamente a mesma largura, mesmo numa janela ímpar.
             canvas.itemconfigure(body_window, width=width)
             columns = 2 if width >= 760 else 1
             for column in (0, 1):
                 body.columnconfigure(column, weight=1 if column < columns else 0, uniform="diarias" if column < columns else "")
-            for index, card in enumerate(self.diarias_sections.values()):
-                card.grid(row=index // columns, column=index % columns, sticky="new", padx=(0, 10 if columns == 2 and index % 2 == 0 else 0), pady=(0, 10))
+            for index, title in enumerate(("Holerite", "Escala", "Protocolo", "Talão")):
+                card = self.diarias_sections[title]
+                card.configure(width=(width - (10 if columns == 2 else 0)) // columns)
+                gap = ((0, 5) if index % 2 == 0 else (5, 0)) if columns == 2 else (0, 0)
+                card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=gap, pady=(0, 10))
+            self._size_diarias_cards()
         canvas.bind("<Configure>", arrange_cards)
         body.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
 
         def section(title, kind, file_var):
-            card = ttk.Frame(body, style="Diarias.Card.TFrame", padding=(12, 10))
+            card = tk.Frame(body, background="#ffffff", borderwidth=0,
+                            highlightbackground="#000000", highlightcolor="#000000", highlightthickness=1)
+            card.pack_propagate(False)
             self.diarias_sections[title] = card
-            header = ttk.Frame(card, style="Diarias.Card.TFrame")
-            header.pack(fill=X, pady=(0, 8 if kind != "escala" else 0))
+            content = ttk.Frame(card, style="Diarias.Card.TFrame", padding=(12, 10))
+            content.pack(fill=BOTH, expand=True)
+            self.diarias_card_contents[title] = content
+            header = ttk.Frame(content, style="Diarias.Card.TFrame")
+            header.pack(fill=X, pady=(0, 8))
             header.columnconfigure(1, weight=1)
             title_row = ttk.Frame(header, style="Diarias.Card.TFrame")
             title_row.grid(row=0, column=0, sticky="w")
@@ -5000,9 +5020,8 @@ class SigApp:
                 reload_button.grid(row=0, column=3, padx=(4, 0))
                 self.diarias_attachment_buttons.append(reload_button)
                 create_tooltip(reload_button, "Extrair novamente os dados do PDF")
-            fields = ttk.Frame(card, style="Diarias.Card.TFrame")
-            if kind != "escala":
-                fields.pack(fill=X)
+            fields = ttk.Frame(content, style="Diarias.Card.TFrame")
+            fields.pack(fill=X)
             return fields
 
         def field(parent, column, label, key, width=12):
@@ -5038,7 +5057,16 @@ class SigApp:
         field(protocolo, 0, "Requerimento", "req")
         field(protocolo, 1, "Mapa", "mapa")
         field(protocolo, 2, "Data", "data")
-        section("Escala", "escala", self.diarias_escala_file_var)
+        escala = section("Escala", "escala", self.diarias_escala_file_var)
+        field(escala, 0, "Mês/ano", "escala_mes", 10)
+        self.diarias_escala_month_warning_var = StringVar(master=self.root)
+        self.diarias_escala_month_warning_label = ttk.Label(escala, textvariable=self.diarias_escala_month_warning_var,
+            style="Diarias.Field.TLabel", foreground="#b42318", wraplength=380)
+        self.diarias_escala_month_warning_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        for variable in (self.diarias_escala_mes_var, self.diarias_abertura_data_var):
+            variable.trace_add("write", self._update_diarias_escala_month_warning)
+        self._update_diarias_escala_month_warning()
+        self._schedule_diarias_card_size()
         def scroll(event):
             if body.winfo_height() > canvas.winfo_height():
                 canvas.yview_scroll((-1 if event.delta > 0 else 1) * max(1, abs(event.delta) // 120), "units")
@@ -5048,6 +5076,25 @@ class SigApp:
             for child in widget.winfo_children():
                 bind_scroll(child)
         bind_scroll(canvas)
+
+    def _size_diarias_cards(self):
+        """Todos os quadros usam a altura do Talão, ampliada só se o texto precisar."""
+        if self.diarias_card_size_after is not None:
+            self.root.after_cancel(self.diarias_card_size_after)
+            self.diarias_card_size_after = None
+        height = max(content.winfo_reqheight() for content in self.diarias_card_contents.values()) + 2
+        for card in self.diarias_sections.values():
+            if card.winfo_reqheight() != height:
+                card.configure(height=height)
+
+    def _schedule_diarias_card_size(self):
+        if self.diarias_card_size_after is None:
+            self.diarias_card_size_after = self.root.after_idle(self._size_diarias_cards)
+
+    def _cancel_diarias_card_size(self, event):
+        if event.widget == self.diarias_tab and self.diarias_card_size_after is not None:
+            self.root.after_cancel(self.diarias_card_size_after)
+            self.diarias_card_size_after = None
 
     def _update_diarias_required_fields(self, *_trace_args):
         if not self.diarias_fields_warned:
@@ -5098,9 +5145,9 @@ class SigApp:
 
     def _set_diarias_busy(self, busy):
         self.diarias_busy = busy
-        controls = (self.diarias_individual_buttons + self.diarias_batch_buttons + self.diarias_attachment_buttons
+        controls = (self.diarias_batch_buttons + self.diarias_attachment_buttons
                     + list(self.diarias_field_entries.values())
-                    + [self.diarias_meios_proprios_checkbox, self.diarias_configure_button])
+                    + [self.diarias_meios_proprios_checkbox, self.diarias_configure_button, self.diarias_generate_menu_button])
         for control in controls:
             control.configure(state="disabled" if busy else "normal")
         self.diarias_profile_selector.configure(state="disabled" if busy else "readonly")
@@ -5170,9 +5217,9 @@ class SigApp:
         bundle = self._prepare_diarias_bundle_ui()
         if bundle is None:
             return
-        attachments = {kind: getattr(self, f"diarias_{kind}_path", "") for kind in ("protocolo", "escala", "holerite")}
+        attachments = {kind: getattr(self, f"diarias_{kind}_path", "") for kind in ("protocolo", "escala", "holerite", "talao")}
         try:
-            diarias_workflow.validate_print_attachments(attachments)
+            diarias_workflow.validate_print_attachments(attachments, meios_proprios=bundle.meios_proprios)
         except diarias_workflow.MissingDiariasFields as exc:
             for field in exc.fields:
                 kind = field.split(":", 1)[1]
@@ -5219,7 +5266,8 @@ class SigApp:
         task["copy_vars"], task["copy_entries"], task["copy_alerts"] = {}, {}, {}
         task["copies_warned"] = False
         task["copies_error"] = ""
-        rows = [row for row in diarias_workflow.PRINT_DOCUMENTS if row[0] != "declaracao" or task["bundle"].meios_proprios]
+        rows = diarias_workflow.print_document_rows(meios_proprios=task["bundle"].meios_proprios,
+            talao_anexo=bool(task["attachments"].get("talao")))
         for index, (key, label, default) in enumerate(rows, 1):
             ttk.Label(quantities, text=label).grid(row=index, column=0, sticky="w", padx=(0, 20), pady=3)
             variable = StringVar(master=win, value=str(default))
@@ -5263,7 +5311,8 @@ class SigApp:
             else:
                 task["copy_alerts"][key].grid()
         try:
-            diarias_workflow.validate_print_copies({key: var.get() for key, var in task["copy_vars"].items()}, meios_proprios=task["bundle"].meios_proprios)
+            diarias_workflow.validate_print_copies({key: var.get() for key, var in task["copy_vars"].items()},
+                meios_proprios=task["bundle"].meios_proprios, talao_anexo=bool(task["attachments"].get("talao")))
         except ValueError as exc:
             task["copies_error"] = str(exc)
             task["dialog_status"].set(str(exc))
@@ -5278,7 +5327,7 @@ class SigApp:
         try:
             copies = diarias_workflow.validate_print_copies(
                 {key: variable.get() for key, variable in task["copy_vars"].items()},
-                meios_proprios=task["bundle"].meios_proprios)
+                meios_proprios=task["bundle"].meios_proprios, talao_anexo=bool(task["attachments"].get("talao")))
         except ValueError as exc:
             task["copies_warned"] = True
             self._update_diarias_print_copies(task)
@@ -5430,6 +5479,32 @@ class SigApp:
             self.diarias_month_warning_label.grid()
         else:
             self.diarias_month_warning_label.grid_remove()
+        if hasattr(self, "diarias_card_contents"):
+            self._schedule_diarias_card_size()
+
+    def _update_diarias_escala_month_warning(self, *_trace_args):
+        try:
+            datetime.strptime(self.diarias_escala_mes_var.get().strip(), "%m/%Y")
+        except ValueError:
+            pass
+        else:
+            self.diarias_field_entries["escala_mes"].configure(style="TEntry")
+            self.diarias_field_alerts["escala_mes"].pack_forget()
+        try:
+            month = datetime.strptime(self.diarias_escala_mes_var.get().strip(), "%m/%Y")
+            ida = datetime.strptime(self.diarias_abertura_data_var.get().strip(), "%d/%m/%Y")
+        except ValueError:
+            differs = False
+        else:
+            differs = (month.year, month.month) != (ida.year, ida.month)
+        self.diarias_escala_month_warning_var.set(
+            "Atenção: o mês da escala difere do mês do talão." if differs else ""
+        )
+        if differs:
+            self.diarias_escala_month_warning_label.grid()
+        else:
+            self.diarias_escala_month_warning_label.grid_remove()
+        self._schedule_diarias_card_size()
 
     def _refresh_diarias_profiles(self):
         """Sincroniza a seleção da tela principal com os perfis persistidos."""
@@ -5807,17 +5882,7 @@ class SigApp:
         if not selecionado:
             return
         if kind == "escala":
-            key = "diarias:escala:anexar"
-            started = self._start_diarias_activity(key, "Anexando escala")
-            path = Path(selecionado)
-            if path.suffix.casefold() != ".pdf" or not path.is_file():
-                self._finish_diarias_activity(key, started, error="Selecione um arquivo PDF existente.")
-                self.diarias_validation_var.set("A escala precisa ser um arquivo PDF.")
-                return
-            self.diarias_escala_path = str(path)
-            self.diarias_escala_file_var.set(path.name)
-            SigApp._clear_diarias_attachment_alert(self, kind)
-            self._finish_diarias_activity(key, started, suffix=f"- anexado: {path.name}")
+            self._attach_diarias_escala_pdf(selecionado)
             return
         if kind == "holerite":
             self._attach_diarias_holerite_pdf(selecionado)
@@ -5830,6 +5895,40 @@ class SigApp:
             self.diarias_protocolo_file_var.set(Path(selecionado).name)
         SigApp._clear_diarias_attachment_alert(self, kind)
         self._reload_diarias_pdf(kind)
+
+    def _attach_diarias_escala_pdf(self, source_path):
+        key = "diarias:escala:anexar"
+        started = self._start_diarias_activity(key, "Lendo e anexando escala")
+        try:
+            month = diarias_protocolo.extract_escala_pdf(source_path)
+            stored_path, display_name = diarias_store.attach_escala_pdf(source_path, month)
+        except Exception as exc:
+            self._finish_diarias_activity(key, started, error=str(exc))
+            self.diarias_validation_var.set(f"Não foi possível ler ou guardar a escala: {exc}")
+            return
+        self.diarias_escala_path = stored_path
+        self.diarias_escala_file_var.set(display_name)
+        self.diarias_escala_mes_var.set(month)
+        self._clear_diarias_attachment_alert("escala")
+        self.diarias_field_entries["escala_mes"].configure(style="TEntry" if month else "Diarias.Invalid.TEntry")
+        alert = self.diarias_field_alerts["escala_mes"]
+        if month:
+            alert.pack_forget()
+            self._finish_diarias_activity(key, started, suffix=f"- anexado: {display_name} ({month})")
+        else:
+            alert.pack(side=LEFT, padx=(4, 0))
+            self._finish_diarias_activity(key, started, suffix="- mês/ano não encontrado no cabeçalho", tag="activity_step_warning")
+            self.diarias_validation_var.set("Não encontrei o mês/ano da escala. Confira o PDF ou preencha o campo manualmente.")
+
+    def _save_diarias_escala_data(self, *_trace_args):
+        try:
+            diarias_store.save_escala_month(self.diarias_escala_mes_var.get())
+        except Exception as exc:
+            if not self.diarias_escala_save_error_shown:
+                self.diarias_escala_save_error_shown = True
+                self._append_activity_log(f"Não foi possível salvar os dados da escala: {exc}", "activity_step_error")
+        else:
+            self.diarias_escala_save_error_shown = False
 
     def _attach_diarias_holerite_pdf(self, source_path):
         """Extrai e guarda uma cópia do holerite antes de torná-lo o anexo ativo."""

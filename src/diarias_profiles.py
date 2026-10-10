@@ -50,7 +50,7 @@ def format_profile_cargo(cargo: str, classe: str) -> str:
     """Cargo em maiúsculas com o texto da classe utilizado no mapa."""
     value = str(classe or "").strip()
     classe_padrao(value)
-    suffix = "CLASSE ESPECIAL" if value == "Especial" else f"{value}ª CLASSE"
+    suffix = "DE CLASSE ESPECIAL" if value == "Especial" else f"DE {value}ª CLASSE"
     return f"{str(cargo or '').strip().upper()} {suffix}"
 
 

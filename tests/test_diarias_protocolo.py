@@ -163,8 +163,8 @@ class DiariasWiringTest(unittest.TestCase):
             '"Requerimento"',
             '"Mapa"',
             '"Data"',
-            "Gerar requerimento",
-            "Gerar declaração Meios Próprios",
+            'text="Gerar"',
+            '"D.M.P."',
             "_generate_diarias_requerimento",
             "_generate_diarias_meios_proprios",
             "prepare_declaracao_meios_proprios",
@@ -176,6 +176,19 @@ class DiariasWiringTest(unittest.TestCase):
             "diarias_fechamento_hora_var",
         ):
             self.assertIn(marcador, fonte, f"marcador sumiu da UI: {marcador}")
+
+
+class ExtractEscalaTest(unittest.TestCase):
+    def test_todos_os_meses_com_letras_e_ano_espacados(self):
+        for index, month in enumerate(("JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO", "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"), 1):
+            with self.subTest(month=month):
+                self.assertEqual(diarias_protocolo.extract_escala_month(" ".join(month) + " - 2 0 2 6"), f"{index:02d}/2026")
+
+    def test_variacoes_de_espacos_caixa_e_traco_e_datas_que_nao_sao_o_titulo(self):
+        for text in ("outubro-2026", "O  U\tT U B R O – 2 0 2 6", "O\nU\nT U B R O — 2026", "O\u00a0U T U B R O − 2\u00a00 2 6"):
+            self.assertEqual(diarias_protocolo.extract_escala_month(text), "10/2026")
+        for text in ("21 de setembro de 2026", "31/10/2026", "OUTUBRO - 202", "OUTUBRO - 20266", "OUTUBRO - 2026\nNOVEMBRO - 2026", "XOUTUBRO - 2026"):
+            self.assertEqual(diarias_protocolo.extract_escala_month(text), "")
 
 
 if __name__ == "__main__":

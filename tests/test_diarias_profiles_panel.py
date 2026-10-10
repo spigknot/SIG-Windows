@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import diarias_store
 import diarias_profiles_panel
 from diarias_profiles import PROFILE_FIELDS
-from diarias_profiles_panel import DiariasProfilesPanel
+from diarias_profiles_panel import DiariasProfilesPanel, PROFILE_FORM_COLUMNS
 
 
 def valid_profile(**changes):
@@ -67,7 +67,11 @@ class DiariasProfilesPanelTest(unittest.TestCase):
         self.root.update()
 
     def fill(self, **changes):
-        for key, value in valid_profile(**changes).items():
+        values = valid_profile(**changes)
+        default_name = self.panel.profile_name_var.get().strip() or values["nome"].strip() or valid_profile()["nome"]
+        name = values.pop("profile_name", default_name)
+        self.panel.profile_name_var.set(name)
+        for key, value in values.items():
             self.panel.field_vars[key].set(value)
         self.root.update_idletasks()
 
@@ -217,26 +221,81 @@ class DiariasProfilesPanelTest(unittest.TestCase):
         rows = [tuple(self.panel.table.item(item, "values")) for item in self.panel.table.get_children()]
         self.assertIn(("Endereço", saved["endereco"]), rows)
 
-    def test_formulario_tem_duas_colunas_campos_pela_metade_sem_rolagem(self):
+    def test_formulario_compacto_tem_ordem_solicitada_e_campos_maiores(self):
         self.panel.create_button.invoke()
         self.root.update()
         self.assertFalse(any(isinstance(widget, (ttk.Scrollbar, tk.Canvas)) for widget in descendants(self.host)))
         self.assertEqual({int(widget.grid_info()["column"]) for widget in self.panel.field_widgets.values()}, {1, 3})
         for key, widget in self.panel.field_widgets.items():
-            self.assertEqual(int(widget.cget("width")), 16 if key == "classe" else 22)
+            self.assertEqual(int(widget.cget("width")), 24 if key == "classe" else 33)
             self.assertTrue(widget.winfo_ismapped())
             self.assertGreaterEqual(widget.winfo_rooty(), self.win.winfo_rooty())
             self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), self.win.winfo_rooty() + self.win.winfo_height())
         self.assertLessEqual(self.win.winfo_height(), self.win.winfo_screenheight())
         self.assertLessEqual(self.win.winfo_width(), self.win.winfo_screenwidth())
+        for column, keys in enumerate(PROFILE_FORM_COLUMNS):
+            for row, key in enumerate(keys):
+                self.assertEqual(int(self.panel.field_widgets[key].grid_info()["row"]), row)
+                self.assertEqual(int(self.panel.field_widgets[key].grid_info()["column"]), column * 2 + 1)
+        self.assertEqual(self.panel.field_labels["cidade_trabalho"]["text"], "Cidade de\ntrabalho")
+        self.assertEqual(self.panel.field_labels["cidade_plantao"]["text"], "Cidade do\nplantão")
+        left = self.panel.field_widgets["nome"]
+        right_label = self.panel.field_labels["estado_civil"]
+        gap = right_label.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
+        self.assertLessEqual(gap, 10)
+        self.assertGreaterEqual(gap, 0)
+        name = self.panel.profile_name_entry
+        self.assertLess(name.winfo_rooty(), self.panel.form.winfo_rooty())
+        editor_center = self.panel.editor.winfo_rootx() + self.panel.editor.winfo_width() / 2
+        self.assertAlmostEqual(name.winfo_rootx() + name.winfo_width() / 2, editor_center, delta=2)
+        labels = [str(widget["text"]) for widget in descendants(self.panel.editor)
+                  if isinstance(widget, ttk.Label)]
+        self.assertFalse(any("Pai é opcional" in text or text.startswith("Ex.:") for text in labels))
+
+    def test_texto_fantasma_nunca_vira_valor_ou_dado_salvo(self):
+        self.panel.create_button.invoke()
+        self.root.update()
+        for key, variable in self.panel.field_vars.items():
+            self.assertEqual(variable.get(), "")
+            self.assertEqual(self.panel.field_widgets[key].get(), "")
+            self.assertTrue(self.panel.field_placeholders[key].winfo_ismapped())
+        self.panel.field_vars["nome"].set("Nome digitado")
+        self.root.update()
+        self.assertFalse(self.panel.field_placeholders["nome"].winfo_ismapped())
+        self.panel.field_vars["nome"].set("")
+        self.root.update()
+        self.assertTrue(self.panel.field_placeholders["nome"].winfo_ismapped())
+        self.fill(profile_name="Plantão em Avaré", pai="")
+        self.panel.save_button.invoke()
+        saved = diarias_store.load_diarias_profile()
+        self.assertEqual(saved["profile_name"], "Plantão em Avaré")
+        self.assertEqual(saved["nome"], "João da Silva")
+        self.assertEqual(saved["pai"], "")
+        self.panel.edit_button.invoke()
+        self.assertEqual(self.panel.profile_name_var.get(), "Plantão em Avaré")
+        self.panel.field_vars["nome"].set("Outro policial")
+        self.panel.save_button.invoke()
+        self.assertEqual(diarias_store.load_diarias_profile()["profile_name"], "Plantão em Avaré")
+
+    def test_nome_do_perfil_vazio_nao_grava_o_exemplo(self):
+        self.panel.create_button.invoke()
+        self.fill()
+        self.panel.profile_name_var.set("")
+        with patch.object(diarias_profiles_panel.messagebox, "showwarning") as warning:
+            self.panel.save_button.invoke()
+        self.assertTrue(self.panel.editing)
+        self.assertEqual(diarias_store.list_diarias_profiles(), [])
+        self.assertIn("Nome do Perfil", warning.call_args.args[1])
 
     def test_ufesp_ao_lado_do_perfil_e_botoes_na_linha_inferior(self):
-        self.assertEqual(int(self.panel.selector.cget("width")), 18)
+        self.assertEqual(int(self.panel.selector.cget("width")), 36)
         self.assertEqual(self.panel.selector.winfo_rooty(), self.panel.ufesp_entry.winfo_rooty())
         self.assertGreater(self.panel.ufesp_entry.winfo_rootx(), self.panel.selector.winfo_rootx() + self.panel.selector.winfo_width())
         for button in (self.panel.create_button, self.panel.remove_button, self.panel.edit_button):
             self.assertGreaterEqual(button.winfo_rooty(), self.panel.selector.winfo_rooty() + self.panel.selector.winfo_height())
         self.assertEqual(self.panel.create_button.winfo_rootx(), self.panel.selector.winfo_rootx())
+        toolbar = self.panel.ufesp_entry.master
+        self.assertEqual(self.panel.ufesp_entry.winfo_x() + self.panel.ufesp_entry.winfo_width(), toolbar.winfo_width())
 
 
 if __name__ == "__main__":

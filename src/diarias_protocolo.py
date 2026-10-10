@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
+import unicodedata
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -35,6 +36,51 @@ _HOLERITE_TOTAL_LABEL_RE = re.compile(r"\bTotal\s+(Vencimentos)\b", re.I)
 _HOLERITE_PAGAMENTO_LABEL_RE = re.compile(r"\bData\s+Pagamento\b", re.I)
 _HOLERITE_AMOUNT_RE = re.compile(r"(?<!\d)(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?!\d)")
 _DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+_ESCALA_MONTHS = (
+    "JANEIRO", "FEVEREIRO", "MARCO", "ABRIL", "MAIO", "JUNHO",
+    "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+)
+_ESCALA_MONTH_RE = re.compile(
+    r"(?<![A-Z0-9])(?P<month>"
+    + "|".join(r"\s*".join(month) for month in _ESCALA_MONTHS)
+    + r")\s*[-\u2010-\u2015\u2212]\s*(?P<year>[12]\s*\d\s*\d\s*\d)(?![ \t]*\d)"
+)
+
+
+def extract_escala_month(text: str) -> str:
+    """Lê o título M Ê S - A A A A; não usa datas de assinatura ou da tabela."""
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFD", (text or "").upper())
+        if unicodedata.category(char) not in ("Mn", "Cf")
+    )
+    months = set()
+    for match in _ESCALA_MONTH_RE.finditer(normalized):
+        month = re.sub(r"\s", "", match["month"])
+        year = re.sub(r"\s", "", match["year"])
+        months.add(f"{_ESCALA_MONTHS.index(month) + 1:02d}/{year}")
+    return months.pop() if len(months) == 1 else ""
+
+
+def extract_escala_pdf(path: str | Path) -> str:
+    """Extrai o mês/ano do cabeçalho da primeira página da escala."""
+    document = pdfium.PdfDocument(str(path))
+    try:
+        if not len(document):
+            return ""
+        page = document[0]
+        try:
+            width, height = page.get_size()
+            text_page = page.get_textpage()
+            try:
+                return extract_escala_month(text_page.get_text_bounded(0, height / 2, width, height))
+            finally:
+                text_page.close()
+        finally:
+            page.close()
+    finally:
+        document.close()
+
+
 def extract_protocol_numbers(text: str) -> tuple[str, str]:
     """Devolve `(mapa, requerimento)`; `""` onde o padrão não aparece."""
     mapa_match = _MAPA_RE.search(text or "")

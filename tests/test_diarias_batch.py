@@ -96,7 +96,7 @@ class DiariasWorkflowTest(unittest.TestCase):
             self.assertEqual(error.exception.fields, ("attachment:escala",))
 
     def test_quantidades_editaveis_respeitam_defaults_checkbox_e_validacao(self):
-        defaults = {key: count for key, _label, count in workflow.PRINT_DOCUMENTS}
+        defaults = {key: count for key, _label, count in workflow.print_document_rows(meios_proprios=True)}
         self.assertEqual(workflow.validate_print_copies(None, meios_proprios=True), defaults)
         self.assertNotIn("declaracao", workflow.validate_print_copies(None, meios_proprios=False))
         self.assertEqual(workflow.validate_print_copies({**defaults, "mapa": "3"}, meios_proprios=True)["mapa"], 3)
@@ -106,6 +106,28 @@ class DiariasWorkflowTest(unittest.TestCase):
         for invalid in (0, -1, 100, "1.5", "texto"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 workflow.validate_print_copies({**defaults, "mapa": invalid}, meios_proprios=True)
+
+    def test_talao_e_vias_so_entram_com_anexo_e_sem_meios_proprios(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = {}
+            for key in ("mapa", "requerimento", "declaracao", "protocolo", "escala", "holerite", "talao"):
+                paths[key] = Path(temporary) / (key + ".pdf")
+                paths[key].write_bytes(b"pdf ficticio")
+            for meios, attached in ((False, False), (False, True), (True, False), (True, True)):
+                with self.subTest(meios=meios, attached=attached):
+                    attachments = {key: path for key, path in paths.items() if key != "talao" or attached}
+                    generated = {key: paths[key] for key in ("mapa", "requerimento", "declaracao") if key != "declaracao" or meios}
+                    rows = workflow.print_document_rows(meios_proprios=meios, talao_anexo=attached)
+                    copies = {key: 3 if key == "talao" else count for key, _label, count in rows}
+                    plan = workflow.build_print_plan(generated, attachments, copies=copies)
+                    expected = attached and not meios
+                    self.assertEqual("talao" in copies, expected)
+                    talao = next((item for item in plan if item.label == "Talão"), None)
+                    self.assertEqual(talao is not None, expected)
+                    if expected:
+                        self.assertEqual(talao.copies, 3)
+                        self.assertFalse(talao.duplex_short_edge)
+                    self.assertEqual([item.label for item in plan if item.duplex_short_edge], ["Mapa"])
 
     def test_pasta_padrao_desktop_e_memoria_persistente_compartilhada(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(diarias_store, "settings_path", return_value=Path(temporary) / "settings.json"):
@@ -178,6 +200,19 @@ class DiariasBatchUiTest(unittest.TestCase):
         self.assertEqual(self.app.diarias_validation_var.get(), "")
         self.assertFalse(any(alert.winfo_manager() for alert in self.app.diarias_field_alerts.values()))
 
+    def test_dialogo_nao_oferece_talao_com_meios_proprios_marcado(self):
+        for meios, attached in ((True, True), (False, True), (True, False), (False, False)):
+            with self.subTest(meios=meios, attached=attached):
+                task = {"bundle": bundle(meios), "attachments": {"talao": "talao.pdf" if attached else ""}}
+                self.app._open_diarias_printer_dialog(task)
+                try:
+                    self.assertEqual("talao" in task["copy_vars"], attached and not meios)
+                    self.assertEqual("declaracao" in task["copy_vars"], meios)
+                    if attached and not meios:
+                        self.assertEqual(task["copy_vars"]["talao"].get(), "1")
+                finally:
+                    task["dialog"].destroy()
+
     def test_botoes_de_lote_usam_pasta_memorizada_e_logam_as_etapas(self):
         for pdf in (False, True):
             with self.subTest(pdf=pdf), patch.object(sig_app.filedialog, "askdirectory", return_value=self.temp.name) as ask, patch.object(workflow, "generate_bundle", return_value={"requerimento": self.directory / "requerimento.pdf", "mapa": self.directory / "mapa.pdf"}) as generate:
@@ -207,7 +242,7 @@ class DiariasBatchUiTest(unittest.TestCase):
             task = self.app.diarias_task
             self.assertIsNone(task["files"])
             self.assertEqual({key: variable.get() for key, variable in task["copy_vars"].items()},
-                             {key: str(default) for key, _label, default in workflow.PRINT_DOCUMENTS})
+                             {key: str(default) for key, _label, default in workflow.print_document_rows(meios_proprios=True)})
             task["copy_vars"]["mapa"].set("")
             task["ok_button"].invoke()
             self.assertFalse(task["accepted"])
@@ -252,15 +287,19 @@ class DiariasBatchUiTest(unittest.TestCase):
             self.assertTrue(self.app.diarias_attachment_alerts[key].winfo_manager())
         path = Path(self.app.diarias_escala_path)
         path.write_bytes(b"pdf ficticio")
-        with patch.object(sig_app.filedialog, "askopenfilename", return_value=str(path)):
+        with patch.object(sig_app.filedialog, "askopenfilename", return_value=str(path)), patch.object(sig_app.diarias_protocolo, "extract_escala_pdf", return_value="12/2026"):
             self.app._select_diarias_pdf("escala")
         self.assertFalse(self.app.diarias_attachment_alerts["escala"].winfo_manager())
 
-    def test_escala_so_anexa_pdf_sem_extrair_campos(self):
-        with patch.object(sig_app.filedialog, "askopenfilename", return_value=self.app.diarias_escala_path), patch.object(self.app, "_reload_diarias_pdf") as extract:
+    def test_escala_anexa_extrai_mes_e_reabre_copia_persistida(self):
+        source = self.app.diarias_escala_path
+        with patch.object(sig_app.filedialog, "askopenfilename", return_value=source), patch.object(sig_app.diarias_protocolo, "extract_escala_pdf", return_value="10/2026") as extract:
             self.app._select_diarias_pdf("escala")
-        extract.assert_not_called()
+        extract.assert_called_once_with(source)
         self.assertEqual(self.app.diarias_escala_file_var.get(), "escala.pdf")
+        self.assertEqual(self.app.diarias_escala_mes_var.get(), "10/2026")
+        self.assertNotEqual(self.app.diarias_escala_path, source)
+        self.assertEqual(diarias_store.load_escala(), (self.app.diarias_escala_path, "escala.pdf", "10/2026"))
 
 
 if __name__ == "__main__":

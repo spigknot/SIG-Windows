@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -40,8 +39,9 @@ def _print_items(printer: str, items: list[dict], job_name: str) -> dict:
 
     documents, dc, handle, active_job = [], None, None, False
     printed = 0
+    job_id = None
     try:
-        # Confere TODOS os PDFs antes de começar o spool de uma única tarefa.
+        # Confere TODOS os PDFs antes de enviar qualquer documento à impressora.
         for item in items:
             path = Path(item["path"])
             if not path.is_file() or path.suffix.casefold() != ".pdf":
@@ -56,15 +56,27 @@ def _print_items(printer: str, items: list[dict], job_name: str) -> dict:
             raise ValueError("Nenhum documento foi preparado para impressão.")
         handle = win32print.OpenPrinter(printer)
         mode = win32print.GetPrinter(handle, 2)["pDevMode"]
-        if mode is not None:
-            mode.Fields |= win32con.DM_ORIENTATION | win32con.DM_COPIES
-            mode.Copies = 1  # As vias são enviadas na ordem do plano, sem multiplicação pelo driver.
-        hdc = win32gui.CreateDC("WINSPOOL", printer, mode)
-        dc = win32ui.CreateDCFromHandle(hdc)
-        job_id = dc.StartDoc(job_name)
-        active_job = True
-        orientation = None
+        if mode is None:
+            raise RuntimeError("Não foi possível configurar frente e verso para esta impressora.")
+        mode.Fields |= win32con.DM_ORIENTATION | win32con.DM_COPIES | win32con.DM_DUPLEX
+        mode.Copies = 1  # As vias são enviadas na ordem do plano, sem multiplicação pelo driver.
         for item, document in documents:
+            # Uma tarefa por documento impede o driver de juntar documentos na
+            # mesma folha. Define o duplex antes de criar o DC e iniciar a tarefa.
+            mode.Duplex = win32con.DMDUP_HORIZONTAL if item.get("duplex_short_edge", False) else win32con.DMDUP_SIMPLEX
+            first_page = document[0]
+            try:
+                width, height = first_page.get_size()
+            finally:
+                first_page.close()
+            orientation = win32con.DMORIENT_LANDSCAPE if width > height else win32con.DMORIENT_PORTRAIT
+            mode.Orientation = orientation
+            hdc = win32gui.CreateDC("WINSPOOL", printer, mode)
+            dc = win32ui.CreateDCFromHandle(hdc)
+            current_job_id = dc.StartDoc(f"{job_name} - {item['label']}")
+            active_job = True
+            if job_id is None:
+                job_id = current_job_id
             indices = range(1 if item["first_page_only"] else len(document))
             for _copy in range(int(item["copies"])):
                 for index in indices:
@@ -72,8 +84,8 @@ def _print_items(printer: str, items: list[dict], job_name: str) -> dict:
                     try:
                         page = document[index]
                         width, height = page.get_size()
-                        page_orientation = 2 if width > height else 1
-                        if mode is not None and page_orientation != orientation:
+                        page_orientation = win32con.DMORIENT_LANDSCAPE if width > height else win32con.DMORIENT_PORTRAIT
+                        if page_orientation != orientation:
                             mode.Orientation = page_orientation
                             win32gui.ResetDC(hdc, mode)
                             orientation = page_orientation
@@ -93,8 +105,10 @@ def _print_items(printer: str, items: list[dict], job_name: str) -> dict:
                             bitmap.close()
                         if page is not None:
                             page.close()
-        dc.EndDoc()
-        active_job = False
+            dc.EndDoc()
+            active_job = False
+            dc.DeleteDC()
+            dc = None
         return {"job_id": job_id, "pages": printed}
     finally:
         if dc is not None:
@@ -130,7 +144,8 @@ def print_plan(printer: str, items, *, job_name: str = "Diária") -> dict:
         request_path.write_text(json.dumps({
             "printer": printer, "job_name": job_name,
             "items": [{"path": str(item.path.resolve()), "label": item.label,
-                       "copies": item.copies, "first_page_only": item.first_page_only} for item in items],
+                       "copies": item.copies, "first_page_only": item.first_page_only,
+                       "duplex_short_edge": item.duplex_short_edge} for item in items],
         }, ensure_ascii=False), encoding="utf-8")
         command = [sys.executable, "--sig-print-job", str(request_path)] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve()), str(request_path)]
         completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

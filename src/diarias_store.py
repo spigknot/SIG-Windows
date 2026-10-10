@@ -86,6 +86,10 @@ def save_diarias_profile(
 ) -> dict[str, str]:
     """Cria ou edita um perfil válido e o seleciona para geração de documentos."""
     normalized = validate_diarias_profile(values)
+    base_name = values.get("profile_name", normalized["nome"])
+    if not isinstance(base_name, str) or not base_name.strip():
+        raise ValueError("Preencha o campo Nome do Perfil.")
+    base_name = base_name.strip()
     data = _read_diarias_profiles_data()
     profiles = data["profiles"]
     if profile_id is not None and not any(profile["id"] == profile_id for profile in profiles):
@@ -96,7 +100,6 @@ def save_diarias_profile(
         for profile in profiles
         if profile["id"] != profile_id
     }
-    base_name = normalized["nome"]
     profile_name = base_name
     suffix = 2
     while profile_name.casefold() in names:
@@ -305,4 +308,76 @@ def attach_holerite_pdf(
         except OSError:
             pass
 
+    return str(destination), source.name
+
+
+def _escala_data_path() -> Path:
+    return settings_path().parent / "diarias_escala.json"
+
+
+def _read_escala_data() -> dict:
+    try:
+        data = json.loads(_escala_data_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_escala_data(data: dict) -> None:
+    path = _escala_data_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_escala() -> tuple[str, str, str]:
+    """Devolve caminho da cópia local, nome exibido e mês/ano da escala ativa."""
+    data = _read_escala_data()
+    stored_name = data.get("pdf_filename")
+    if not isinstance(stored_name, str) or Path(stored_name).name != stored_name:
+        return "", "", ""
+    path = settings_path().parent / "diarias_escalas" / stored_name
+    if not path.is_file():
+        return "", "", ""
+    name = data.get("pdf_display_name")
+    month = data.get("mes")
+    return str(path), name if isinstance(name, str) and name else path.name, month if isinstance(month, str) else ""
+
+
+def save_escala_month(month: str) -> None:
+    data = _read_escala_data()
+    data["mes"] = str(month or "")
+    _write_escala_data(data)
+
+
+def attach_escala_pdf(source_path: str | Path, month: str) -> tuple[str, str]:
+    """Guarda a escala no usuário, inclusive se o arquivo original for movido."""
+    source = Path(source_path)
+    if not source.is_file() or source.suffix.casefold() != ".pdf":
+        raise ValueError("Selecione um arquivo PDF existente.")
+    directory = settings_path().parent / "diarias_escalas"
+    directory.mkdir(parents=True, exist_ok=True)
+    stored_name = f"escala_{uuid.uuid4().hex}.pdf"
+    destination = directory / stored_name
+    temporary = directory / f".{stored_name}.tmp"
+    old_name = _read_escala_data().get("pdf_filename")
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+        try:
+            _write_escala_data({"pdf_filename": stored_name, "pdf_display_name": source.name, "mes": str(month or "")})
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+    finally:
+        temporary.unlink(missing_ok=True)
+    if isinstance(old_name, str) and Path(old_name).name == old_name and old_name.startswith("escala_") and old_name.endswith(".pdf"):
+        try:
+            (directory / old_name).unlink(missing_ok=True)
+        except OSError:
+            pass
     return str(destination), source.name

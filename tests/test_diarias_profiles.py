@@ -45,9 +45,9 @@ class DiariasProfileRulesTest(unittest.TestCase):
                 validated = validate_diarias_profile(valid_profile(classe=classe))
                 self.assertEqual(validated["classe"], classe)
         self.assertEqual(format_profile_cargo("Investigador de Polícia", "2"),
-                         "INVESTIGADOR DE POLÍCIA 2ª CLASSE")
+                         "INVESTIGADOR DE POLÍCIA DE 2ª CLASSE")
         self.assertEqual(format_profile_cargo("Investigador de Polícia", "Especial"),
-                         "INVESTIGADOR DE POLÍCIA CLASSE ESPECIAL")
+                         "INVESTIGADOR DE POLÍCIA DE CLASSE ESPECIAL")
         for classe in ("4", "especial", "III"):
             with self.subTest(invalid=classe), self.assertRaisesRegex(ValueError, "Classe"):
                 validate_diarias_profile(valid_profile(classe=classe))
@@ -124,6 +124,23 @@ class DiariasProfileStoreTest(unittest.TestCase):
         self.assertEqual(diarias_store.load_diarias_profile(), edited)
         edited["nome"] = "mudança só na memória"
         self.assertEqual(diarias_store.load_diarias_profile()["nome"], "Maria de Souza")
+
+    def test_nome_editavel_do_perfil_persiste_sem_alterar_nome_do_policial(self):
+        first = diarias_store.save_diarias_profile(valid_profile(profile_name="Plantão em Avaré"))
+        second = diarias_store.save_diarias_profile(valid_profile(profile_name="Plantão em Avaré"))
+        self.assertEqual(first["profile_name"], "Plantão em Avaré")
+        self.assertEqual(second["profile_name"], "Plantão em Avaré 2")
+        edited = diarias_store.save_diarias_profile(
+            valid_profile(profile_name="  Plantão em Taquarituba  "), first["id"]
+        )
+        self.assertEqual(edited["profile_name"], "Plantão em Taquarituba")
+        self.assertEqual(edited["nome"], "João da Silva")
+        self.assertEqual(diarias_store.load_diarias_profile(first["id"]), edited)
+        self.assertEqual(diarias_store.load_diarias_profile(second["id"]), second)
+        before = (self.directory / "diarias_profiles.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "Nome do Perfil"):
+            diarias_store.save_diarias_profile(valid_profile(profile_name=" "), first["id"])
+        self.assertEqual((self.directory / "diarias_profiles.json").read_bytes(), before)
 
     def test_remover_ativo_seleciona_outro_e_ultimo_limpa_selecao(self):
         first = diarias_store.save_diarias_profile(valid_profile())

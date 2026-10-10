@@ -23,6 +23,7 @@ PRINT_DOCUMENTS = (
     ("mapa", "Mapa", 2), ("protocolo", "Protocolo", 2),
     ("requerimento", "Requerimento", 1),
     ("declaracao", "Declaração de meios próprios", 1),
+    ("talao", "Talão", 1),
     ("escala", "Escala (somente a 1ª página)", 1), ("holerite", "Holerite", 1),
 )
 
@@ -140,11 +141,22 @@ class PrintItem:
     label: str
     copies: int = 1
     first_page_only: bool = False
+    duplex_short_edge: bool = False
 
 
-def validate_print_attachments(attachments: Mapping[str, str]) -> dict[str, Path]:
+def print_document_rows(*, meios_proprios: bool, talao_anexo: bool = False):
+    """A lista de vias e o plano usam a mesma regra para declaração e talão."""
+    return tuple(row for row in PRINT_DOCUMENTS
+                 if (row[0] != "declaracao" or meios_proprios)
+                 and (row[0] != "talao" or (talao_anexo and not meios_proprios)))
+
+
+def validate_print_attachments(attachments: Mapping[str, str], *, meios_proprios: bool = False) -> dict[str, Path]:
     result, missing = {}, []
-    for key in ("protocolo", "escala", "holerite"):
+    keys = ["protocolo", "escala", "holerite"]
+    if not meios_proprios and attachments.get("talao"):
+        keys.append("talao")
+    for key in keys:
         path = Path(attachments.get(key) or "")
         if path.suffix.casefold() != ".pdf" or not path.is_file():
             missing.append("attachment:" + key)
@@ -154,8 +166,8 @@ def validate_print_attachments(attachments: Mapping[str, str]) -> dict[str, Path
     return result
 
 
-def validate_print_copies(copies: Mapping[str, object] | None, *, meios_proprios: bool) -> dict[str, int]:
-    rows = [row for row in PRINT_DOCUMENTS if row[0] != "declaracao" or meios_proprios]
+def validate_print_copies(copies: Mapping[str, object] | None, *, meios_proprios: bool, talao_anexo: bool = False) -> dict[str, int]:
+    rows = print_document_rows(meios_proprios=meios_proprios, talao_anexo=talao_anexo)
     values = {key: str(default if copies is None else copies.get(key, "")).strip() for key, _label, default in rows}
     missing = ["copies:" + key for key, value in values.items() if not value]
     if missing:
@@ -171,13 +183,16 @@ def validate_print_copies(copies: Mapping[str, object] | None, *, meios_proprios
 
 def build_print_plan(generated: Mapping[str, Path], attachments: Mapping[str, str],
                      *, copies: Mapping[str, object] | None = None) -> list[PrintItem]:
-    attached = validate_print_attachments(attachments)
-    counts = validate_print_copies(copies, meios_proprios="declaracao" in generated)
-    plan = [PrintItem(generated["mapa"], "Mapa", counts["mapa"]),
+    meios_proprios = "declaracao" in generated
+    attached = validate_print_attachments(attachments, meios_proprios=meios_proprios)
+    counts = validate_print_copies(copies, meios_proprios=meios_proprios, talao_anexo="talao" in attached)
+    plan = [PrintItem(generated["mapa"], "Mapa", counts["mapa"], duplex_short_edge=True),
             PrintItem(attached["protocolo"], "Protocolo", counts["protocolo"]),
             PrintItem(generated["requerimento"], "Requerimento", counts["requerimento"])]
     if "declaracao" in generated:
         plan.append(PrintItem(generated["declaracao"], "Declaração de meios próprios", counts["declaracao"]))
+    if "talao" in attached:
+        plan.append(PrintItem(attached["talao"], "Talão", counts["talao"]))
     plan.extend((PrintItem(attached["escala"], "Escala", counts["escala"], first_page_only=True),
                  PrintItem(attached["holerite"], "Holerite", counts["holerite"])))
     return plan

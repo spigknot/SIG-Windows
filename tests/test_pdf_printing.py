@@ -49,22 +49,30 @@ class PdfPrintingTest(unittest.TestCase):
                 documents[str(path)] = FakeDocument((842, 595) if key == "mapa" else (595, 842), 2 if key == "mapa" else 3 if key == "escala" else 1)
             plan = diarias_workflow.build_print_plan({key: paths[key] for key in ("mapa", "requerimento", "declaracao")}, paths)
             plan = diarias_workflow.build_print_plan({key: paths[key] for key in ("mapa", "requerimento", "declaracao")}, paths, copies={key: 3 if key == "mapa" else count for key, _label, count in diarias_workflow.PRINT_DOCUMENTS})
-            items = [dict(path=str(item.path), label=item.label, copies=item.copies, first_page_only=item.first_page_only) for item in plan]
+            items = [dict(path=str(item.path), label=item.label, copies=item.copies, first_page_only=item.first_page_only, duplex_short_edge=item.duplex_short_edge) for item in plan]
             mode = SimpleNamespace(Fields=0, Copies=4, Orientation=1)
             dc = Mock()
             dc.StartDoc.return_value = 345
             dc.GetDeviceCaps.side_effect = lambda cap: {win32con.HORZRES: 2000, win32con.VERTRES: 2800, win32con.LOGPIXELSX: 600}[cap]
-            with patch.object(pypdfium2, "PdfDocument", side_effect=lambda path: documents[path]), patch.object(win32print, "OpenPrinter", return_value=123), patch.object(win32print, "GetPrinter", return_value={"pDevMode": mode}), patch.object(win32print, "ClosePrinter"), patch.object(win32gui, "CreateDC", return_value=987), patch.object(win32gui, "ResetDC") as reset, patch.object(win32ui, "CreateDCFromHandle", return_value=dc), patch.object(ImageWin, "Dib") as dib:
+            modes = []
+            def create_dc(_driver, _printer, configured):
+                modes.append((configured.Duplex, configured.Orientation, configured.Copies, configured.Fields))
+                return 987
+            with patch.object(pypdfium2, "PdfDocument", side_effect=lambda path: documents[path]), patch.object(win32print, "OpenPrinter", return_value=123), patch.object(win32print, "GetPrinter", return_value={"pDevMode": mode}), patch.object(win32print, "ClosePrinter"), patch.object(win32gui, "CreateDC", side_effect=create_dc), patch.object(win32gui, "ResetDC") as reset, patch.object(win32ui, "CreateDCFromHandle", return_value=dc), patch.object(ImageWin, "Dib") as dib:
                 result = pdf_printing._print_items("Impressora fictícia", items, "Diária teste")
             self.assertEqual(result, {"job_id": 345, "pages": 12})
             self.assertEqual(dc.StartPage.call_count, 12)
             self.assertEqual(dc.EndPage.call_count, 12)
             self.assertEqual(dib.return_value.draw.call_count, 12)
-            self.assertEqual(reset.call_count, 2)
+            self.assertEqual(reset.call_count, 0)
             self.assertEqual(mode.Copies, 1)
-            dc.EndDoc.assert_called_once()
+            self.assertEqual([m[0] for m in modes], [win32con.DMDUP_HORIZONTAL] + [win32con.DMDUP_SIMPLEX] * 5)
+            self.assertEqual([m[1] for m in modes], [win32con.DMORIENT_LANDSCAPE] + [win32con.DMORIENT_PORTRAIT] * 5)
+            self.assertTrue(all(m[2] == 1 and m[3] & win32con.DM_DUPLEX for m in modes))
+            self.assertEqual([call.args[0] for call in dc.StartDoc.call_args_list], ["Diária teste - " + item.label for item in plan])
+            self.assertEqual(dc.EndDoc.call_count, len(plan))
             dc.AbortDoc.assert_not_called()
-            dc.DeleteDC.assert_called_once()
+            self.assertEqual(dc.DeleteDC.call_count, len(plan))
             for document in documents.values():
                 document.close.assert_called_once()
 

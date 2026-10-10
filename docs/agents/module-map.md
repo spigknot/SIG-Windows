@@ -51,11 +51,11 @@ Ambiente ...... app_env.py
 | `imei_lookup.py` | Consulta e historico de IMEI (JSON local) | UI |
 | `name_database.py` | Base de nomes: extracao, normalizacao, chave fonetica | UI |
 | `qualification.py` | Qualificacao de ocorrencias: parsing de JSON, labels, status | UI |
-| `diarias_protocolo.py` | Extracao dos campos dos PDFs de protocolo, talão e holerite | UI, persistencia |
+| `diarias_protocolo.py` | Extracao dos campos dos PDFs de protocolo, talão, holerite e mês/ano do cabeçalho da escala | UI, persistencia |
 | `diarias_mapa.py` | Validação dos dados e preenchimento do modelo Excel de mapa de diária, preservando fontes, fórmulas e o formato `.xlsx` | UI, extração de PDFs |
-| `diarias_workflow.py` | Nove campos obrigatórios, geração conjunta e plano de impressão (vias/ordem/primeira página da escala) | UI, persistência |
+| `diarias_workflow.py` | Nove campos obrigatórios, geração conjunta e plano de impressão (vias/ordem/duplex do mapa/primeira página da escala/talão condicionado a Meios Próprios) | UI, persistência |
 | `pdf_printing.py` | Impressoras Windows e envio de PDFs ao GDI em processo isolado | Dados do perfil, Tkinter |
-| `diarias_store.py` | Persistencia local dos perfis/seleção de Diárias, UFESP, pasta de saída e valores/PDF ativo do holerite | Leitura de PDF, UI |
+| `diarias_store.py` | Persistencia local dos perfis/seleção de Diárias, UFESP, pasta de saída e valores/PDFs ativos do holerite e da escala | Leitura de PDF, UI |
 | `diarias_profiles.py` | Campos e validação dos perfis de Diárias, nomes e relação classe/padrão | UI, persistência |
 | `diarias_profiles_panel.py` | Formulário, seletor e tabela dos perfis em Configurações → Policial → Diárias | Regras de documento, persistência em disco |
 | `ui_widgets.py` | Widgets reutilizaveis (`create_tooltip`, `PreviewIconButton`) | Regra de negocio |

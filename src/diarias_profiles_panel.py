@@ -6,7 +6,13 @@ from tkinter import messagebox, ttk
 
 import diarias_store
 from diarias_profiles import PROFILE_FIELDS
-from ui_widgets import create_tooltip
+from ui_widgets import add_entry_placeholder, create_tooltip
+
+
+PROFILE_FORM_COLUMNS = (
+    ("nome", "rg", "cpf", "nascimento", "pai", "mae", "naturalidade", "endereco", "cidade_trabalho"),
+    ("estado_civil", "delegacia", "cargo", "classe", "agencia", "conta", "banco", "ufesp_index", "cidade_plantao"),
+)
 
 
 class DiariasProfilesPanel:
@@ -17,6 +23,8 @@ class DiariasProfilesPanel:
         self._editing_id = None
         self._profiles = []
         self.field_vars, self.field_widgets = {}, {}
+        self.field_labels, self.field_placeholders = {}, {}
+        self.profile_name_var = tk.StringVar(master=parent)
         self.profile_var = tk.StringVar(master=parent)
         self.status_var = tk.StringVar(master=parent)
         style = ttk.Style(parent)
@@ -27,15 +35,16 @@ class DiariasProfilesPanel:
 
         toolbar = ttk.Frame(parent, style="Settings.Inner.TFrame")
         toolbar.pack(fill="x", pady=(0, 10))
+        toolbar.columnconfigure(2, weight=1)
         ttk.Label(toolbar, text="Perfil", style="Settings.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.selector = ttk.Combobox(toolbar, textvariable=self.profile_var, state="readonly", width=18)
+        self.selector = ttk.Combobox(toolbar, textvariable=self.profile_var, state="readonly", width=36)
         self.selector.grid(row=0, column=1, sticky="w")
         self.selector.bind("<<ComboboxSelected>>", self._select_profile)
-        ttk.Label(toolbar, text="Valor UFESP (R$)", style="Settings.TLabel").grid(row=0, column=2, sticky="w", padx=(20, 8))
+        ttk.Label(toolbar, text="Valor UFESP (R$)", style="Settings.TLabel").grid(row=0, column=3, sticky="e", padx=(20, 8))
         self.ufesp_entry = ttk.Entry(toolbar, textvariable=ufesp_var, width=12)
-        self.ufesp_entry.grid(row=0, column=3, sticky="w")
+        self.ufesp_entry.grid(row=0, column=4, sticky="e")
         profile_actions = ttk.Frame(toolbar, style="Settings.Inner.TFrame")
-        profile_actions.grid(row=1, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        profile_actions.grid(row=1, column=1, columnspan=4, sticky="w", pady=(8, 0))
         self.create_button = ttk.Button(profile_actions, text="+", width=3, style="Diarias.Profile.Add.TButton", command=self.create_profile)
         self.remove_button = ttk.Button(profile_actions, text="−", width=3, style="Diarias.Profile.Remove.TButton", command=self.remove_profile)
         self.edit_button = ttk.Button(profile_actions, text="✎", width=3, command=self.edit_profile)
@@ -53,23 +62,34 @@ class DiariasProfilesPanel:
         self.table.tag_configure("alternate", background="#f4f7f6")
         self.table.pack(fill="both", expand=True)
         self.editor = ttk.Frame(self.details, style="Settings.Inner.TFrame")
-        ttk.Label(self.editor, text="Preencha todos os campos. Pai é opcional.", style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
+        profile_name = ttk.Frame(self.editor, style="Settings.Inner.TFrame")
+        profile_name.pack(anchor="center", pady=(0, 10))
+        ttk.Label(profile_name, text="Nome do Perfil", style="Settings.TLabel").pack()
+        self.profile_name_entry = ttk.Entry(profile_name, textvariable=self.profile_name_var, width=33)
+        self.profile_name_entry.pack(pady=(3, 0))
+        self.profile_name_placeholder = add_entry_placeholder(
+            self.profile_name_entry, self.profile_name_var, "Ex.: Plantão em Taquarituba"
+        )
         self.form = ttk.Frame(self.editor, style="Settings.Inner.TFrame")
         self.form.pack(fill="x")
-        fields_per_column = (len(PROFILE_FIELDS) + 1) // 2
-        for index, (key, label, example) in enumerate(PROFILE_FIELDS):
-            column, row = divmod(index, fields_per_column)
-            base_column = column * 2
-            variable = tk.StringVar(master=parent)
-            self.field_vars[key] = variable
-            ttk.Label(self.form, text=label, style="Settings.TLabel").grid(row=row * 2, column=base_column, rowspan=2, sticky="nw", padx=(18 if column else 0, 8), pady=(3, 6))
-            if key == "classe":
-                entry = ttk.Combobox(self.form, textvariable=variable, values=("1", "2", "3", "Especial"), state="readonly", width=16)
-            else:
-                entry = ttk.Entry(self.form, textvariable=variable, width=22)
-            entry.grid(row=row * 2, column=base_column + 1, sticky="w", pady=(1, 0))
-            ttk.Label(self.form, text=f"Ex.: {example}", style="Muted.TLabel", wraplength=190).grid(row=row * 2 + 1, column=base_column + 1, sticky="nw", pady=(0, 6))
-            self.field_widgets[key] = entry
+        fields = {key: (label, example) for key, label, example in PROFILE_FIELDS}
+        for column, keys in enumerate(PROFILE_FORM_COLUMNS):
+            for row, key in enumerate(keys):
+                label, example = fields[key]
+                label = {"cidade_trabalho": "Cidade de\ntrabalho", "cidade_plantao": "Cidade do\nplantão"}.get(key, label)
+                base_column = column * 2
+                variable = tk.StringVar(master=parent)
+                self.field_vars[key] = variable
+                label_widget = ttk.Label(self.form, text=label, style="Settings.TLabel", justify="left")
+                label_widget.grid(row=row, column=base_column, sticky="w", padx=(8 if column else 0, 8), pady=2)
+                self.field_labels[key] = label_widget
+                if key == "classe":
+                    entry = ttk.Combobox(self.form, textvariable=variable, values=("1", "2", "3", "Especial"), state="readonly", width=24)
+                else:
+                    entry = ttk.Entry(self.form, textvariable=variable, width=33)
+                entry.grid(row=row, column=base_column + 1, sticky="w", pady=2)
+                self.field_widgets[key] = entry
+                self.field_placeholders[key] = add_entry_placeholder(entry, variable, f"Ex.: {example}")
 
         actions = ttk.Frame(self.editor, style="Settings.Inner.TFrame")
         actions.pack(fill="x", pady=(10, 0))
@@ -124,6 +144,7 @@ class DiariasProfilesPanel:
     def _show_editor(self, profile=None):
         self.editing = True
         self._editing_id = profile["id"] if profile else None
+        self.profile_name_var.set(profile["profile_name"] if profile else "")
         for key, variable in self.field_vars.items():
             variable.set(profile[key] if profile else "")
         self.view.pack_forget()
@@ -134,7 +155,7 @@ class DiariasProfilesPanel:
             button.configure(state="disabled")
         self.status_var.set("")
         self._resize()
-        self.field_widgets["nome"].focus_set()
+        self.profile_name_entry.focus_set()
 
     def create_profile(self):
         self._show_editor()
@@ -146,7 +167,9 @@ class DiariasProfilesPanel:
 
     def save_profile(self):
         try:
-            profile = diarias_store.save_diarias_profile({key: var.get() for key, var in self.field_vars.items()}, self._editing_id)
+            values = {key: var.get() for key, var in self.field_vars.items()}
+            values["profile_name"] = self.profile_name_var.get()
+            profile = diarias_store.save_diarias_profile(values, self._editing_id)
         except ValueError as exc:
             messagebox.showwarning("Dados do perfil", str(exc), parent=self.parent)
             return False

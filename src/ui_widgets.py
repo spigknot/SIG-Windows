@@ -7,12 +7,45 @@ O `NodeSlider` e uma porta do slider do projeto TurboCore
 atracao magnetica. Mantido igual para as duas aplicacoes terem o mesmo visual.
 """
 
-from tkinter import Canvas, Toplevel, ttk
+from tkinter import Canvas, Label, Toplevel, ttk
 
 import math
 from typing import Callable
 
 from PIL import Image, ImageDraw, ImageTk
+
+
+def add_entry_placeholder(entry, variable, text: str):
+    """Exibe uma dica sobre o campo vazio sem inseri-la no StringVar."""
+    style = ttk.Style(entry)
+    hint = Label(entry, text=text, foreground="#7d8583", borderwidth=0,
+                 padx=0, pady=0, anchor="w", takefocus=False)
+
+    def refresh(_event=None):
+        entry_style = entry.cget("style") or entry.winfo_class()
+        hint.configure(
+            background=style.lookup(entry_style, "fieldbackground", entry.state()) or "#ffffff",
+            font=style.lookup(entry_style, "font") or "TkDefaultFont",
+        )
+        if variable.get() or entry.focus_get() == entry:
+            hint.place_forget()
+        else:
+            right_space = 25 if isinstance(entry, ttk.Combobox) else 8
+            hint.place(x=4, rely=0.5, anchor="w", relwidth=1, width=-right_space)
+
+    def focus(_event):
+        entry.focus_set()
+        refresh()
+        if isinstance(entry, ttk.Combobox) and "readonly" in entry.state():
+            entry.tk.call("ttk::combobox::Post", entry)
+        return "break"
+
+    hint.bind("<Button-1>", focus)
+    variable.trace_add("write", lambda *_args: refresh())
+    for event in ("<FocusIn>", "<FocusOut>", "<Map>", "<<ThemeChanged>>"):
+        entry.bind(event, refresh, add="+")
+    refresh()
+    return hint
 
 MAGIC_WAND_SIZE = 20
 MAGIC_WAND_SCALE = 8

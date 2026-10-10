@@ -61,10 +61,13 @@ class DiariasMapaData:
     nome: str = ""
     rg: str = ""
     delegacia_oitiva: str = ""
+    delegacia_perfil: str = ""
     padrao: str = ""
     cargo_classe: str = ""
     cpf: str = ""
     dados_bancarios: str = ""
+    agencia: str = ""
+    conta: str = ""
     cidade_plantao: str = ""
 
 
@@ -156,12 +159,15 @@ def prepare_diarias_mapa(
         profile_values = {
             "indice_ufesp": float(Decimal(selected["ufesp_index"].replace(",", "."))),
             "nome": selected["nome"].upper(),
-            "rg": selected["rg"],
+            "rg": _format_profile_rg(selected["rg"]),
             "delegacia_oitiva": str(oitiva_delegacia or "").strip(),
+            "delegacia_perfil": selected["delegacia"].upper(),
             "padrao": classe_padrao(selected["classe"]),
             "cargo_classe": format_profile_cargo(selected["cargo"], selected["classe"]),
-            "cpf": selected["cpf"],
+            "cpf": _format_profile_cpf(selected["cpf"]),
             "dados_bancarios": f"001 / {selected['agencia']} / {selected['conta']}",
+            "agencia": selected["agencia"],
+            "conta": selected["conta"],
             "cidade_plantao": selected["cidade_plantao"],
         }
 
@@ -193,10 +199,24 @@ def _excel_time_fraction(value: time) -> float:
     return seconds / 86400
 
 
+def _format_profile_rg(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 9:
+        base, check_digit = digits[:-1], digits[-1]
+        return f"{base[:-6]}.{base[-6:-3]}.{base[-3:]}-{check_digit}"
+    return str(value or "").strip()
+
+
+def _format_profile_cpf(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 11:
+        return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+    return str(value or "").strip()
+
+
 def _excel_cell_characters(cell, start: int, length: int):
     """Obtém Range.Characters via PROPERTYGET, como exige a API COM do Excel."""
     import pythoncom
-    from win32com.client import Dispatch
 
     dispatch_id = cell._oleobj_.GetIDsOfNames("Characters")
     characters = cell._oleobj_.InvokeTypes(
@@ -208,13 +228,12 @@ def _excel_cell_characters(cell, start: int, length: int):
         start,
         length,
     )
-    return Dispatch(characters)
+    return _cache_free_excel_dispatch(characters)
 
 
 def _shape_text_characters(text_range, start: int, length: int):
     """Obtém TextRange2.Characters com os tipos declarados no Office COM."""
     import pythoncom
-    from win32com.client import Dispatch
 
     dispatch_id = text_range._oleobj_.GetIDsOfNames("Characters")
     characters = text_range._oleobj_.InvokeTypes(
@@ -226,7 +245,7 @@ def _shape_text_characters(text_range, start: int, length: int):
         start,
         length,
     )
-    return Dispatch(characters)
+    return _cache_free_excel_dispatch(characters)
 
 
 def _replace_cell_marker(cell, marker: str, replacement: str) -> int:
@@ -237,6 +256,39 @@ def _replace_cell_marker(cell, marker: str, replacement: str) -> int:
     if marker in str(cell.Value2 or ""):
         raise RuntimeError(f"Não foi possível substituir a marca {marker} em {cell.Address}.")
     return len(positions)
+
+
+def _replace_sheet_cell_markers(sheet, replacements: dict[str, str]) -> dict[str, int]:
+    """Substitui tags em células com Characters para manter a fonte de cada trecho."""
+    counts = {marker: 0 for marker in replacements}
+    used = sheet.UsedRange
+    rows, columns = int(used.Rows.Count), int(used.Columns.Count)
+    values = used.Value2
+    if rows == 1 and columns == 1:
+        values = ((values,),)
+    else:
+        # Normaliza as variantes 1D/2D devolvidas pelo COM para linhas e
+        # colunas, inclusive quando o UsedRange tem apenas uma coluna.
+        if rows == 1 and (not values or not isinstance(values[0], (tuple, list))):
+            values = (values,)
+        else:
+            values = tuple(
+                tuple(row) if isinstance(row, (tuple, list)) else (row,)
+                for row in values
+            )
+    first_row, first_column = int(used.Row), int(used.Column)
+    for row_offset, row_values in enumerate(values):
+        for column_offset, value in enumerate(row_values):
+            if not isinstance(value, str) or "{{{" not in value:
+                continue
+            cell = sheet.Cells.Item(first_row + row_offset, first_column + column_offset)
+            if cell.HasFormula:
+                continue
+            for marker, replacement in replacements.items():
+                if marker in value:
+                    counts[marker] += _replace_cell_marker(cell, marker, replacement)
+                    value = str(cell.Value2 or "")
+    return counts
 
 
 def _replace_shape_markers(sheet, replacements: dict[str, str]) -> dict[str, int]:
@@ -325,6 +377,70 @@ def _prepare_mapa_template(template_path: Path, directory: Path) -> Path:
     return prepared
 
 
+def _cache_free_excel_dispatch(dispatch, user_name=None):
+    """Mantém métodos e objetos retornados pelo Excel fora do cache gen_py."""
+    from win32com.client import dynamic
+
+    def wrap(value, name=None, _result_clsid=None):
+        return dynamic.Dispatch(value, name, createClass=ExcelDispatch)
+
+    class ExcelDispatch(dynamic.CDispatch):
+        def _wrap_dispatch_(self, value, userName=None, returnCLSID=None):
+            return wrap(value, userName)
+
+        def _make_method_(self, name):
+            method = super()._make_method_(name)
+            if method is not None:
+                # pywin32 usa o Dispatch com cache nos métodos gerados, mesmo
+                # quando o objeto pai foi aberto com despacho dinâmico.
+                method.__func__.__globals__["Dispatch"] = wrap
+            return method
+
+    return wrap(dispatch, user_name)
+
+
+def _create_excel_application():
+    """Abre uma instância própria sem os wrappers gerados no cache gen_py.
+
+    Um cache incompleto pode impedir DispatchEx de devolver uma instância de
+    Excel que já iniciou. O despacho dinâmico também vale para seus filhos.
+    """
+    import pythoncom
+
+    dispatch = pythoncom.CoCreateInstance(
+        "Excel.Application", None,
+        pythoncom.CLSCTX_LOCAL_SERVER, pythoncom.IID_IDispatch,
+    )
+    return _cache_free_excel_dispatch(dispatch, "Excel.Application")
+
+
+def _replace_template_markers(sheet, replacements: dict[str, str]) -> dict[str, int]:
+    counts = _replace_sheet_cell_markers(sheet, replacements)
+    shape_counts = _replace_shape_markers(sheet, replacements)
+    for marker, count in shape_counts.items():
+        counts[marker] += count
+    return counts
+
+
+def _replace_verso_delegacia_heading(sheet, delegacia: str) -> int:
+    """Atualiza o título fixo de delegacia em modelos sem a tag delegacia2."""
+    shapes = getattr(sheet, "Shapes", None)
+    if shapes is None:
+        return 0
+    for shape_index in range(1, int(shapes.Count) + 1):
+        shape = shapes.Item(shape_index)
+        try:
+            text_range = shape.TextFrame2.TextRange
+            text = str(text_range.Text or "")
+        except Exception:
+            continue
+        first_line = text.replace("\r", "\n").split("\n", 1)[0]
+        if re.match(r"^\s*DELEGACIA\b", first_line, flags=re.IGNORECASE):
+            _shape_text_characters(text_range, 1, len(first_line)).Text = delegacia
+            return 1
+    return 0
+
+
 def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
     """Gera o mapa como XLSX ou PDF a partir do modelo e dados da diária."""
     destination = Path(destination)
@@ -339,17 +455,15 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
     export_pdf = extension == ".pdf"
 
     try:
-        from win32com.client import DispatchEx
+        excel = _create_excel_application()
     except ImportError as exc:
         raise RuntimeError(
             "O componente de automação do Excel não está disponível neste aplicativo."
         ) from exc
 
-    try:
-        excel = DispatchEx("Excel.Application")
     except Exception as exc:
         raise RuntimeError(
-            "Não foi possível iniciar o Microsoft Excel. Confira se ele está instalado."
+            f"Não foi possível iniciar o Microsoft Excel: {exc}"
         ) from exc
 
     workbook = None
@@ -371,60 +485,70 @@ def generate_diarias_mapa(destination: Path, values: DiariasMapaData) -> Path:
         limite = workbook.Worksheets.Item("Limite 50%")
         verso = workbook.Worksheets.Item("Verso")
 
-        limite.Range("K10").Value2 = values.total_vencimentos
         limite.Range("G16").Value2 = "PARTICULAR" if values.meios_proprios else "VIATURA"
         limite.Range("B16").Value2 = values.cidade_plantao.upper()
         limite.Range("V10").Value2 = values.valor_ufesp
         if getattr(values, "indice_ufesp", None) is not None:
-            # Value2 altera o conteúdo, mantendo a fonte e o estilo do modelo.
+            # Escreve apenas os campos fixos previstos no mapa novo. Value2
+            # conserva os estilos aplicados às células no modelo.
             for address, value in (
                 ("Z10", values.indice_ufesp),
-                ("B8", values.nome),
+                ("B8", values.nome.upper()),
                 ("N8", values.rg),
                 ("T8", values.delegacia_oitiva),
                 ("B10", values.padrao),
                 ("E10", values.cargo_classe),
                 ("J28", values.cpf),
-                ("T28", values.dados_bancarios),
             ):
                 limite.Range(address).Value2 = value
+        limite.Range("K10").Value2 = values.total_vencimentos
         limite.Range("AC8").Value2 = _excel_date_serial(values.data_ida)
-        # O modelo identifica essas colunas como DIA; mês/ano fica em AC8.
         limite.Range("J16").Value2 = values.data_ida.day
         limite.Range("L16").Value2 = values.data_volta.day
         limite.Range("K16").Value2 = _excel_time_fraction(values.horario_ida)
         limite.Range("M16").Value2 = _excel_time_fraction(values.horario_volta)
+        limite.Range("C45").Value2 = _excel_date_serial(values.data_protocolo)
         if values.menos_de_12_horas:
             limite.Range("W16").Value2 = 1
             limite.Range("Z16").ClearContents()
         else:
             limite.Range("W16").ClearContents()
             limite.Range("Z16").Value2 = 1
-        limite.Range("C45").Value2 = _excel_date_serial(values.data_protocolo)
-
-        if _replace_cell_marker(limite.Range("B34"), "{{{data_ida}}}", values.mes_ano_ida) == 0:
-            raise RuntimeError("A marca {{{data_ida}}} não foi encontrada na célula B34 do modelo.")
-
-        if getattr(values, "cidade_plantao", ""):
-            if _replace_cell_marker(
-                limite.Range("B34"), "{{{cidade_plantao}}}", values.cidade_plantao
-            ) == 0:
-                raise RuntimeError(
-                    "A marca {{{cidade_plantao}}} não foi encontrada na célula B34 do modelo."
-                )
-
+        template_markers = {
+            "{{{cidade_plantao}}}": values.cidade_plantao,
+            "{{{agencia}}}": values.agencia,
+            "{{{conta}}}": values.conta,
+            "{{{data_ida}}}": values.mes_ano_ida,
+            "{{{data protocolo}}}": values.data_protocolo.strftime("%d/%m/%Y"),
+            "{{{data_protocolo}}}": values.data_protocolo.strftime("%d/%m/%Y"),
+            "{{{protocolo_mapa}}}": values.protocolo_mapa,
+            "{{{protocolo_requerimento}}}": values.protocolo_requerimento,
+            "{{{delegacia2}}}": values.delegacia_perfil,
+        }
+        marker_counts = _replace_template_markers(limite, template_markers)
         verso.Range("A16").Value2 = values.protocolo_requerimento
-        marker_counts = _replace_shape_markers(
-            verso,
-            {
-                "{{{data_protocolo}}}": values.data_protocolo.strftime("%d/%m/%Y"),
-                "{{{protocolo_mapa}}}": values.protocolo_mapa,
-            },
+        verso_markers = _replace_template_markers(verso, template_markers)
+        for marker, count in verso_markers.items():
+            marker_counts[marker] += count
+        # O modelo distribuído ainda mantém estes dois trechos como texto
+        # estático; os valores são atualizados enquanto ele não tiver as tags.
+        if not marker_counts["{{{agencia}}}"] and not marker_counts["{{{conta}}}"]:
+            limite.Range("T28").Value2 = values.dados_bancarios
+        if not marker_counts["{{{delegacia2}}}"]:
+            marker_counts["{{{delegacia2}}}"] = _replace_verso_delegacia_heading(
+                verso, values.delegacia_perfil
+            )
+        required_tag_groups = (
+            ("{{{cidade_plantao}}}",), ("{{{data_ida}}}",),
+            ("{{{data protocolo}}}", "{{{data_protocolo}}}"),
+            ("{{{protocolo_mapa}}}",),
         )
-        missing = [marker for marker, count in marker_counts.items() if count == 0]
+        missing = [group[0] for group in required_tag_groups
+                   if not any(marker_counts[marker] for marker in group)]
         if missing:
             raise RuntimeError(
-                "Marca(s) não encontrada(s) na planilha Verso: " + ", ".join(missing)
+                "Marca(s) obrigatória(s) não encontrada(s) no modelo de mapa: "
+                + ", ".join(missing)
             )
 
         if export_pdf:

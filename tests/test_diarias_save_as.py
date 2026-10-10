@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import types
 import unittest
 from datetime import date, time
 from pathlib import Path
@@ -320,13 +319,8 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
                 protocolo_requerimento="215626/2026",
                 protocolo_mapa="215627/2026",
             )
-            client = types.ModuleType("win32com.client")
-            client.DispatchEx = Mock(return_value=_Excel())
-            win32com = types.ModuleType("win32com")
-            win32com.client = client
-            with patch.dict(
-                sys.modules,
-                {"win32com": win32com, "win32com.client": client},
+            with patch.object(
+                diarias_mapa, "_create_excel_application", return_value=_Excel(),
             ), patch.object(
                 diarias_mapa, "_replace_cell_marker", return_value=1
             ), patch.object(
@@ -363,13 +357,8 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
                 protocolo_mapa="215627/2026",
             )
             excel = _Excel()
-            client = types.ModuleType("win32com.client")
-            client.DispatchEx = Mock(return_value=excel)
-            win32com = types.ModuleType("win32com")
-            win32com.client = client
-            with patch.dict(
-                sys.modules,
-                {"win32com": win32com, "win32com.client": client},
+            with patch.object(
+                diarias_mapa, "_create_excel_application", return_value=excel,
             ), patch.object(
                 diarias_mapa, "_replace_cell_marker", return_value=1
             ), patch.object(

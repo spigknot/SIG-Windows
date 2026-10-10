@@ -50,12 +50,14 @@ class DiariasSettingsIntegrationTest(unittest.TestCase):
         self.assertEqual(['Policial de Oitiva', 'Cargo de Oitiva', 'DEL.POL.OITIVA', 'Delegado', 'TAGUAI'], [entry.get() for entry in entries])
         panel = win.diarias_profiles_panel
         panel.create_button.invoke()
+        panel.profile_name_var.set('Plantão em Taguaí')
         for key, _label, example in PROFILE_FIELDS:
             panel.field_vars[key].set('1' if key == 'classe' else example)
         panel.save_button.invoke()
         self.root.update_idletasks()
         saved = diarias_store.load_diarias_profile()
         self.assertEqual('João da Silva', saved['nome'])
+        self.assertEqual('Plantão em Taguaí', saved['profile_name'])
         self.assertEqual(saved['profile_name'], self.app.diarias_profile_var.get())
         self.assertEqual('DEL.POL.OITIVA', self.app.settings['police_station'])
         self.assertEqual('Delegacia de Polícia de Taguaí', saved['delegacia'])
