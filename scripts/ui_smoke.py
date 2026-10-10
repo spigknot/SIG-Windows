@@ -429,8 +429,8 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
 
     Vacinas do pedido de 10/09:
     - as duas telas têm a checkbox "Keywords" (mesma chave de settings);
-    - a aba "Chaves API" tem UMA seção "Modelos" com os 7 provedores na ordem
-      Deepseek, xAI, Meta, ElevenLabs, Deepgram, AssemblyAI, Alibaba;
+    - a aba "Chaves API" tem UMA seção "Modelos" com os 8 provedores na ordem
+      Deepseek, xAI, Meta, ElevenLabs, Deepgram, AssemblyAI, Alibaba, G AI Studio;
     - a aba "Avançado" tem o botão KEYWORDS.
     """
     from tkinter import ttk
@@ -556,7 +556,7 @@ def _check_keywords_and_settings_tabs(app, settings_window) -> None:
         for rotulo in descendentes(modelos)
         if isinstance(rotulo, ttk.Label)
     ]
-    esperado = ["Deepseek", "xAI", "Meta", "ElevenLabs", "Deepgram", "AssemblyAI", "Alibaba"]
+    esperado = ["Deepseek", "xAI", "Meta", "ElevenLabs", "Deepgram", "AssemblyAI", "Alibaba", "G AI Studio"]
     if labels != esperado:
         raise RuntimeError(f"linhas da secao Modelos fora de ordem: {labels}")
 
@@ -580,11 +580,11 @@ def _check_api_key_visibility_toggle(app, settings_window) -> None:
     if imei is None:
         raise RuntimeError("secao 'IMEI CHECK' ausente na aba Chaves API")
     api_tab = imei.master
-    # 7 provedores da secao "Modelos" + a chave do IMEI CHECK.
+    # 8 provedores da secao "Modelos" + a chave do IMEI CHECK.
     campos = [w for w in descendentes(api_tab) if isinstance(w, ttk.Entry)]
-    if len(campos) != 8:
+    if len(campos) != 9:
         raise RuntimeError(
-            f"aba Chaves API deveria ter 8 campos de chave, achou {len(campos)}"
+            f"aba Chaves API deveria ter 9 campos de chave, achou {len(campos)}"
         )
     if {w.cget("show") for w in campos} != {"*"}:
         raise RuntimeError("as chaves API deveriam nascer mascaradas")

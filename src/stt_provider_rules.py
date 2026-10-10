@@ -95,9 +95,25 @@ ALIBABA_CODES = {
     "cs", "hu", "ro", "bg", "hr", "sk",
 }
 
+# Locales Gemini 3.5 Transcribe (REST e Live). Auto usa uma lista vazia.
+GEMINI_CODES = {
+    "af-ZA", "ja-JP", "am-ET", "jv-ID", "ar-EG", "kea-CV", "hy-AM", "kn-IN",
+    "as-IN", "kk-KZ", "az-AZ", "ko-KR", "be-BY", "ky-KG", "bn-BD", "lv-LV",
+    "bn-IN", "ln-CD", "bs-BA", "lt-LT", "bg-BG", "mk-MK", "rup-BG", "ms-MY",
+    "my-MM", "ml-IN", "yue-Hant-HK", "mt-MT", "ca-ES", "cmn-Hans-CN", "ceb",
+    "mr-IN", "km-KH", "mn-MN", "hr-HR", "ne-NP", "cs-CZ", "nb-NO", "da-DK",
+    "or-IN", "nl-NL", "pl-PL", "en-GB", "pt-BR", "en-IN", "pt-PT", "en-US",
+    "pa-IN", "et-EE", "pa-Guru-IN", "fa-IR", "ro-RO", "fil-PH", "ru-RU",
+    "fi-FI", "sr-RS", "fr-FR", "sd-Arab-IN", "gl-ES", "sk-SK", "ka-GE",
+    "sl-SI", "de-DE", "es-419", "el-GR", "es-US", "gu-IN", "sw-KE", "ha-NG",
+    "sv-SE", "he-IL", "tg-TJ", "hi-IN", "te-IN", "hu-HU", "th-TH", "is-IS",
+    "tr-TR", "uk-UA", "id-ID", "uz-UZ", "it-IT", "vi-VN",
+}
+
 # ---------------- Settings keys ----------------
 
 KEY_LANGUAGE_MODE = {
+    "gemini": "gemini_language_mode",
     "deepgram": "deepgram_language_mode",
     "assemblyai": "assemblyai_language_mode",
     "elevenlabs": "elevenlabs_language_mode",
@@ -106,6 +122,7 @@ KEY_LANGUAGE_MODE = {
     "alibaba": "alibaba_language_mode",
 }
 KEY_LANGUAGE_CUSTOM = {
+    "gemini": "gemini_language_custom",
     "deepgram": "deepgram_language_custom",
     "assemblyai": "assemblyai_language_custom",
     "elevenlabs": "elevenlabs_language_custom",
@@ -114,6 +131,7 @@ KEY_LANGUAGE_CUSTOM = {
     "alibaba": "alibaba_language_custom",
 }
 DEFAULT_MODE = {
+    "gemini": "pt-BR",
     "deepgram": "pt-BR",
     "assemblyai": "pt",
     "elevenlabs": "pt",
@@ -122,6 +140,7 @@ DEFAULT_MODE = {
     "alibaba": "pt",
 }
 MENU_OPTIONS = {
+    "gemini": ["multi", "pt-BR", "en-US", "es-419", "custom"],
     "deepgram": ["multi", "pt-BR", "en", "es", "custom"],
     "assemblyai": ["multi", "pt", "es", "en", "custom"],
     "elevenlabs": ["multi", "pt", "es", "en", "custom"],
@@ -150,6 +169,7 @@ DEFAULT_TRANSCRIPTION_LANGUAGE = "pt"
 # variante); o servidor local (Granite NAR) não tem parâmetro de idioma e por
 # isso não aparece nesta tabela.
 TRANSCRIPTION_OPTION_MODES = {
+    "gemini": {"auto": "multi", "pt": "pt-BR", "en": "en-US", "es": "es-419"},
     "deepgram": {"auto": "multi", "pt": "pt-BR", "en": "en", "es": "es"},
     "assemblyai": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
     "elevenlabs": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
@@ -205,6 +225,8 @@ def language_custom(settings: dict, provider: str) -> str:
 
 
 def is_valid_code(provider: str, code: str) -> bool:
+    if provider == "gemini":
+        return code in GEMINI_CODES
     if provider == "deepgram":
         return code in DEEPGRAM_CODES
     if provider == "assemblyai":
@@ -225,6 +247,8 @@ def invalid_codes(provider: str, codes: list[str]) -> list[str]:
 
 
 def codes_for_help(provider: str) -> str:
+    if provider == "gemini":
+        return ", ".join(sorted(GEMINI_CODES))
     if provider == "deepgram":
         return ", ".join(sorted(DEEPGRAM_CODES))
     if provider == "assemblyai":
@@ -350,6 +374,8 @@ def alibaba_language_hints(settings: dict) -> list[str] | None:
 # ---------------- Diarização: parâmetros por provedor ----------------
 
 def supports_diarize(provider: str, is_live: bool) -> bool:
+    if provider == "gemini":
+        return not is_live
     return provider in ("deepgram", "assemblyai", "elevenlabs", "grok", "metamuse")
 
 
@@ -511,7 +537,7 @@ def alibaba_vocabulary(settings: dict) -> dict[str, int] | None:
     return {term: ALIBABA_KEYWORD_WEIGHT for term in terms}
 
 # Provedores que aceitam algum tipo de termo de reforço (o servidor local não).
-KEYWORD_PROVIDERS = ("deepgram", "grok", "elevenlabs", "assemblyai", "metamuse", "alibaba")
+KEYWORD_PROVIDERS = ("deepgram", "grok", "elevenlabs", "assemblyai", "metamuse", "alibaba", "gemini")
 
 
 def normalize_stt_keywords(raw) -> list[str]:

@@ -54,6 +54,10 @@ DEFAULT_SETTINGS = {
     "elevenlabs_api_key": "",
     "metamuse_api_key": "",
     "alibaba_api_key": "",
+    "gcloud_api_key": "",
+    "g_ai_studio_api_key": "",
+    "gemini_language_mode": "pt-BR",
+    "gemini_language_custom": "",
     # Lista PRÉ-COMPILADA de hotwords da Alibaba, POR MODELO alvo (a do
     # WebSocket não vale para o arquivo e vice-versa):
     # {"<target_model>": {"id": "vocab-sig-...", "terms": [...]}}.
@@ -93,6 +97,9 @@ API_KEY_IMPORT_FIELDS = {
     "deepgram": "deepgram_api_key",
     "assemblyai": "assemblyai_api_key",
     "alibaba": "alibaba_api_key",
+    "gcloud": "gcloud_api_key",
+    "gaistudio": "g_ai_studio_api_key",
+    "gemini": "g_ai_studio_api_key",
     "imeicheck": "imei_api_key",
 }
 
@@ -166,6 +173,12 @@ ALIBABA_REST_MODEL = "fun-asr-flash-2026-06-15"
 
 
 ALIBABA_WS_MODEL = "qwen-audio-3.0-asr-flash-streaming"
+
+GEMINI_API_NAME = "Gemini 3.5 Transcribe"
+GEMINI_STT_MODEL = "gemini-3.5-transcribe"
+GEMINI_LIVE_MODEL = "gemini-3.5-transcribe-live"
+GEMINI_STT_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+GEMINI_WEBSOCKET_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
 
 GROK_TEXT_URL = "https://api.x.ai/v1/responses"
@@ -345,13 +358,21 @@ def read_transcription_servers() -> list[dict]:
     elevenlabs_selected = any(server["name"] == ELEVENLABS_API_NAME for server in servers if server["selected"])
     metamuse_selected = any(server["name"] == META_MUSE_API_NAME for server in servers if server["selected"])
     alibaba_selected = any(server["name"] == ALIBABA_API_NAME for server in servers if server["selected"])
-    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected or metamuse_selected or alibaba_selected
+    gemini_selected = any(server["name"] == GEMINI_API_NAME for server in servers if server["selected"])
+    api_selected = grok_selected or deepgram_selected or assemblyai_selected or elevenlabs_selected or metamuse_selected or alibaba_selected or gemini_selected
     plain_servers = [
         {**server, "selected": server["selected"] and not api_selected}
         for server in servers
-        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME, META_MUSE_API_NAME, ALIBABA_API_NAME)
+        if server["name"] not in (GROK_API_NAME, DEEPGRAM_API_NAME, ASSEMBLYAI_API_NAME, ELEVENLABS_API_NAME, META_MUSE_API_NAME, ALIBABA_API_NAME, GEMINI_API_NAME)
     ]
     return plain_servers + [
+        {
+            "name": GEMINI_API_NAME,
+            "url": GEMINI_STT_URL,
+            "parameters": {"model": GEMINI_STT_MODEL},
+            "selected": gemini_selected,
+            "is_gemini_api": True,
+        },
         {
             "name": GROK_API_NAME,
             "url": GROK_STT_URL,
@@ -524,8 +545,8 @@ def selected_transcription_server(settings: dict) -> dict:
 
 
 def transcription_server_label(server: dict) -> str:
-    if server["name"] == GROK_API_NAME:
-        return GROK_API_NAME
+    if server["name"] in {GROK_API_NAME, GEMINI_API_NAME}:
+        return server["name"]
     return f"{server['name']} ({server['parameters'].get('model', 'modelo não informado')})"
 
 
@@ -587,6 +608,7 @@ def fallback_transcription_server_for_missing_api_key(
     elevenlabs_api_key: str,
     metamuse_api_key: str = "",
     alibaba_api_key: str = "",
+    g_ai_studio_api_key: str = "",
 ) -> str:
     """Retorna o Granite NAR quando um servidor STT perdeu sua chave."""
     candidate = str(server_name or "").strip()
@@ -597,6 +619,7 @@ def fallback_transcription_server_for_missing_api_key(
         ELEVENLABS_API_NAME: elevenlabs_api_key,
         META_MUSE_API_NAME: metamuse_api_key,
         ALIBABA_API_NAME: alibaba_api_key,
+        GEMINI_API_NAME: g_ai_studio_api_key,
     }
     if candidate in api_keys and not str(api_keys[candidate] or "").strip():
         return DEFAULT_SETTINGS["transcription_server"]
@@ -668,6 +691,7 @@ def is_local_granite_transcription_server(server_name: str) -> bool:
 # (stt_provider_rules). O servidor local (Granite NAR) fica de fora: não tem
 # parâmetro de idioma (mesma regra da aba Ocorrência e do app Android).
 STT_PROVIDER_FLAGS = (
+    ("gemini", "is_gemini_api"),
     ("grok", "is_grok_api"),
     ("deepgram", "is_deepgram_api"),
     ("assemblyai", "is_assemblyai_api"),

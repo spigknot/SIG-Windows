@@ -94,6 +94,13 @@ import prompt_store
 import qr_encoder
 import smart_join_planner
 import stt_provider_rules
+from gemini_stt_client import (
+    GeminiStreamingClient,
+    gemini_api_key,
+    gemini_error_message,
+    gemini_rest_body,
+    gemini_setup_payload,
+)
 from prompts_panel import PromptsPanel
 from diarias_profiles_panel import DiariasProfilesPanel
 from diarias_profiles import validate_diarias_profile
@@ -441,6 +448,7 @@ from providers import (  # noqa: F401
     PARTS_EXTRACTION_LABELS,
     TEXT_TASK_KEYS,
     DEFAULT_SETTINGS,
+    GEMINI_API_NAME,
     API_KEY_IMPORT_FIELDS,
     read_transcription_servers,
     read_text_models,
@@ -1099,6 +1107,8 @@ class SigApp:
         self.live_uses_elevenlabs_websocket = False
         self.live_uses_metamuse_websocket = False
         self.live_uses_alibaba_websocket = False
+        self.live_uses_gemini_websocket = False
+        self.gemini_streaming_client = None
         self.live_grok_settings: dict | None = None
         self.live_grok_language = "pt"
         self.live_grok_diarize = False
@@ -8892,6 +8902,8 @@ try {
             "• Alibaba Fun ASR: funciona na Ocorrência (ao vivo), via lista "
             "pré-compilada; na Transcrição (arquivo) enviamos a lista, mas a "
             "medição não mostrou mudança no resultado.\n"
+            "• Gemini 3.5 Transcribe: até 1000 termos; o app envia até 100. "
+            "No REST, keywords não podem ser combinadas com diarização ou timestamps.\n"
             "• servidor (Granite): não usa keywords — nenhum parâmetro é enviado.\n"
             "\n"
             "ATENÇÃO EM TRANSCRIÇÃO POLICIAL\n"
@@ -8930,9 +8942,13 @@ try {
         message = "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante."
         if self._current_stt_provider() == "alibaba":
             message += "\n\nDiarização não disponível para Alibaba Fun ASR/Qwen."
+        elif self._current_stt_provider() == "gemini":
+            message += "\n\nGemini oferece diarização no REST. O WebSocket Live não oferece diarização."
         messagebox.showinfo("Diarização", message)
 
     def _current_stt_provider(self) -> str | None:
+        if selected_transcription_server(self.settings).get("is_gemini_api"):
+            return "gemini"
         if is_deepgram_transcription(self.settings):
             return "deepgram"
         if is_assemblyai_transcription(self.settings):
@@ -8990,7 +9006,8 @@ try {
         entry.pack(fill=X, pady=(0, 8))
         hint = ttk.Label(
             frame,
-            text="Digite um ou mais códigos, separados por vírgula.\nEx: en, es, pt",
+            text="Digite um ou mais códigos, separados por vírgula.\nEx: "
+                 + ("pt-BR, en-US" if provider == "gemini" else "en, es, pt"),
             justify="left",
         )
         hint.pack(anchor="w", pady=(0, 8))
@@ -9146,6 +9163,9 @@ try {
             return
         self.microphone_available = True
         self.settings = load_settings()
+        if selected_transcription_server(self.settings).get("is_gemini_api") and not self.settings.get("g_ai_studio_api_key"):
+            messagebox.showerror("sig", "Insira a chave G AI Studio nas configurações antes de gravar.")
+            return
         if is_grok_transcription(self.settings) and not self.settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de gravar.")
             return
@@ -9288,6 +9308,7 @@ try {
                 getattr(self, "normal_record_deepgram", False)
                 or is_assemblyai_transcription(self.settings)
                 or is_elevenlabs_transcription(self.settings)
+                or selected_transcription_server(self.settings).get("is_gemini_api")
             )
             if api_provider:
                 record_settings = self.settings.copy()
@@ -9338,6 +9359,14 @@ try {
                                 [("audio", wav_path.name, "audio/wav", audio_size)],
                             ),
                         ),
+                    )
+                elif selected_transcription_server(self.settings).get("is_gemini_api"):
+                    body = gemini_rest_body(record_settings, "<arquivo enviado pela Files API>", "audio/wav")
+                    self._queue(
+                        "params_block", "Parâmetros REST (Gemini):", body,
+                        format_raw_request("POST", url,
+                            [("Content-Type", "application/json"), ("x-goog-api-key", "***")],
+                            json.dumps(body, ensure_ascii=False)),
                     )
                 elif is_elevenlabs_transcription(self.settings):
                     rest_fields = {"model_id": "scribe_v2"}
@@ -9506,6 +9535,8 @@ try {
             if name == ASSEMBLYAI_API_NAME and not plausible_assemblyai_api_key(settings.get("assemblyai_api_key", "")):
                 continue
             if name == ALIBABA_API_NAME and not str(settings.get("alibaba_api_key") or "").strip():
+                continue
+            if name == GEMINI_API_NAME and not str(settings.get("g_ai_studio_api_key") or "").strip():
                 continue
             available[transcription_server_label(server)] = name
         return available
@@ -10162,6 +10193,7 @@ try {
         elevenlabs_api_key_var = StringVar(master=self.root, value=self.settings.get("elevenlabs_api_key", ""))
         metamuse_api_key_var = StringVar(master=self.root, value=self.settings.get("metamuse_api_key", ""))
         alibaba_api_key_var = StringVar(master=self.root, value=self.settings.get("alibaba_api_key", ""))
+        g_ai_studio_api_key_var = StringVar(master=self.root, value=self.settings.get("g_ai_studio_api_key", ""))
         imei_api_key_var = StringVar(master=self.root, value=self.settings.get("imei_api_key", ""))
         police_name_var = StringVar(master=self.root, value=self.settings.get("police_name", ""))
         police_role_var = StringVar(master=self.root, value=self.settings.get("police_role", ""))
@@ -10359,6 +10391,8 @@ try {
             "Preencha para liberar o Alibaba Fun ASR/Qwen na lista de transcrição.",
         )
         add_api_field(api_imei_frame, 0, "IMEI Check", imei_api_key_var)
+        add_api_field(api_models_frame, 7, "G AI Studio", g_ai_studio_api_key_var,
+                      "Preencha para liberar Gemini 3.5 Transcribe (REST e WebSocket).")
 
         # Botão de olho da aba (fica no topo, ao lado do IMPORTAR): revela as
         # chaves dos campos e, já reveladas, vira o olho cortado com a função de
@@ -10383,6 +10417,7 @@ try {
             eye_button.configure(image=hide_icon if api_keys_visible else reveal_icon)
 
         api_key_variables = {
+            "g_ai_studio_api_key": g_ai_studio_api_key_var,
             "grok_api_key": grok_api_key_var,
             "deepseek_api_key": deepseek_api_key_var,
             "deepgram_api_key": deepgram_api_key_var,
@@ -10393,6 +10428,7 @@ try {
             "imei_api_key": imei_api_key_var,
         }
         api_key_import_labels = {
+            "g_ai_studio_api_key": "G AI Studio",
             "grok_api_key": "xAI",
             "deepseek_api_key": "Deepseek",
             "deepgram_api_key": "Deepgram",
@@ -10427,7 +10463,8 @@ try {
                 )
                 return
 
-            imported = parse_api_keys_text(content)
+            imported = {field: key for field, key in parse_api_keys_text(content).items()
+                        if field in api_key_variables}
             if not imported:
                 messagebox.showwarning(
                     "Importar chaves API",
@@ -11016,6 +11053,10 @@ try {
                     server["name"] != ALIBABA_API_NAME
                     or bool(alibaba_api_key_var.get().strip())
                 )
+                and (
+                    server["name"] != GEMINI_API_NAME
+                    or bool(g_ai_studio_api_key_var.get().strip())
+                )
             ]
             transcription_labels = {
                 transcription_server_label(server): server["name"]
@@ -11510,6 +11551,7 @@ try {
             deepgram_api_key_var,
             assemblyai_api_key_var,
             elevenlabs_api_key_var,
+            g_ai_studio_api_key_var,
         ):
             api_key_variable.trace_add("write", refresh_api_key_dependent_selectors)
 
@@ -11650,6 +11692,7 @@ try {
                 elevenlabs_api_key,
                 metamuse_api_key,
                 alibaba_api_key,
+                g_ai_studio_api_key_var.get().strip(),
             )
             selected_history = fallback_text_model_for_missing_api_key(
                 selected_history,
@@ -11804,6 +11847,8 @@ try {
                     "elevenlabs_api_key": elevenlabs_api_key,
                     "metamuse_api_key": metamuse_api_key,
                     "alibaba_api_key": alibaba_api_key,
+                    "gcloud_api_key": self.settings.get("gcloud_api_key", ""),
+                    "g_ai_studio_api_key": g_ai_studio_api_key_var.get().strip(),
                     "stt_keyword_profiles": {
                         nome: list(termos) for nome, termos in keywords_profiles_edit.items()
                     },
@@ -12159,6 +12204,12 @@ try {
         self.settings = load_settings()
         self._refresh_live_grok_controls()
         multi_selected = self._selected_multi_transcription_model_names()
+        if selected_transcription_server(self.settings).get("is_gemini_api"):
+            try:
+                gemini_api_key(self.settings)
+            except ValueError as exc:
+                messagebox.showerror("sig", str(exc))
+                return
         primary = self.settings.get("transcription_server")
         secondary_name = next(
             (name for name in multi_selected if name != primary), None
@@ -12168,6 +12219,12 @@ try {
             if secondary_name
             else None
         )
+        if secondary_settings is not None and selected_transcription_server(secondary_settings).get("is_gemini_api"):
+            try:
+                gemini_api_key(secondary_settings)
+            except ValueError as exc:
+                messagebox.showerror("sig", str(exc))
+                return
         if (
             is_grok_transcription(self.settings)
             or (secondary_settings is not None and is_grok_transcription(secondary_settings))
@@ -12226,6 +12283,7 @@ try {
         self.live_uses_alibaba_websocket = is_alibaba_transcription(self.settings) and not self.settings.get(
             "grok_rest_requests", False
         )
+        self.live_uses_gemini_websocket = bool(selected_transcription_server(self.settings).get("is_gemini_api"))
         self.live_grok_settings = self.settings.copy() if self.live_uses_grok_websocket else None
         self.live_grok_language = grok_language_param(self.settings) or ""
         self.live_grok_diarize = bool(self.live_diarize_var.get())
@@ -12260,7 +12318,8 @@ try {
         self.alibaba_ws_intentional_close = False
         self.alibaba_ws_app = None
         streaming_websocket = (
-            self.live_uses_grok_websocket
+            self.live_uses_gemini_websocket
+            or self.live_uses_grok_websocket
             or self.live_uses_deepgram_websocket
             or self.live_uses_assemblyai_websocket
             or self.live_uses_elevenlabs_websocket
@@ -12272,7 +12331,7 @@ try {
         temp_live.mkdir(parents=True, exist_ok=True)
         self._clear_live_integral_audio()
         self.live_full_pcm_path = temp_live / f"live_full_{int(time.time() * 1000)}.pcm"
-        self.live_was_grok_websocket = streaming_websocket
+        self.live_was_grok_websocket = streaming_websocket and not self.live_uses_gemini_websocket
         self.live_recovery_cancel_event.clear()
         self.live_capture_finish_waiting = False
         self.live_output_finished = False
@@ -12308,7 +12367,8 @@ try {
         self.live_upload_executor = (
             None
             if (
-                self.live_uses_grok_websocket
+                self.live_uses_gemini_websocket
+                or self.live_uses_grok_websocket
                 or self.live_uses_deepgram_websocket
                 or self.live_uses_assemblyai_websocket
                 or self.live_uses_elevenlabs_websocket
@@ -12332,11 +12392,16 @@ try {
             and not self.live_uses_elevenlabs_websocket
             and not self.live_uses_metamuse_websocket
             and not self.live_uses_alibaba_websocket
+            and not self.live_uses_gemini_websocket
         ):
             self.status_var.set("Ouvindo e transcrevendo ao vivo...")
+        elif self.live_uses_gemini_websocket:
+            self.status_var.set("Conectando ao Gemini 3.5 Transcribe Live...")
         elif streaming_websocket:
             self.status_var.set("Gravando. Clique no botão verde para encerrar o websocket")
-        if self.live_uses_alibaba_websocket:
+        if self.live_uses_gemini_websocket:
+            target = self._gemini_live_capture_loop
+        elif self.live_uses_alibaba_websocket:
             target = self._alibaba_live_capture_loop
         elif self.live_uses_metamuse_websocket:
             target = self._metamuse_live_capture_loop
@@ -12392,6 +12457,12 @@ try {
             self.live_paused_total += time.time() - self.live_paused_at
             self.live_paused_at = 0.0
         self._set_live_state("finalizing")
+        if self.live_uses_gemini_websocket:
+            self._begin_activity_step("live:ws_finalize", "Recebendo a transcrição final do Gemini...")
+            self.live_ws_finalize_started = time.monotonic()
+            self.live_ws_finalize_pending = True
+            self.live_stop_event.set()
+            return
         if self.live_uses_alibaba_websocket:
             # Parar é imediato: finish-task, fecha o socket e consolida
             # o texto acumulado na hora — sem esperar o task-finished.
@@ -12553,6 +12624,9 @@ try {
             return
         self.live_stop_event.set()
         self.live_abort_event.set()
+        if self.gemini_streaming_client is not None:
+            self.gemini_streaming_client.cancel()
+        self.live_uses_gemini_websocket = False
         self.live_recovery_cancel_event.set()
         self.live_audio_recovery_available = False
         self.live_output_finished = True
@@ -12642,16 +12716,60 @@ try {
         audio_queue.put(chunk)
 
     def _secondary_live_worker(self, settings: dict):
+        worker = threading.current_thread()
         try:
-            if is_grok_transcription(settings) and not settings.get("grok_rest_requests", False):
+            if selected_transcription_server(settings).get("is_gemini_api"):
+                self._secondary_gemini_live_worker(settings)
+            elif is_grok_transcription(settings) and not settings.get("grok_rest_requests", False):
                 self._secondary_grok_live_worker(settings)
             else:
                 self._secondary_http_live_worker(settings)
         except Exception as exc:
-            if not self.live_abort_event.is_set():
+            if not self.live_abort_event.is_set() and self.live_secondary_thread is worker:
                 self._queue("status", f"Modelo de transcrição 2 falhou: {exc}")
         finally:
-            self.live_secondary_done_event.set()
+            if self.live_secondary_thread is worker:
+                self.live_secondary_done_event.set()
+
+    def _secondary_gemini_live_worker(self, settings: dict):
+        audio = self.live_secondary_audio_queue
+        if audio is None:
+            return
+        worker = threading.current_thread()
+        abort_event, stop_event = self.live_abort_event, self.live_stop_event
+        generation = self.live_secondary_generation
+        client = GeminiStreamingClient(settings, abort_event)
+
+        def receive(finals, draft):
+            with self.live_secondary_lock:
+                if (abort_event.is_set() or generation != self.live_secondary_generation
+                        or self.live_secondary_thread is not worker):
+                    return
+                if finals:
+                    self.live_secondary_committed_text = " ".join(
+                        part for part in (self.live_secondary_committed_text.strip(), *finals) if part
+                    )
+                self.live_secondary_draft_text = draft
+                display = "\n".join(part for part in (
+                    self.live_secondary_committed_text.strip(), draft.strip()) if part)
+            self._queue("live_display_2", display)
+
+        # O watchdog também fecha recv/connect quando o usuário cancela.
+        finished = threading.Event()
+
+        def watch_cancel():
+            while not finished.wait(.1):
+                if abort_event.is_set() or self.live_secondary_thread is not worker:
+                    client.cancel()
+                    return
+
+        watcher = threading.Thread(target=watch_cancel, daemon=True)
+        watcher.start()
+        try:
+            client.transcribe(audio, stop_event, receive)
+        finally:
+            finished.set()
+            client.cancel()
 
     def _secondary_grok_live_worker(self, settings: dict):
         try:
@@ -12931,6 +13049,110 @@ try {
         self.alibaba_ws_task_id = ""
         self.live_uses_alibaba_websocket = False
         self._consolidate_live_text_now()
+
+    def _gemini_live_capture_loop(self, settings: dict):
+        """Capture PCM local; o protocolo WebSocket pertence a gemini_stt_client."""
+        import sounddevice as sd
+
+        worker_thread = threading.current_thread()
+        if self.live_thread is not worker_thread:
+            return
+        stop_event, abort_event = self.live_stop_event, self.live_abort_event
+
+        audio_queue = queue.Queue(maxsize=100)
+        overflow = threading.Event()
+        pcm_lock = threading.Lock()
+        client = None
+        pcm_file = None
+        failed = ""
+        # A geração protege callbacks tardios depois de cancelar/reiniciar.
+        generation = self.live_draft_generation
+
+        def receive(finals: list[str], draft: str):
+            with self.live_lock:
+                if abort_event.is_set() or generation != self.live_draft_generation or self.live_thread is not worker_thread:
+                    return
+                if finals:
+                    self.live_committed_text = " ".join(
+                        part for part in (self.live_committed_text.strip(), *finals) if part
+                    )
+                self.live_draft_text = draft
+                display = self._current_live_text_locked()
+            self._queue("live_display", display)
+
+        def audio_callback(indata, _frames, _time_info, _status):
+            if stop_event.is_set() or abort_event.is_set() or self.live_thread is not worker_thread:
+                return
+            chunk = bytes(indata)
+            if self.live_state == "paused":
+                chunk = bytes(len(chunk))
+            else:
+                self._push_live_waveform_chunk(chunk)
+                self._queue_secondary_audio(chunk)
+                with pcm_lock:
+                    pcm_file.write(chunk)
+            try:
+                audio_queue.put_nowait(chunk)
+            except queue.Full:
+                overflow.set()
+                stop_event.set()
+
+        try:
+            client = GeminiStreamingClient(settings, abort_event)
+            self.gemini_streaming_client = client
+            client.connect()
+            setup = gemini_setup_payload(settings)
+            self._queue("params_block", "Parâmetros WebSocket (Gemini):", setup,
+                        format_raw_websocket_frame(setup))
+            if stop_event.is_set() or abort_event.is_set() or self.live_thread is not worker_thread:
+                return
+            pcm_path = self.live_full_pcm_path
+            if not pcm_path:
+                raise RuntimeError("Não foi possível criar o arquivo de áudio do streaming.")
+            pcm_file = pcm_path.open("wb")
+            self.live_started_at = time.time()
+            self._queue("status", "Ouvindo e transcrevendo com Gemini 3.5 Transcribe Live...")
+            with sd.RawInputStream(samplerate=LIVE_SAMPLE_RATE, channels=1, dtype="int16",
+                                   blocksize=int(LIVE_SAMPLE_RATE * 0.1), callback=audio_callback):
+                client.transcribe(audio_queue, stop_event, receive,
+                                  lambda text: self._queue("status", text))
+            if overflow.is_set():
+                failed = "Gemini: envio atrasado. O streaming foi interrompido e o áudio foi preservado."
+        except Cancelled:
+            pass
+        except Exception as exc:
+            if not abort_event.is_set():
+                failed = gemini_error_message(exc)
+        finally:
+            if self.live_thread is worker_thread:
+                stop_event.set()
+            if client is not None:
+                client.cancel()
+            if pcm_file is not None:
+                pcm_file.close()
+            if self.gemini_streaming_client is client:
+                self.gemini_streaming_client = None
+            if not abort_event.is_set() and generation == self.live_draft_generation and self.live_thread is worker_thread:
+                self.live_uses_gemini_websocket = False
+                # Preserve inclusive o último rascunho em caso de falha.
+                with self.live_lock:
+                    text = self._current_live_text_locked().strip()
+                    self.live_committed_text = text
+                    self.live_draft_text = ""
+                self._queue("live_display", text)
+                if self.live_full_pcm_path and self.live_full_pcm_path.exists():
+                    pcm_path = self.live_full_pcm_path
+                    if pcm_path.stat().st_size:
+                        try:
+                            wav_path = pcm_path.with_suffix(".wav")
+                            write_wav_from_pcm_file(wav_path, pcm_path)
+                            self._queue("activity", f"Áudio Gemini salvo em: {wav_path}")
+                        except Exception:
+                            self._queue("status", "Não foi possível converter a gravação; o áudio PCM foi preservado.")
+                self._finish_ws_finalize_step()
+                self._finish_live_output()
+                if failed:
+                    self._queue("status", failed)
 
     def _alibaba_live_capture_loop(self, settings: dict):
         try:
@@ -14915,6 +15137,10 @@ try {
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Alibaba Fun ASR/Qwen envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
+        if selected_transcription_server(workflow_settings).get("is_gemini_api") and self.send_zip_var.get():
+            self.send_zip_var.set(False)
+            self._refresh_zip_controls()
+            self.status_var.set("Gemini Transcribe envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
         if multi_transcription and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()

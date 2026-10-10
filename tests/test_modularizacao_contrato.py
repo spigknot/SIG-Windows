@@ -48,6 +48,7 @@ MODULOS_SEM_UI = [
     "text_models",
     "http_clients",
     "stt_clients",
+    "gemini_stt_client",
     "log_formatting",
     "reporting",
     "qualification",

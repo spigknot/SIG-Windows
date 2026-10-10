@@ -68,6 +68,7 @@ def normalize_settings(data: dict) -> dict:
         "metamuse_language_mode": "pt",
         "alibaba_language_mode": "pt",
         "grok_language_mode": "pt",
+        "gemini_language_mode": "pt-BR",
     }.items():
         value = str(data.get(language_key) or "").strip()
         clean[language_key] = value or fallback
@@ -78,6 +79,7 @@ def normalize_settings(data: dict) -> dict:
         "metamuse_language_custom",
         "alibaba_language_custom",
         "grok_language_custom",
+        "gemini_language_custom",
     ):
         clean[custom_key] = str(data.get(custom_key) or "").strip()
     # Idioma do seletor da aba Transcrição (auto/pt/en/es). Persistimos só a
@@ -134,6 +136,7 @@ def normalize_settings(data: dict) -> dict:
         elevenlabs_api_key,
         metamuse_api_key,
         alibaba_api_key,
+        str(data.get("g_ai_studio_api_key") or "").strip(),
     )
     clean["transcription_server"] = (
         transcription_server
@@ -153,6 +156,7 @@ def normalize_settings(data: dict) -> dict:
             elevenlabs_api_key,
             metamuse_api_key,
             alibaba_api_key,
+            str(data.get("g_ai_studio_api_key") or "").strip(),
         )
         if candidate in server_names and not is_realtime_only_transcription_server(candidate):
             normalized_multi_models.append(candidate)
@@ -243,6 +247,8 @@ def normalize_settings(data: dict) -> dict:
     clean["elevenlabs_api_key"] = elevenlabs_api_key
     clean["metamuse_api_key"] = metamuse_api_key
     clean["alibaba_api_key"] = alibaba_api_key
+    for key in ("gcloud_api_key", "g_ai_studio_api_key"):
+        clean[key] = str(data.get(key) or "").strip()
     clean["alibaba_vocabulary_by_model"] = alibaba_vocabulary_records(data)
     clean["deepseek_api_key"] = deepseek_api_key
     clean["imei_api_key"] = str(data.get("imei_api_key") or "").strip()

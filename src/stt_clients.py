@@ -1,6 +1,6 @@
 """Protocolo de cada provedor STT: URLs, campos de formulario, handshake e
 chamadas REST/WebSocket especificos (Grok, Deepgram, AssemblyAI, ElevenLabs,
-MetaMuse, Alibaba).
+MetaMuse, Alibaba, Gemini).
 
 Regra: diferencas entre provedores sao intencionais e NAO devem ser unificadas.
 Para adicionar campos novos, edite transcription_form_fields (um lugar so).
@@ -115,6 +115,10 @@ def is_alibaba_transcription(settings: dict) -> bool:
     return selected_transcription_server(settings).get("is_alibaba_api", False)
 
 
+def is_gemini_transcription(settings: dict) -> bool:
+    return selected_transcription_server(settings).get("is_gemini_api", False)
+
+
 def transcription_form_fields(settings: dict) -> dict:
     diarize_checked = bool(settings.get("diarize") or settings.get("grok_diarize"))
     if is_grok_transcription(settings):
@@ -169,10 +173,16 @@ def transcription_form_fields(settings: dict) -> dict:
     if is_alibaba_transcription(settings):
         # O Alibaba monta o JSON DashScope dedicado; sem form fields.
         return {}
+    if is_gemini_transcription(settings):
+        # Files/Interactions utiliza um corpo JSON próprio.
+        return {}
     return selected_transcription_server(settings)["parameters"].copy()
 
 
 def create_transcription_uploader(cancel_event: threading.Event, settings: dict) -> "GraniteUploader":
+    if is_gemini_transcription(settings):
+        from gemini_stt_client import GeminiTranscriptionUploader
+        return GeminiTranscriptionUploader(cancel_event, settings)
     if is_grok_transcription(settings):
         api_key = str(settings.get("grok_api_key") or "").strip()
         if not api_key:
