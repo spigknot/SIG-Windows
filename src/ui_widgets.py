@@ -690,7 +690,7 @@ class PreviewIconButton(Canvas):
 
 
 def diarias_action_icon_image(kind: str, size: int = 26) -> Image.Image:
-    """Ícones de arquivo, PDF e impressora com traços suaves em oito vezes o tamanho."""
+    """Ícones de Diárias com traços suaves em oito vezes o tamanho."""
     scale = 8
     image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -702,6 +702,9 @@ def diarias_action_icon_image(kind: str, size: int = 26) -> Image.Image:
         draw.polygon([box((14, 2)), box((27, 26)), box((1, 26))], fill="#f4bb45", outline="#ac751d", width=stroke)
         draw.line(box((14, 9, 14, 17)), fill="#533b0c", width=stroke * 2)
         draw.ellipse(box((13, 20, 15, 22)), fill="#533b0c")
+    elif kind == "extract":
+        draw.arc(box((4, 4, 24, 24)), start=45, end=320, fill="#1565d8", width=stroke * 2)
+        draw.polygon([box((19, 4)), box((26, 11)), box((18, 12))], fill="#1565d8")
     elif kind == "print":
         draw.rounded_rectangle(box((6, 2, 22, 14)), radius=scale, fill="#ffffff", outline=navy, width=stroke)
         draw.rounded_rectangle(box((2, 10, 26, 22)), radius=2 * scale, fill="#dce9e9", outline=navy, width=stroke)

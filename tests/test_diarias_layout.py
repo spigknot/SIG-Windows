@@ -6,7 +6,7 @@ import tkinter as tk
 import unittest
 from pathlib import Path
 from tkinter import ttk
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -55,10 +55,11 @@ class DiariasLayoutTest(unittest.TestCase):
 
     def test_secoes_sao_cartoes_independentes_com_campos_alinhados(self):
         cards = getattr(self.app, "diarias_sections", {})
-        self.assertEqual(list(cards), ["Holerite", "Talão", "Protocolo", "Escala"])
+        self.assertEqual(self.app.diarias_card_order, ("Holerite", "Escala", "Talão", "Protocolo"))
         self.assertEqual(len({(c.winfo_width(), c.winfo_height()) for c in cards.values()}), 1)
         previous_bottom = None
-        for title, card in cards.items():
+        for title in self.app.diarias_card_order:
+            card = cards[title]
             with self.subTest(section=title):
                 self.assertEqual(card["background"], "#ffffff")
                 self.assertEqual(card["highlightbackground"], "#000000")
@@ -108,14 +109,17 @@ class DiariasLayoutTest(unittest.TestCase):
 
     def test_acoes_pdf_e_geracao_preservam_os_callbacks(self):
         for title, kind in (("Holerite", "holerite"), ("Talão", "talao"),
-                            ("Protocolo", "protocolo")):
+                            ("Protocolo", "protocolo"), ("Escala", "escala")):
             buttons = [w for w in descendants(self.app.diarias_sections[title])
                        if isinstance(w, ttk.Button)]
-            self.assertEqual([w["text"] for w in buttons], ["Selecionar PDF", "⟳"])
+            self.assertEqual([w["text"] for w in buttons], ["Selecionar PDF"])
             buttons[0].invoke()
             self.app._select_diarias_pdf.assert_called_with(kind)
-            buttons[1].invoke()
-            self.app._reload_diarias_pdf.assert_called_with(kind)
+            setattr(self.app, f"diarias_{kind}_path", f"{kind}.pdf")
+        self.app.diarias_reload_all_button.invoke()
+        self.assertEqual(self.app._reload_diarias_pdf.call_args_list,
+                         [call("holerite"), call("escala"), call("talao"), call("protocolo")])
+        self.assertEqual(len(self.app.diarias_attachment_buttons), 5)
         self.app.diarias_generate_menu.invoke(0)
         self.app._generate_diarias_requerimento.assert_called_once_with()
         self.app.diarias_generate_menu.invoke(1)
@@ -128,6 +132,25 @@ class DiariasLayoutTest(unittest.TestCase):
         self.assertEqual(self.app.diarias_generate_menu_button.winfo_y(), self.app.diarias_configure_button.winfo_y())
         self.assertEqual(self.app.diarias_generate_menu_button.winfo_x(),
                          self.app.diarias_configure_button.winfo_x() + self.app.diarias_configure_button.winfo_width() + 8)
+        self.app._reload_diarias_pdf = SigApp._reload_diarias_pdf.__get__(self.app)
+        self.app._start_diarias_activity = Mock(return_value=0)
+        self.app._finish_diarias_activity = Mock()
+        with patch("sig_app.diarias_protocolo.extract_holerite_pdf", return_value=("10.817,23", "10/2026")) as holerite, \
+             patch("sig_app.diarias_protocolo.extract_escala_pdf", return_value="10/2026") as escala, \
+             patch("sig_app.diarias_protocolo.extract_talao_pdf", return_value=("09/10/2026", "07:00", "09/10/2026", "20:00")) as talao, \
+             patch("sig_app.diarias_protocolo.extract_protocolo_completo", return_value=("215627/2026", "215626/2026", "10/10/2026")) as protocolo:
+            self.app.diarias_reload_all_button.invoke()
+            for extractor, kind in ((holerite, "holerite"), (escala, "escala"), (talao, "talao"), (protocolo, "protocolo")):
+                extractor.assert_called_once_with(f"{kind}.pdf")
+        for key, expected in (("holerite_total", "10.817,23"), ("holerite_mes", "10/2026"),
+                              ("escala_mes", "10/2026"), ("abertura_data", "09/10/2026"),
+                              ("abertura_hora", "07:00"), ("fechamento_data", "09/10/2026"),
+                              ("fechamento_hora", "20:00"), ("req", "215626/2026"),
+                              ("mapa", "215627/2026"), ("data", "10/10/2026")):
+            self.assertEqual(getattr(self.app, f"diarias_{key}_var").get(), expected)
+        self.assertEqual(self.app._finish_diarias_activity.call_args_list,
+                         [call(f"diarias:{kind}:reextrair", 0) for kind in ("holerite", "escala", "talao", "protocolo")])
+        self.assertFalse(self.app.diarias_reload_all_button.instate(["disabled"]))
 
     def test_novas_acoes_tem_icones_e_preservam_callbacks(self):
         self.app.diarias_generate_bundle_button.invoke()
@@ -139,20 +162,33 @@ class DiariasLayoutTest(unittest.TestCase):
         for button in self.app.diarias_batch_buttons:
             self.assertTrue(button.cget("image"))
         self.assertEqual(int(self.app.diarias_profile_selector.cget("width")), 22)
-        self.assertEqual(self.app.diarias_generate_bundle_button.winfo_x(), 0)
+        last = self.app.diarias_print_button
+        self.assertEqual(last.winfo_rootx() + last.winfo_width(),
+                         self.app.diarias_tab.winfo_rootx() + self.app.diarias_tab.winfo_width() - 14)
+        self.assertFalse(any(isinstance(w, ttk.Separator) for w in descendants(self.app.diarias_tab)))
         scale_buttons = [child for child in descendants(self.app.diarias_sections["Escala"]) if isinstance(child, ttk.Button)]
         self.assertEqual(len(scale_buttons), 1)
         scale_buttons[0].invoke()
         self.app._select_diarias_pdf.assert_called_with("escala")
 
-    def test_cartoes_ficam_em_duas_colunas_sem_alargar_na_tela_grande(self):
+    def test_cartoes_ficam_na_coluna_esquerda_e_convergem_para_extracao(self):
         self.root.geometry("1400x720")
         self.root.update()
         cards = self.app.diarias_sections
-        self.assertEqual(cards["Holerite"].grid_info()["row"], cards["Talão"].grid_info()["row"])
-        self.assertNotEqual(cards["Holerite"].grid_info()["column"], cards["Talão"].grid_info()["column"])
-        self.assertLessEqual(cards["Holerite"].winfo_width(), 450)
-        self.assertLessEqual(cards["Talão"].winfo_width(), 450)
+        for row, title in enumerate(self.app.diarias_card_order):
+            self.assertEqual(int(cards[title].grid_info()["row"]), row)
+            self.assertEqual(int(cards[title].grid_info()["column"]), 0)
+            self.assertEqual(cards[title].winfo_rootx(), cards["Holerite"].winfo_rootx())
+            self.assertLessEqual(cards[title].winfo_width(), 460)
+        button = self.app.diarias_reload_all_button
+        top = cards["Holerite"].winfo_rooty() + cards["Holerite"].winfo_height() / 2
+        bottom = cards["Protocolo"].winfo_rooty() + cards["Protocolo"].winfo_height() / 2
+        self.assertAlmostEqual(button.winfo_rooty() + button.winfo_height() / 2, (top + bottom) / 2, delta=1)
+        self.assertGreater(button.winfo_rootx(), cards["Holerite"].winfo_rootx() + cards["Holerite"].winfo_width())
+        self.assertEqual(len(self.app.diarias_connectors_canvas.find_withtag("connections")), 4)
+        self.assertGreater(button.winfo_height(), 40)
+        self.assertGreater(self.app.diarias_generate_bundle_button.winfo_rootx(), button.winfo_rootx() + button.winfo_width())
+        self.assertEqual([int(b.grid_info()["row"]) for b in self.app.diarias_batch_buttons], [0, 1, 2])
         self.assertEqual(len({(c.winfo_width(), c.winfo_height()) for c in cards.values()}), 1)
         for card in cards.values():
             for child in descendants(card):
@@ -175,7 +211,7 @@ class DiariasLayoutTest(unittest.TestCase):
                 if isinstance(control, (ttk.Button, ttk.Entry)):
                     self.assertLessEqual(control.winfo_rootx() + control.winfo_width(),
                                          card.winfo_rootx() + card.winfo_width())
-        canvas = next(w for w in descendants(self.app.diarias_tab) if isinstance(w, tk.Canvas))
+        canvas = self.app.diarias_cards_canvas
         canvas.event_generate("<MouseWheel>", delta=-120)
         self.root.update()
         self.assertGreater(canvas.yview()[0], 0)
