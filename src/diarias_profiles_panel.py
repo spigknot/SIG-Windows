@@ -19,6 +19,7 @@ class DiariasProfilesPanel:
     def __init__(self, parent, *, ufesp_var, on_change=None, on_resize=None):
         self.parent = parent
         self.on_change, self.on_resize = on_change, on_resize
+        self.on_edit_change = None
         self.editing = False
         self._editing_id = None
         self._profiles = []
@@ -91,12 +92,6 @@ class DiariasProfilesPanel:
                 self.field_widgets[key] = entry
                 self.field_placeholders[key] = add_entry_placeholder(entry, variable, f"Ex.: {example}")
 
-        actions = ttk.Frame(self.editor, style="Settings.Inner.TFrame")
-        actions.pack(fill="x", pady=(10, 0))
-        self.cancel_button = ttk.Button(actions, text="Cancelar edição", command=self.cancel_edit)
-        self.cancel_button.pack(side="right")
-        self.save_button = ttk.Button(actions, text="Salvar perfil", style="Diarias.Profile.Add.TButton", command=self.save_profile)
-        self.save_button.pack(side="right", padx=(0, 8))
         ttk.Label(parent, textvariable=self.status_var, style="Muted.TLabel", wraplength=590).pack(anchor="w", pady=(6, 0))
         self.refresh()
 
@@ -105,6 +100,8 @@ class DiariasProfilesPanel:
             self.on_change()
 
     def _resize(self):
+        if self.on_edit_change:
+            self.on_edit_change()
         if self.on_resize:
             self.on_resize()
 
@@ -147,6 +144,7 @@ class DiariasProfilesPanel:
         self.profile_name_var.set(profile["profile_name"] if profile else "")
         for key, variable in self.field_vars.items():
             variable.set(profile[key] if profile else "")
+        self._initial_editor_values = self._editor_values()
         self.view.pack_forget()
         self.empty_label.pack_forget()
         self.editor.pack(fill="both", expand=True)
@@ -164,6 +162,12 @@ class DiariasProfilesPanel:
         profile = diarias_store.load_diarias_profile()
         if profile:
             self._show_editor(profile)
+
+    def _editor_values(self):
+        return (self.profile_name_var.get(), tuple(var.get() for var in self.field_vars.values()))
+
+    def has_unsaved_changes(self):
+        return self.editing and self._editor_values() != self._initial_editor_values
 
     def save_profile(self):
         try:

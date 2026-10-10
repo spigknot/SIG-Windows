@@ -16,6 +16,84 @@ from diarias_profiles import PROFILE_FIELDS
 
 
 class DiariasSettingsIntegrationTest(unittest.TestCase):
+    def footer_button(self, win, text):
+        def children(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from children(child)
+        return next(child for child in children(win)
+                    if isinstance(child, sig_app.ttk.Button) and child.cget('text') == text
+                    and child.master.grid_info().get('row') == 2)
+
+    def test_rodape_salva_perfil_sem_fechar_e_depois_salva_configuracoes(self):
+        self.app.open_settings(police_subtab='Diárias')
+        panel = self.app.diarias_profiles_panel
+        win = panel.parent.winfo_toplevel()
+        cancel = self.footer_button(win, 'Cancelar')
+        panel.create_button.invoke()
+        self.assertEqual('Voltar', cancel.cget('text'))
+        self.assertFalse(hasattr(panel, 'save_button'))
+        self.assertFalse(hasattr(panel, 'cancel_button'))
+        panel.profile_name_var.set('Perfil de teste')
+        for key, _label, example in PROFILE_FIELDS:
+            panel.field_vars[key].set('1' if key == 'classe' else example)
+        with patch.object(sig_app, 'save_settings', wraps=sig_app.save_settings) as save_settings:
+            self.footer_button(win, 'Salvar').invoke()
+            self.assertFalse(panel.editing)
+            self.assertTrue(win.winfo_exists())
+            self.assertEqual('Perfil de teste', diarias_store.load_diarias_profile()['profile_name'])
+            self.assertEqual('Cancelar', self.footer_button(win, 'Cancelar').cget('text'))
+            save_settings.assert_not_called()
+            panel.edit_button.invoke()
+            panel.field_vars['nome'].set('Alterado temporariamente')
+            panel.field_vars['nome'].set(diarias_store.load_diarias_profile()['nome'])
+            with patch.object(sig_app.messagebox, 'askyesno') as confirm:
+                self.footer_button(win, 'Voltar').invoke()
+                confirm.assert_not_called()
+            self.assertFalse(panel.editing)
+            self.footer_button(win, 'Salvar').invoke()
+            save_settings.assert_called_once()
+            self.assertFalse(win.winfo_exists())
+
+    def test_salvar_invalido_mantem_editor_e_voltar_sem_edicoes_nao_avisa(self):
+        self.app.open_settings(police_subtab='Diárias')
+        panel = self.app.diarias_profiles_panel
+        win = panel.parent.winfo_toplevel()
+        panel.create_button.invoke()
+        with patch.object(sig_app.messagebox, 'showwarning') as warning:
+            self.footer_button(win, 'Salvar').invoke()
+            warning.assert_called_once()
+        self.assertTrue(panel.editing)
+        with patch.object(sig_app.messagebox, 'askyesno') as confirm:
+            self.footer_button(win, 'Voltar').invoke()
+            confirm.assert_not_called()
+        self.assertFalse(panel.editing)
+        self.assertEqual('Cancelar', self.footer_button(win, 'Cancelar').cget('text'))
+        self.assertTrue(win.winfo_exists())
+
+    def test_voltar_confirma_descarte_e_restaura_cancelar(self):
+        self.app.open_settings(police_subtab='Diárias')
+        panel = self.app.diarias_profiles_panel
+        win = panel.parent.winfo_toplevel()
+        cancel = self.footer_button(win, 'Cancelar')
+        panel.create_button.invoke()
+        panel.profile_name_var.set('Rascunho')
+        with patch.object(sig_app.messagebox, 'askyesno', return_value=False) as confirm:
+            cancel.invoke()
+            confirm.assert_called_once()
+            self.assertIn('não salvas', confirm.call_args.args[1])
+        self.assertTrue(panel.editing)
+        self.assertEqual('Voltar', cancel.cget('text'))
+        self.assertEqual('Rascunho', panel.profile_name_var.get())
+        with patch.object(sig_app.messagebox, 'askyesno', return_value=True):
+            cancel.invoke()
+        self.assertFalse(panel.editing)
+        self.assertEqual('Cancelar', cancel.cget('text'))
+        self.assertTrue(win.winfo_exists())
+        self.assertEqual([], diarias_store.list_diarias_profiles())
+        cancel.invoke()
+        self.assertFalse(win.winfo_exists())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -53,7 +131,7 @@ class DiariasSettingsIntegrationTest(unittest.TestCase):
         panel.profile_name_var.set('Plantão em Taguaí')
         for key, _label, example in PROFILE_FIELDS:
             panel.field_vars[key].set('1' if key == 'classe' else example)
-        panel.save_button.invoke()
+        self.footer_button(win, 'Salvar').invoke()
         self.root.update_idletasks()
         saved = diarias_store.load_diarias_profile()
         self.assertEqual('João da Silva', saved['nome'])

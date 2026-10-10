@@ -11771,8 +11771,8 @@ try {
             if self.diarias_profiles_panel.editing:
                 select_settings_tab("Policial")
                 select_police_subtab("Diárias")
-                if not self.diarias_profiles_panel.save_profile():
-                    return
+                self.diarias_profiles_panel.save_profile()
+                return
             selected_transcription = transcription_labels.get(transcription_server_var.get(), "")
             selected_history = history_ui["labels"].get(history_model_var.get(), "")
             selected_statement = statement_ui["labels"].get(statement_model_var.get(), "")
@@ -11968,7 +11968,25 @@ try {
             self._refresh_files_grok_limit_warning()
             win.destroy()
 
-        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side=LEFT, padx=(0, 8))
+        def cancel_or_back():
+            if win.diarias_profiles_panel.editing:
+                select_settings_tab("Policial")
+                select_police_subtab("Diárias")
+                if win.diarias_profiles_panel.has_unsaved_changes() and not messagebox.askyesno(
+                    "Alterações não salvas",
+                    "Ao voltar, as alterações não salvas do perfil serão perdidas. Deseja continuar?",
+                    parent=win,
+                ):
+                    return
+                win.diarias_profiles_panel.cancel_edit()
+                return
+            win.destroy()
+
+        cancel_button = ttk.Button(buttons, text="Cancelar", command=cancel_or_back)
+        cancel_button.pack(side=LEFT, padx=(0, 8))
+        win.diarias_profiles_panel.on_edit_change = lambda: cancel_button.configure(
+            text="Voltar" if win.diarias_profiles_panel.editing else "Cancelar"
+        )
         ttk.Button(buttons, text="Salvar", command=save_and_close).pack(side=LEFT)
 
         def normalize_settings_surface(widget):
