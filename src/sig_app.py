@@ -102,6 +102,8 @@ from gemini_stt_client import (
     gemini_setup_payload,
 )
 from prompts_panel import PromptsPanel
+from transcriptions_panel import TranscriptionsPanel
+from transcription_history import record_from_jobs, save_record
 from diarias_profiles_panel import DiariasProfilesPanel
 from diarias_profiles import validate_diarias_profile
 from ui_widgets import diarias_action_icon_image, tool_action_icon_image
@@ -3873,28 +3875,17 @@ class SigApp:
 
         file_top = ttk.Frame(self.files_tab)
         file_top.pack(fill=X)
+        self.files_main_top = file_top
 
-        self.action_canvas = Canvas(file_top, width=74, height=74, highlightthickness=0, background="#f4f7f6")
-        self.action_canvas.pack(side=RIGHT, padx=(16, 2))
-        self.action_canvas.bind("<Button-1>", lambda _event: self.toggle_run())
-        self.action_canvas.bind("<Configure>", lambda _event: self._draw_action_button())
-        create_tooltip(self.action_canvas, "Executar ou cancelar a transcrição")
-        self._draw_action_button()
-
-        self.folder_canvas = Canvas(file_top, width=56, height=56, highlightthickness=0, background="#f4f7f6")
-        self.folder_canvas.bind("<Button-1>", lambda _event: self._open_temp_folder())
-        self.folder_canvas.bind("<Configure>", lambda _event: self._draw_folder_button())
-        create_tooltip(self.folder_canvas, "Abrir pasta de saída")
-        self._draw_folder_button()  # some ao limpar
-
-        self.save_canvas = Canvas(file_top, width=56, height=56, highlightthickness=0, background="#f4f7f6")
-        self.save_canvas.bind("<Button-1>", lambda _event: self.save_html_report())
-        self.save_canvas.bind("<Configure>", lambda _event: self._draw_save_button())
-        create_tooltip(self.save_canvas, "Salvar resultado da transcrição")
-        self._draw_save_button()
-        self.save_canvas.pack(side=RIGHT, padx=(16, 0), pady=(9, 0))
-        # pasta à esquerda do disquete
-        self.folder_canvas.pack(side=RIGHT, padx=(4, 0), pady=(9, 0))
+        self.files_transcriptions_button = ttk.Button(
+            file_top,
+            text="Transcrições",
+            image=self._tool_icon_photo("arrow_right", 22),
+            compound=RIGHT,
+            command=self._show_files_transcriptions_view,
+        )
+        self.files_transcriptions_button.pack(side=RIGHT, padx=(16, 2))
+        create_tooltip(self.files_transcriptions_button, "Abrir a tela de Transcrições")
 
         self.files_controls_frame = ttk.Frame(file_top)
         self.files_controls_frame.pack(side=LEFT, fill=X, expand=True)
@@ -4051,30 +4042,190 @@ class SigApp:
 
         list_frame = ttk.Frame(self.files_tab)
         list_frame.pack(fill=BOTH, expand=True)
+        self.files_list_frame = list_frame
+        self.files_tree_frame = ttk.Frame(list_frame)
+        self.files_tree_frame.pack(side=LEFT, fill=Y)
+        self.files_tree_frame.pack_propagate(False)
         columns = ("arquivo", "tamanho", "status")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(self.files_tree_frame, columns=columns, show="headings", selectmode="extended")
         self.tree.heading("arquivo", text="Arquivo original")
         self.tree.heading("tamanho", text="Tamanho")
-        self.tree.heading("status", text="Status")
-        self.tree.column("arquivo", width=440, anchor="w")
-        self.tree.column("tamanho", width=90, anchor="center")
-        self.tree.column("status", width=230, anchor="w")
-        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.heading("status", text="Status", anchor="center")
+        self.tree.column("arquivo", width=220, anchor="w", stretch=False)
+        self.tree.column("tamanho", width=30, anchor="center", stretch=False)
+        self.tree.column("status", width=78, anchor="center", stretch=False)
+        scroll = ttk.Scrollbar(self.files_tree_frame, orient="vertical", command=self.tree.yview)
+        self.files_tree_scroll = scroll
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.bind("<Double-1>", self._open_selected_original)
         self.tree.bind("<Delete>", self._remove_selected_files)
-        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.pack(side=RIGHT, fill=Y)
+        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
+        # A tabela ocupa ~40% da largura da aba (proporções originais
+        # 440/90/230 entre as colunas), ancorada à esquerda.
+        self._files_tree_proportions = (("arquivo", 440), ("tamanho", 90), ("status", 230))
+        list_frame.bind("<Configure>", lambda _event: self._size_files_tree())
+        self.root.after_idle(self._size_files_tree)
 
         bottom = ttk.Frame(self.files_tab)
         bottom.pack(fill=X, pady=(12, 0))
+        self.files_bottom = bottom
         progress_row = ttk.Frame(bottom)
         progress_row.pack(fill=X)
         self.progress = ttk.Progressbar(progress_row, maximum=100, variable=self.progress_var)
         self.progress.pack(side=LEFT, fill=X, expand=True)
         ttk.Label(bottom, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+
+        # Linha dos botões de ação junto à margem inferior (mesma
+        # posição horizontal da direita, só que lá embaixo).
+        bottom_actions = ttk.Frame(bottom)
+        bottom_actions.pack(fill=X, pady=(10, 0))
+        self.files_bottom_actions = bottom_actions
+        self.action_canvas = Canvas(bottom_actions, width=74, height=74, highlightthickness=0, background="#f4f7f6")
+        self.action_canvas.pack(side=RIGHT, padx=(16, 2))
+        self.action_canvas.bind("<Button-1>", lambda _event: self.toggle_run())
+        self.action_canvas.bind("<Configure>", lambda _event: self._draw_action_button())
+        create_tooltip(self.action_canvas, "Executar ou cancelar a transcrição")
+        self._draw_action_button()
+
+        self.save_canvas = Canvas(bottom_actions, width=56, height=56, highlightthickness=0, background="#f4f7f6")
+        self.save_canvas.bind("<Button-1>", lambda _event: self.save_html_report())
+        self.save_canvas.bind("<Configure>", lambda _event: self._draw_save_button())
+        create_tooltip(self.save_canvas, "Salvar resultado da transcrição")
+        self._draw_save_button()
+        self.save_canvas.pack(side=RIGHT, padx=(16, 0), pady=(9, 0))
+
+        self.folder_canvas = Canvas(bottom_actions, width=56, height=56, highlightthickness=0, background="#f4f7f6")
+        self.folder_canvas.bind("<Button-1>", lambda _event: self._open_temp_folder())
+        self.folder_canvas.bind("<Configure>", lambda _event: self._draw_folder_button())
+        create_tooltip(self.folder_canvas, "Abrir pasta de saída")
+        self._draw_folder_button()  # some ao limpar
+        # pasta à esquerda do disquete
+        self.folder_canvas.pack(side=RIGHT, padx=(4, 0), pady=(9, 0))
+
+        self.files_transcriptions_frame = ttk.Frame(self.files_tab)
+        transcriptions_head = ttk.Frame(self.files_transcriptions_frame)
+        transcriptions_head.pack(fill=X, pady=(0, 12))
+        self.files_transcriptions_back_button = ttk.Button(
+            transcriptions_head,
+            text="Voltar",
+            image=self._tool_icon_photo("arrow_left", 22),
+            compound=LEFT,
+            command=self._show_files_main_view,
+        )
+        self.files_transcriptions_back_button.pack(side=LEFT)
+        create_tooltip(self.files_transcriptions_back_button, "Voltar à ferramenta de transcrição")
+        self._build_tool_styles()
+        ttk.Label(transcriptions_head, text="Transcrições", style="Tool.Title.TLabel").pack(
+            side=LEFT, padx=(14, 0))
+        ttk.Label(
+            transcriptions_head,
+            text="Histórico de todas as tarefas: consulte, renomeie, junte e salve as tabelas.",
+            style="Muted.TLabel",
+        ).pack(side=LEFT, padx=(12, 0), pady=(6, 0))
+        self.transcriptions_panel = TranscriptionsPanel(
+            self.files_transcriptions_frame,
+            self.root,
+            temp_dir=lambda: app_base_dir() / "temp",
+            is_busy=self._transcriptions_temp_busy,
+            on_temp_cleared=self._on_transcriptions_temp_cleared,
+            log=lambda message: self._append_activity_log(message, "activity_step_done"),
+        )
+
         self.root.after_idle(self._align_activity_log)
         self.select_main_tab("live")
+
+    def _show_files_transcriptions_view(self) -> None:
+        """Substitui a tela de Transcrição pela tela de Transcrições."""
+        try:
+            self.files_main_top.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.files_list_frame.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.files_bottom.pack_forget()
+        except Exception:
+            pass
+        self.files_transcriptions_frame.pack(fill=BOTH, expand=True)
+        panel = getattr(self, "transcriptions_panel", None)
+        if panel is not None:
+            panel.refresh()
+
+    def _transcriptions_temp_busy(self) -> bool:
+        """Apagar temporários só com o app ocioso (nada lendo/gravando em temp/)."""
+        return bool(
+            self.running
+            or getattr(self, "live_state", "idle") != "idle"
+            or getattr(self, "assistant_busy", False)
+            or (getattr(self, "ffmpeg_tools", None) and self.ffmpeg_tools.running)
+        )
+
+    def _on_transcriptions_temp_cleared(self) -> None:
+        """O HTML da última tarefa sumiu com o temp/: desliga Disquete e Pasta."""
+        if self.last_html_path and not self.last_html_path.exists():
+            self.last_html_path = None
+        self._draw_save_button()
+        self._show_folder_button(visible=False)
+
+    def _record_transcription_history(self, jobs, stats, *, partial: bool = False) -> None:
+        """Guarda a tabela da tarefa no histórico (falha aqui nunca derruba o lote)."""
+        try:
+            record = record_from_jobs(jobs, stats, partial=partial)
+            save_record(record)
+        except Exception as exc:
+            self._queue("status_silent", f"Não foi possível salvar no histórico: {exc}")
+            return
+        self._queue("history_saved", record.id)
+
+    def _show_files_main_view(self) -> None:
+        """Volta da tela de Transcrições para a ferramenta original."""
+        try:
+            self.files_transcriptions_frame.pack_forget()
+        except Exception:
+            pass
+        self.files_main_top.pack(fill=X)
+        self.files_list_frame.pack(fill=BOTH, expand=True)
+        self.files_bottom.pack(fill=X, pady=(12, 0))
+        self.root.after_idle(self._size_files_tree)
+
+    def _size_files_tree(self) -> None:
+        """Ajusta as colunas para a tabela ocupar ~40% da largura da aba."""
+        frame = getattr(self, "files_list_frame", None)
+        tree = getattr(self, "tree", None)
+        proportions = getattr(self, "_files_tree_proportions", None)
+        if frame is None or tree is None or not proportions:
+            return
+        try:
+            if not frame.winfo_exists():
+                return
+            total = int(frame.winfo_width() * 0.4)
+        except Exception:
+            return
+        if total < 120:
+            return
+        container = getattr(self, "files_tree_frame", None)
+        scroll = getattr(self, "files_tree_scroll", None)
+        if container is not None and scroll is not None:
+            # Alterar apenas column(width) não atualiza a largura solicitada
+            # pelo Treeview já realizado. O container controla o tamanho real.
+            container.configure(width=total + scroll.winfo_reqwidth())
+        total = max(1, total - 2)  # bordas do Treeview
+        denom = sum(weight for _column, weight in proportions)
+        used = 0
+        for index, (column, weight) in enumerate(proportions):
+            if index < len(proportions) - 1:
+                width = max(20, int(total * weight / denom))
+                used += width
+            else:
+                width = max(20, total - used)
+            try:
+                if tree.column(column, "width") != width:
+                    tree.column(column, width=width, stretch=False)
+            except Exception:
+                pass
 
     def _build_qualification_tab(self) -> None:
         """Monta a área de entrada e saída da ferramenta Qualificação."""
@@ -15315,14 +15466,23 @@ try {
                 pass
 
     def _set_controls_state(self, state: str):
+        history_frame = getattr(self, "files_transcriptions_frame", None)
         for child in self.files_tab.winfo_children():
-            self._set_child_state(child, state)
+            # O histórico gerencia os próprios estados. A limpeza verifica
+            # explicitamente se há uma tarefa usando os temporários.
+            if child is not history_frame:
+                self._set_child_state(child, state)
         self.action_canvas.configure(state="normal")
 
     def _set_child_state(self, widget, state: str):
+        always_enabled = (
+            getattr(self, "action_canvas", None),
+            getattr(self, "files_transcriptions_button", None),
+            getattr(self, "files_transcriptions_back_button", None),
+        )
         for child in widget.winfo_children():
             try:
-                if child is not self.action_canvas:
+                if child not in always_enabled:
                     child.configure(state=state)
             except Exception:
                 pass
@@ -15485,6 +15645,7 @@ try {
             html_path = temp_dir / "transcricoes.html"
             stats = self._batch_report_stats(jobs, mode, settings, process_started, send_zip, zip_level, zip_stats)
             write_html_report(jobs, html_path, stats)
+            self._record_transcription_history(jobs, stats)
             self._queue("html_ready", str(html_path))
             # Bloco final (separador + estatísticas + separador) ANTES do
             # "Concluído" (pedido do usuário, 16/09).
@@ -15530,6 +15691,16 @@ try {
         MESMO caminho e formato do relatório normal, só com o material existente:
         os arquivos que nem começaram a ser transcritos não entram.
         """
+        if jobs:
+            # O histórico é independente da oferta opcional de HTML: recusar
+            # a exportação não pode perder os resultados da tarefa cancelada.
+            try:
+                history_stats = self._batch_report_stats(
+                    jobs, mode, settings, process_started, send_zip, zip_level, None
+                )
+            except Exception:
+                history_stats = [("Arquivos", str(len(jobs))), ("Estado", "Cancelado")]
+            self._record_transcription_history(jobs, history_stats, partial=True)
         if getattr(self, "_app_closing", False):
             return
         model_count = 1
@@ -17405,6 +17576,11 @@ try {
                 elif kind == "html_ready":
                     self.last_html_path = Path(message[1])
                     self._draw_save_button()
+                elif kind == "history_saved":
+                    panel = getattr(self, "transcriptions_panel", None)
+                    frame = getattr(self, "files_transcriptions_frame", None)
+                    if panel is not None and frame is not None and frame.winfo_ismapped():
+                        panel.refresh(select_id=message[1])
                 elif kind == "live_display":
                     self.last_live_transcript_text = message[1]
                     self.live_plain_transcript_text = message[1]

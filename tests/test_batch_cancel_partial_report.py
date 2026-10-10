@@ -51,6 +51,9 @@ def _app_base() -> SigApp:
     app._batch_job_total = 0
     app._job_size_column_text = lambda _job: "-"
     app._show_folder_button = lambda *, visible=True: None
+    # Este harness valida a oferta de HTML; persistência tem testes isolados
+    # próprios e nunca deve gravar fixtures no histórico real do usuário.
+    app._record_transcription_history = lambda *args, **kwargs: None
     return app
 
 

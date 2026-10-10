@@ -62,6 +62,7 @@ MODULOS_SEM_UI = [
     "batch_execution",
     "media_probe",
     "prompt_store",
+    "transcription_history",
 ]
 
 FONTE_SIG_APP = (SRC / "sig_app.py").read_text(encoding="utf-8")
@@ -307,7 +308,7 @@ class CamadasTest(unittest.TestCase):
 
     def test_modulos_extraidos_declaram_responsabilidade(self):
         sem_docstring = []
-        for modulo in MODULOS_SEM_UI + ["ui_widgets", "ffmpeg_tools_panel", "prompts_panel"]:
+        for modulo in MODULOS_SEM_UI + ["ui_widgets", "ffmpeg_tools_panel", "prompts_panel", "transcriptions_panel"]:
             arvore = ast.parse((SRC / f"{modulo}.py").read_text(encoding="utf-8"))
             if not ast.get_docstring(arvore):
                 sem_docstring.append(modulo)

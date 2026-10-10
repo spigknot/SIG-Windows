@@ -7,7 +7,8 @@ edite o modulo dono — nunca duplique logica em `sig_app.py`.
 ## Camadas (dependencia so aponta para baixo)
 
 ```
-UI ............ sig_app.py, ffmpeg_tools_panel.py, ui_widgets.py, prompts_panel.py
+UI ............ sig_app.py, ffmpeg_tools_panel.py, ui_widgets.py, prompts_panel.py,
+                transcriptions_panel.py
 Orquestracao .. sig_app.py (classe SigApp), vad_worker.py, batch_execution.py
 Integracoes ... stt_clients.py, gemini_stt_client.py, grok_stt_client.py, http_clients.py,
                 text_models.py, imei_lookup.py
@@ -48,6 +49,7 @@ Ambiente ...... app_env.py
 | `batch_errors.py` | Rotulos curtos dos erros do lote (uma linha viva por TIPO de erro, com contagem) e texto das linhas "ja estavam prontos/compactados" | UI, contagem de estado |
 | `batch_execution.py` | Orquestracao de futures do lote com cancelamento imediato (`cancellable_executor`, `iter_completed`, `cancellable_join`) e a divisao equilibrada da fila do VAD entre processos (`split_balanced`) | Regra de negocio, rede |
 | `reporting.py` | HTML de relatorio e de status ao vivo (`html_document`, `write_html_report`, `build_live_html`) | Geracao de DOCX/PDF |
+| `transcription_history.py` | Historico das tabelas de transcricao em `%APPDATA%\sig\transcricoes` (um JSON por tarefa): gravar, listar, renomear, excluir, juntar pelo nome do arquivo, exportar HTML/CSV; medir/limpar `temp/` | Tkinter (a tela e `transcriptions_panel.py`) |
 | `documents.py` | DOCX a partir dos modelos Word, PDF via Word, previa e clipboard | Regras de transcricao |
 | `media_files.py` | Extensoes suportadas, MIME e deteccao de tipo (`is_video_file`) | Processamento de midia |
 | `audio_io.py` | Conversao PCM <-> WAV da captura ao vivo | Captura/rede |

@@ -559,6 +559,12 @@ def tool_action_icon_image(kind: str, size: int = 24, *, enabled: bool = True,
                      fill="#d69b32" if enabled else ink)
         rounded((11, 23, 53, 49), fill=gold, outline="#bd8b2e" if enabled else ink, radius=4)
         stroke_path(((18, 30), (46, 30)), fill="#fff0ba", stroke=2)
+    elif kind == "arrow_right":
+        stroke_path(((14, 32), (45, 32)), stroke=5)
+        draw.polygon([box(point) for point in ((37, 20), (52, 32), (37, 44))], fill=ink)
+    elif kind == "arrow_left":
+        stroke_path(((50, 32), (19, 32)), stroke=5)
+        draw.polygon([box(point) for point in ((27, 20), (12, 32), (27, 44))], fill=ink)
     elif kind == "copy":
         rounded((23, 10, 53, 42), fill=pale, radius=4)
         rounded((11, 23, 41, 55), fill="#ffffff", radius=4)
