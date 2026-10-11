@@ -154,9 +154,9 @@ class PanelSafetyTests(unittest.TestCase):
         self.assertTrue(self.panel.export_button.winfo_ismapped())
         self.assertTrue(self.panel.open_button.winfo_ismapped())
 
-    def test_dispose_cancels_polling_and_search_trace(self):
+    def test_dispose_cancels_polling_without_errors_after_destroy(self):
         self.parent.destroy()
-        self.panel.search_var.set("depois de destruir")
+        self.panel.refresh()
         self.root.after(200, self.root.quit)
         self.root.mainloop()
         self.assertEqual([], self.errors)
@@ -168,7 +168,7 @@ class PanelSafetyTests(unittest.TestCase):
         preview = self.tmp / "temp" / "transcricoes_visualizar" / "r1.html"
         self.assertTrue(preview.exists())
         with patch("transcriptions_panel.messagebox.askyesno", return_value=True):
-            self.panel.delete_button.invoke()
+            self.panel.context_menu.invoke(1)
         self.assertFalse(preview.exists())
         self.assertEqual([], history.list_records(self.tmp))
 

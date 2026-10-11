@@ -181,6 +181,19 @@ def _rodar_lote(
 class ModoSequencialTest(unittest.TestCase):
     """Item 2 do pedido: marcada, um modelo de cada vez."""
 
+    def test_status_counts_successful_models_per_file(self):
+        for sequential in (True, False):
+            with self.subTest(sequential=sequential):
+                _, queue = _rodar_lote(um_por_vez=sequential, arquivos=3)
+                statuses = {}
+                for event in queue:
+                    if event[0] == "job":
+                        statuses.setdefault(event[1], []).append(event[2])
+                self.assertEqual(3, len(statuses))
+                for values in statuses.values():
+                    self.assertEqual(["Transcrito (1/2)", "Transcrito (2/2)",
+                                      "Transcrito (2/2)"], values)
+
     def test_modelo_2_so_comeca_depois_do_ultimo_arquivo_do_modelo_1(self):
         registro, _fila = _rodar_lote(
             um_por_vez=True, arquivos=4, paralelismo=1, sonda_cruzada=True

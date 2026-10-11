@@ -65,7 +65,7 @@ def _check_transcription_language_selector(app) -> None:
     """Seletor de idioma da aba Transcrição (paridade com a aba Ocorrência).
 
     Vacina da UI: o seletor precisa existir, oferecer exatamente
-    auto/pt/en/es (sem custom) e ficar À DIREITA do botão "Modelos".
+    auto/pt/en/es/custom e ficar À DIREITA do botão "Modelos".
     """
     button = getattr(app, "files_language_button", None)
     if button is None:
@@ -83,7 +83,7 @@ def _check_transcription_language_selector(app) -> None:
     menu = button.cget("menu")
     labels = [button.nametowidget(menu).entrycget(index, "label")
               for index in range(button.nametowidget(menu).index("end") + 1)]
-    if labels != ["auto", "pt", "en", "es"]:
+    if labels != ["auto", "pt", "en", "es", "custom"]:
         raise RuntimeError(f"opcoes do seletor de idioma inesperadas: {labels}")
     if not str(app.files_language_label_var.get()).startswith("Idioma:"):
         raise RuntimeError("rotulo do seletor de idioma fora do padrao 'Idioma: ...'")
@@ -2222,6 +2222,45 @@ def _check_settings_window_fills_its_content(app, root) -> None:
         root.update_idletasks()
 
 
+def _check_transcription_workspace(app, root):
+    """Fila e histórico compartilham a aba, sem navegação nem estados herdados."""
+    app.select_main_tab("files")
+    root.update_idletasks()
+    panel = app.transcriptions_panel
+    if app.files_transcriptions_frame.master is not app.files_list_frame:
+        raise RuntimeError("transcription history must be inside the queue workspace")
+    if hasattr(app, "files_transcriptions_button") or hasattr(app, "files_transcriptions_back_button"):
+        raise RuntimeError("integrated transcription workspace must not have navigation buttons")
+    if len(panel.body_panes.panes()) != 2 or len(panel.content_panes.panes()) != 2:
+        raise RuntimeError("history/table/detail splitters are missing")
+    if panel.sessions_title.cget("text") != "Sessões" or panel.merge_button.cget("text") != "Juntar":
+        raise RuntimeError("session header labels are incorrect")
+    if panel.preview_tree.master.master.master is not panel.content_panes:
+        raise RuntimeError("preview table must be beside sessions")
+    if panel.detail_text.master.master.master is not panel.body_panes:
+        raise RuntimeError("full text must be below sessions and preview")
+    if hasattr(panel, "rename_button") or hasattr(panel, "delete_button"):
+        raise RuntimeError("rename/delete must be context-menu actions")
+    if [panel.context_menu.entrycget(i, "label") for i in range(2)] != ["Renomear", "Excluir"]:
+        raise RuntimeError("session context-menu actions are missing")
+    if panel.detail_title.cget("text") != "Transcrições do arquivo selecionado":
+        raise RuntimeError("detail title default is incorrect")
+    if not panel.detail_model_buttons or panel.detail_model_buttons[0].cget("text") != "Todos":
+        raise RuntimeError("detail model filters are missing")
+    if panel.clear_temp_button.cget("text") != "Limpar":
+        raise RuntimeError("temporary cleanup action label is incorrect")
+    for tree in (panel.records_tree, panel.preview_tree):
+        if str(tree.tag_configure("alternate", "background")) != "#f4f7f6":
+            raise RuntimeError("alternating row color is missing")
+    export_disabled = panel.export_button.instate(["disabled"])
+    app._set_controls_state("disabled")
+    app._set_controls_state("normal")
+    if panel.refresh_temp_button.instate(["disabled"]) or str(panel.detail_text.cget("state")) != "disabled":
+        raise RuntimeError("batch controls must not change the history's own states")
+    if panel.export_button.instate(["disabled"]) != export_disabled:
+        raise RuntimeError("batch controls changed the history export state")
+
+
 def run(*, quiet: bool = False) -> int:
     root: tk.Tk | None = None
     try:
@@ -2242,6 +2281,7 @@ def run(*, quiet: bool = False) -> int:
 
             _check_transcription_language_selector(app)
             _check_transcription_models_menu(app)
+            _check_transcription_workspace(app, root)
             # Vacina do pedido de 13/09: a checkbox "Um modelo por vez" fica
             # entre o botao "Modelos" e o seletor de Idioma, desmarcada.
             _check_one_model_checkbox(app)

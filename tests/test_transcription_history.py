@@ -51,8 +51,37 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(["A", "B"], record.models)
         self.assertEqual("texto a2", record.rows[0]["cells"]["B"]["text"])
         self.assertTrue(record.rows[1]["cells"]["B"]["problem"])  # vazio vira problema
-        self.assertIn("10/10/2026 09:30", record.name)
+        self.assertEqual("2 arquivos, 2 modelos", record.name)
         self.assertEqual(10, record.rows[0]["size"])
+
+    def test_task_name_contains_only_file_and_model_counts(self):
+        models = ["Grok STT", "Servidor", "Deepgram"]
+        jobs = [make_job(self.tmp, f"audio-{i}.mp3", models, ["a", "b", "c"])
+                for i in range(150)]
+        record = history.record_from_jobs(jobs, now=datetime(2026, 10, 10, 9, 30))
+        self.assertEqual("150 arquivos, 3 modelos", record.name)
+        self.assertEqual("2026-10-10T09:30:00", record.created_at)
+        partial = history.record_from_jobs(jobs[:1], partial=True)
+        self.assertEqual("1 arquivos, 3 modelos", partial.name)
+        self.assertTrue(partial.partial)
+
+    def test_old_automatic_names_normalize_without_changing_custom_names_or_disk(self):
+        record = make_record("old", "2026-10-10T09:30:00", ["A", "B"], {"a.mp3": ["a", "b"]})
+        for old_name, kind, partial in (
+            ("10/10/2026 09:30 · 1 arquivo · A, B", "task", False),
+            ("10/10/2026 09:30 · 1 arquivo · A, B · parcial", "task", True),
+            ("Junção · 1 arquivo · A, B", "merged", False),
+        ):
+            with self.subTest(name=old_name):
+                record.name, record.kind, record.partial = old_name, kind, partial
+                path = history.save_record(record, self.store)
+                original = path.read_bytes()
+                self.assertEqual("1 arquivos, 2 modelos", history.load_record(record.id, self.store).name)
+                self.assertEqual("1 arquivos, 2 modelos", history.list_records(self.store)[0].name)
+                self.assertEqual(original, path.read_bytes())
+        record.name = "Lote personalizado da delegacia"
+        history.save_record(record, self.store)
+        self.assertEqual(record.name, history.load_record(record.id, self.store).name)
 
     def test_save_list_rename_delete_roundtrip(self):
         old = make_record("r1", "2026-10-01T10:00:00", ["A"], {"a.mp3": ["x"]})
@@ -188,12 +217,10 @@ class PanelTests(unittest.TestCase):
         self.assertEqual("normal", str(self.panel.export_button.cget("state")))
         self.assertEqual("disabled", str(self.panel.merge_button.cget("state")))
 
-    def test_search_filters_by_filename_and_model(self):
+    def test_history_lists_all_records_without_search_box(self):
         self.panel.refresh()
-        self.panel.search_var.set("C")
-        self.assertEqual(("r2",), self.panel.records_tree.get_children())
-        self.panel.search_var.set("a.mp3")
-        self.assertEqual(("r1",), self.panel.records_tree.get_children())
+        self.assertFalse(hasattr(self.panel, "search_entry"))
+        self.assertEqual(("r2", "r1"), self.panel.records_tree.get_children())
 
     def test_merge_and_rename_through_ui(self):
         self.panel.refresh()

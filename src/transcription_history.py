@@ -89,7 +89,7 @@ class HistoryRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> "HistoryRecord":
-        return cls(
+        record = cls(
             id=str(data["id"]),
             name=str(data.get("name") or ""),
             created_at=str(data.get("created_at") or ""),
@@ -100,6 +100,8 @@ class HistoryRecord:
             partial=bool(data.get("partial")),
             sources=[str(s) for s in data.get("sources") or []],
         )
+        _normalize_automatic_record_name(record)
+        return record
 
 
 def _new_id(now: datetime) -> str:
@@ -107,9 +109,25 @@ def _new_id(now: datetime) -> str:
 
 
 def default_record_name(now: datetime, file_count: int, models: list[str]) -> str:
-    arquivos = "arquivo" if file_count == 1 else "arquivos"
-    modelos = ", ".join(models) if models else "sem modelo"
-    return f"{now.strftime('%d/%m/%Y %H:%M')} · {file_count} {arquivos} · {modelos}"
+    return f"{file_count} arquivos, {len(models)} modelos"
+
+
+def _normalize_automatic_record_name(record: HistoryRecord) -> None:
+    """Compatibilidade em memória: reconhece só o nome automático antigo."""
+    try:
+        now = datetime.fromisoformat(record.created_at)
+    except ValueError:
+        return
+    arquivos = f"{record.file_count} {'arquivo' if record.file_count == 1 else 'arquivos'}"
+    if record.kind == "merged":
+        old_name = f"Junção · {arquivos} · {', '.join(record.models)}"
+    else:
+        modelos = ", ".join(record.models) if record.models else "sem modelo"
+        old_name = f"{now.strftime('%d/%m/%Y %H:%M')} · {arquivos} · {modelos}"
+        if record.partial:
+            old_name += " · parcial"
+    if record.name == old_name:
+        record.name = default_record_name(now, record.file_count, record.models)
 
 
 def _job_models(jobs: list[AudioJob]) -> list[str]:
@@ -153,7 +171,7 @@ def record_from_jobs(
         rows.append({"file": job.original_name, "size": _original_size(job), "cells": cells})
     return HistoryRecord(
         id=_new_id(now),
-        name=default_record_name(now, len(rows), models) + (" · parcial" if partial else ""),
+        name=default_record_name(now, len(rows), models),
         created_at=now.isoformat(timespec="seconds"),
         models=models,
         rows=rows,
@@ -282,7 +300,7 @@ def merge_records(
     total = len(rows)
     record = HistoryRecord(
         id=_new_id(now),
-        name=name or f"Junção · {total} {'arquivo' if total == 1 else 'arquivos'} · {', '.join(columns)}",
+        name=name or default_record_name(now, total, columns),
         created_at=now.isoformat(timespec="seconds"),
         models=columns,
         rows=list(rows.values()),

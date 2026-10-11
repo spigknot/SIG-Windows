@@ -1278,7 +1278,7 @@ class SigApp:
         self.files_one_model_var = BooleanVar(master=self.root, value=False)
         self.files_language_label_var = StringVar(value="Idioma: pt")
         self.files_keywords_label_var = StringVar(master=self.root, value=f"Keywords: {KEYWORDS_OFF_LABEL}")
-        self.status_var = StringVar(value="Escolha arquivos ou uma pasta para começar.")
+        self.status_var = StringVar(value="")
         self._activity_status_suppressed = 0
         self._activity_steps: dict[str, dict[str, str]] = {}
         self.live_ws_finalize_pending = False
@@ -3879,21 +3879,36 @@ class SigApp:
         file_top.pack(fill=X)
         self.files_main_top = file_top
 
-        self.files_transcriptions_button = ttk.Button(
-            file_top,
-            text="Transcrições",
-            image=self._tool_icon_photo("arrow_right", 22),
-            compound=RIGHT,
-            command=self._show_files_transcriptions_view,
-        )
-        self.files_transcriptions_button.pack(side=RIGHT, padx=(16, 2))
-        create_tooltip(self.files_transcriptions_button, "Abrir a tela de Transcrições")
-
         self.files_controls_frame = ttk.Frame(file_top)
         self.files_controls_frame.pack(side=LEFT, fill=X, expand=True)
 
-        controls = ttk.Frame(self.files_controls_frame)
-        controls.pack(fill=X, pady=(0, 10))
+        toolbar = ttk.Frame(self.files_controls_frame)
+        toolbar.pack(fill=X, pady=(0, 10))
+        self.files_controls_canvas = Canvas(
+            toolbar, width=1, height=26, highlightthickness=0, borderwidth=0,
+            background="#f4f7f6",
+        )
+        self.files_controls_canvas.pack(fill=X)
+        controls = ttk.Frame(self.files_controls_canvas)
+        self.files_controls_canvas.create_window(0, 0, window=controls, anchor="nw")
+        self.files_controls_scroll = ttk.Scrollbar(
+            toolbar, orient="horizontal", command=self.files_controls_canvas.xview,
+        )
+        self.files_controls_canvas.configure(xscrollcommand=self.files_controls_scroll.set)
+
+        def size_controls(_event=None):
+            width, height = controls.winfo_reqwidth(), controls.winfo_reqheight()
+            canvas = self.files_controls_canvas
+            canvas.configure(height=height, scrollregion=(0, 0, width, height))
+            # Uma única linha também em janelas estreitas, sem cortar opções.
+            if width > canvas.winfo_width():
+                self.files_controls_scroll.pack(fill=X)
+            else:
+                self.files_controls_scroll.pack_forget()
+                canvas.xview_moveto(0)
+
+        controls.bind("<Configure>", size_controls)
+        self.files_controls_canvas.bind("<Configure>", size_controls)
         ttk.Button(controls, text="Adicionar arquivos", command=self.add_files).pack(side=LEFT, padx=(0, 8))
         ttk.Button(controls, text="Selecionar pasta", command=self.add_folder).pack(side=LEFT, padx=(0, 8))
         ttk.Button(controls, text="Limpar", command=self.clear_files).pack(side=LEFT)
@@ -3914,8 +3929,8 @@ class SigApp:
         self._vad_tooltip_label.bind("<Leave>", lambda _e: self._hide_vad_tooltip())
         self._vad_tooltip_label.bind("<Button-1>", lambda _e: self._show_vad_info())
 
-        options = ttk.Frame(self.files_controls_frame)
-        options.pack(fill=X, pady=(4, 12))
+        options = ttk.Frame(controls)
+        options.pack(side=LEFT, padx=(16, 0))
         self.ready_radio = ttk.Radiobutton(
             options, text="Enviar pronto", value="ready", variable=self.mode_var, command=self._refresh_tree_modes
         )
@@ -4060,8 +4075,28 @@ class SigApp:
         list_frame = ttk.Frame(self.files_tab)
         list_frame.pack(fill=BOTH, expand=True)
         self.files_list_frame = list_frame
-        self.files_tree_frame = ttk.Frame(list_frame)
-        self.files_tree_frame.pack(side=LEFT, fill=Y)
+        list_frame.columnconfigure(1, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self._build_tool_styles()
+        queue_card = ttk.Frame(list_frame, style="Tool.Card.TFrame", padding=12)
+        queue_card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        self.files_queue_card = queue_card
+        queue_head = ttk.Frame(queue_card, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        queue_head.pack(fill=X, pady=(0, 3))
+        self.files_queue_title = ttk.Label(
+            queue_head, text="Arquivos para transcrever", style="Tool.Section.TLabel",
+            font=("Segoe UI Semibold", 10),
+        )
+        self.files_queue_title.pack(side=LEFT)
+        # Mesma fonte/formatação do contador de Sessões, encostado no título.
+        self.files_queue_status_label = ttk.Label(
+            queue_head, textvariable=self.status_var, style="Tool.Field.TLabel",
+            font=("Segoe UI", 8), anchor="w",
+        )
+        self.files_queue_status_label.pack(side=LEFT, padx=(6, 0))
+        create_tooltip(self.files_queue_status_label, lambda: self.status_var.get())
+        self.files_tree_frame = ttk.Frame(queue_card)
+        self.files_tree_frame.pack(fill=Y, expand=True)
         self.files_tree_frame.pack_propagate(False)
         columns = ("arquivo", "tamanho", "status")
         self.tree = ttk.Treeview(self.files_tree_frame, columns=columns, show="headings", selectmode="extended")
@@ -4071,6 +4106,7 @@ class SigApp:
         self.tree.column("arquivo", width=220, anchor="w", stretch=False)
         self.tree.column("tamanho", width=30, anchor="center", stretch=False)
         self.tree.column("status", width=78, anchor="center", stretch=False)
+        self.tree.tag_configure("alternate", background="#f4f7f6")
         scroll = ttk.Scrollbar(self.files_tree_frame, orient="vertical", command=self.tree.yview)
         self.files_tree_scroll = scroll
         self.tree.configure(yscrollcommand=scroll.set)
@@ -4085,19 +4121,26 @@ class SigApp:
         self.root.after_idle(self._size_files_tree)
 
         bottom = ttk.Frame(self.files_tab)
-        bottom.pack(fill=X, pady=(12, 0))
+        bottom.pack(side=BOTTOM, fill=X, pady=(12, 0), before=list_frame)
         self.files_bottom = bottom
-        progress_row = ttk.Frame(bottom)
-        progress_row.pack(fill=X)
+        # Usa a margem inferior já existente: o raio não muda de posição.
+        progress_row = ttk.Frame(self.files_tab)
+        progress_row.place(x=14, rely=1.0, y=-10, relwidth=1.0, width=-28, height=8,
+                           bordermode="ignore")
+        self.files_progress_row = progress_row
         self.progress = ttk.Progressbar(progress_row, maximum=100, variable=self.progress_var)
-        self.progress.pack(side=LEFT, fill=X, expand=True)
-        ttk.Label(bottom, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        self.progress.pack(fill=BOTH, expand=True)
+
 
         # Linha dos botões de ação junto à margem inferior (mesma
         # posição horizontal da direita, só que lá embaixo).
         bottom_actions = ttk.Frame(bottom)
         bottom_actions.pack(fill=X, pady=(10, 0))
         self.files_bottom_actions = bottom_actions
+        self.files_temp_frame = ttk.Frame(bottom_actions, width=200)
+        self.files_temp_frame.pack(side=LEFT, fill=Y)
+        self.files_temp_frame.pack_propagate(False)
+        queue_card.bind("<Configure>", lambda event: self.files_temp_frame.configure(width=event.width))
         self.action_canvas = Canvas(bottom_actions, width=74, height=74, highlightthickness=0, background="#f4f7f6")
         self.action_canvas.pack(side=RIGHT, padx=(16, 2))
         self.action_canvas.bind("<Button-1>", lambda _event: self.toggle_run())
@@ -4120,29 +4163,12 @@ class SigApp:
         # pasta à esquerda do disquete
         self.folder_canvas.pack(side=RIGHT, padx=(4, 0), pady=(9, 0))
 
-        self.files_transcriptions_frame = ttk.Frame(self.files_tab)
-        transcriptions_head = ttk.Frame(self.files_transcriptions_frame)
-        transcriptions_head.pack(fill=X, pady=(0, 12))
-        self.files_transcriptions_back_button = ttk.Button(
-            transcriptions_head,
-            text="Voltar",
-            image=self._tool_icon_photo("arrow_left", 22),
-            compound=LEFT,
-            command=self._show_files_main_view,
-        )
-        self.files_transcriptions_back_button.pack(side=LEFT)
-        create_tooltip(self.files_transcriptions_back_button, "Voltar à ferramenta de transcrição")
-        self._build_tool_styles()
-        ttk.Label(transcriptions_head, text="Transcrições", style="Tool.Title.TLabel").pack(
-            side=LEFT, padx=(14, 0))
-        ttk.Label(
-            transcriptions_head,
-            text="Histórico de todas as tarefas: consulte, renomeie, junte e salve as tabelas.",
-            style="Muted.TLabel",
-        ).pack(side=LEFT, padx=(12, 0), pady=(6, 0))
+        self.files_transcriptions_frame = ttk.Frame(list_frame)
+        self.files_transcriptions_frame.grid(row=0, column=1, sticky="nsew")
         self.transcriptions_panel = TranscriptionsPanel(
             self.files_transcriptions_frame,
             self.root,
+            temp_parent=self.files_temp_frame,
             temp_dir=lambda: app_base_dir() / "temp",
             is_busy=self._transcriptions_temp_busy,
             on_temp_cleared=self._on_transcriptions_temp_cleared,
@@ -4152,24 +4178,6 @@ class SigApp:
         self.root.after_idle(self._align_activity_log)
         self.select_main_tab("live")
 
-    def _show_files_transcriptions_view(self) -> None:
-        """Substitui a tela de Transcrição pela tela de Transcrições."""
-        try:
-            self.files_main_top.pack_forget()
-        except Exception:
-            pass
-        try:
-            self.files_list_frame.pack_forget()
-        except Exception:
-            pass
-        try:
-            self.files_bottom.pack_forget()
-        except Exception:
-            pass
-        self.files_transcriptions_frame.pack(fill=BOTH, expand=True)
-        panel = getattr(self, "transcriptions_panel", None)
-        if panel is not None:
-            panel.refresh()
 
     def _transcriptions_temp_busy(self) -> bool:
         """Apagar temporários só com o app ocioso (nada lendo/gravando em temp/)."""
@@ -4197,19 +4205,8 @@ class SigApp:
             return
         self._queue("history_saved", record.id)
 
-    def _show_files_main_view(self) -> None:
-        """Volta da tela de Transcrições para a ferramenta original."""
-        try:
-            self.files_transcriptions_frame.pack_forget()
-        except Exception:
-            pass
-        self.files_main_top.pack(fill=X)
-        self.files_list_frame.pack(fill=BOTH, expand=True)
-        self.files_bottom.pack(fill=X, pady=(12, 0))
-        self.root.after_idle(self._size_files_tree)
-
     def _size_files_tree(self) -> None:
-        """Ajusta as colunas para a tabela ocupar ~40% da largura da aba."""
+        """Mantém a fila estreita; o espaço economizado pertence ao histórico."""
         frame = getattr(self, "files_list_frame", None)
         tree = getattr(self, "tree", None)
         proportions = getattr(self, "_files_tree_proportions", None)
@@ -4223,21 +4220,25 @@ class SigApp:
             return
         if total < 120:
             return
-        container = getattr(self, "files_tree_frame", None)
-        scroll = getattr(self, "files_tree_scroll", None)
-        if container is not None and scroll is not None:
-            # Alterar apenas column(width) não atualiza a largura solicitada
-            # pelo Treeview já realizado. O container controla o tamanho real.
-            container.configure(width=total + scroll.winfo_reqwidth())
         total = max(1, total - 2)  # bordas do Treeview
         denom = sum(weight for _column, weight in proportions)
         used = 0
+        widths = []
         for index, (column, weight) in enumerate(proportions):
             if index < len(proportions) - 1:
                 width = max(20, int(total * weight / denom))
                 used += width
             else:
                 width = max(20, total - used)
+            widths.append(width)
+        # Sobre a largura anterior: Arquivo -20%, Status -35%; Tamanho intacto.
+        widths[0] = max(20, int(int(widths[0] * 0.75) * 0.80))
+        widths[2] = max(20, int(widths[2] * 0.65))
+        container = getattr(self, "files_tree_frame", None)
+        scroll = getattr(self, "files_tree_scroll", None)
+        if container is not None and scroll is not None:
+            container.configure(width=sum(widths) + 2 + scroll.winfo_reqwidth())
+        for (column, _weight), width in zip(proportions, widths):
             try:
                 if tree.column(column, "width") != width:
                     tree.column(column, width=width, stretch=False)
@@ -4333,6 +4334,10 @@ class SigApp:
         style.configure("Tool.TEntry", padding=(8, 7), fieldbackground="#ffffff", bordercolor="#cbdad1")
         style.configure("Tool.TCheckbutton", background="#ffffff", foreground="#344d42", font=("Segoe UI", 10))
         style.map("Tool.TCheckbutton", background=[("active", "#ffffff")])
+        style.configure("Tool.Filter.TRadiobutton", background="#ffffff", foreground="#344d42",
+                        font=("Segoe UI", 10))
+        style.map("Tool.Filter.TRadiobutton", background=[("disabled", "#ffffff"), ("active", "#ffffff")],
+                  foreground=[("disabled", "#96a39a")])
         style.configure("Tool.Primary.TButton", background="#216b4a", foreground="#ffffff",
                         bordercolor="#216b4a", lightcolor="#216b4a", darkcolor="#216b4a",
                         font=("Segoe UI Semibold", 10), padding=(12, 9))
@@ -5019,6 +5024,9 @@ class SigApp:
                 frame.pack_forget()
         if tab_name == "files":
             self.files_tab.pack(fill=BOTH, expand=True)
+            panel = getattr(self, "transcriptions_panel", None)
+            if panel is not None:
+                panel.refresh()
             self.live_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
             self.files_tab_button.configure(background=active_bg, foreground=active_fg)
             self.imei_tab_button.configure(background=inactive_bg, foreground=inactive_fg)
@@ -10335,9 +10343,10 @@ try {
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.tree_items.clear()
-        for i, path in enumerate(self.selected_paths):
+        for position, path in enumerate(self.selected_paths):
             kb = path.stat().st_size // 1024
-            item = self.tree.insert("", END, values=(path.name, f"{kb} KB", "Aguardando"))
+            item = self.tree.insert("", END, values=(path.name, f"{kb} KB", "Aguardando"),
+                                    tags=("alternate",) if position % 2 else ())
             self.tree_items[path] = item
             added = True
         if added:
@@ -10377,6 +10386,9 @@ try {
         # Remove da lista ordenada mantendo a ordem de tamanho (já está ordenada)
         removed_set = {p.resolve() for p in paths_to_remove}
         self.selected_paths = [p for p in self.selected_paths if p.resolve() not in removed_set]
+        # Recalcula o zebrado pela nova ordem, como na tabela de Diárias.
+        for position, item in enumerate(self.tree.get_children()):
+            self.tree.item(item, tags=("alternate",) if position % 2 else ())
         self.status_var.set(f"{len(paths_to_remove)} arquivo(s) removido(s). {len(self.selected_paths)} arquivo(s) na fila.")
 
     def clear_files(self):
@@ -15590,10 +15602,11 @@ try {
     def _set_child_state(self, widget, state: str):
         always_enabled = (
             getattr(self, "action_canvas", None),
-            getattr(self, "files_transcriptions_button", None),
-            getattr(self, "files_transcriptions_back_button", None),
         )
         for child in widget.winfo_children():
+            if child in (getattr(self, "files_transcriptions_frame", None),
+                         getattr(self, "files_temp_frame", None)):
+                continue
             try:
                 if child not in always_enabled:
                     child.configure(state=state)
@@ -17221,6 +17234,7 @@ try {
         self.uploaders = uploaders
         done = [0] * len(model_settings)
         progress_lock = threading.Lock()
+        completed_models = {id(job): set() for job in candidates}
         model_starts = [time.perf_counter()] * len(model_settings)
         # Relógio PRÓPRIO de cada modelo, CONGELADO no instante em que ele
         # termina: a linha verde não pode continuar contando por conta dos
@@ -17318,6 +17332,12 @@ try {
                         job = future_map[future]
                         try:
                             future.result()
+                            with progress_lock:
+                                completed_models[id(job)].add(index)
+                                self._queue(
+                                    "job", job.original_path,
+                                    f"Transcrito ({len(completed_models[id(job)])}/{len(model_settings)})",
+                                )
                         except Cancelled:
                             raise
                         except Exception as exc:
@@ -17377,9 +17397,11 @@ try {
             if all(errors):
                 self._queue("job", job.original_path, "Erro nos modelos")
             elif any(errors):
-                self._queue("job", job.original_path, "Transcrito parcialmente")
+                self._queue("job", job.original_path,
+                            f"Transcrito ({len(completed_models[id(job)])}/{len(model_settings)})")
             else:
-                self._queue("job", job.original_path, f"Transcrito nos {len(model_settings)} modelos")
+                self._queue("job", job.original_path,
+                            f"Transcrito ({len(model_settings)}/{len(model_settings)})")
 
     def _alibaba_vocabulary_for(self, settings: dict, target_model: str) -> str:
         """Lista pré-compilada de hotwords pronta para ESTE modelo ("" = sem).
@@ -17428,7 +17450,8 @@ try {
             raise Cancelled()
         if not job.upload_path:
             raise RuntimeError("arquivo para envio não definido")
-        self._queue("job", job.original_path, "Enviando")
+        if len((request_settings or self.settings).get("_multi_transcription_models") or []) < 2:
+            self._queue("job", job.original_path, "Enviando")
         mime_type = MIME_TYPES.get(job.upload_path.suffix.lower()) or mimetypes.guess_type(job.upload_path.name)[0]
         if not mime_type:
             mime_type = "application/octet-stream"
@@ -17693,7 +17716,10 @@ try {
                     panel = getattr(self, "transcriptions_panel", None)
                     frame = getattr(self, "files_transcriptions_frame", None)
                     if panel is not None and frame is not None and frame.winfo_ismapped():
-                        panel.refresh(select_id=message[1])
+                        # Chegar um lote novo não deve interromper uma leitura
+                        # nem desfazer os registros selecionados para junção.
+                        select_id = None if panel.records_tree.selection() else message[1]
+                        panel.refresh(select_id=select_id)
                 elif kind == "live_display":
                     self.last_live_transcript_text = message[1]
                     self.live_plain_transcript_text = message[1]

@@ -514,6 +514,82 @@ def create_tooltip(widget, message: str | Callable[[], str]) -> None:
     widget.bind("<ButtonPress>", hide, add="+")
 
 
+class TreeviewCellTooltip:
+    """Balão com o mesmo estilo dos tooltips, lendo o valor completo da célula."""
+
+    def __init__(self, tree, text_for_cell: Callable[[str, str], str]):
+        self.tree = tree
+        self.text_for_cell = text_for_cell
+        self.window = None
+        self.label = None
+        self._cell = None
+        self._hide_after = None
+        tree.bind("<Motion>", self._motion, add="+")
+        tree.bind("<Leave>", self._leave, add="+")
+        for event in ("<ButtonPress>", "<MouseWheel>", "<Configure>", "<Unmap>", "<Destroy>"):
+            tree.bind(event, self.hide, add="+")
+
+    def _cancel_hide(self, _event=None):
+        if self._hide_after is not None:
+            self.tree.after_cancel(self._hide_after)
+            self._hide_after = None
+
+    def hide(self, _event=None):
+        self._cancel_hide()
+        if self.window is not None:
+            self.window.destroy()
+        self.window = self.label = self._cell = None
+
+    def _leave(self, _event=None):
+        self._cancel_hide()
+        # Permite alcançar/rolar um balão longo sem ele desaparecer no caminho.
+        self._hide_after = self.tree.after(180, self.hide)
+
+    def _motion(self, event):
+        self._cancel_hide()
+        row = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not row or self.tree.identify_region(event.x, event.y) != "cell":
+            self.hide()
+            return
+        cell = (row, column)
+        if cell == self._cell:
+            return
+        self.hide()
+        text = self.text_for_cell(row, column)
+        if not text:
+            return
+        self._cell = cell
+        self.window = popup = Toplevel(self.tree)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        background = ttk.Style(self.tree).lookup("TLabel", "background")
+        canvas = Canvas(popup, highlightthickness=0, borderwidth=0, background=background)
+        self.label = label = ttk.Label(canvas, text=text, padding=(7, 4), relief="solid",
+                                       wraplength=min(560, self.tree.winfo_screenwidth() - 48), justify="left")
+        canvas.create_window(0, 0, window=label, anchor="nw")
+        label.update_idletasks()
+        width, height = label.winfo_reqwidth(), label.winfo_reqheight()
+        max_height = max(100, self.tree.winfo_screenheight() - 80)
+        canvas.configure(width=width, height=min(height, max_height), scrollregion=(0, 0, width, height))
+        if height > max_height:
+            scroll = ttk.Scrollbar(popup, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        popup.bind("<Enter>", self._cancel_hide, add="+")
+        popup.bind("<Leave>", self._leave, add="+")
+        popup.bind("<ButtonPress>", self._cancel_hide, add="+")
+        def wheel(e):
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+            return "break"
+        popup.bind("<MouseWheel>", wheel)
+        popup.update_idletasks()
+        x = min(event.x_root + 14, self.tree.winfo_screenwidth() - popup.winfo_reqwidth() - 4)
+        y = min(event.y_root + 14, self.tree.winfo_screenheight() - popup.winfo_reqheight() - 4)
+        popup.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+
 def tool_action_icon_image(kind: str, size: int = 24, *, enabled: bool = True,
                            circular: bool = False, foreground: str | None = None) -> Image.Image:
     """Ícones de ação desenhados em oito vezes o tamanho para bordas suaves."""
