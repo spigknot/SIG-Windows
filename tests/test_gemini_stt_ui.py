@@ -107,9 +107,10 @@ class GeminiSettingsUITests(unittest.TestCase):
         self.app._refresh_live_grok_controls()
         self.assertEqual(self.app._current_stt_provider(), "gemini")
         self.assertIn("disabled", self.app.live_diarize_check.state())
-        self.assertEqual(self.app.live_language_label_var.get(), "Idioma: pt-BR")
-        self.app._set_live_language("en-US")
-        self.assertEqual(self.app.settings["gemini_language_mode"], "en-US")
+        self.assertEqual(self.app.live_language_label_var.get(), "Idioma: pt")
+        self.app._set_live_language("en")
+        self.assertEqual(self.app.settings["gemini_language_mode"], "en")
+        self.assertEqual(self.app.live_language_label_var.get(), "Idioma: en")
 
     def test_live_capture_sends_silence_while_paused_and_preserves_recording(self):
         app = self.app
@@ -175,6 +176,59 @@ class GeminiSettingsUITests(unittest.TestCase):
             self.app.cancel_live_mic()
             self.assertFalse(self.app.live_uses_gemini_websocket)
             self.assertEqual(self.app.live_state, "idle")
+
+    def test_manual_batch_dialog_catalog_and_saved_json_language(self):
+        self.app.multi_transcription_model_vars = {
+            sig_app.GEMINI_API_NAME: tk.BooleanVar(master=self.root, value=True)}
+        self.app._set_files_language("custom")
+        dialog = next(w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel))
+        widgets = list(descendants(dialog))
+        entry = next(w for w in widgets if w.winfo_class() == "TEntry")
+        entry.delete(0, "end")
+        entry.insert(0, "pt-PT, en-GB")
+        with patch.object(sig_app.messagebox, "showinfo") as help_dialog:
+            next(w for w in widgets if w.winfo_class() == "TButton" and w.cget("text") == "?").invoke()
+        self.assertIn("yue-Hant-HK", help_dialog.call_args.args[1])
+        next(w for w in widgets if w.winfo_class() == "TButton" and w.cget("text") == "OK").invoke()
+        self.assertEqual("custom", self.app.settings["transcription_language"])
+        self.assertEqual("pt-BR", self.app.settings["gemini_language_mode"])
+        batch = self.app._transcription_batch_settings([sig_app.GEMINI_API_NAME])
+        config = sig_app.gemini_rest_body(batch, "uri", "audio/wav")["generation_config"]["transcription_config"]
+        self.assertEqual(["pt-PT", "en-GB"], config["language_codes"])
+        self.assertEqual("pt-PT,en-GB", sig_app.load_settings()["transcription_language_custom"]["gemini"])
+        self.app._set_files_language("auto")
+        batch = self.app._transcription_batch_settings([sig_app.GEMINI_API_NAME])
+        self.assertNotIn("language_codes", sig_app.gemini_rest_body(batch, "uri", "audio/wav")["generation_config"]["transcription_config"])
+
+    def test_timestamp_control_is_gemini_only_and_persists(self):
+        self.app.multi_transcription_model_vars = {
+            sig_app.GEMINI_API_NAME: tk.BooleanVar(master=self.root, value=True)}
+        self.app._refresh_files_grok_limit_warning()
+        checkbox = self.app.files_gemini_timestamps_check
+        self.assertEqual("pack", checkbox.winfo_manager())
+        checkbox.invoke()
+        self.assertTrue(sig_app.load_settings()["gemini_timestamps"])
+        batch = self.app._transcription_batch_settings([sig_app.GEMINI_API_NAME])
+        config = sig_app.gemini_rest_body(batch, "uri", "audio/wav")["generation_config"]["transcription_config"]
+        self.assertEqual(["word"], config["mode"]["timestamp_granularities"])
+        self.app.multi_transcription_model_vars[sig_app.GEMINI_API_NAME].set(False)
+        self.app._refresh_files_grok_limit_warning()
+        self.assertEqual("", checkbox.winfo_manager())
+
+    def test_incompatible_gemini_settings_stop_whole_batch_before_upload(self):
+        self.app.selected_paths = [Path(self.temp.name) / "fixture.wav"]
+        self.app.multi_transcription_model_vars = {
+            sig_app.GROK_API_NAME: tk.BooleanVar(master=self.root, value=True),
+            sig_app.GEMINI_API_NAME: tk.BooleanVar(master=self.root, value=True)}
+        sig_app.save_settings({**self.app.settings, "g_ai_studio_api_key": "fict-studio",
+            "gemini_timestamps": True, "stt_keyword_profiles": {"Locais": ["Taguaí"]},
+            "stt_keyword_profile": "Locais"})
+        with patch.object(sig_app.messagebox, "showinfo") as notice, \
+             patch.object(sig_app, "create_transcription_uploader") as uploader:
+            self.app.start_run()
+        uploader.assert_not_called()
+        self.assertFalse(self.app.running)
+        self.assertIn("não combina Keywords", notice.call_args.args[1])
 
     def test_white_microphone_uses_gemini_rest_uploader(self):
         app = self.app

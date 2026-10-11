@@ -83,6 +83,54 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(rules.supports_diarize("gemini", is_live=False))
         self.assertFalse(rules.supports_diarize("gemini", is_live=True))
 
+    def test_selector_languages_reach_rest_and_live_without_auto_field(self):
+        for option, expected in (("pt", ["pt-BR"]), ("en", ["en-US"]), ("es", ["es-419"]), ("auto", None)):
+            with self.subTest(option=option):
+                batch = rules.apply_transcription_language_option({**SETTINGS, "transcription_language": option}, ["gemini"])
+                rest = gemini.gemini_rest_body(batch, "uri", "audio/wav")["generation_config"]["transcription_config"]
+                live = gemini.gemini_setup_payload(batch)["setup"]["inputAudioTranscription"]
+                if expected is None:
+                    self.assertNotIn("language_codes", rest)
+                    self.assertNotIn("languageCodes", live)
+                else:
+                    self.assertEqual(expected, rest["language_codes"])
+                    self.assertEqual(expected, live["languageCodes"])
+                self.assertEqual(expected or [], gemini.gemini_language_codes({"gemini_language_mode": option}))
+
+    def test_manual_batch_codes_are_per_provider_and_persisted(self):
+        original = {**SETTINGS, "transcription_language": "custom",
+                    "transcription_language_custom": {"gemini": "pt-PT, en-GB", "grok": "fr"},
+                    "gemini_timestamps": True}
+        saved = settings_store.normalize_settings(original)
+        batch = rules.apply_transcription_language_option(saved, ["gemini", "grok"])
+        self.assertEqual(["pt-PT", "en-GB"], gemini.gemini_language_codes(batch))
+        self.assertEqual("fr", rules.grok_language_param(batch))
+        self.assertEqual("pt-BR", original["gemini_language_mode"])
+        self.assertTrue(saved["gemini_timestamps"])
+        with self.assertRaisesRegex(ValueError, "deepgram"):
+            rules.apply_transcription_language_option(saved, ["gemini", "grok", "deepgram"])
+
+    def test_every_catalog_code_is_accepted_in_rest_and_live(self):
+        for code in rules.GEMINI_CODES:
+            settings = {**SETTINGS, "gemini_language_mode": "custom", "gemini_language_custom": code}
+            with self.subTest(code=code):
+                self.assertEqual([code], gemini.gemini_transcription_config(settings)["language_codes"])
+                self.assertEqual([code], gemini.gemini_transcription_config(settings, live=True)["languageCodes"])
+        with self.assertRaisesRegex(ValueError, "pelo menos um"):
+            gemini.gemini_transcription_config({"gemini_language_mode": "custom"})
+
+    def test_only_selected_keyword_profile_is_sent_and_off_omits_it(self):
+        settings = {**SETTINGS, "stt_keyword_profiles": {"Armas": ["SIG"], "Locais": ["Taguaí"]},
+                    "stt_keyword_profile": "Locais"}
+        self.assertEqual(["Taguaí"], gemini.gemini_transcription_config(settings)["custom_vocabulary"])
+        self.assertEqual(["Taguaí"], gemini.gemini_transcription_config(settings, live=True)["customVocabulary"])
+        settings["stt_keyword_profile"] = ""
+        self.assertNotIn("custom_vocabulary", gemini.gemini_transcription_config(settings))
+        self.assertNotIn("customVocabulary", gemini.gemini_transcription_config(settings, live=True))
+        for feature in ("diarize", "gemini_timestamps"):
+            with self.subTest(feature=feature), self.assertRaisesRegex(ValueError, "não combina Keywords"):
+                gemini.gemini_transcription_config({**SETTINGS, **vocabulary("SIG"), feature: True})
+
     def test_selection_requires_studio_key_and_round_trips(self):
         normalized = settings_store.normalize_settings({**SETTINGS, "gcloud_api_key": " fict-cloud "})
         self.assertEqual(normalized["transcription_server"], providers.GEMINI_API_NAME)

@@ -61,6 +61,25 @@ class GrokWarningUITest(unittest.TestCase):
         self.app._refresh_files_grok_limit_warning()
         self.assertEqual(self.app.files_grok_limit_warning.winfo_manager(), "pack")
 
+    def test_gemini_warning_is_red_and_dialog_shows_live_quota(self):
+        self.select(sig_app.GEMINI_API_NAME)
+        marker = self.app.files_gemini_limit_warning
+        self.assertEqual(marker.cget("fg"), "#d32f2f")
+        self.assertEqual(marker.winfo_manager(), "pack")
+        self.assertEqual(self.app.files_grok_limit_warning.winfo_manager(), "")
+        self.app.settings["g_ai_studio_api_key"] = "fict-ui"
+        with patch.object(sig_app.GeminiQuota, "statistics_text", return_value="Uso local: 3/100"):
+            self.app._show_files_gemini_limit_help()
+        dialog = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+        label = next(w for w in dialog.winfo_children() if w.winfo_class() == "TLabel")
+        text = dialog.getvar(label.cget("textvariable"))
+        self.assertIn("10 requisições por minuto", text)
+        self.assertIn("100 por dia", text)
+        self.assertIn("3/100", text)
+        dialog.destroy()
+        self.select("servidor")
+        self.assertEqual(marker.winfo_manager(), "")
+
     def test_occurrence_selection_does_not_show_batch_warning(self):
         self.app.settings["transcription_server"] = sig_app.GROK_API_NAME
         self.select("servidor")

@@ -2,7 +2,7 @@
 
 Regras que estes testes protegem:
 
-1. Opções fixas: auto, pt, en, es — nada de "custom" por enquanto.
+1. Opções: auto, pt, en, es e custom com códigos separados por provedor.
 2. O seletor guarda só a OPÇÃO; o parâmetro real continua sendo montado por
    CADA provedor na hora da requisição (nunca um valor único para todos).
 3. "pt" vira "pt-BR" no Deepgram e "pt" nos demais; "auto" vira o "multi"
@@ -87,10 +87,10 @@ def _metodo_fonte(nome: str) -> str:
 
 class OpcoesDoSeletorTest(unittest.TestCase):
     def test_opcoes_sao_auto_pt_en_es(self):
-        self.assertEqual(("auto", "pt", "en", "es"), TRANSCRIPTION_LANGUAGE_OPTIONS)
+        self.assertEqual(("auto", "pt", "en", "es", "custom"), TRANSCRIPTION_LANGUAGE_OPTIONS)
 
-    def test_sem_custom_por_enquanto(self):
-        self.assertNotIn("custom", TRANSCRIPTION_LANGUAGE_OPTIONS)
+    def test_custom_e_tratado_por_provedor(self):
+        self.assertIn("custom", TRANSCRIPTION_LANGUAGE_OPTIONS)
         self.assertNotIn("custom", TRANSCRIPTION_OPTION_MODES["grok"])
 
     def test_default_do_app_e_pt(self):
@@ -235,7 +235,7 @@ class PersistenciaTest(unittest.TestCase):
         self.assertEqual("es", normalizado[KEY_TRANSCRIPTION_LANGUAGE])
 
     def test_normalize_descarta_valor_desconhecido(self):
-        normalizado = normalize_settings({**DEFAULT_SETTINGS, KEY_TRANSCRIPTION_LANGUAGE: "custom"})
+        normalizado = normalize_settings({**DEFAULT_SETTINGS, KEY_TRANSCRIPTION_LANGUAGE: "xx"})
         self.assertEqual("pt", normalizado[KEY_TRANSCRIPTION_LANGUAGE])
 
     def test_default_sobrevive_ao_round_trip(self):
@@ -274,8 +274,8 @@ class InterfaceTest(unittest.TestCase):
         # vez" (flag do lote, não persistida).
         self.assertIn(
             "self._transcription_batch_settings(\n"
-            "            multi_model_names, one_model_at_a_time=self.files_one_model_var.get()\n"
-            "        )",
+            "                multi_model_names, one_model_at_a_time=self.files_one_model_var.get()\n"
+            "            )",
             SIG_APP_FONTE,
         )
         self.assertIn(

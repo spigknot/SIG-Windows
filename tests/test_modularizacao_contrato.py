@@ -49,6 +49,7 @@ MODULOS_SEM_UI = [
     "http_clients",
     "stt_clients",
     "gemini_stt_client",
+    "gemini_stt_quota",
     "grok_stt_client",
     "log_formatting",
     "reporting",

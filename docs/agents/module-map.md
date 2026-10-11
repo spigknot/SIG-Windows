@@ -23,7 +23,7 @@ Ambiente ...... app_env.py
 ```
 
 `domain_models`, `providers`, `settings_store`, `prompt_store`,
-`transcription_parsing`, `text_models`, `http_clients`, `stt_clients`, `gemini_stt_client`, `grok_stt_client`,
+`transcription_parsing`, `text_models`, `http_clients`, `stt_clients`, `gemini_stt_client`, `gemini_stt_quota`, `grok_stt_client`,
 `log_formatting`, `reporting`, `qualification`, `name_database`, `imei_lookup`,
 `documents`, `media_files`, `audio_io`, `batch_errors`, `batch_execution` e
 `app_env` **nao podem** importar `tkinter` nem `sig_app` (testado em
@@ -43,6 +43,7 @@ Ambiente ...... app_env.py
 | `http_clients.py` | `GraniteUploader` e `TextModelClient` (transporte HTTP, cancelamento) | Formato de cada provedor STT |
 | `stt_clients.py` | Protocolo STT: URLs, form fields, deteccao de provedor, REST/WS (Alibaba, MetaMuse, Deepgram...) | UI e persistencia |
 | `gemini_stt_client.py` | Gemini 3.5 Transcribe: Files/Interactions REST, protocolo Live WebSocket, configuração e cancelamento | UI, persistência de chaves |
+| `gemini_stt_quota.py` | Cota Gemini REST: pacing 8/min, teto local 100/dia, SQLite por chave anonimizada, headers opcionais e backoff | UI, áudio, chaves em disco e saldo global inventado |
 | `grok_stt_client.py` | Grok STT na Transcrição: pacing compartilhado de 8 RPS, cooldown de 429, Retry-After, backoff e métricas HTTP | UI, persistência, outros provedores e streaming |
 | `log_formatting.py` | Formatacao de comandos FFmpeg e de parametros para log; `format_bytes`, `format_duration`, `format_audio_total` | Execucao de FFmpeg |
 | `media_probe.py` | Duracao de midia: cabecalho do WAV (barato) e sonda externa `ffprobe`/`ffmpeg -i` (para o resumo antes do envio) | UI, contagem de lote |

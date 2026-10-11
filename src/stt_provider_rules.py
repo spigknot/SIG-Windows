@@ -95,7 +95,7 @@ ALIBABA_CODES = {
     "cs", "hu", "ro", "bg", "hr", "sk",
 }
 
-# Locales Gemini 3.5 Transcribe (REST e Live). Auto usa uma lista vazia.
+# Locales Gemini 3.5 Transcribe (REST e Live). Auto omite o campo.
 GEMINI_CODES = {
     "af-ZA", "ja-JP", "am-ET", "jv-ID", "ar-EG", "kea-CV", "hy-AM", "kn-IN",
     "as-IN", "kk-KZ", "az-AZ", "ko-KR", "be-BY", "ky-KG", "bn-BD", "lv-LV",
@@ -140,7 +140,7 @@ DEFAULT_MODE = {
     "alibaba": "pt",
 }
 MENU_OPTIONS = {
-    "gemini": ["multi", "pt-BR", "en-US", "es-419", "custom"],
+    "gemini": ["multi", "pt", "en", "es", "custom"],
     "deepgram": ["multi", "pt-BR", "en", "es", "custom"],
     "assemblyai": ["multi", "pt", "es", "en", "custom"],
     "elevenlabs": ["multi", "pt", "es", "en", "custom"],
@@ -154,6 +154,12 @@ MENU_OPTIONS = {
 # requisições — nunca mude os valores, apenas estas labels.
 LANGUAGE_LABELS = {"multi": "auto"}
 
+
+def language_label(provider: str, mode: str) -> str:
+    if provider == "gemini":
+        mode = {"pt-BR": "pt", "en-US": "en", "es-419": "es"}.get(mode, mode)
+    return LANGUAGE_LABELS.get(mode, mode)
+
 # ---------------- Seletor de idioma da aba Transcrição ----------------
 #
 # A aba Transcrição escolhe VÁRIOS modelos ao mesmo tempo, então o seletor
@@ -162,11 +168,11 @@ LANGUAGE_LABELS = {"multi": "auto"}
 # um parâmetro único e enviá-lo a todos os modelos — cada provedor recebe o
 # formato que ele próprio entende (mesma regra da aba Ocorrência).
 KEY_TRANSCRIPTION_LANGUAGE = "transcription_language"
-TRANSCRIPTION_LANGUAGE_OPTIONS = ("auto", "pt", "en", "es")
+KEY_TRANSCRIPTION_LANGUAGE_CUSTOM = "transcription_language_custom"
+TRANSCRIPTION_LANGUAGE_OPTIONS = ("auto", "pt", "en", "es", "custom")
 DEFAULT_TRANSCRIPTION_LANGUAGE = "pt"
 # Opção -> valor de modo do provedor. "auto" é o "multi" interno (detecção
-# nativa); "pt" usa "pt-BR" no Deepgram (único provedor que distingue a
-# variante); o servidor local (Granite NAR) não tem parâmetro de idioma e por
+# nativa); "pt" usa "pt-BR" no Deepgram e no Gemini; o servidor local (Granite NAR) não tem parâmetro de idioma e por
 # isso não aparece nesta tabela.
 TRANSCRIPTION_OPTION_MODES = {
     "gemini": {"auto": "multi", "pt": "pt-BR", "en": "en-US", "es": "es-419"},
@@ -180,7 +186,7 @@ TRANSCRIPTION_OPTION_MODES = {
 
 
 def transcription_language_option(settings: dict) -> str:
-    """Opção escolhida na aba Transcrição (auto/pt/en/es). Padrão: "auto"."""
+    """Opção escolhida na aba Transcrição (auto/pt/en/es/custom). Padrão: "pt"."""
     value = str(settings.get(KEY_TRANSCRIPTION_LANGUAGE) or "").strip().casefold()
     return value if value in TRANSCRIPTION_LANGUAGE_OPTIONS else DEFAULT_TRANSCRIPTION_LANGUAGE
 
@@ -204,6 +210,17 @@ def apply_transcription_language_option(
     resolved = option or transcription_language_option(settings)
     updated = settings.copy()
     for provider in providers:
+        if resolved == "custom" and provider in KEY_LANGUAGE_MODE:
+            custom = settings.get(KEY_TRANSCRIPTION_LANGUAGE_CUSTOM) or {}
+            codes = parse_codes(str(custom.get(provider) or ""))
+            invalid = invalid_codes(provider, codes)
+            if not codes or invalid:
+                raise ValueError(f"Idioma custom de {provider}: " + (
+                    "códigos não suportados: " + ", ".join(invalid) if invalid else "digite pelo menos um código."
+                ))
+            updated[KEY_LANGUAGE_MODE[provider]] = "custom"
+            updated[KEY_LANGUAGE_CUSTOM[provider]] = ",".join(codes)
+            continue
         mode = language_mode_for_option(provider, resolved)
         if mode:
             updated[KEY_LANGUAGE_MODE[provider]] = mode

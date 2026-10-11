@@ -36,6 +36,8 @@ from stt_provider_rules import (
     DEFAULT_KEYWORD_PROFILE_NAME,
     DEFAULT_TRANSCRIPTION_LANGUAGE,
     KEY_TRANSCRIPTION_LANGUAGE,
+    KEY_TRANSCRIPTION_LANGUAGE_CUSTOM,
+    KEY_LANGUAGE_MODE,
     normalize_keyword_profiles,
     TRANSCRIPTION_LANGUAGE_OPTIONS,
 )
@@ -90,6 +92,12 @@ def normalize_settings(data: dict) -> dict:
         if language_option in TRANSCRIPTION_LANGUAGE_OPTIONS
         else DEFAULT_TRANSCRIPTION_LANGUAGE
     )
+    custom_languages = data.get(KEY_TRANSCRIPTION_LANGUAGE_CUSTOM)
+    clean[KEY_TRANSCRIPTION_LANGUAGE_CUSTOM] = {
+        provider: value.strip() for provider, value in custom_languages.items()
+        if provider in KEY_LANGUAGE_MODE and isinstance(value, str)
+    } if isinstance(custom_languages, dict) else {}
+    clean["gemini_timestamps"] = data.get("gemini_timestamps") is True
     # Perfis de keywords + o perfil ativo. MIGRAÇÃO: settings antigos guardavam
     # uma lista única (`stt_keywords`) e um liga/desliga (`stt_keywords_enabled`)
     # — viram o perfil "Lista 1" (ativo apenas se estava ligado), sem perder

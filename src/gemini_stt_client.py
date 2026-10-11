@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from app_env import app_base_dir
 from domain_models import Cancelled
 from http_clients import GraniteUploader
+from gemini_stt_quota import GeminiQuota
 from media_probe import audio_duration_seconds
 from providers import GEMINI_LIVE_MODEL, GEMINI_STT_MODEL, GEMINI_STT_URL, GEMINI_WEBSOCKET_URL
 from stt_provider_rules import invalid_codes, keywords_for_provider, language_custom, language_mode, parse_codes
@@ -48,10 +49,13 @@ def gemini_api_key(settings: dict) -> str:
 
 def gemini_language_codes(settings: dict) -> list[str]:
     mode = language_mode(settings, "gemini")
+    mode = {"auto": "multi", "pt": "pt-BR", "en": "en-US", "es": "es-419"}.get(mode, mode)
     codes = parse_codes(language_custom(settings, "gemini")) if mode == "custom" else (
         [] if mode == "multi" else [mode]
     )
     invalid = invalid_codes("gemini", codes)
+    if mode == "custom" and not codes:
+        raise ValueError("Digite pelo menos um código de idioma para Gemini.")
     if invalid:
         raise ValueError("Gemini não suporta estes códigos de idioma: " + ", ".join(invalid))
     return codes
@@ -63,7 +67,9 @@ def gemini_transcription_config(settings: dict, *, live: bool = False) -> dict:
     if len(terms) > 1000:
         raise ValueError("Gemini aceita no máximo 1.000 termos de vocabulário.")
     if live:
-        config = {"languageCodes": codes, "mode": "VERBATIM"}
+        config = {"mode": "VERBATIM"}
+        if codes:
+            config["languageCodes"] = codes
         if terms:
             config["customVocabulary"] = terms
         return config
@@ -76,7 +82,9 @@ def gemini_transcription_config(settings: dict, *, live: bool = False) -> dict:
         mode["diarization_mode"] = "speaker"
     if timestamps:
         mode["timestamp_granularities"] = ["word"]
-    config = {"language_codes": codes, "mode": mode}
+    config = {"mode": mode}
+    if codes:
+        config["language_codes"] = codes
     if terms:
         config["custom_vocabulary"] = terms
     return config
@@ -150,8 +158,22 @@ class GeminiTranscriptionUploader(GraniteUploader):
         self.settings = settings.copy()
         self.api_key = gemini_api_key(settings)
         gemini_transcription_config(settings)
+        self.quota = GeminiQuota(self.api_key) if settings.get("_multi_transcription") else None
+        self.on_retry = None
+        self.on_error = None
+
+    @property
+    def error_count(self):
+        return self.quota.error_count if self.quota else 0
 
     def _request(self, method, url, body=b"", headers=None, *, cleanup=False):
+        if self.quota is not None and method == "POST" and url == GEMINI_STT_URL and not cleanup:
+            self.quota.on_retry = self.on_retry
+            self.quota.on_error = self.on_error
+            return self.quota.execute(self.cancel_event, lambda: self._request_once(method, url, body, headers))
+        return self._request_once(method, url, body, headers, cleanup=cleanup)
+
+    def _request_once(self, method, url, body=b"", headers=None, *, cleanup=False):
         parsed = urlparse(url)
         # URLs de upload vêm da API. Não encaminhar a chave para outros hosts.
         if parsed.scheme != "https" or parsed.netloc != "generativelanguage.googleapis.com":
@@ -174,7 +196,10 @@ class GeminiTranscriptionUploader(GraniteUploader):
             conn.putrequest(method, path)
             for name, value in request_headers.items():
                 conn.putheader(name, value)
-            conn.endheaders()
+            if self.quota is not None and method == "POST" and url == GEMINI_STT_URL and not cleanup:
+                self.quota.start(self.cancel_event, conn.endheaders)
+            else:
+                conn.endheaders()
             if isinstance(body, Path):
                 with body.open("rb") as source:
                     while chunk := source.read(128 * 1024):
@@ -190,7 +215,8 @@ class GeminiTranscriptionUploader(GraniteUploader):
                     raise Cancelled()
                 chunks.append(chunk)
             raw = b"".join(chunks)
-            raw = gemini_error_message(raw.decode("utf-8"), self.api_key).encode("utf-8") if response.status >= 400 else raw
+            if response.status >= 400:
+                raw = raw.replace(self.api_key.encode(), b"[chave ocultada]")
             return response.status, raw, {key.lower(): value for key, value in response.getheaders()}
         except Exception as exc:
             if self.cancel_event.is_set() and not cleanup:
@@ -209,6 +235,8 @@ class GeminiTranscriptionUploader(GraniteUploader):
         return json.loads(raw or b"{}"), headers
 
     def post_file_raw(self, url, file_path, mime_type, raw_path, form_fields=None, accept="application/json"):
+        if self.quota:
+            self.quota.check_available()
         path = Path(file_path)
         settings = {**self.settings, **(form_fields or {})}
         config = gemini_transcription_config(settings)

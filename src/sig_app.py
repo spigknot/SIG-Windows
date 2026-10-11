@@ -355,6 +355,8 @@ from stt_clients import (  # noqa: F401
     alibaba_vocabulary_record_update,
 )
 from grok_stt_client import GrokTranscriptionUploader
+from gemini_stt_client import GeminiTranscriptionUploader
+from gemini_stt_quota import GeminiQuota, HELP_TEXT as GEMINI_QUOTA_HELP
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
@@ -3987,6 +3989,14 @@ class SigApp:
         self.files_grok_limit_warning.bind("<space>", self._show_files_grok_limit_help)
         create_tooltip(self.files_grok_limit_warning, "Grok STT: limite de 10 requisições por segundo")
 
+        self.files_gemini_limit_warning = tk.Label(
+            options2, text="!", fg="#d32f2f", background="#f4f7f6",
+            font=("Segoe UI", 13, "bold"), cursor="hand2", takefocus=True,
+        )
+        for event in ("<Button-1>", "<Return>", "<space>"):
+            self.files_gemini_limit_warning.bind(event, self._show_files_gemini_limit_help)
+        create_tooltip(self.files_gemini_limit_warning, "Gemini: 10 por minuto e 100 por dia; clique para ver a cota")
+
         # Checkbox "Um modelo por vez" (entre o botão "Modelos" e o seletor de
         # Idioma, regra do usuário 13/09): marcada, o lote NÃO manda os áudios
         # para os modelos ao mesmo tempo — a fila inteira vai para um modelo e
@@ -4032,6 +4042,13 @@ class SigApp:
             options2, lambda: self._open_keywords_help()
         )
         self.files_keywords_help.pack(side=LEFT, padx=(4, 0))
+        self.files_gemini_timestamps_var = BooleanVar(value=self.settings.get("gemini_timestamps", False))
+        self.files_gemini_timestamps_check = ttk.Checkbutton(
+            options2, text="Tempos por palavra (Gemini)", variable=self.files_gemini_timestamps_var,
+            command=self._set_files_gemini_timestamps,
+        )
+        create_tooltip(self.files_gemini_timestamps_check,
+                       "Timestamps por palavra no Gemini REST; não podem ser combinados com Keywords.")
         self._rebuild_keywords_menus()
         self._refresh_files_language_label()
         self._refresh_files_grok_limit_warning()
@@ -9191,12 +9208,12 @@ try {
             self.live_language_label_var.set("Idioma")
             return
         for option in MENU_OPTIONS[provider]:
-            label = stt_provider_rules.LANGUAGE_LABELS.get(option, option)
+            label = stt_provider_rules.language_label(provider, option)
             menu.add_command(label=label, command=lambda selected=option: self._set_live_language(selected))
         self.live_language_button.configure(menu=menu)
         mode = language_mode(self.settings, provider)
         custom = language_custom(self.settings, provider)
-        shown = custom if mode == "custom" and custom else stt_provider_rules.LANGUAGE_LABELS.get(mode, mode)
+        shown = custom if mode == "custom" and custom else stt_provider_rules.language_label(provider, mode)
         self.live_language_label_var.set(f"Idioma: {shown}")
 
     def _set_live_language(self, code: str):
@@ -9209,7 +9226,7 @@ try {
         self.settings[stt_provider_rules.KEY_LANGUAGE_MODE[provider]] = code
         save_settings(self.settings)
         self.live_language_var.set(code)
-        shown = stt_provider_rules.LANGUAGE_LABELS.get(code, code)
+        shown = stt_provider_rules.language_label(provider, code)
         self.live_language_label_var.set(f"Idioma: {shown}")
         self._set_activity_status(f"Idioma selecionado: {shown}.", log=False)
 
@@ -9785,6 +9802,49 @@ try {
         else:
             marker.pack_forget()
 
+        gemini_marker = getattr(self, "files_gemini_limit_warning", None)
+        if gemini_marker is not None:
+            if GEMINI_API_NAME in names:
+                gemini_marker.pack(side=LEFT, padx=(4, 0), before=self.files_one_model_check)
+            else:
+                gemini_marker.pack_forget()
+
+        timestamps = getattr(self, "files_gemini_timestamps_check", None)
+        if timestamps is not None:
+            if GEMINI_API_NAME in names:
+                timestamps.pack(side=LEFT, padx=(8, 0))
+            else:
+                timestamps.pack_forget()
+
+    def _set_files_gemini_timestamps(self):
+        self.settings["gemini_timestamps"] = self.files_gemini_timestamps_var.get()
+        self.settings = save_settings(self.settings)
+
+    def _show_files_gemini_limit_help(self, _event=None):
+        window = Toplevel(self.root)
+        window.title("Gemini — 10 por minuto / 100 por dia")
+        window.transient(self.root)
+        text = tk.StringVar(window)
+        ttk.Label(window, textvariable=text, wraplength=580, justify=LEFT).pack(padx=20, pady=16)
+        ttk.Button(window, text="Fechar", command=window.destroy).pack(pady=(0, 16))
+        timer = [None]
+        def stop_refresh(event):
+            if event.widget is window and timer[0] is not None:
+                window.after_cancel(timer[0])
+                timer[0] = None
+        window.bind("<Destroy>", stop_refresh)
+        def refresh():
+            if not window.winfo_exists():
+                return
+            key = str(self.settings.get("g_ai_studio_api_key") or "").strip()
+            try:
+                stats = GeminiQuota(key).statistics_text() if key else "Configure a chave G AI Studio para acompanhar a cota."
+            except Exception:
+                stats = "Não foi possível ler o registro local de cota."
+            text.set(GEMINI_QUOTA_HELP + stats)
+            timer[0] = window.after(1000, refresh)
+        refresh()
+
     def _show_files_grok_limit_help(self, _event=None):
         messagebox.showinfo(
             "Grok STT — limite de requisições",
@@ -9920,10 +9980,57 @@ try {
         """
         if option not in TRANSCRIPTION_LANGUAGE_OPTIONS:
             return
+        if option == "custom":
+            self._show_files_custom_language_dialog()
+            return
         self.settings[stt_provider_rules.KEY_TRANSCRIPTION_LANGUAGE] = option
         self.settings = save_settings(self.settings)
         self.files_language_label_var.set(f"Idioma: {option}")
         self._set_activity_status(f"Idioma selecionado: {option}.", log=False)
+
+    def _show_files_custom_language_dialog(self):
+        names = self._selected_multi_transcription_model_names()
+        if not names:
+            names = self.settings.get("multi_transcription_models") or []
+        providers = transcription_providers_for_servers(names)
+        if not providers:
+            messagebox.showinfo("Código do idioma", "Selecione um modelo com suporte a idioma.", parent=self.root)
+            return
+        window = Toplevel(self.root)
+        window.title("Código do idioma")
+        window.transient(self.root)
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="Digite um ou mais códigos, separados por vírgula, para cada modelo.").grid(
+            row=0, column=0, columnspan=3, pady=(0, 8))
+        saved = self.settings.get(stt_provider_rules.KEY_TRANSCRIPTION_LANGUAGE_CUSTOM) or {}
+        entries = {}
+        for row, provider in enumerate(providers, 1):
+            ttk.Label(frame, text=provider).grid(row=row, column=0, sticky="w", padx=(0, 8))
+            entry = ttk.Entry(frame, width=28)
+            entry.insert(0, saved.get(provider) or stt_provider_rules.DEFAULT_MODE[provider])
+            entry.grid(row=row, column=1, pady=4)
+            entries[provider] = entry
+            ttk.Button(frame, text="?", width=3, command=lambda p=provider: messagebox.showinfo(
+                "Códigos aceitos — " + p, codes_for_help(p), parent=window)).grid(row=row, column=2, padx=6)
+
+        def apply_codes():
+            values = {p: ",".join(parse_codes(entry.get())) for p, entry in entries.items()}
+            candidate = {**self.settings, stt_provider_rules.KEY_TRANSCRIPTION_LANGUAGE_CUSTOM: {**saved, **values}}
+            try:
+                apply_transcription_language_option(candidate, providers, "custom")
+            except ValueError as exc:
+                messagebox.showinfo("Código do idioma", str(exc), parent=window)
+                return
+            candidate[stt_provider_rules.KEY_TRANSCRIPTION_LANGUAGE] = "custom"
+            self.settings = save_settings(candidate)
+            self._refresh_files_language_label()
+            window.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(providers) + 1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Button(buttons, text="Voltar", command=window.destroy).pack(side=LEFT)
+        ttk.Button(buttons, text="OK", command=apply_codes).pack(side=RIGHT)
 
     def _transcription_batch_settings(
         self, model_names: list[str], one_model_at_a_time: bool = False
@@ -15387,9 +15494,15 @@ try {
             return
         # Cópia do lote: é ELA que define o modelo e o idioma realmente usados
         # (o `transcription_server` é compartilhado com a aba Ocorrência).
-        workflow_settings = self._transcription_batch_settings(
-            multi_model_names, one_model_at_a_time=self.files_one_model_var.get()
-        )
+        try:
+            workflow_settings = self._transcription_batch_settings(
+                multi_model_names, one_model_at_a_time=self.files_one_model_var.get()
+            )
+            if GEMINI_API_NAME in multi_model_names:
+                gemini_rest_body(workflow_settings, "", "audio/wav")
+        except ValueError as exc:
+            messagebox.showinfo("Transcrição", str(exc), parent=self.root)
+            return
         multi_transcription = len(multi_model_names) >= 2
         if is_grok_transcription(workflow_settings) and not workflow_settings.get("grok_api_key"):
             messagebox.showerror("sig", "Insira a chave API do Grok nas configurações antes de transcrever.")
@@ -17143,7 +17256,7 @@ try {
             for model_index, count in enumerate(snapshot, start=1):
                 label = model_labels[model_index - 1]
                 model_uploader = uploaders[model_index - 1]
-                errors = f" - {model_uploader.error_count} erros" if isinstance(model_uploader, GrokTranscriptionUploader) else ""
+                errors = f" - {model_uploader.error_count} erros" if isinstance(model_uploader, (GrokTranscriptionUploader, GeminiTranscriptionUploader)) else ""
                 if count >= total:
                     # Linha FECHADA: escrita UMA única vez, com o tempo do
                     # próprio modelo — reescrever aqui faria o relógio continuar
@@ -17168,8 +17281,8 @@ try {
 
         for model_index, label in enumerate(model_labels, start=1):
             uploader = uploaders[model_index - 1]
-            errors = " - 0 erros" if isinstance(uploader, GrokTranscriptionUploader) else ""
-            if isinstance(uploader, GrokTranscriptionUploader):
+            errors = " - 0 erros" if isinstance(uploader, (GrokTranscriptionUploader, GeminiTranscriptionUploader)) else ""
+            if isinstance(uploader, (GrokTranscriptionUploader, GeminiTranscriptionUploader)):
                 uploader.on_error = lambda index=model_index: update_progress(index, advance=False)
             self._queue("activity_line", f"model:{model_index}", f"{label} 0/{total}{errors} (0%)", None)
 
@@ -17360,7 +17473,7 @@ try {
             txt_path.write_text(result, encoding="utf-8")
             return
         protected_grok = isinstance(uploader, GrokTranscriptionUploader)
-        if protected_grok:
+        if protected_grok or isinstance(uploader, GeminiTranscriptionUploader):
             uploader.on_retry = lambda notice: self._queue("activity", notice, "warning")
         status, transcript = uploader.post_file(url, job.upload_path, mime_type, raw_path)
         if status != 200 and is_grok_transcription(request_settings) and not protected_grok:

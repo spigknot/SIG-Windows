@@ -25,6 +25,7 @@ DEFAULT_SETTINGS = {
     "transcription_server": "servidor",
     "multi_transcription_models": ["servidor"],
     "transcription_language": "pt",
+    "transcription_language_custom": {},
     # Perfis de keywords do STT: várias listas nomeadas, uma ativa por vez.
     # A montagem do parâmetro continua sendo POR PROVEDOR (ver stt_provider_rules).
     "stt_keyword_profiles": {},
@@ -57,6 +58,7 @@ DEFAULT_SETTINGS = {
     "gcloud_api_key": "",
     "g_ai_studio_api_key": "",
     "gemini_language_mode": "pt-BR",
+    "gemini_timestamps": False,
     "gemini_language_custom": "",
     # Lista PRÉ-COMPILADA de hotwords da Alibaba, POR MODELO alvo (a do
     # WebSocket não vale para o arquivo e vice-versa):
