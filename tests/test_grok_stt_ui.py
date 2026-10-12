@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import sig_app
+import ui_widgets
 
 
 class GrokWarningUITest(unittest.TestCase):
@@ -68,15 +69,16 @@ class GrokWarningUITest(unittest.TestCase):
         self.assertEqual(marker.winfo_manager(), "pack")
         self.assertEqual(self.app.files_grok_limit_warning.winfo_manager(), "")
         self.app.settings["g_ai_studio_api_key"] = "fict-ui"
-        with patch.object(sig_app.GeminiQuota, "statistics_text", return_value="Uso local: 3/100"):
+        with patch.object(sig_app.GeminiQuota, "statistics_text", return_value="Uso local: 3/100"), \
+             patch.object(sig_app, "show_info_popup") as popup:
             self.app._show_files_gemini_limit_help()
-        dialog = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
-        label = next(w for w in dialog.winfo_children() if w.winfo_class() == "TLabel")
-        text = dialog.getvar(label.cget("textvariable"))
+            popup.assert_called_once()
+            self.assertIs(popup.call_args.args[0], marker)
+            self.assertEqual(popup.call_args.kwargs["refresh_ms"], 1000)
+            text = popup.call_args.args[2]()
         self.assertIn("10 requisições por minuto", text)
         self.assertIn("100 por dia", text)
         self.assertIn("3/100", text)
-        dialog.destroy()
         self.select("servidor")
         self.assertEqual(marker.winfo_manager(), "")
 
@@ -89,18 +91,21 @@ class GrokWarningUITest(unittest.TestCase):
         marker = self.app.files_grok_limit_warning
         for event in ("<Button-1>", "<Return>", "<space>"):
             self.assertTrue(marker.bind(event))
-        with patch.object(sig_app.messagebox, "showinfo") as dialog:
+        with patch.object(ui_widgets, "show_info_popup") as dialog:
             # A janela fica oculta no teste; dispare o callback registrado no
             # Tcl, pois event_generate não entrega cliques a widgets ocultos.
             callback = marker.bind("<Button-1>").split("[", 1)[1].split()[0]
             marker.tk.call(callback)
         dialog.assert_called_once()
-        message = dialog.call_args.args[1]
+        self.assertIs(dialog.call_args.args[0], marker)
+        self.assertEqual(dialog.call_args.args[1], "Grok STT — limite de requisições")
+        message = dialog.call_args.args[2]
+        if callable(message):
+            message = message()
         self.assertIn("10 RPS", message)
         self.assertIn("8 requisições", message)
         self.assertIn("atraso", message)
         self.assertIn("5 tentativas", message)
-        self.assertIs(dialog.call_args.kwargs["parent"], self.root)
 
 
 if __name__ == "__main__":

@@ -270,8 +270,8 @@ class InterfaceTest(unittest.TestCase):
         self.assertIn("transcription_providers_for_servers", fonte)
 
     def test_start_run_usa_a_copia_do_lote_no_enviador(self):
-        # A cópia do lote recebe também a marcação da checkbox "Um modelo por
-        # vez" (flag do lote, não persistida).
+        # A cópia do lote recebe também a marcação da opção "Um por vez"
+        # (flag do lote, não persistida).
         self.assertIn(
             "self._transcription_batch_settings(\n"
             "                multi_model_names, one_model_at_a_time=self.files_one_model_var.get()\n"

@@ -170,7 +170,7 @@ class EncoderSelectorWiringTests(unittest.TestCase):
         origem = method_source("_refresh_encoder_advanced_controls")
         self.assertIn("ENCODER_PATH_GPU", origem)
         self.assertIn("pack_forget", origem)
-        ajuda = method_source("_show_encoder_help")
+        ajuda = method_source("_encoder_help_text")
         self.assertIn("Avançado", ajuda)
         # O texto cita o rotulo do automatico, o curto-circuito da GPU em trecho curto
         # e o aviso de que a falha de hardware cai na CPU com registro no log.

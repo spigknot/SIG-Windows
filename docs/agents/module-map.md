@@ -26,7 +26,7 @@ Ambiente ...... app_env.py
 `transcription_parsing`, `text_models`, `http_clients`, `stt_clients`, `gemini_stt_client`, `gemini_stt_quota`, `grok_stt_client`,
 `log_formatting`, `reporting`, `qualification`, `name_database`, `imei_lookup`,
 `documents`, `media_files`, `audio_io`, `batch_errors`, `batch_execution` e
-`app_env` **nao podem** importar `tkinter` nem `sig_app` (testado em
+`app_env`, `concatenated_audio` **nao podem** importar `tkinter` nem `sig_app` (testado em
 `tests/test_modularizacao_contrato.py`).
 
 ## Tabela de responsabilidades
@@ -54,6 +54,7 @@ Ambiente ...... app_env.py
 | `documents.py` | DOCX a partir dos modelos Word, PDF via Word, previa e clipboard | Regras de transcricao |
 | `media_files.py` | Extensoes suportadas, MIME e deteccao de tipo (`is_video_file`) | Processamento de midia |
 | `audio_io.py` | Conversao PCM <-> WAV da captura ao vivo | Captura/rede |
+| `concatenated_audio.py` | WAV com silêncio PCM, agrupamento de arquivos inteiros sob limites de API e atribuição dos timestamps por arquivo | UI, chamadas HTTP e tempos estimados |
 | `imei_lookup.py` | Consulta e historico de IMEI (JSON local) | UI |
 | `name_database.py` | Base de nomes: extracao, normalizacao, chave fonetica | UI |
 | `qualification.py` | Qualificacao de ocorrencias: parsing de JSON, labels, status | UI |

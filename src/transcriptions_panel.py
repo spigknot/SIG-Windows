@@ -647,14 +647,15 @@ class TranscriptionsPanel:
         except ValueError as exc:
             messagebox.showerror("sig", str(exc), parent=self.root)
             return
+        default_name = " + ".join(record.name for record in selected)
         name = simpledialog.askstring(
             "Juntar tabelas",
             f"{len(selected)} registros · {preview.file_count} arquivos · colunas: {', '.join(preview.models)}\n\n"
             "Nome da nova tabela:",
-            initialvalue=preview.name, parent=self.root)
+            initialvalue=default_name, parent=self.root)
         if name is None:
             return
-        preview.name = " ".join(name.split()) or preview.name
+        preview.name = " ".join(name.split()) or default_name or preview.name
         try:
             history.save_record(preview, self._history_directory())
         except OSError as exc:

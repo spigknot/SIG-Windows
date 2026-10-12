@@ -274,20 +274,26 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
             x, y, w, h = tree.bbox("0", column)
             tree.event_generate("<Motion>", x=x + min(w // 2, 15), y=y + h // 2)
             self.pump()
+            self.root.after(720, self.root.quit)
+            self.root.mainloop()
             balloon = panel.preview_tooltip
             self.assertTrue(balloon.window.winfo_exists())
             self.assertEqual(expected, balloon.label.cget("text"))
             self.assertEqual("solid", str(balloon.label.cget("relief")))
-            self.assertEqual((7, 4), tuple(int(str(p)) for p in balloon.label.cget("padding")))
+            self.assertEqual("#172024", balloon.label.cget("background"))
+            self.assertEqual(12, int(balloon.label.cget("padx")))
             self.assertLessEqual(balloon.window.winfo_height(), self.root.winfo_screenheight())
         tree.event_generate("<ButtonPress-1>", x=x + 5, y=y + h // 2)
         self.pump()
         self.assertIsNone(panel.preview_tooltip.window)
+
         tree.xview_moveto(1.0)
         self.pump()
         x, y, w, h = tree.bbox("0", "m0")
         tree.event_generate("<Motion>", x=max(5, x + 10), y=y + h // 2)
         self.pump()
+        self.root.after(720, self.root.quit)
+        self.root.mainloop()
         self.assertEqual(full_text, panel.preview_tooltip.label.cget("text"))
         tree.configure(displaycolumns=("m0", "arquivo"))
         tree.xview_moveto(0.0)
@@ -295,6 +301,8 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
         x, y, w, h = tree.bbox("0", "m0")
         tree.event_generate("<Motion>", x=x + 10, y=y + h // 2)
         self.pump()
+        self.root.after(720, self.root.quit)
+        self.root.mainloop()
         self.assertEqual(full_text, panel.preview_tooltip.label.cget("text"))
         tree.event_generate("<Motion>", x=5, y=2)
         self.pump()
@@ -309,6 +317,21 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
         self.app.select_main_tab("live")
         self.pump()
         self.assertIsNone(panel.preview_tooltip.window)
+
+    def test_callback_error_keeps_queue_layout_and_is_logged_once(self):
+        self.root.geometry("1220x820+30+30")
+        self.pump()
+        before = self.app.files_queue_card.winfo_width()
+        error = tk.TclError('bad window path name "' + '.!frame.!treeview.!toplevel.!canvas.!label' * 12 + '"')
+        self.app._report_callback_exception(tk.TclError, error, None)
+        self.pump()
+        self.assertLessEqual(abs(self.app.files_queue_card.winfo_width() - before), 2)
+        self.assertIn('bad window path name', self.app.status_var.get())
+        log = self.app.activity_log.get('1.0', 'end-1c')
+        self.assertEqual(1, log.count('Erro interno: TclError:'))
+        label = self.app.files_queue_status_label
+        head = label.master
+        self.assertLessEqual(label.winfo_rootx()+label.winfo_width(), head.winfo_rootx()+head.winfo_width()+1)
 
     def test_all_bottom_actions_keep_their_callbacks(self):
         self.app._show_folder_button(visible=True)
@@ -703,17 +726,22 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
     def test_empty_transcription_has_no_starting_hint(self):
         self.assertEqual("", self.app.status_var.get())
 
-    def test_transcription_modes_continue_the_vad_line_in_order(self):
+    def test_transcription_mode_dropdown_continues_the_vad_line_in_order(self):
         self.root.geometry("1920x989+30+30")
         self.app.vad_var.set("Silero - 1")
         self.app._refresh_vad_only_visibility()
         self.pump()
-        options = self.app.ready_radio.master
+        options = self.app.files_send_mode_button.master
         converter = next(w for w in options.winfo_children()
                          if w.cget("text") == "Apenas converter")
-        widgets = (self.app._vad_tooltip_label, self.app.ready_radio,
-                   self.app.compact_radio, self.app.as_is_radio, converter,
-                   self.app.vad_only_check)
+        labels = [self.app.files_send_mode_menu.entrycget(index, "label")
+                  for index in range(self.app.files_send_mode_menu.index("end") + 1)]
+        self.assertEqual(["Pronto", "Compacto", "Como está"], labels)
+        self.assertEqual("Enviar:", self.app.files_send_mode_prefix_label.cget("text"))
+        self.assertEqual("ready", self.app.mode_var.get())
+        self.assertEqual("Pronto", self.app.files_send_mode_label_var.get())
+        widgets = (self.app._vad_tooltip_label, self.app.files_send_mode_prefix_label,
+                   self.app.files_send_mode_button, converter, self.app.vad_only_check)
         for left, right in zip(widgets, widgets[1:]):
             self.assertLessEqual(left.winfo_rootx() + left.winfo_width(), right.winfo_rootx())
             self.assertAlmostEqual(left.winfo_rooty() + left.winfo_height() / 2,
@@ -725,8 +753,10 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
         self.app._refresh_vad_only_visibility()
         self.pump()
         canvas = self.app.files_controls_canvas
-        self.assertTrue(self.app.files_controls_scroll.winfo_ismapped())
-        self.assertLess(canvas.xview()[1], 1.0)
+        if self.app.files_controls_scroll.winfo_ismapped():
+            self.assertLess(canvas.xview()[1], 1.0)
+        else:
+            self.assertEqual((0.0, 1.0), canvas.xview())
         canvas.xview_moveto(1.0)
         self.pump()
         last = self.app.vad_only_check

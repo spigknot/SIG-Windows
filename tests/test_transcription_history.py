@@ -227,8 +227,10 @@ class PanelTests(unittest.TestCase):
         self.panel.records_tree.selection_set(("r1", "r2"))
         self.panel._on_select()
         self.assertEqual("normal", str(self.panel.merge_button.cget("state")))
-        with patch("transcriptions_panel.simpledialog.askstring", return_value="Três modelos"):
+        default_name = " + ".join(record.name for record in self.panel._selected_records())
+        with patch("transcriptions_panel.simpledialog.askstring", return_value="Três modelos") as ask:
             self.panel.merge_selected()
+        self.assertEqual(default_name, ask.call_args.kwargs["initialvalue"])
         merged = [r for r in history.list_records(self.store) if r.kind == "merged"]
         self.assertEqual(["Três modelos"], [r.name for r in merged])
         self.assertEqual(["A", "B", "C"], merged[0].models)

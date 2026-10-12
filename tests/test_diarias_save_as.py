@@ -299,12 +299,26 @@ class _Excel:
 
 
 class DiariasMapaOverwriteTest(unittest.TestCase):
+    @staticmethod
+    def _replace_template_markers(_sheet, replacements):
+        counts = {marker: 0 for marker in replacements}
+        for marker in (
+            "{{{cidade_plantao}}}", "{{{data_ida}}}",
+            "{{{data_protocolo}}}", "{{{protocolo_mapa}}}",
+        ):
+            counts[marker] = 1
+        return counts
+
     def test_mapa_substitui_o_arquivo_existente_selecionado(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             destination = directory / "mapa_escolhido.xlsx"
             destination.write_bytes(b"old workbook")
             values = SimpleNamespace(
+                agencia="TAGUAI",
+                conta="000000",
+                dados_bancarios="Dados bancários de teste",
+                delegacia_perfil="Delegacia de teste",
                 total_vencimentos=10817.23,
                 meios_proprios=True,
                 cidade_plantao="TAGUAI",
@@ -322,11 +336,9 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
             with patch.object(
                 diarias_mapa, "_create_excel_application", return_value=_Excel(),
             ), patch.object(
-                diarias_mapa, "_replace_cell_marker", return_value=1
-            ), patch.object(
                 diarias_mapa,
-                "_replace_shape_markers",
-                return_value={"{{{data_protocolo}}}": 1, "{{{protocolo_mapa}}}": 1},
+                "_replace_template_markers",
+                side_effect=self._replace_template_markers,
             ):
                 diarias_mapa.generate_diarias_mapa(destination, values)
 
@@ -342,6 +354,10 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
             destination = directory / "mapa_escolhido.pdf"
             destination.write_bytes(b"old pdf")
             values = SimpleNamespace(
+                agencia="TAGUAI",
+                conta="000000",
+                dados_bancarios="Dados bancários de teste",
+                delegacia_perfil="Delegacia de teste",
                 total_vencimentos=10817.23,
                 meios_proprios=True,
                 cidade_plantao="TAGUAI",
@@ -360,11 +376,9 @@ class DiariasMapaOverwriteTest(unittest.TestCase):
             with patch.object(
                 diarias_mapa, "_create_excel_application", return_value=excel,
             ), patch.object(
-                diarias_mapa, "_replace_cell_marker", return_value=1
-            ), patch.object(
                 diarias_mapa,
-                "_replace_shape_markers",
-                return_value={"{{{data_protocolo}}}": 1, "{{{protocolo_mapa}}}": 1},
+                "_replace_template_markers",
+                side_effect=self._replace_template_markers,
             ):
                 diarias_mapa.generate_diarias_mapa(destination, values)
 

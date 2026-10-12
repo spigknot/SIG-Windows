@@ -208,6 +208,8 @@ from documents import (  # noqa: F401
 # Implementacao real em src/ui_widgets.py (codigo movido verbatim).
 from ui_widgets import (  # noqa: F401
     create_tooltip,
+    create_info_marker,
+    show_info_popup,
     describe_parallel_values,
     describe_step_values,
     MAGIC_WAND_ASSET,
@@ -357,6 +359,11 @@ from stt_clients import (  # noqa: F401
 from grok_stt_client import GrokTranscriptionUploader
 from gemini_stt_client import GeminiTranscriptionUploader
 from gemini_stt_quota import GeminiQuota, HELP_TEXT as GEMINI_QUOTA_HELP
+from concatenated_audio import (GEMINI_MAX_BATCH_SECONDS, concatenate_wavs,
+                                concatenation_settings, check_limits,
+                                split_entries, entries_text, group_concatenated_audio_by_files)
+from providers import transcription_provider_for_server
+from transcription_parsing import TimedTranscriptEntry, timestamp_entries
 
 
 # --- API historica: nomes reexportados dos modulos extraidos ---------------
@@ -544,7 +551,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261009_001"
+APP_VERSION = "20261012_001"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -1254,9 +1261,6 @@ class SigApp:
         self.imei_last_processed = ""
         self.imei_history_expanded = False
         self.imei_formatting = False
-        self.zip_help_after_id = None
-        self.zip_help_window = None
-        self.zip_help_position = (0, 0)
         self.available_update_sync: dict | None = None
         self._sync_file_marks: dict[str, str] = {}
         self.update_check_thread: threading.Thread | None = None
@@ -1266,15 +1270,16 @@ class SigApp:
         self.about_image = None
 
         self.mode_var = StringVar(value="ready")
+        self.files_send_mode_label_var = StringVar(value="Pronto")
         self.convert_only_var = BooleanVar(value=False)
         self.vad_var = StringVar(value="Off")
         self.vad_only_var = BooleanVar(value=False)
         self.transcribe_after_convert_var = BooleanVar(value=False)
         self.send_zip_var = BooleanVar(value=False)
+        self.concatenate_audio_var = BooleanVar(master=self.root, value=False)
         self.zip_level_var = StringVar(value="1")
-        # "Um modelo por vez" (padrão: DESMARCADA): flag do LOTE — não é
-        # persistida em settings.json (mesmo padrão das outras checkboxes da
-        # linha), então o app sempre abre com ela desmarcada.
+        # "Um por vez" (padrão: desmarcado) é uma flag do lote, não é
+        # persistida em settings.json e sempre volta desmarcada ao abrir.
         self.files_one_model_var = BooleanVar(master=self.root, value=False)
         self.files_language_label_var = StringVar(value="Idioma: pt")
         self.files_keywords_label_var = StringVar(master=self.root, value=f"Keywords: {KEYWORDS_OFF_LABEL}")
@@ -1505,7 +1510,7 @@ class SigApp:
             pass
         try:
             self._append_activity_log(f"{resumo} (detalhes em sig_erros.log)", "activity_step_error")
-            self.status_var.set(resumo)
+            self._set_activity_status(resumo, log=False)
         except Exception:
             pass
 
@@ -3152,7 +3157,7 @@ class SigApp:
         )
         self.live_diarize_check.pack(side=LEFT)
         self.live_diarize_help = self._make_help_marker(
-            self.live_grok_controls, self.show_live_diarization_help
+            self.live_grok_controls, "Diarização", self._live_diarization_help_text
         )
         self.live_diarize_help.pack(side=LEFT, padx=(4, 8))
         self.live_language_button = ttk.Menubutton(self.live_grok_controls, textvariable=self.live_language_label_var, width=11)
@@ -3173,7 +3178,7 @@ class SigApp:
         self.live_keywords_button.configure(menu=self.live_keywords_menu)
         self.live_keywords_button.pack(side=LEFT, padx=(10, 0))
         self.live_keywords_help = self._make_help_marker(
-            self.live_grok_controls, lambda: self._open_keywords_help()
+            self.live_grok_controls, "Keywords", self._keywords_help_text
         )
         self.live_keywords_help.pack(side=LEFT, padx=(4, 0))
         self.live_grok_controls.pack(side=LEFT)
@@ -3921,34 +3926,37 @@ class SigApp:
                                       state="readonly", width=13, font=("Segoe UI", 9))
         self.vad_combo.pack(side=LEFT, padx=(0, 4))
         self.vad_combo.bind("<<ComboboxSelected>>", lambda _e: self._vad_changed())
-        self._vad_tooltip_label = tk.Label(controls, text="?", fg="#889493",
-                                           font=("Segoe UI", 9, "bold"), cursor="hand2",
-                                           background="#f4f7f6")
+        self._vad_tooltip_label = self._make_help_marker(controls, "Sobre VAD", self._vad_help_text)
         self._vad_tooltip_label.pack(side=LEFT)
-        self._vad_tooltip_label.bind("<Enter>", lambda _e: self._show_vad_tooltip())
-        self._vad_tooltip_label.bind("<Leave>", lambda _e: self._hide_vad_tooltip())
-        self._vad_tooltip_label.bind("<Button-1>", lambda _e: self._show_vad_info())
 
         options = ttk.Frame(controls)
         options.pack(side=LEFT, padx=(16, 0))
-        self.ready_radio = ttk.Radiobutton(
-            options, text="Enviar pronto", value="ready", variable=self.mode_var, command=self._refresh_tree_modes
+        self.files_send_mode_prefix_label = ttk.Label(options, text="Enviar:")
+        self.files_send_mode_prefix_label.pack(side=LEFT, padx=(0, 4))
+        self.files_send_mode_button = ttk.Menubutton(
+            options, textvariable=self.files_send_mode_label_var, width=10,
         )
-        self.compact_radio = ttk.Radiobutton(
-            options, text="Enviar compactado", value="compact", variable=self.mode_var, command=self._refresh_tree_modes
-        )
-        self.as_is_radio = ttk.Radiobutton(
-            options, text="Enviar como está", value="as_is", variable=self.mode_var, command=self._refresh_tree_modes
-        )
-        self.ready_radio.pack(side=LEFT, padx=(0, 18))
-        self.compact_radio.pack(side=LEFT, padx=(0, 18))
-        self.as_is_radio.pack(side=LEFT, padx=(0, 26))
-        ttk.Checkbutton(
+        self.files_send_mode_menu = tk.Menu(self.files_send_mode_button, tearoff=False)
+        for label, mode in (("Pronto", "ready"), ("Compacto", "compact"), ("Como está", "as_is")):
+            self.files_send_mode_menu.add_command(
+                label=label,
+                command=lambda selected_mode=mode: self._set_files_send_mode(selected_mode),
+            )
+        self.files_send_mode_button.configure(menu=self.files_send_mode_menu)
+        self.files_send_mode_button.pack(side=LEFT, padx=(0, 26))
+        create_tooltip(self.files_send_mode_button,
+                       "Pronto: converte para WAV PCM 16 kHz, mono e 16-bit.\n\n"
+                       "Compacto: converte para Ogg/Opus mono a 16 kHz, reduzindo o tamanho do envio.\n\n"
+                       "Como está: envia o arquivo original, sem conversão, quando o modelo aceita o formato.\n\n"
+                       "O Gemini recebe automaticamente os arquivos inteiros concatenados em lotes de até "
+                       "30 min, independentemente deste seletor. Nenhum áudio é cortado.")
+        self.convert_only_check = ttk.Checkbutton(
             options,
             text="Apenas converter",
             variable=self.convert_only_var,
             command=self._convert_only_changed,
-        ).pack(side=LEFT, padx=(0, 18))
+        )
+        self.convert_only_check.pack(side=LEFT, padx=(0, 18))
         self.vad_only_check = ttk.Checkbutton(
             options,
             text="Apenas VAD",
@@ -3960,11 +3968,17 @@ class SigApp:
 
         options2 = ttk.Frame(self.files_controls_frame)
         options2.pack(fill=X, pady=(0, 12))
-        ttk.Checkbutton(
+        self.transcribe_after_convert_check = ttk.Checkbutton(
             options2,
             text="Enviar após converter",
             variable=self.transcribe_after_convert_var,
-        ).pack(side=LEFT)
+        )
+        self.transcribe_after_convert_check.pack(side=LEFT)
+        create_tooltip(self.transcribe_after_convert_check,
+                       "Começa a enviar cada arquivo assim que sua conversão termina, enquanto os próximos "
+                       "ainda são convertidos.\n\nA antecipação depende do modo e dos modelos escolhidos. "
+                       "Envio ZIP, VAD e concatenação precisam aguardar a preparação do lote. "
+                       "O Gemini sempre aguarda todos os áudios para concatená-los.")
         self.zip_check = ttk.Checkbutton(
             options2,
             text="Enviar como zip",
@@ -3972,9 +3986,16 @@ class SigApp:
             command=self._refresh_zip_controls,
         )
         self.zip_check.pack(side=LEFT, padx=(24, 4))
-        self.zip_check.bind("<Enter>", self._schedule_zip_help)
-        self.zip_check.bind("<Motion>", self._schedule_zip_help)
-        self.zip_check.bind("<Leave>", self._hide_zip_help)
+        create_tooltip(self.zip_check, self._zip_help_text)
+        self.concatenate_audio_check = ttk.Checkbutton(
+            options2, text="Concatenar áudios", variable=self.concatenate_audio_var,
+            command=self._concatenate_audio_changed,
+        )
+        self.concatenate_audio_check.pack(side=LEFT, padx=(10, 4))
+        create_tooltip(self.concatenate_audio_check,
+                       "Experimental: um WAV por modelo, com 2s de silêncio entre arquivos. "
+                       "Separa o resultado pelos timestamps. Exige modelo compatível e respeita o limite do áudio total. "
+                       "O silêncio ajuda a separar, mas não reinicia o contexto do modelo.")
         self.zip_level_frame = ttk.Frame(options2)
         ttk.Label(self.zip_level_frame, text="Nível:").pack(side=LEFT, padx=(0, 4))
         self.zip_level_combo = ttk.Combobox(
@@ -3989,40 +4010,23 @@ class SigApp:
         # Botão "Modelos": multi-seleção de modelos de transcrição (menu).
         self.files_models_button = ttk.Menubutton(
             options2,
-            text="Modelos",
+            text="Modelos: 0",
         )
         self.files_models_menu = tk.Menu(self.files_models_button, tearoff=0, postcommand=self._populate_models_menu)
         self.files_models_button.configure(menu=self.files_models_menu)
         self.files_models_button.pack(side=LEFT, padx=(16, 0))
 
-        self.files_grok_limit_warning = tk.Label(
-            options2, text="!", fg="#d5a000", background="#f4f7f6",
-            font=("Segoe UI", 13, "bold"), cursor="hand2", takefocus=True,
+        self.files_grok_limit_warning = create_info_marker(
+            options2, "Grok STT — limite de requisições",
+            "Grok STT: limite de 10 requisições por segundo",
+            symbol="!", color="#d5a000", popup_message=self._files_grok_limit_help_text,
         )
-        self.files_grok_limit_warning.bind("<Button-1>", self._show_files_grok_limit_help)
-        self.files_grok_limit_warning.bind("<Return>", self._show_files_grok_limit_help)
-        self.files_grok_limit_warning.bind("<space>", self._show_files_grok_limit_help)
-        create_tooltip(self.files_grok_limit_warning, "Grok STT: limite de 10 requisições por segundo")
-
-        self.files_gemini_limit_warning = tk.Label(
-            options2, text="!", fg="#d32f2f", background="#f4f7f6",
-            font=("Segoe UI", 13, "bold"), cursor="hand2", takefocus=True,
+        self.files_gemini_limit_warning = create_info_marker(
+            options2, "Gemini — 10 por minuto / 100 por dia",
+            "Gemini: 10 por minuto e 100 por dia; clique para ver a cota",
+            symbol="!", color="#d32f2f", popup_message=self._files_gemini_limit_information,
+            refresh_ms=1000,
         )
-        for event in ("<Button-1>", "<Return>", "<space>"):
-            self.files_gemini_limit_warning.bind(event, self._show_files_gemini_limit_help)
-        create_tooltip(self.files_gemini_limit_warning, "Gemini: 10 por minuto e 100 por dia; clique para ver a cota")
-
-        # Checkbox "Um modelo por vez" (entre o botão "Modelos" e o seletor de
-        # Idioma, regra do usuário 13/09): marcada, o lote NÃO manda os áudios
-        # para os modelos ao mesmo tempo — a fila inteira vai para um modelo e
-        # só depois de ele terminar o próximo começa. O HTML continua sendo
-        # gerado uma única vez, no fim de TODOS os modelos.
-        self.files_one_model_check = ttk.Checkbutton(
-            options2,
-            text="Um modelo por vez",
-            variable=self.files_one_model_var,
-        )
-        self.files_one_model_check.pack(side=LEFT, padx=(12, 0))
 
         # Idioma do lote, logo à direita do botão "Modelos" (mesmo padrão do
         # seletor da aba Ocorrência). Aqui a opção é genérica (auto/pt/en/es):
@@ -4053,17 +4057,8 @@ class SigApp:
         self.files_keywords_button.pack(side=LEFT, padx=(10, 0))
         # "?" ao lado: limites reais de termos/caracteres por modelo
         # e aviso de falso positivo (contexto forense).
-        self.files_keywords_help = self._make_help_marker(
-            options2, lambda: self._open_keywords_help()
-        )
+        self.files_keywords_help = self._make_help_marker(options2, "Keywords", self._keywords_help_text)
         self.files_keywords_help.pack(side=LEFT, padx=(4, 0))
-        self.files_gemini_timestamps_var = BooleanVar(value=self.settings.get("gemini_timestamps", False))
-        self.files_gemini_timestamps_check = ttk.Checkbutton(
-            options2, text="Tempos por palavra (Gemini)", variable=self.files_gemini_timestamps_var,
-            command=self._set_files_gemini_timestamps,
-        )
-        create_tooltip(self.files_gemini_timestamps_check,
-                       "Timestamps por palavra no Gemini REST; não podem ser combinados com Keywords.")
         self._rebuild_keywords_menus()
         self._refresh_files_language_label()
         self._refresh_files_grok_limit_warning()
@@ -4091,9 +4086,11 @@ class SigApp:
         # Mesma fonte/formatação do contador de Sessões, encostado no título.
         self.files_queue_status_label = ttk.Label(
             queue_head, textvariable=self.status_var, style="Tool.Field.TLabel",
-            font=("Segoe UI", 8), anchor="w",
+            font=("Segoe UI", 8), anchor="w", width=1,
         )
-        self.files_queue_status_label.pack(side=LEFT, padx=(6, 0))
+        # O texto integral fica no log e no tooltip. Status longos não podem
+        # aumentar a largura solicitada da fila e deslocar os outros painéis.
+        self.files_queue_status_label.pack(side=LEFT, fill=X, expand=True, padx=(6, 0))
         create_tooltip(self.files_queue_status_label, lambda: self.status_var.get())
         self.files_tree_frame = ttk.Frame(queue_card)
         self.files_tree_frame.pack(fill=Y, expand=True)
@@ -4285,11 +4282,8 @@ class SigApp:
             width=30,
         )
         self.qualification_other_ids_entry.pack(side=LEFT, padx=(6, 4))
-        self.qualification_other_help_button = ttk.Button(
-            other_data_frame,
-            text="?",
-            width=2,
-            command=self._show_qualification_other_help,
+        self.qualification_other_help_button = create_info_marker(
+            other_data_frame, "Outros dados", self._qualification_other_help_text
         )
         self.qualification_other_help_button.pack(side=LEFT)
 
@@ -4856,11 +4850,13 @@ class SigApp:
         ]
 
     def _show_qualification_other_help(self) -> None:
-        messagebox.showinfo(
-            "Outros dados",
+        show_info_popup(self.qualification_other_help_button, "Outros dados", self._qualification_other_help_text)
+
+    @staticmethod
+    def _qualification_other_help_text() -> str:
+        return (
             "Use este campo para solicitar outros atributos além das opções padrão. "
-            "Digite os IDs desejados separados por vírgula, por exemplo: nome_social, placa, observacao.",
-            parent=self.root,
+            "Digite os IDs desejados separados por vírgula, por exemplo: nome_social, placa, observacao."
         )
 
     def _clear_qualification_text(self, target: str) -> None:
@@ -9160,36 +9156,23 @@ try {
             "não pela fala."
         )
 
-    def _make_help_marker(self, parent, command):
-        """O "?" padrão do app — IDÊNTICO ao do VAD.
-
-        Mesmo rótulo, cor, fonte e cursor do marcador do VAD; o clique abre um
-        `messagebox` (sem janela própria, sem barra de rolagem, sem caixa de
-        texto). Use sempre este helper para novos "?" para a estética não
-        divergir entre as telas.
-        """
-        marcador = tk.Label(
-            parent,
-            text="?",
-            fg="#889493",
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            background="#f4f7f6",
-        )
-        marcador.bind("<Button-1>", lambda _event: command())
-        return marcador
+    def _make_help_marker(self, parent, title, message):
+        return create_info_marker(parent, title, message)
 
     def _open_keywords_help(self, parent=None):
-        """Ajuda das Keywords — mesmo padrão do "?" do VAD (messagebox)."""
-        messagebox.showinfo("Keywords", self._keywords_help_text(), parent=parent)
+        marker = parent if hasattr(parent, "winfo_rootx") else self.files_keywords_help
+        show_info_popup(marker, "Keywords", self._keywords_help_text)
 
-    def show_live_diarization_help(self):
+    def _live_diarization_help_text(self):
         message = "A diarização tenta identificar interlocutores diferentes. O Grok rotula as falas como Interlocutor 1, Interlocutor 2 e assim por diante."
         if self._current_stt_provider() == "alibaba":
             message += "\n\nDiarização não disponível para Alibaba Fun ASR/Qwen."
         elif self._current_stt_provider() == "gemini":
             message += "\n\nGemini oferece diarização no REST. O WebSocket Live não oferece diarização."
-        messagebox.showinfo("Diarização", message)
+        return message
+
+    def show_live_diarization_help(self):
+        show_info_popup(self.live_diarize_help, "Diarização", self._live_diarization_help_text)
 
     def _current_stt_provider(self) -> str | None:
         if selected_transcription_server(self.settings).get("is_gemini_api"):
@@ -9278,17 +9261,12 @@ try {
             self._set_activity_status("Idioma custom salvo.", log=False)
             win.destroy()
 
-        def show_help():
-            messagebox.showinfo(
-                "Códigos aceitos",
-                codes_for_help(provider),
-                parent=win,
-            )
-
         buttons = ttk.Frame(frame)
         buttons.pack(fill=X, pady=(4, 0))
         ttk.Button(buttons, text="Voltar", command=win.destroy).pack(side=LEFT)
-        ttk.Button(buttons, text="?", width=3, command=show_help).pack(side=LEFT, padx=6)
+        create_info_marker(buttons, "Códigos aceitos", lambda: codes_for_help(provider)).pack(
+            side=LEFT, padx=6
+        )
         ttk.Button(buttons, text="OK", command=apply_codes).pack(side=RIGHT)
 
     def _format_grok_diarized_transcript(self, payload: dict, fallback: str) -> str:
@@ -9766,9 +9744,7 @@ try {
         available = {}
         for server in read_transcription_servers():
             name = server["name"]
-            # Modelos exclusivos de WebSocket/ao vivo (ElevenLabs Scribe
-            # realtime e Meta Muse Voice) não aparecem na aba Transcrição:
-            # quem os usa é a aba Ocorrência (regra do usuário, 10/09).
+            # O lote exige uma rota REST; Muse e Scribe v2 também a possuem.
             if is_realtime_only_transcription_server(name):
                 continue
             if name in {"servidor", "taguai-speech"} and not hostname_online("servidor"):
@@ -9783,7 +9759,12 @@ try {
                 continue
             if name == GEMINI_API_NAME and not str(settings.get("g_ai_studio_api_key") or "").strip():
                 continue
-            available[transcription_server_label(server)] = name
+            if name == META_MUSE_API_NAME and not str(settings.get("metamuse_api_key") or "").strip():
+                continue
+            if name == ELEVENLABS_API_NAME and not str(settings.get("elevenlabs_api_key") or "").strip():
+                continue
+            label = "ElevenLabs Scribe v2" if name == ELEVENLABS_API_NAME else transcription_server_label(server)
+            available[label] = name
         return available
 
     def _selected_multi_transcription_model_names(self) -> list[str]:
@@ -9805,57 +9786,32 @@ try {
             if self.multi_transcription_model_vars
             else self.settings.get("multi_transcription_models") or []
         )
+        self.files_models_button.configure(text=f"Modelos: {len(names)}")
         if GROK_API_NAME in names:
-            marker.pack(side=LEFT, padx=(4, 0), before=self.files_one_model_check)
+            marker.pack(side=LEFT, padx=(4, 0), before=self.files_language_button)
         else:
             marker.pack_forget()
 
         gemini_marker = getattr(self, "files_gemini_limit_warning", None)
         if gemini_marker is not None:
             if GEMINI_API_NAME in names:
-                gemini_marker.pack(side=LEFT, padx=(4, 0), before=self.files_one_model_check)
+                gemini_marker.pack(side=LEFT, padx=(4, 0), before=self.files_language_button)
             else:
                 gemini_marker.pack_forget()
 
-        timestamps = getattr(self, "files_gemini_timestamps_check", None)
-        if timestamps is not None:
-            if GEMINI_API_NAME in names:
-                timestamps.pack(side=LEFT, padx=(8, 0))
-            else:
-                timestamps.pack_forget()
-
-    def _set_files_gemini_timestamps(self):
-        self.settings["gemini_timestamps"] = self.files_gemini_timestamps_var.get()
-        self.settings = save_settings(self.settings)
-
-    def _show_files_gemini_limit_help(self, _event=None):
-        window = Toplevel(self.root)
-        window.title("Gemini — 10 por minuto / 100 por dia")
-        window.transient(self.root)
-        text = tk.StringVar(window)
-        ttk.Label(window, textvariable=text, wraplength=580, justify=LEFT).pack(padx=20, pady=16)
-        ttk.Button(window, text="Fechar", command=window.destroy).pack(pady=(0, 16))
-        timer = [None]
-        def stop_refresh(event):
-            if event.widget is window and timer[0] is not None:
-                window.after_cancel(timer[0])
-                timer[0] = None
-        window.bind("<Destroy>", stop_refresh)
-        def refresh():
-            if not window.winfo_exists():
-                return
+    def _files_gemini_limit_information(self):
+        def information():
             key = str(self.settings.get("g_ai_studio_api_key") or "").strip()
             try:
                 stats = GeminiQuota(key).statistics_text() if key else "Configure a chave G AI Studio para acompanhar a cota."
             except Exception:
                 stats = "Não foi possível ler o registro local de cota."
-            text.set(GEMINI_QUOTA_HELP + stats)
-            timer[0] = window.after(1000, refresh)
-        refresh()
+            return GEMINI_QUOTA_HELP + stats
+        return information()
 
-    def _show_files_grok_limit_help(self, _event=None):
-        messagebox.showinfo(
-            "Grok STT — limite de requisições",
+    @staticmethod
+    def _files_grok_limit_help_text():
+        return (
             "O Grok STT permite até 10 requisições por segundo (10 RPS) no tier "
             "considerado pelo SIG.\n\n"
             "Para manter uma margem, o SIG inicia até 8 requisições por segundo, "
@@ -9863,9 +9819,18 @@ try {
             "Por isso, pode haver um atraso no envio de muitos arquivos curtos.\n\n"
             "Se a xAI limitar a taxa ou a capacidade (por exemplo, por outras instâncias "
             "usando a mesma cota), o SIG aguarda e tenta novamente, até 5 tentativas. "
-            "O botão Parar também interrompe essa espera.",
-            parent=self.root,
+            "O botão Parar também interrompe essa espera."
         )
+
+    def _show_files_gemini_limit_help(self, _event=None):
+        return show_info_popup(self.files_gemini_limit_warning,
+                               "Gemini — 10 por minuto / 100 por dia",
+                               self._files_gemini_limit_information, refresh_ms=1000)
+
+    def _show_files_grok_limit_help(self, _event=None):
+        return show_info_popup(self.files_grok_limit_warning,
+                               "Grok STT — limite de requisições",
+                               self._files_grok_limit_help_text)
 
     def _populate_models_menu(self):
         """Popula o menu do Menubutton 'Modelos' (postcommand) com a
@@ -9877,38 +9842,44 @@ try {
                 label="Aguarde o lote atual terminar...",
                 state="disabled",
             )
-            return
-        available = self._available_multi_transcription_models()
-        if not available:
-            menu.add_command(
-                label="Nenhum modelo disponível (verifique chaves/servidor)",
-                state="disabled",
-            )
-            return
-        selected = set(self._selected_multi_transcription_model_names())
-        if not selected:
-            # Primeira montagem do menu desde a abertura do app: retoma a
-            # seleção salva da aba Transcrição (padrão: apenas "servidor", o
-            # Granite NAR local). Entram só os modelos disponíveis agora —
-            # modelos só de WebSocket já foram filtrados de `available`.
-            saved_settings = load_settings()
-            selected.update(
-                name
-                for name in (saved_settings.get("multi_transcription_models") or [])
-                if name in available.values()
-            )
-            if not selected:
-                default = self._default_transcription_model_name()
-                if default in available.values():
-                    selected.add(default)
-        for label, name in available.items():
-            variable = BooleanVar(value=name in selected)
-            self.multi_transcription_model_vars[name] = variable
-            menu.add_checkbutton(
-                label=label,
-                variable=variable,
-                command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
-            )
+        else:
+            available = self._available_multi_transcription_models()
+            if not available:
+                menu.add_command(
+                    label="Nenhum modelo disponível (verifique chaves/servidor)",
+                    state="disabled",
+                )
+            else:
+                selected = set(self._selected_multi_transcription_model_names())
+                if not selected:
+                    # Primeira montagem do menu desde a abertura do app: retoma a
+                    # seleção salva da aba Transcrição (padrão: apenas "servidor", o
+                    # Granite NAR local). Entram só os modelos disponíveis agora —
+                    # modelos só de WebSocket já foram filtrados de `available`.
+                    saved_settings = load_settings()
+                    selected.update(
+                        name
+                        for name in (saved_settings.get("multi_transcription_models") or [])
+                        if name in available.values()
+                    )
+                    if not selected:
+                        default = self._default_transcription_model_name()
+                        if default in available.values():
+                            selected.add(default)
+                for label, name in available.items():
+                    variable = BooleanVar(master=self.root, value=name in selected)
+                    self.multi_transcription_model_vars[name] = variable
+                    menu.add_checkbutton(
+                        label=label,
+                        variable=variable,
+                        command=lambda selected_name=name: self._multi_transcription_model_changed(selected_name),
+                    )
+        menu.add_separator()
+        menu.add_checkbutton(
+            label="Um por vez",
+            variable=self.files_one_model_var,
+            state="disabled" if self.running else "normal",
+        )
         self._refresh_files_grok_limit_warning()
 
     def _default_transcription_model_name(self) -> str:
@@ -9979,6 +9950,22 @@ try {
     def _refresh_files_language_label(self):
         self.files_language_label_var.set(f"Idioma: {transcription_language_option(self.settings)}")
 
+    def _refresh_files_send_mode_label(self):
+        labels = {"ready": "Pronto", "compact": "Compacto", "as_is": "Como está"}
+        self.files_send_mode_label_var.set(labels.get(self.mode_var.get(), "Pronto"))
+
+    def _set_files_send_mode(self, mode: str):
+        """Seleciona o formato de envio e atualiza a fila da aba Transcrição."""
+        if self.concatenate_audio_var.get() and mode != "ready":
+            return
+        if mode not in {"ready", "compact", "as_is"}:
+            return
+        if mode == "as_is" and self.convert_only_var.get():
+            return
+        self.mode_var.set(mode)
+        self._refresh_files_send_mode_label()
+        self._refresh_tree_modes()
+
     def _set_files_language(self, option: str):
         """Grava a opção do seletor de idioma da aba Transcrição.
 
@@ -10019,8 +10006,9 @@ try {
             entry.insert(0, saved.get(provider) or stt_provider_rules.DEFAULT_MODE[provider])
             entry.grid(row=row, column=1, pady=4)
             entries[provider] = entry
-            ttk.Button(frame, text="?", width=3, command=lambda p=provider: messagebox.showinfo(
-                "Códigos aceitos — " + p, codes_for_help(p), parent=window)).grid(row=row, column=2, padx=6)
+            marker = create_info_marker(frame, "Códigos aceitos — " + provider,
+                                        lambda p=provider: codes_for_help(p))
+            marker.grid(row=row, column=2, padx=6)
 
         def apply_codes():
             values = {p: ",".join(parse_codes(entry.get())) for p, entry in entries.items()}
@@ -10055,7 +10043,7 @@ try {
         WebSocket), então sem isto o lote de um único modelo usaria o modelo
         da Ocorrência em vez do que está selecionado na Transcrição.
 
-        `one_model_at_a_time` (checkbox "Um modelo por vez") entra como flag do
+        `one_model_at_a_time` (opção "Um por vez" do menu Modelos) entra como flag do
         LOTE (`_one_model_at_a_time`): com ela, o multi-modelo manda a fila
         inteira para um modelo e só depois passa para o próximo. Não vai para o
         settings.json.
@@ -10177,14 +10165,17 @@ try {
     def _convert_only_changed(self):
         if self.convert_only_var.get() and self.mode_var.get() == "as_is":
             self.mode_var.set("ready")
+        self._refresh_files_send_mode_label()
         if self.convert_only_var.get():
             self.vad_only_var.set(False)
         state = "disabled" if self.convert_only_var.get() else "normal"
-        self.as_is_radio.configure(state=state)
+        self.files_send_mode_menu.entryconfigure(2, state=state)
         self._refresh_zip_controls()
         self._refresh_tree_modes()
 
     def _vad_changed(self):
+        if self.concatenate_audio_var.get():
+            self.vad_var.set("Off")
         self._refresh_vad_only_visibility()
 
     def _vad_only_changed(self):
@@ -10202,11 +10193,8 @@ try {
         else:
             self.vad_only_check.pack(side=LEFT, padx=(0, 0))
 
-    _vad_tooltip_window = None
-
-    def _show_vad_info(self):
-        messagebox.showinfo(
-            "Sobre VAD",
+    def _vad_help_text(self):
+        return (
             "VAD (Voice Activity Detection) detecta trechos de voz em áudios.\n\n"
             "Níveis de agressividade:\n"
             "  0 = menos agressivo (detecta mais voz)\n"
@@ -10217,26 +10205,12 @@ try {
             "Marque 'Apenas VAD' para converter, aplicar o filtro e não transcrever."
         )
 
-    def _show_vad_tooltip(self):
-        if self._vad_tooltip_window:
-            return
-        tw = tk.Toplevel(self.root)
-        tw.wm_overrideredirect(True)
-        x = self.root.winfo_pointerx() + 16
-        y = self.root.winfo_pointery() + 16
-        tw.wm_geometry(f"+{x}+{y}")
-        label = tk.Label(tw, text="0 = menos agressivo (detecta mais voz)\n3 = mais agressivo (filtra mais)",
-                         background="#ffffcc", relief="solid", borderwidth=1,
-                         font=("Segoe UI", 9), justify="left", padx=6, pady=4)
-        label.pack()
-        self._vad_tooltip_window = tw
-
-    def _hide_vad_tooltip(self):
-        if self._vad_tooltip_window:
-            self._vad_tooltip_window.destroy()
-            self._vad_tooltip_window = None
+    def _show_vad_info(self):
+        show_info_popup(self._vad_tooltip_label, "Sobre VAD", self._vad_help_text)
 
     def _refresh_zip_controls(self):
+        if hasattr(self, "concatenate_audio_var") and self.concatenate_audio_var.get():
+            self.send_zip_var.set(False)
         if hasattr(self, "zip_level_frame"):
             if self.send_zip_var.get() and not self.convert_only_var.get():
                 self.zip_level_frame.pack(side=LEFT)
@@ -10244,6 +10218,46 @@ try {
                 self.zip_level_frame.pack_forget()
         if hasattr(self, "tree"):
             self._refresh_tree_modes()
+
+    def _concatenate_audio_changed(self):
+        enabled = self.concatenate_audio_var.get()
+        if enabled:
+            messagebox.showinfo(
+                "Concatenação experimental",
+                "Concatenar áudios para todos os modelos é experimental. Os timestamps "
+                "podem vir incorretos e misturar transcrições entre arquivos, mesmo com "
+                "silêncio de separação. Confira os resultados.\n\n"
+                "Com esta opção desmarcada, somente o Gemini 3.5 Transcribe recebe "
+                "os áudios concatenados automaticamente; os demais recebem arquivos individuais.",
+                parent=self.root,
+            )
+        variables = (self.mode_var, self.vad_var, self.send_zip_var, self.convert_only_var,
+                     self.vad_only_var, self.transcribe_after_convert_var)
+        if enabled:
+            self._concat_previous_controls = tuple(variable.get() for variable in variables)
+            self.mode_var.set("ready")
+            self.vad_var.set("Off")
+            self.vad_only_var.set(False)
+            self.convert_only_var.set(False)
+            self.send_zip_var.set(False)
+            self.transcribe_after_convert_var.set(False)
+        else:
+            previous = getattr(self, "_concat_previous_controls", None)
+            if previous:
+                for variable, value in zip(variables, previous):
+                    variable.set(value)
+        self._convert_only_changed()
+        self._refresh_vad_only_visibility()
+        self._refresh_concat_controls()
+
+    def _refresh_concat_controls(self):
+        enabled = self.concatenate_audio_var.get()
+        state = "disabled" if enabled or self.running else "normal"
+        for widget in (self.files_send_mode_button, self.zip_check, self.convert_only_check, self.vad_only_check,
+                       self.transcribe_after_convert_check):
+            widget.configure(state=state)
+        self.vad_combo.configure(state="disabled" if enabled or self.running else "readonly")
+        self._refresh_files_grok_limit_warning()
 
     def _zip_help_text(self) -> str:
         return (
@@ -10255,51 +10269,6 @@ try {
             "O nível 9 pode compactar um pouco mais, mas em áudio e vídeo normalmente a diferença é pequena. "
             "Sem compactação cria o ZIP mais rápido, mas envia um arquivo maior."
         )
-
-    def _schedule_zip_help(self, event):
-        self.zip_help_position = (event.x_root + 14, event.y_root + 18)
-        if self.zip_help_after_id:
-            self.root.after_cancel(self.zip_help_after_id)
-        self.zip_help_after_id = self.root.after(700, self._show_zip_help)
-
-    def _show_zip_help(self):
-        self.zip_help_after_id = None
-        if self.zip_help_window or not self.zip_check.winfo_exists():
-            return
-        import tkinter as tk
-
-        x, y = self.zip_help_position
-        win = Toplevel(self.root)
-        win.withdraw()
-        win.overrideredirect(True)
-        win.configure(background="#172024")
-        frame = tk.Frame(win, background="#172024", borderwidth=1, relief="solid")
-        frame.pack(fill=BOTH, expand=True)
-        tk.Label(
-            frame,
-            text=self._zip_help_text(),
-            background="#172024",
-            foreground="#edf7f5",
-            justify="left",
-            wraplength=420,
-            padx=12,
-            pady=10,
-            font=("Segoe UI", 9),
-        ).pack()
-        win.geometry(f"+{x}+{y}")
-        win.deiconify()
-        self.zip_help_window = win
-
-    def _hide_zip_help(self, _event=None):
-        if self.zip_help_after_id:
-            self.root.after_cancel(self.zip_help_after_id)
-            self.zip_help_after_id = None
-        if self.zip_help_window:
-            try:
-                self.zip_help_window.destroy()
-            except Exception:
-                pass
-            self.zip_help_window = None
 
     def add_files(self):
         files = filedialog.askopenfilenames(
@@ -10937,16 +10906,7 @@ try {
             scale.set(variable.get())
             scale.grid(row=row, column=1, sticky="ew", pady=5)
 
-            help_button = ttk.Button(
-                parallel_frame,
-                text="?",
-                width=2,
-                command=lambda: messagebox.showinfo(
-                    f"{label}",
-                    help_text,
-                    parent=win,
-                ),
-            )
+            help_button = create_info_marker(parallel_frame, label, help_text)
             help_button.grid(row=row, column=3, sticky="w", pady=5, padx=(8, 0))
             return scale
 
@@ -11094,9 +11054,8 @@ try {
         keywords_profile_combo.pack(side=LEFT, padx=(6, 0))
         # "?" no fim da linha: limites reais por modelo e aviso de falso
         # positivo (mesmo marcador discreto usado no VAD).
-        self._make_help_marker(
-            keywords_profile_row, lambda: self._open_keywords_help(win)
-        ).pack(side=LEFT, padx=(10, 0))
+        self._make_help_marker(keywords_profile_row, "Keywords", self._keywords_help_text).pack(
+            side=LEFT, padx=(10, 0))
 
         keywords_entry_row = ttk.Frame(keywords_page, style="Settings.Inner.TFrame")
         keywords_entry_row.pack(fill=X, pady=(0, 10))
@@ -11463,16 +11422,12 @@ try {
         )
         grok_chunk_entry.pack(side=LEFT)
 
-        def show_chunk_help():
-            messagebox.showinfo(
-                "Chunk size do Grok",
-                "Define, em milissegundos, o tamanho de cada pedaço de áudio enviado ao streaming do Grok.\n\n"
-                "O valor recomendado pela xAI é 100 ms. Não altere esta configuração se não souber exatamente "
-                "o que está fazendo.",
-                parent=win,
-            )
-
-        chunk_help = ttk.Button(chunk_controls, text="?", width=2, command=show_chunk_help)
+        chunk_help = create_info_marker(
+            chunk_controls, "Chunk size do Grok",
+            "Define, em milissegundos, o tamanho de cada pedaço de áudio enviado ao streaming do Grok.\n\n"
+            "O valor recomendado pela xAI é 100 ms. Não altere esta configuração se não souber exatamente "
+            "o que está fazendo.",
+        )
         chunk_help.pack(side=LEFT, padx=(5, 0))
         chunk_controls.grid(row=chunk_size_row, column=1, columnspan=3, sticky="w", pady=5)
 
@@ -15510,8 +15465,14 @@ try {
             workflow_settings = self._transcription_batch_settings(
                 multi_model_names, one_model_at_a_time=self.files_one_model_var.get()
             )
+            if self.concatenate_audio_var.get():
+                workflow_settings = concatenation_settings(workflow_settings, multi_model_names)
             if GEMINI_API_NAME in multi_model_names:
-                gemini_rest_body(workflow_settings, "", "audio/wav")
+                # A configuração automática pertence apenas ao Gemini, nunca
+                # aos outros modelos selecionados nem às preferências salvas.
+                gemini_settings = concatenation_settings(workflow_settings, [GEMINI_API_NAME])
+                gemini_rest_body(gemini_settings, "", "audio/wav")
+                workflow_settings["_automatic_gemini_concat"] = not self.concatenate_audio_var.get()
         except ValueError as exc:
             messagebox.showinfo("Transcrição", str(exc), parent=self.root)
             return
@@ -15527,6 +15488,14 @@ try {
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
             self.status_var.set("Meta Muse Voice envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
+        if is_elevenlabs_transcription(workflow_settings) and self.send_zip_var.get():
+            self.send_zip_var.set(False)
+            self._refresh_zip_controls()
+            self.status_var.set("ElevenLabs Scribe v2 recebe áudio por REST; o envio ZIP foi desativado.")
+        if META_MUSE_API_NAME in multi_model_names and not self.convert_only_var.get():
+            # Muse REST aceita somente WAV PCM mono 16-bit a 16/24 kHz.
+            # Vale também quando ele é um dos modelos adicionais do lote.
+            self._set_files_send_mode("ready")
         if is_alibaba_transcription(workflow_settings) and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
@@ -15534,7 +15503,7 @@ try {
         if selected_transcription_server(workflow_settings).get("is_gemini_api") and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
-            self.status_var.set("Gemini Transcribe envia os arquivos individualmente por REST; o envio ZIP foi desativado.")
+            self.status_var.set("Gemini Transcribe recebe um áudio concatenado por REST; o envio ZIP foi desativado.")
         if multi_transcription and self.send_zip_var.get():
             self.send_zip_var.set(False)
             self._refresh_zip_controls()
@@ -15598,6 +15567,8 @@ try {
             if child is not history_frame:
                 self._set_child_state(child, state)
         self.action_canvas.configure(state="normal")
+        if state == "normal" and hasattr(self, "concatenate_audio_check"):
+            self._refresh_concat_controls()
 
     def _set_child_state(self, widget, state: str):
         always_enabled = (
@@ -15626,6 +15597,9 @@ try {
         zip_level: str,
         settings: dict,
     ):
+        concat = bool(settings.get("_concatenate_audio"))
+        if concat:
+            mode, vad_mode, send_zip, convert_only, vad_only, transcribe_after_convert = "ready", "Off", False, False, False, False
         process_started = time.perf_counter()
         temp_dir = app_base_dir() / "temp"
         raw_dir = temp_dir / "raw"
@@ -15639,7 +15613,8 @@ try {
         txt_dir.mkdir(parents=True, exist_ok=True)
 
         # Arquivos menores entram primeiro para a fila começar a avançar rapidamente.
-        paths = sorted(paths, key=lambda p: p.stat().st_size)
+        if not concat:
+            paths = sorted(paths, key=lambda p: p.stat().st_size)
         stems = safe_stems(paths)
         jobs = []
         primary_server = selected_transcription_server(settings)
@@ -15661,6 +15636,7 @@ try {
                 raw_path=raw_dir / f"{stem}.json",
                 log_path=log_dir / f"{stem}.ffmpeg.log",
                 model_name=transcription_model_names[0],
+                concat_source=concat,
                 model_names=transcription_model_names[1:],
                 txt_paths=(
                     [txt_dir / f"{stem}.modelo_{i}.txt" for i in range(2, len(transcription_model_names) + 1)]
@@ -15710,6 +15686,7 @@ try {
                 and not use_vad
                 and not is_grok_transcription(settings)
                 and not settings.get("_multi_transcription")
+                and not settings.get("_automatic_gemini_concat")
             ):
                 # No pipeline a transcrição começa JUNTO com a conversão: o
                 # marcador do envio sai antes das linhas vivas do lote (os
@@ -16544,7 +16521,9 @@ try {
             if job.upload_path and job.upload_path.exists()
         }
         stats = [
-            ("Método", "ZIP" if send_zip else "Requisições individuais"),
+            ("Método", "Áudio concatenado" if settings.get("_concatenate_audio") else
+             "Gemini concatenado; demais modelos individuais" if settings.get("_automatic_gemini_concat") else
+             "ZIP" if send_zip else "Requisições individuais"),
             ("Arquivos", str(len(jobs))),
             ("Modo", mode_label_from_value(mode)),
             ("Servidor", selected_transcription_server(settings)["name"]),
@@ -16552,6 +16531,12 @@ try {
         if settings.get("_multi_transcription"):
             for index, name in enumerate(settings.get("_multi_transcription_models") or [], start=1):
                 stats.append((f"Modelo {index}", str(name)))
+        if settings.get("_concatenate_audio") or settings.get("_automatic_gemini_concat"):
+            stats.append(("Silêncio entre arquivos", "2 segundos"))
+            if settings.get("_concat_duration_seconds") is not None:
+                stats.append(("Duração do WAV concatenado", format_duration(settings["_concat_duration_seconds"])))
+            if settings.get("_concat_timeline"):
+                stats.append(("Mapa dos áudios", settings["_concat_timeline"]))
         if send_zip:
             stats.append(("Nível ZIP", zip_level))
             if zip_stats:
@@ -17043,6 +17028,10 @@ try {
                 "pcm_s16le",
                 str(job.converted_path),
             ]
+            if job.concat_source:
+                # Conversão de alta qualidade, sem normalizar volume nem
+                # remover silêncios/falas dos arquivos originais.
+                command[6:6] = ["-af", "aresample=16000:filter_size=64:phase_shift=10:cutoff=0.95"]
         else:
             command = [
                 str(ffmpeg),
@@ -17146,6 +17135,12 @@ try {
         self._queue("prep_count", kind, int(getattr(self, "_batch_job_total", 0) or 0))
 
     def _run_transcriptions(self, jobs: list[AudioJob], settings: dict):
+        if settings.get("_concatenate_audio"):
+            self._run_concatenated_transcriptions(jobs, settings)
+            return
+        if settings.get("_automatic_gemini_concat"):
+            self._run_multi_transcriptions(jobs, settings)
+            return
         if settings.get("_multi_transcription") and len(settings.get("_multi_transcription_models") or []) >= 2:
             self._run_multi_transcriptions(jobs, settings)
             return
@@ -17215,18 +17210,298 @@ try {
             self._queue("activity", notice, "warning")
             run_group(large, 1)
 
+    def _run_concatenated_transcriptions(self, jobs: list[AudioJob], settings: dict,
+                                       *, model_index: int | None = None, uploader=None):
+        candidates = transcription_candidates(jobs)
+        if not candidates:
+            return
+        names = ([selected_transcription_server(settings)["name"]] if model_index is not None else
+                 list(settings.get("_multi_transcription_models") or [selected_transcription_server(settings)["name"]]))
+        settings.update(concatenation_settings(settings, names))
+        directory = app_base_dir() / "temp" / "concatenados" / str(time.time_ns())
+        started = time.perf_counter()
+        sources = candidates
+        if model_index is not None:
+            # Os demais modelos conservam seu upload (inclusive VAD/Opus).
+            # O Gemini usa o PCM anterior ao VAD ou uma conversão dos originais.
+            sources = []
+            for job in candidates:
+                if self.cancel_event.is_set():
+                    raise Cancelled()
+                prepared = next((path for path in (job.converted_path, job.original_path)
+                                 if path and is_transcription_ready_wav(path)), None)
+                source = AudioJob(job.original_path, job.original_name, job.stem, "ready",
+                                  upload_path=prepared, concat_source=True,
+                                  converted_path=directory / f"fonte_{len(sources)}.wav",
+                                  log_path=directory / f"fonte_{len(sources)}.ffmpeg.log")
+                if prepared is None:
+                    directory.mkdir(parents=True, exist_ok=True)
+                    self._convert_job(source)
+                sources.append(source)
+        self._queue("activity", "Concatenando áudios: silêncio de 2s entre arquivos.", None)
+        audio = concatenate_wavs(sources, directory / "concatenado.wav", self.cancel_event,
+                                 lambda done, total: self._queue_phase_progress("Concatenando áudios", done, total, "concat", started))
+        settings["_concat_duration_seconds"] = audio.duration
+        settings["_concat_timeline"] = str(audio.manifest)
+        if model_index is not None and names[0] == GEMINI_API_NAME:
+            chunks = group_concatenated_audio_by_files(
+                audio, directory / "gemini_trechos", self.cancel_event,
+                max_duration_seconds=GEMINI_MAX_BATCH_SECONDS,
+                progress=lambda done, total: self._queue_phase_progress(
+                    "Montando lotes do Gemini", done, total, "concat", started
+                ),
+            )
+            if not chunks:
+                raise ValueError("O Gemini não recebeu nenhum trecho de áudio.")
+            for chunk in chunks:
+                check_limits(chunk, names)
+            self._queue(
+                "activity",
+                f"Gemini 3.5 Transcribe: {len(chunks)} requisição(ões), "
+                f"arquivos inteiros em lotes de até 30 min ({audio.duration / 60:.1f} min no total).",
+                None,
+            )
+            self._run_gemini_concatenated_chunks(
+                candidates, audio, chunks, settings, directory,
+                model_index=model_index, uploader=uploader,
+            )
+            return
+        check_limits(audio, names)
+        self._queue("activity", f"Áudio concatenado: {len(candidates)} arquivos; {audio.duration:.3f}s; uma transcrição por modelo.", None)
+        bundle = AudioJob(
+            audio.path, audio.path.name, "concatenado", "ready", upload_path=audio.path,
+            txt_path=directory / "modelo_1.txt", raw_path=directory / "modelo_1.json", model_name=names[0],
+            model_names=names[1:], txt_paths=[directory / f"modelo_{i}.txt" for i in range(2, len(names) + 1)],
+            raw_paths=[directory / f"modelo_{i}.json" for i in range(2, len(names) + 1)],
+        )
+        aborted = False
+        completed = [0] * len(candidates)
+        try:
+            # Reutiliza paralelismo, "Um modelo por vez", pacing e backoff.
+            request_settings = {**settings, "_concatenate_audio": False, "_automatic_gemini_concat": False}
+            if model_index is None:
+                self._run_transcriptions([bundle], request_settings)
+            else:
+                try:
+                    self._transcribe_job(bundle, transcribe_url(request_settings), uploader, request_settings)
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    bundle.error = f"ERRO transcrição: {exc}"
+        except Cancelled:
+            aborted = True
+        finally:
+            for index, name in enumerate(names, 1):
+                target_index = model_index if model_index is not None else index
+                error = audio_job_attr(bundle, "error", index) or ""
+                raw_path = audio_job_attr(bundle, "raw_path", index)
+                if aborted and not error and not job_transcript_for_model(bundle, index).strip():
+                    continue
+                groups = None
+                try:
+                    if error:
+                        raise ValueError(error)
+                    if raw_path is None or not raw_path.exists():
+                        raise ValueError("A API não devolveu a resposta com timestamps.")
+                    entries = timestamp_entries(raw_path.read_bytes(), transcription_provider_for_server(name))
+                    if not entries and job_transcript_for_model(bundle, index).strip() not in ("", "(sem transcrição)"):
+                        raise ValueError("A API devolveu texto sem timestamps. Não é possível separar o lote; a resposta completa foi preservada.")
+                    groups, discarded = split_entries(audio, entries)
+                    if discarded:
+                        self._queue("activity", f"{name}: {discarded} trecho(s) nos silêncios de separação foram ignorados.", "warning")
+                except Exception as exc:
+                    error = f"ERRO concatenação ({name}): {exc}"
+                    self._queue("batch_error", "Timestamps da concatenação", name)
+                diarize = bool(settings.get("diarize") or settings.get("grok_diarize"))
+                for source_index, job in enumerate(candidates):
+                    txt_path = audio_job_attr(job, "txt_path", target_index)
+                    if error:
+                        audio_job_set(job, "error", target_index, error)
+                        if txt_path:
+                            txt_path.write_text(error, encoding="utf-8")
+                        continue
+                    selected = groups[source_index]
+                    text = entries_text(selected, diarize) or "(sem transcrição)"
+                    audio_job_set(job, "transcription", target_index, text)
+                    if txt_path:
+                        txt_path.write_text(text, encoding="utf-8")
+                    source_raw = audio_job_attr(job, "raw_path", target_index)
+                    if source_raw:
+                        span = audio.spans[source_index]
+                        payload = {"text": text, "words": [
+                            {"text": entry.text, "start": entry.start, "end": entry.end,
+                             **({"speaker": entry.speaker} if entry.speaker is not None else {})}
+                            for entry in selected],
+                            "concatenation": {"manifest": str(audio.manifest), "model_response": str(raw_path),
+                                              "start_frame": span.start_frame, "end_frame": span.end_frame,
+                                              "sample_rate": 16000}}
+                        source_raw.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                    completed[source_index] += 1
+            for source_index, job in enumerate(candidates):
+                if model_index is not None:
+                    continue  # O runner comum mantém o progresso de todos os modelos.
+                count = completed[source_index]
+                if count:
+                    job.status = "Transcrito" if len(names) == 1 else f"Transcrito ({count}/{len(names)})"
+                elif aborted:
+                    job.status = "Cancelado"
+                else:
+                    job.status = "Erro na concatenação"
+                self._queue("job", job.original_path, job.status)
+        if aborted:
+            raise Cancelled()
+
+    def _run_gemini_concatenated_chunks(self, candidates: list[AudioJob], audio, chunks,
+                                        settings: dict, directory: Path, *,
+                                        model_index: int, uploader) -> None:
+        """Transcreve lotes de arquivos inteiros de até 30 min e recompõe as respostas."""
+        source_chunks: list[set[int]] = [set() for _ in candidates]
+        source_entries: list[list[TimedTranscriptEntry]] = [[] for _ in candidates]
+        successful_chunks: set[int] = set()
+        chunk_errors: dict[int, str] = {}
+        response_paths: dict[int, str] = {}
+        for chunk_index, chunk in enumerate(chunks):
+            indices = {
+                span.source_index if span.source_index is not None else span.index
+                for span in chunk.spans
+            }
+            for source_index in indices:
+                source_chunks[source_index].add(chunk_index)
+
+        request_settings = {
+            **settings,
+            "_concatenate_audio": False,
+            "_automatic_gemini_concat": False,
+        }
+        url = transcribe_url(request_settings)
+        aborted = False
+        for chunk_index, chunk in enumerate(chunks):
+            if self.cancel_event.is_set():
+                aborted = True
+                break
+            chunk_number = chunk_index + 1
+            raw_path = directory / f"gemini_{chunk_number:03}.json"
+            text_path = directory / f"gemini_{chunk_number:03}.txt"
+            bundle = AudioJob(
+                chunk.path, chunk.path.name, chunk.path.stem, "ready",
+                upload_path=chunk.path, txt_path=text_path, raw_path=raw_path,
+                model_name=GEMINI_API_NAME,
+            )
+            self._queue(
+                "activity",
+                f"Gemini 3.5 Transcribe: enviando trecho {chunk_number}/{len(chunks)} "
+                f"({chunk.duration / 60:.1f} min).",
+                None,
+            )
+            try:
+                self._transcribe_job(bundle, url, uploader, request_settings)
+                if not raw_path.exists():
+                    raise ValueError("A API não devolveu a resposta com timestamps.")
+                entries = timestamp_entries(raw_path.read_bytes(), "gemini")
+                transcript = job_transcript_for_model(bundle, 1).strip()
+                if not entries and transcript not in ("", "(sem transcrição)"):
+                    raise ValueError("A API devolveu texto sem timestamps para este trecho.")
+                groups, discarded = split_entries(chunk, entries)
+                for span in chunk.spans:
+                    source_index = span.source_index if span.source_index is not None else span.index
+                    offset = span.source_offset_frames / 16000
+                    source_entries[source_index].extend(
+                        TimedTranscriptEntry(
+                            entry.text, entry.start + offset, entry.end + offset,
+                            entry.speaker, entry.kind,
+                        )
+                        for entry in groups[span.index]
+                    )
+                if discarded:
+                    self._queue(
+                        "activity",
+                        f"Gemini trecho {chunk_number}: {discarded} trecho(s) nos silêncios foram ignorados.",
+                        "warning",
+                    )
+                successful_chunks.add(chunk_index)
+                response_paths[chunk_index] = str(raw_path)
+                self._queue("activity", f"Gemini: trecho {chunk_number}/{len(chunks)} concluído.", None)
+            except Cancelled:
+                aborted = True
+                break
+            except Exception as exc:
+                chunk_errors[chunk_index] = str(exc)
+                self._queue(
+                    "batch_error",
+                    transcription_label(str(exc), GEMINI_API_NAME),
+                    f"Trecho {chunk_number}/{len(chunks)}",
+                )
+
+        diarize = bool(settings.get("diarize") or settings.get("grok_diarize"))
+        target_index = model_index
+        for source_index, job in enumerate(candidates):
+            required = source_chunks[source_index]
+            if required and required.issubset(successful_chunks):
+                selected = source_entries[source_index]
+                text = entries_text(selected, diarize) or "(sem transcrição)"
+                audio_job_set(job, "transcription", target_index, text)
+                txt_path = audio_job_attr(job, "txt_path", target_index)
+                if txt_path:
+                    txt_path.write_text(text, encoding="utf-8")
+                raw_path = audio_job_attr(job, "raw_path", target_index)
+                if raw_path:
+                    span = audio.spans[source_index]
+                    payload = {
+                        "text": text,
+                        "words": [{
+                            "text": entry.text,
+                            "start": entry.start,
+                            "end": entry.end,
+                            **({"speaker": entry.speaker} if entry.speaker is not None else {}),
+                        } for entry in sorted(selected, key=lambda item: item.start)],
+                        "concatenation": {
+                            "manifest": str(audio.manifest),
+                            "model_responses": [response_paths[index] for index in sorted(required)],
+                            "start_frame": span.start_frame,
+                            "end_frame": span.end_frame,
+                            "sample_rate": 16000,
+                        },
+                    }
+                    raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                continue
+
+            failed = sorted(required.intersection(chunk_errors))
+            if failed:
+                details = "; ".join(
+                    f"trecho {index + 1}/{len(chunks)}: {chunk_errors[index]}" for index in failed
+                )
+                error = f"ERRO concatenação (Gemini): {details}"
+                audio_job_set(job, "error", target_index, error)
+                txt_path = audio_job_attr(job, "txt_path", target_index)
+                if txt_path:
+                    txt_path.write_text(error, encoding="utf-8")
+            elif not aborted:
+                error = "ERRO concatenação (Gemini): o áudio não foi coberto por nenhum trecho."
+                audio_job_set(job, "error", target_index, error)
+                txt_path = audio_job_attr(job, "txt_path", target_index)
+                if txt_path:
+                    txt_path.write_text(error, encoding="utf-8")
+
+        if aborted:
+            raise Cancelled()
+
     def _run_multi_transcriptions(self, jobs: list[AudioJob], settings: dict):
         candidates = transcription_candidates(jobs)
         total = len(candidates)
         if total == 0:
             return
         model_names = list(settings.get("_multi_transcription_models") or [])
-        if len(model_names) < 2:
+        if len(model_names) < 2 and not settings.get("_automatic_gemini_concat"):
             raise RuntimeError("O multi-modelo precisa de pelo menos dois modelos selecionados.")
         model_settings = [
             settings_for_transcription_server(settings, name)
             for name in model_names
         ]
+        if settings.get("_automatic_gemini_concat"):
+            model_settings = [
+                concatenation_settings(item, [name]) if name == GEMINI_API_NAME else item
+                for name, item in zip(model_names, model_settings)
+            ]
         uploaders = [
             create_transcription_uploader(self.cancel_event, item_settings)
             for item_settings in model_settings
@@ -17310,6 +17585,31 @@ try {
             # "um modelo por vez" o segundo só entra depois de o primeiro
             # terminar e não pode herdar o tempo da espera.
             model_starts[index - 1] = time.perf_counter()
+            if settings.get("_automatic_gemini_concat") and model_names[index - 1] == GEMINI_API_NAME:
+                try:
+                    self._run_concatenated_transcriptions(candidates, current_settings,
+                                                         model_index=index, uploader=uploader)
+                    for key in ("_concat_duration_seconds", "_concat_timeline"):
+                        if key in current_settings:
+                            settings[key] = current_settings[key]
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    detail = f"ERRO concatenação ({GEMINI_API_NAME}): {exc}"
+                    for job in candidates:
+                        audio_job_set(job, "error", index, detail)
+                        path = job_attr(job, "txt_path", index)
+                        if path:
+                            path.write_text(detail, encoding="utf-8")
+                    self._queue("batch_error", transcription_label(str(exc), GEMINI_API_NAME), "Lote Gemini")
+                for job in candidates:
+                    if not audio_job_attr(job, "error", index):
+                        with progress_lock:
+                            completed_models[id(job)].add(index)
+                            self._queue("job", job.original_path,
+                                        f"Transcrito ({len(completed_models[id(job)])}/{len(model_settings)})")
+                    update_progress(index)
+                return
             url = transcribe_url(current_settings)
             configured_parallelism = max(1, int(settings["transcribe_parallel"]))
 
@@ -17373,7 +17673,7 @@ try {
             run_group(large, 1)
 
         if settings.get("_one_model_at_a_time"):
-            # "Um modelo por vez" (checkbox da aba Transcrição): a fila INTEIRA
+            # "Um por vez" (opção do menu Modelos): a fila INTEIRA
             # vai para o modelo da vez e só depois de ele terminar o próximo
             # começa — os modelos nunca ficam em voo ao mesmo tempo (cada um
             # mantém o paralelismo PRÓPRIO de requisições). O HTML do lote
@@ -17463,13 +17763,21 @@ try {
         txt_path = audio_job_attr(job, "txt_path", model_index)
         if raw_path is None or txt_path is None:
             raise RuntimeError(f"arquivos de saída do modelo {model_index} não definidos")
-        # AssemblyAI: áudios com 2 minutos ou mais vão pelo fluxo assíncrono
-        # (v2/upload -> v2/transcript -> polling a cada 3s).
+        # Sync não detecta o idioma quando language_codes é omitido (usa en).
+        # Na concatenação, Auto e diarização precisam do fluxo async, mesmo
+        # para um WAV curto. Os demais envios mantêm a escolha existente.
         if (
             is_assemblyai_transcription(request_settings)
-            and probe_duration_ms(job.upload_path) >= 120000
+            and (probe_duration_ms(job.upload_path) >= 120000 or (
+                request_settings.get("_request_timestamps") and
+                (request_settings.get("diarize") or request_settings.get("grok_diarize") or
+                 assemblyai_rest_language(request_settings)[0])
+            ))
         ):
-            result = self._assemblyai_async_transcribe(job, request_settings)
+            if request_settings.get("_request_timestamps"):
+                result = self._assemblyai_async_transcribe(job, request_settings, raw_path=raw_path)
+            else:
+                result = self._assemblyai_async_transcribe(job, request_settings)
             audio_job_set(job, "transcription", model_index, result)
             txt_path.write_text(result, encoding="utf-8")
             return
@@ -17530,7 +17838,7 @@ try {
         audio_job_set(job, "transcription", model_index, result)
         txt_path.write_text(result, encoding="utf-8")
 
-    def _assemblyai_async_transcribe(self, job: AudioJob, request_settings: dict) -> str:
+    def _assemblyai_async_transcribe(self, job: AudioJob, request_settings: dict, *, raw_path: Path | None = None) -> str:
         """Fluxo async da AssemblyAI (espelho do Android): upload -> submit ->
         polling GET /v2/transcript/{id} a cada 3 segundos."""
         api_key = str(request_settings.get("assemblyai_api_key") or "").strip()
@@ -17539,6 +17847,19 @@ try {
         diarize_checked = bool(request_settings.get("diarize") or request_settings.get("grok_diarize"))
         detection, code = assemblyai_rest_language(request_settings)
         speaker_labels, punctuate = assemblyai_rest_diarize(diarize_checked)
+        params: dict = {"speech_models": ["universal-3-5-pro", "universal-2"]}
+        # Este fluxo monta o JSON v2/transcript; as keywords também precisam
+        # acompanhar os áudios enviados pela API assíncrona.
+        termos = stt_provider_rules.keywords_for_provider(request_settings, "assemblyai")
+        if termos:
+            params["keyterms_prompt"] = list(termos)
+        if detection:
+            params["language_detection"] = True
+        if code:
+            params["language_code"] = code
+        if speaker_labels:
+            params["speaker_labels"] = True
+            params["punctuate"] = True
 
         def http_request(host: str, path: str, *, headers=None, payload=None, method="GET"):
             if self.cancel_event.is_set():
@@ -17554,37 +17875,31 @@ try {
         if not job.upload_path:
             raise RuntimeError("arquivo para envio não definido")
         self._queue("job", job.original_path, "AssemblyAI upload")
-        upload_payload = job.upload_path.read_bytes()
-        status, body = http_request(
-            "api.assemblyai.com",
-            "/v2/upload",
-            headers={"Authorization": api_key, "Content-Type": "application/octet-stream"},
-            payload=upload_payload,
-            method="POST",
-        )
+        if request_settings.get("_request_timestamps") and raw_path is not None:
+            # O WAV combinado pode ser grande: enviar em blocos e registrar o
+            # socket no cancelamento, sem carregar o lote inteiro na memória.
+            upload = GraniteUploader(self.cancel_event, extra_headers={"Authorization": api_key}, raw_body=True)
+            self.uploaders.append(upload)
+            status, body, _headers = upload.post_file_raw(
+                "https://api.assemblyai.com/v2/upload", job.upload_path,
+                "application/octet-stream", raw_path.with_suffix(".upload.json"),
+            )
+        else:
+            upload_payload = job.upload_path.read_bytes()
+            status, body = http_request(
+                "api.assemblyai.com",
+                "/v2/upload",
+                headers={"Authorization": api_key, "Content-Type": "application/octet-stream"},
+                payload=upload_payload,
+                method="POST",
+            )
         if status != 200:
             raise RuntimeError(f"AssemblyAI upload HTTP {status}\n{body[:400]!r}")
         upload_url = json.loads(body.decode("utf-8", errors="replace") or "{}").get("upload_url")
         if not upload_url:
             raise RuntimeError("AssemblyAI não retornou upload_url.")
 
-        params: dict = {
-            "audio_url": upload_url,
-            "speech_models": ["universal-3-5-pro", "universal-2"],
-        }
-        # Keywords: este fluxo monta o JSON na mão (v2/transcript), então precisa
-        # incluir o `keyterms_prompt` explicitamente — sem isto, as keywords não
-        # chegavam nos áudios de 2 minutos ou mais.
-        termos = stt_provider_rules.keywords_for_provider(request_settings, "assemblyai")
-        if termos:
-            params["keyterms_prompt"] = list(termos)
-        if detection:
-            params["language_detection"] = True
-        if code:
-            params["language_code"] = code
-        if speaker_labels:
-            params["speaker_labels"] = True
-            params["punctuate"] = True
+        params["audio_url"] = upload_url
         status, body = http_request(
             "api.assemblyai.com",
             "/v2/transcript",
@@ -17614,6 +17929,8 @@ try {
             payload = json.loads(body.decode("utf-8", errors="replace") or "{}")
             state = payload.get("status")
             if state == "completed":
+                if raw_path is not None:
+                    raw_path.write_bytes(body)
                 text = str(payload.get("text") or "").strip()
                 if not text:
                     raise RuntimeError("A AssemblyAI retornou uma transcrição vazia (async).")

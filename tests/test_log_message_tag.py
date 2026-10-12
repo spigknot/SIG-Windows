@@ -150,7 +150,7 @@ class _TreeStub:
     def delete(self, item) -> None:
         self.items.remove(item)
 
-    def insert(self, _parent, _index, values=()):
+    def insert(self, _parent, _index, values=(), tags=()):
         item = f"item{len(self.items) + 1}"
         self.items.append(item)
         self.rows.append(tuple(values))

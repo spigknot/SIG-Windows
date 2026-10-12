@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import sig_app
+import ui_widgets
 
 
 def descendants(widget):
@@ -186,9 +187,11 @@ class GeminiSettingsUITests(unittest.TestCase):
         entry = next(w for w in widgets if w.winfo_class() == "TEntry")
         entry.delete(0, "end")
         entry.insert(0, "pt-PT, en-GB")
-        with patch.object(sig_app.messagebox, "showinfo") as help_dialog:
-            next(w for w in widgets if w.winfo_class() == "TButton" and w.cget("text") == "?").invoke()
-        self.assertIn("yue-Hant-HK", help_dialog.call_args.args[1])
+        with patch.object(ui_widgets, "show_info_popup") as help_dialog:
+            marker = next(w for w in widgets if isinstance(w, tk.Label) and w.cget("text") == "?")
+            marker.invoke()
+        help_text = help_dialog.call_args.args[2]
+        self.assertIn("yue-Hant-HK", help_text() if callable(help_text) else help_text)
         next(w for w in widgets if w.winfo_class() == "TButton" and w.cget("text") == "OK").invoke()
         self.assertEqual("custom", self.app.settings["transcription_language"])
         self.assertEqual("pt-BR", self.app.settings["gemini_language_mode"])
@@ -200,20 +203,19 @@ class GeminiSettingsUITests(unittest.TestCase):
         batch = self.app._transcription_batch_settings([sig_app.GEMINI_API_NAME])
         self.assertNotIn("language_codes", sig_app.gemini_rest_body(batch, "uri", "audio/wav")["generation_config"]["transcription_config"])
 
-    def test_timestamp_control_is_gemini_only_and_persists(self):
+    def test_gemini_timestamp_checkbox_is_removed_but_concat_still_requests_timestamps(self):
         self.app.multi_transcription_model_vars = {
             sig_app.GEMINI_API_NAME: tk.BooleanVar(master=self.root, value=True)}
         self.app._refresh_files_grok_limit_warning()
-        checkbox = self.app.files_gemini_timestamps_check
-        self.assertEqual("pack", checkbox.winfo_manager())
-        checkbox.invoke()
-        self.assertTrue(sig_app.load_settings()["gemini_timestamps"])
+        self.assertFalse(hasattr(self.app, "files_gemini_timestamps_check"))
+        self.assertFalse(hasattr(self.app, "files_gemini_timestamps_var"))
         batch = self.app._transcription_batch_settings([sig_app.GEMINI_API_NAME])
-        config = sig_app.gemini_rest_body(batch, "uri", "audio/wav")["generation_config"]["transcription_config"]
+        concatenated = sig_app.concatenation_settings(batch, [sig_app.GEMINI_API_NAME])
+        config = sig_app.gemini_rest_body(concatenated, "uri", "audio/wav")["generation_config"]["transcription_config"]
         self.assertEqual(["word"], config["mode"]["timestamp_granularities"])
         self.app.multi_transcription_model_vars[sig_app.GEMINI_API_NAME].set(False)
         self.app._refresh_files_grok_limit_warning()
-        self.assertEqual("", checkbox.winfo_manager())
+        self.assertEqual("", self.app.files_gemini_limit_warning.winfo_manager())
 
     def test_incompatible_gemini_settings_stop_whole_batch_before_upload(self):
         self.app.selected_paths = [Path(self.temp.name) / "fixture.wav"]
@@ -228,7 +230,7 @@ class GeminiSettingsUITests(unittest.TestCase):
             self.app.start_run()
         uploader.assert_not_called()
         self.assertFalse(self.app.running)
-        self.assertIn("não combina Keywords", notice.call_args.args[1])
+        self.assertIn("desligue Keywords", notice.call_args.args[1])
 
     def test_white_microphone_uses_gemini_rest_uploader(self):
         app = self.app

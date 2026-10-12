@@ -658,15 +658,10 @@ def settings_for_transcription_server(settings: dict, server_name: str) -> dict:
     return selected
 
 
-# Modelos que NÃO podem ser escolhidos na aba Transcrição (arquivos): são de
-# WebSocket/ao vivo — quem os usa é a aba Ocorrência (streaming). Regra do
-# usuário (10/09): o Meta Muse Voice é apenas websocket.
-REALTIME_ONLY_TRANSCRIPTION_SERVERS = frozenset(
-    {
-        ELEVENLABS_API_NAME,
-        META_MUSE_API_NAME,
-    }
-)
+# Todos os provedores atuais têm uma rota REST para arquivos, incluindo Muse
+# e Scribe v2. O nome histórico do ElevenLabs identifica também a configuração
+# da aba Ocorrência; o lote usa model_id=scribe_v2.
+REALTIME_ONLY_TRANSCRIPTION_SERVERS: frozenset[str] = frozenset()
 
 
 def is_realtime_only_transcription_server(server_name: str) -> bool:

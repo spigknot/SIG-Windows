@@ -46,6 +46,7 @@ class AudioJob:
     errors: list[str] = field(default_factory=list)
     txt_paths: list[Path] = field(default_factory=list)
     raw_paths: list[Path] = field(default_factory=list)
+    concat_source: bool = False
 
 
 def job_transcript_text(job: AudioJob) -> str:

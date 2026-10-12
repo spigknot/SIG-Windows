@@ -40,6 +40,7 @@ _RE_BLOCO = re.compile(
 
 # Modulos de dominio que NAO podem conhecer Tkinter nem o monolito de UI.
 MODULOS_SEM_UI = [
+    "concatenated_audio",
     "app_env",
     "domain_models",
     "providers",

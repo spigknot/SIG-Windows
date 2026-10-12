@@ -1,16 +1,17 @@
-"""Checkbox "Um modelo por vez" da aba Transcrição (vacina permanente).
+"""Opção "Um por vez" no menu Modelos da aba Transcrição (vacina permanente).
 
-Pedido do usuário (13/09): uma checkbox entre o seletor de "Modelos" e o de
-"Idiomas", DESMARCADA por padrão. Marcada, o lote NÃO manda os áudios para os
-modelos ao mesmo tempo — a fila inteira vai para um modelo e só depois de ele
-terminar o próximo começa, até acabar a lista. O HTML continua sendo gerado uma
-única vez, no fim de TUDO (`_workflow`), nunca por modelo.
+Pedido do usuário: uma opção separada no fim do menu "Modelos", desmarcada por
+padrão. Marcada, o lote NÃO manda os áudios para os modelos ao mesmo tempo — a
+fila inteira vai para um modelo e só depois de ele terminar o próximo começa,
+até acabar a lista. O HTML continua sendo gerado uma única vez, no fim de TUDO
+(`_workflow`), nunca por modelo.
 
 Regras que estes testes protegem:
 
-1. A checkbox vive entre "Modelos" e "Idioma" e nasce desmarcada.
+1. A opção "Um por vez" é o último item do menu Modelos, separada dos modelos,
+   e nasce desmarcada.
 2. A marcação viaja no lote (`_one_model_at_a_time`) e NÃO é persistida em
-   settings.json (mesmo padrão das outras checkboxes da linha).
+   settings.json.
 3. Marcada: os modelos nunca ficam em voo ao mesmo tempo e a ordem é a da
    lista — o modelo 2 só começa depois do último arquivo do modelo 1.
 4. Desmarcada: o comportamento antigo (modelos em paralelo) continua.
@@ -268,14 +269,14 @@ class ModoParaleloContinuaTest(unittest.TestCase):
 
     def test_sem_marcar_os_modelos_rodam_juntos(self):
         # A sonda só estoura se o modelo 2 não entrar em voo enquanto o modelo
-        # 1 espera: sem a checkbox ele precisa continuar entrando em paralelo.
+        # 1 espera: sem a opção ele precisa continuar entrando em paralelo.
         registro, _fila = _rodar_lote(
             um_por_vez=False, arquivos=2, paralelismo=1, sonda_cruzada=True
         )
 
         self.assertFalse(
             registro.sonda_estourou,
-            "sem a checkbox os modelos precisam continuar rodando em paralelo",
+            "sem marcar 'Um por vez' os modelos precisam continuar rodando em paralelo",
         )
         self.assertTrue(registro.cruzou_modelos)
 
@@ -310,18 +311,18 @@ class LoteSemPersistenciaTest(unittest.TestCase):
 
 
 class InterfaceTest(unittest.TestCase):
-    """Item 1: a checkbox existe, entre Modelos e Idioma, desmarcada por padrão."""
+    """Item 1: "Um por vez" é a última opção separada no menu de modelos."""
 
-    def test_fica_entre_modelos_e_idioma(self):
-        posicao_modelos = FONTE.index("self.files_models_button.pack(side=LEFT, padx=(16, 0))")
-        posicao_checkbox = FONTE.index("self.files_one_model_check.pack(side=LEFT")
-        posicao_idioma = FONTE.index("self.files_language_button.pack(side=LEFT, padx=(8, 0))")
-        self.assertLess(posicao_modelos, posicao_checkbox)
-        self.assertLess(posicao_checkbox, posicao_idioma)
+    def test_opcao_fica_no_fim_do_menu_separada_dos_modelos(self):
+        fonte = _metodo_fonte("_populate_models_menu")
+        posicao_separador = fonte.index("menu.add_separator()")
+        posicao_opcao = fonte.index('label="Um por vez"')
+        self.assertLess(posicao_separador, posicao_opcao)
 
-    def test_rotulo_e_variavel(self):
-        self.assertIn('text="Um modelo por vez"', FONTE)
-        self.assertIn("variable=self.files_one_model_var", FONTE)
+    def test_opcao_usa_variavel_da_aba(self):
+        fonte = _metodo_fonte("_populate_models_menu")
+        self.assertIn('label="Um por vez"', fonte)
+        self.assertIn("variable=self.files_one_model_var", fonte)
 
     def test_nasce_desmarcada(self):
         # Com o `master` do root (regra do runbook para variáveis novas: sem
@@ -345,7 +346,7 @@ class ExecucaoSequencialNoCodigoTest(unittest.TestCase):
             for no in ast.walk(metodo)
             if isinstance(no, ast.If) and "_one_model_at_a_time" in ast.unparse(no.test)
         ]
-        self.assertEqual(1, len(desvios), "faltou o desvio da checkbox no runner")
+        self.assertEqual(1, len(desvios), "faltou o desvio da opção no runner")
         desvio = desvios[0]
         # Marcada: roda os modelos um atrás do outro (sem executor por modelo).
         self.assertIn("model_runner(index)", ast.unparse(desvio.body))

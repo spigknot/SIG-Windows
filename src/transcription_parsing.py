@@ -15,6 +15,80 @@ class ParsedTranscription:
     timestamped_text: str = ""
 
 
+@dataclass(frozen=True)
+class TimedTranscriptEntry:
+    text: str
+    start: float
+    end: float
+    speaker: str | None = None
+    kind: str = "word"
+
+
+def timestamp_entries(raw: bytes, provider: str) -> list[TimedTranscriptEntry]:
+    """Tempos reais de cada API em segundos, sem duração/palavras estimadas.
+
+    Usado para separar um áudio concatenado. Não altera o parser de exibição,
+    que pode completar um ``end`` ausente para desenhar marcas no texto.
+    """
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("A resposta concatenada precisa ser JSON com timestamps.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Formato de resposta concatenada inválido.")
+    kind, scale = "word", 1.0
+    if provider == "deepgram":
+        channels = (payload.get("results") or {}).get("channels") or []
+        alternatives = (channels[0].get("alternatives") or []) if channels else []
+        items = alternatives[0].get("words") or [] if alternatives else []
+    elif provider == "metamuse":
+        items, scale, kind = payload.get("turns") or [], 0.001, "turn"
+    elif provider == "alibaba":
+        output = payload.get("output") or {}
+        if isinstance(output.get("output"), dict):
+            output = output["output"]
+        sentences = output.get("sentences") or [output.get("sentence") or {}]
+        items = [word for sentence in sentences for word in sentence.get("words", [])]
+        scale = 0.001
+    elif provider == "gemini" and "words" not in payload:
+        items = [annotation for step in payload.get("steps", []) if step.get("type") == "model_output"
+                 for content in step.get("content", []) for annotation in content.get("annotations", [])
+                 if annotation.get("type") == "word_info"]
+    else:
+        items = payload.get("words") or []
+        scale = 0.001 if provider == "assemblyai" else 1.0
+    if not isinstance(items, list):
+        raise ValueError("A lista de timestamps da API é inválida.")
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Um item da API não contém timestamps válidos.")
+        if item.get("type") in ("spacing", "audio_event"):
+            continue
+        text = str(item.get("punctuated_word") or item.get("text") or item.get("word") or item.get("transcript") or "").strip()
+        if not text:
+            continue
+        if provider == "metamuse":
+            start, end = item.get("startMs"), item.get("endMs")
+        elif provider == "alibaba":
+            start, end = item.get("begin_time"), item.get("end_time")
+            text += str(item.get("punctuation") or "")
+        else:
+            start, end = item.get("start", item.get("start_offset")), item.get("end", item.get("end_offset"))
+        try:
+            start = float(str(start).removesuffix("s")) * scale
+            # Alguns Grok REST retornam só start. A origem ainda é conhecida
+            # por esse ponto; nunca fabricar uma duração para separar arquivos.
+            end = start if end is None and provider == "grok" else float(str(end).removesuffix("s")) * scale
+        except (ValueError, TypeError) as exc:
+            raise ValueError("A API devolveu texto sem timestamp; não é possível separar os arquivos com segurança.") from exc
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+            raise ValueError("A API devolveu timestamps inválidos para a concatenação.")
+        speaker = item.get("speaker", item.get("speaker_id"))
+        result.append(TimedTranscriptEntry(text, start, end, str(speaker) if speaker is not None else None, kind))
+    return result
+
+
 def _format_transcription_timestamp(seconds: float) -> str:
     millis = max(0, int(round(seconds * 1000)))
     hours, remainder = divmod(millis, 3_600_000)
@@ -163,7 +237,8 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
     # (inclusive nas normais, com transcript). Então a regra certa é:
     # 1) se existe transcript real -> usa (o aviso no metadata é ruído);
     # 2) sem transcript, se a resposta é aviso/erro -> vazio (não vazar metadados);
-    # 3) sem transcript e sem aviso -> texto cru (compatibilidade antiga).
+    # 3) campo de transcript presente, mas vazio -> vazio;
+    # 4) formato sem campos conhecidos e sem aviso -> texto cru (compatibilidade).
     def _find_transcript(value):
         """Primeiro conteúdo não vazio sob chaves de transcrição conhecidas."""
         if isinstance(value, dict):
@@ -198,7 +273,10 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
             return any(_is_warning(item) for item in value)
         return False
 
+    recognized_transcript = False
+
     def collect(value):
+        nonlocal recognized_transcript
         if value is None:
             return []
         if isinstance(value, str):
@@ -210,8 +288,12 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
                 found.extend(collect(item))
             return found
         if isinstance(value, dict):
+            has_direct_field = False
             for key in ("text", "transcription", "transcript", "result", "output"):
                 if key in value:
+                    if isinstance(value[key], str) or value[key] is None:
+                        has_direct_field = True
+                        recognized_transcript = True
                     direct = collect(value[key])
                     if direct:
                         return direct
@@ -224,9 +306,12 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
                 segments = collect(value["segments"])
                 if segments:
                     return ["".join(segments)]
+            if has_direct_field:
+                return []
             found = []
             for item in value.values():
-                found.extend(collect(item))
+                if isinstance(item, (dict, list)):
+                    found.extend(collect(item))
             return found
         return []
 
@@ -236,8 +321,8 @@ def parse_transcription_response(raw: bytes) -> ParsedTranscription:
             "\n".join(pieces).strip(),
             _timestamped_text_from_json(payload).strip(),
         )
-    # Sem transcript real: aviso/erro do provedor -> vazio (não vazar metadados).
-    if _is_warning(payload):
+    # Um campo vazio é uma resposta STT válida, não texto cru de compatibilidade.
+    if recognized_transcript or _is_warning(payload):
         return ParsedTranscription("")
     return ParsedTranscription(text.strip(), _timestamped_text_from_json(payload).strip())
 

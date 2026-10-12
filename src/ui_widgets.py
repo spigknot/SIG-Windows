@@ -7,7 +7,7 @@ O `NodeSlider` e uma porta do slider do projeto TurboCore
 atracao magnetica. Mantido igual para as duas aplicacoes terem o mesmo visual.
 """
 
-from tkinter import Canvas, Label, Toplevel, ttk
+from tkinter import Button, Canvas, Frame, Label, Toplevel, TclError, ttk
 
 import math
 from typing import Callable
@@ -489,29 +489,128 @@ class NodeSlider(Canvas):
         return "break"
 
 
-def create_tooltip(widget, message: str | Callable[[], str]) -> None:
-    tooltip = None
+INFO_DELAY_MS = 500
+INFO_BACKGROUND = "#172024"
+INFO_FOREGROUND = "#edf7f5"
+INFO_LABEL_OPTIONS = dict(background=INFO_BACKGROUND, foreground=INFO_FOREGROUND,
+                          justify="left", wraplength=420, padx=12, pady=10,
+                          font=("Segoe UI", 9))
 
-    def show(_event=None):
-        nonlocal tooltip
-        if tooltip or not widget.winfo_exists():
+
+def _place_information(window, x, y):
+    window.update_idletasks()
+    if not window.winfo_exists():
+        return
+    x = min(x, window.winfo_screenwidth() - window.winfo_reqwidth() - 4)
+    y = min(y, window.winfo_screenheight() - window.winfo_reqheight() - 4)
+    window.geometry(f"+{max(0, x)}+{max(0, y)}")
+    window.deiconify()
+
+
+class InformationTooltip:
+    """Dica padrão: 500 ms parado, aparência do antigo informativo de ZIP."""
+    def __init__(self, widget, message):
+        self.widget, self.message = widget, message
+        self.window = self.label = self.timer = None
+        self.position = (0, 0)
+        for event in ("<Enter>", "<Motion>"):
+            widget.bind(event, self.schedule, add="+")
+        for event in ("<Leave>", "<ButtonPress>", "<Unmap>", "<Destroy>"):
+            widget.bind(event, self.hide, add="+")
+
+    def schedule(self, event):
+        if self.window is not None:
             return
-        tooltip = Toplevel(widget)
-        tooltip.overrideredirect(True)
-        tooltip.attributes("-topmost", True)
-        label = ttk.Label(tooltip, text=message() if callable(message) else message, padding=(7, 4), relief="solid")
-        label.pack()
-        tooltip.geometry(f"+{widget.winfo_rootx() + widget.winfo_width() + 4}+{widget.winfo_rooty() + 2}")
+        self.hide()
+        self.position = (event.x_root + 14, event.y_root + 18)
+        self.timer = self.widget.after(INFO_DELAY_MS, self.show)
 
-    def hide(_event=None):
-        nonlocal tooltip
-        if tooltip:
-            tooltip.destroy()
-            tooltip = None
+    def show(self):
+        self.timer = None
+        if self.window is not None or not self.widget.winfo_exists():
+            return
+        text = self.message() if callable(self.message) else self.message
+        if not text:
+            return
+        self.window = Toplevel(self.widget)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        frame = Frame(self.window, background=INFO_BACKGROUND, borderwidth=1, relief="solid")
+        frame.pack(fill="both", expand=True)
+        self.label = Label(frame, text=text, **INFO_LABEL_OPTIONS)
+        self.label.pack()
+        _place_information(self.window, *self.position)
 
-    widget.bind("<Enter>", show, add="+")
-    widget.bind("<Leave>", hide, add="+")
-    widget.bind("<ButtonPress>", hide, add="+")
+    def hide(self, _event=None):
+        timer, window = self.timer, self.window
+        self.timer = self.window = self.label = None
+        try:
+            if timer is not None:
+                self.widget.after_cancel(timer)
+            if window is not None:
+                window.destroy()
+        except TclError:
+            pass
+
+
+def create_tooltip(widget, message: str | Callable[[], str]):
+    widget._sig_tooltip = InformationTooltip(widget, message)
+    return widget._sig_tooltip
+
+
+def create_info_marker(parent, title, message, *, symbol="?", color="#889493",
+                       popup_message=None, refresh_ms=None):
+    """Marcador informativo único, com balão hover e popup padronizados."""
+    marker = Label(parent, text=symbol, fg=color, font=("Segoe UI", 10, "bold"),
+                   cursor="hand2", background="#f4f7f6", takefocus=True)
+    create_tooltip(marker, message)
+    def open_help(_event=None):
+        show_info_popup(marker, title, popup_message if popup_message is not None else message,
+                        refresh_ms=refresh_ms)
+        return "break"
+    marker.bind("<Button-1>", open_help)
+    marker.bind("<Return>", open_help)
+    marker.bind("<space>", open_help)
+    marker.invoke = open_help
+    return marker
+
+
+def show_info_popup(widget, title, message, *, refresh_ms=None):
+    """Ajuda clicável, com a mesma estética e âncora para todos os marcadores."""
+    tooltip = getattr(widget, "_sig_tooltip", None)
+    if tooltip:
+        tooltip.hide()
+    window = Toplevel(widget.winfo_toplevel())
+    window.withdraw()
+    window.title(title)
+    window.transient(widget.winfo_toplevel())
+    window.overrideredirect(True)
+    window.attributes("-topmost", True)
+    window.configure(background=INFO_BACKGROUND, borderwidth=1, relief="solid")
+    label = Label(window, **INFO_LABEL_OPTIONS)
+    label.pack(fill="both", expand=True)
+    Button(window, text="Fechar", command=window.destroy, background=INFO_BACKGROUND,
+           foreground=INFO_FOREGROUND, activebackground="#28363c", activeforeground=INFO_FOREGROUND,
+           font=("Segoe UI", 9), padx=12, pady=4).pack(pady=(0, 10))
+    timer = [None]
+    def refresh():
+        timer[0] = None
+        if not window.winfo_exists():
+            return
+        label.configure(text=message() if callable(message) else message)
+        if refresh_ms:
+            timer[0] = window.after(refresh_ms, refresh)
+    def dispose(event):
+        if event.widget is window and timer[0] is not None:
+            window.after_cancel(timer[0])
+            timer[0] = None
+    window.bind("<Destroy>", dispose)
+    window.bind("<Escape>", lambda _event: window.destroy())
+    refresh()
+    _place_information(window, widget.winfo_rootx() + 14,
+                       widget.winfo_rooty() + widget.winfo_height() + 18)
+    return window
 
 
 class TreeviewCellTooltip:
@@ -524,6 +623,8 @@ class TreeviewCellTooltip:
         self.label = None
         self._cell = None
         self._hide_after = None
+        self._show_after = None
+        self._pending_cell = None
         tree.bind("<Motion>", self._motion, add="+")
         tree.bind("<Leave>", self._leave, add="+")
         for event in ("<ButtonPress>", "<MouseWheel>", "<Configure>", "<Unmap>", "<Destroy>"):
@@ -531,21 +632,65 @@ class TreeviewCellTooltip:
 
     def _cancel_hide(self, _event=None):
         if self._hide_after is not None:
-            self.tree.after_cancel(self._hide_after)
+            timer = self._hide_after
             self._hide_after = None
+            try:
+                self.tree.after_cancel(timer)
+            except TclError:
+                pass  # O interpretador/widget pode ter sido encerrado.
 
     def hide(self, _event=None):
         self._cancel_hide()
-        if self.window is not None:
-            self.window.destroy()
+        if self._show_after is not None:
+            try:
+                self.tree.after_cancel(self._show_after)
+            except TclError:
+                pass
+            self._show_after = None
+        self._pending_cell = None
+        popup = self.window
         self.window = self.label = self._cell = None
+        if popup is not None:
+            try:
+                popup.destroy()
+            except TclError:
+                pass  # Também aceita um balão destruído pelo dono da tabela.
+
+    def _popup_is_current(self, popup, label):
+        # update_idletasks executa callbacks que podem atualizar a tabela,
+        # esconder este balão ou até criar outro durante o mesmo _motion.
+        try:
+            current = (self.window is popup and self.label is label and
+                       self.tree.winfo_exists() and popup.winfo_exists() and label.winfo_exists())
+        except TclError:
+            current = False
+        if not current and self.window is popup:
+            self.hide()
+        return current
 
     def _leave(self, _event=None):
+        if self.window is None:
+            self.hide()
         self._cancel_hide()
         # Permite alcançar/rolar um balão longo sem ele desaparecer no caminho.
         self._hide_after = self.tree.after(180, self.hide)
 
     def _motion(self, event):
+        row, column = self.tree.identify_row(event.y), self.tree.identify_column(event.x)
+        if not row or self.tree.identify_region(event.x, event.y) != "cell":
+            self.hide()
+            return
+        self._cancel_hide()
+        cell = (row, column)
+        if cell == self._cell or cell == self._pending_cell:
+            return
+        self.hide()
+        self._pending_cell = cell
+        self._show_after = self.tree.after(INFO_DELAY_MS, lambda: self._show_cell(event))
+
+    def _show_cell(self, event):
+        self._show_after = None
+        self._pending_cell = None
         self._cancel_hide()
         row = self.tree.identify_row(event.y)
         column = self.tree.identify_column(event.x)
@@ -563,12 +708,13 @@ class TreeviewCellTooltip:
         self.window = popup = Toplevel(self.tree)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
-        background = ttk.Style(self.tree).lookup("TLabel", "background")
+        background = INFO_BACKGROUND
         canvas = Canvas(popup, highlightthickness=0, borderwidth=0, background=background)
-        self.label = label = ttk.Label(canvas, text=text, padding=(7, 4), relief="solid",
-                                       wraplength=min(560, self.tree.winfo_screenwidth() - 48), justify="left")
+        self.label = label = Label(canvas, text=text, borderwidth=1, relief="solid", **INFO_LABEL_OPTIONS)
         canvas.create_window(0, 0, window=label, anchor="nw")
         label.update_idletasks()
+        if not self._popup_is_current(popup, label):
+            return
         width, height = label.winfo_reqwidth(), label.winfo_reqheight()
         max_height = max(100, self.tree.winfo_screenheight() - 80)
         canvas.configure(width=width, height=min(height, max_height), scrollregion=(0, 0, width, height))
@@ -585,6 +731,8 @@ class TreeviewCellTooltip:
             return "break"
         popup.bind("<MouseWheel>", wheel)
         popup.update_idletasks()
+        if not self._popup_is_current(popup, label):
+            return
         x = min(event.x_root + 14, self.tree.winfo_screenwidth() - popup.winfo_reqwidth() - 4)
         y = min(event.y_root + 14, self.tree.winfo_screenheight() - popup.winfo_reqheight() - 4)
         popup.geometry(f"+{max(0, x)}+{max(0, y)}")

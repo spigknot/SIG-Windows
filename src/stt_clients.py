@@ -35,6 +35,8 @@ import stt_provider_rules
 
 def transcribe_url(settings: dict) -> str:
     url = selected_transcription_server(settings)["url"]
+    if is_assemblyai_transcription(settings) and settings.get("_request_timestamps"):
+        return "https://sync.assemblyai.com/v1/transcribe"
     if is_deepgram_transcription(settings):
         url = f"{url}?{deepgram_query_string(settings)}"
     return url
@@ -138,6 +140,15 @@ def transcription_form_fields(settings: dict) -> dict:
         # fica vazio apenas para manter a assinatura do uploader.
         return {}
     if is_assemblyai_transcription(settings):
+        if settings.get("_request_timestamps"):
+            config = {"timestamps": True}
+            codes = stt_provider_rules.assemblyai_ws_language_codes(settings)
+            if codes:
+                config["language_codes"] = codes
+            terms = stt_provider_rules.keywords_for_provider(settings, "assemblyai")
+            if terms:
+                config["keyterms_prompt"] = terms
+            return {"config": json.dumps(config, ensure_ascii=False)}
         fields: dict = {}
         detection, code = stt_provider_rules.assemblyai_rest_language(settings)
         if detection:
@@ -155,6 +166,8 @@ def transcription_form_fields(settings: dict) -> dict:
         return fields
     if is_elevenlabs_transcription(settings):
         fields = {}
+        if settings.get("_request_timestamps"):
+            fields["timestamps_granularity"] = "word"
         code = stt_provider_rules.elevenlabs_rest_language_code(settings)
         if code:
             fields["language_code"] = code
@@ -217,12 +230,13 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
             raise RuntimeError("Insira a chave API da AssemblyAI nas configurações.")
         return GraniteUploader(
             cancel_event,
-            {},
+            transcription_form_fields(settings) if settings.get("_request_timestamps") else {},
             {
                 "Authorization": api_key,
-                "X-AAI-Model": "u3-sync-pro",
+                "X-AAI-Model": "universal-3-5-pro" if settings.get("_request_timestamps") else "u3-sync-pro",
             },
             "audio",
+            json_fields={"config"} if settings.get("_request_timestamps") else None,
         )
     if is_elevenlabs_transcription(settings):
         api_key = str(settings.get("elevenlabs_api_key") or "").strip()
@@ -230,7 +244,7 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
             raise RuntimeError("Insira a chave API da ElevenLabs nas configurações.")
         return GraniteUploader(
             cancel_event,
-            {"model_id": "scribe_v2"},
+            {"model_id": "scribe_v2", **(transcription_form_fields(settings) if settings.get("_request_timestamps") else {})},
             {"xi-api-key": api_key},
             "file",
         )
@@ -278,6 +292,8 @@ def metamuse_handshake_payload(api_key: str, diarize_checked: bool, settings: di
 
 def metamuse_rest_request_body(diarize_checked: bool, settings: dict) -> dict:
     """Parte JSON \"request\" do REST do Muse (multipart com a parte \"audio\")."""
+    # Esses modos devolvem turns[].startMs/endMs, inclusive na concatenação.
+    # Não usar PUSH_TO_TALK (turns vazio), nem inventar timestamps por palavra.
     body = {
         "mode": metamuse_mode(bool(diarize_checked)),
         "model": META_MUSE_MODEL,

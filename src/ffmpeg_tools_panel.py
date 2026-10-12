@@ -54,7 +54,7 @@ from tkinter import (
     messagebox,
     ttk,
 )
-from ui_widgets import PreviewIconButton, create_tooltip
+from ui_widgets import PreviewIconButton, create_tooltip, create_info_marker, show_info_popup
 import smart_join_planner
 import smart_cut_planner
 import smart_insert_planner
@@ -1627,11 +1627,11 @@ class FfmpegToolsPanel:
             width=12,
         )
         self.encoder_advanced_label = ttk.Label(tool_tab_bar, text="Avançado:", style="Muted.TLabel")
-        self.encoder_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_encoder_help)
+        self.encoder_help_button = create_info_marker(tool_tab_bar, "Encoder de vídeo", self._encoder_help_text)
         self.encoder_effective_label = ttk.Label(encoder_message, textvariable=self.encoder_effective_var, style="Muted.TLabel", wraplength=730)
         self.acceleration_label = ttk.Label(tool_tab_bar, text="Encoder de vídeo:", style="Muted.TLabel")
         self.acceleration_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
-        self.quality_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_quality_help)
+        self.quality_help_button = create_info_marker(tool_tab_bar, "Qualidade do vídeo", self._video_quality_help_text)
         self.quality_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
         self.quality_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_quality_var, width=9)
         self.quality_menu = self.tk.Menu(self.quality_menu_button, tearoff=False)
@@ -1645,7 +1645,7 @@ class FfmpegToolsPanel:
         self.quality_menu_button.pack(side=RIGHT, pady=(2, 0))
         self.quality_label = ttk.Label(tool_tab_bar, text="Qualidade:", style="Muted.TLabel")
         self.quality_label.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
-        self.speed_help_button = ttk.Button(tool_tab_bar, text="?", width=3, command=self._show_video_speed_help)
+        self.speed_help_button = create_info_marker(tool_tab_bar, "Velocidade", self._video_speed_help_text)
         self.speed_help_button.pack(side=RIGHT, padx=(4, 0), pady=(2, 0))
         self.speed_menu_button = ttk.Menubutton(tool_tab_bar, textvariable=self.video_speed_var, width=13)
         self.speed_menu = self.tk.Menu(self.speed_menu_button, tearoff=False)
@@ -2457,7 +2457,7 @@ class FfmpegToolsPanel:
                                           values=CUT_MODES, state="readonly", width=18)
         self.cut_mode_combo.pack(side=LEFT, fill=X, expand=True)
         self.cut_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_cut_controls())
-        self.cut_mode_help_button = ttk.Button(mode_controls, text="?", width=3, command=self._show_cut_mode_help)
+        self.cut_mode_help_button = create_info_marker(mode_controls, "Modos de corte", CUT_MODE_HELP)
         self.cut_mode_help_button.pack(side=LEFT, padx=(4, 0))
         audio = self._option_row(sidebar, "Áudio do vídeo")
         self.cut_audio_policy_combo = ttk.Combobox(
@@ -2572,16 +2572,14 @@ class FfmpegToolsPanel:
         ttk.Label(self.rotate_parallel_frame, text="Trechos:", style="Muted.TLabel").pack(side=LEFT)
         self.rotate_segments_entry = ttk.Entry(self.rotate_parallel_frame, textvariable=self.rotate_segments_var, width=8)
         self.rotate_segments_entry.pack(side=LEFT, padx=(6, 4))
-        ttk.Button(
-            self.rotate_parallel_frame, text="?", width=3,
-            command=lambda: messagebox.showinfo(
-                "Trechos em paralelo",
-                "O valor define quantos trechos serão criados e quantos poderão ser processados simultaneamente. "
-                "Mais trechos podem acelerar vídeos longos, mas valores altos consomem RAM, aquecem o PC e podem saturar o encoder de hardware. "
-                "Em vídeos curtos, o overhead pode piorar o tempo. Deixe vazio para usar todos os núcleos lógicos em CPU; "
-                "com encoder de hardware (NVENC/QSV/AMF), o padrão é limitado a 3 processos simultâneos por segurança das sessões do driver.",
-            ),
-        ).pack(side=LEFT)
+        self.rotate_parallel_help_button = create_info_marker(
+            self.rotate_parallel_frame, "Trechos em paralelo",
+            "O valor define quantos trechos serão criados e quantos poderão ser processados simultaneamente. "
+            "Mais trechos podem acelerar vídeos longos, mas valores altos consomem RAM, aquecem o PC e podem saturar o encoder de hardware. "
+            "Em vídeos curtos, o overhead pode piorar o tempo. Deixe vazio para usar todos os núcleos lógicos em CPU; "
+            "com encoder de hardware (NVENC/QSV/AMF), o padrão é limitado a 3 processos simultâneos por segurança das sessões do driver.",
+        )
+        self.rotate_parallel_help_button.pack(side=LEFT)
         self.rotate_device_limit_var = StringVar(value="")
         self.rotate_device_limit_label = ttk.Label(sidebar, textvariable=self.rotate_device_limit_var,
                                                    foreground="#b3261e", wraplength=FFMPEG_SIDEBAR_WIDTH - 16)
@@ -2817,7 +2815,7 @@ class FfmpegToolsPanel:
         return str(self.cut_mode_var.get()).startswith(CUT_MODE_COPY)
 
     def _show_cut_mode_help(self) -> None:
-        messagebox.showinfo("Modos de corte", CUT_MODE_HELP)
+        return show_info_popup(self.cut_mode_help_button, "Modos de corte", CUT_MODE_HELP)
 
     def _update_cut_controls(self) -> None:
         fast = self._cut_mode_is_copy()
@@ -2906,9 +2904,8 @@ class FfmpegToolsPanel:
     def _on_encoder_path_changed(self) -> None:
         self._refresh_encoder_control_state()
 
-    def _show_encoder_help(self) -> None:
-        messagebox.showinfo(
-            "Encoder de vídeo",
+    def _encoder_help_text(self) -> str:
+        return (
             "GPU: usa o encoder de hardware (NVENC/QSV/AMF) sempre que ele existir para o codec "
             "necessário — em geral é bem mais rápido. Se a GPU falhar (driver, sessão ocupada), a "
             "tarefa é repetida na CPU e o app avisa no log.\n\n"
@@ -2918,7 +2915,7 @@ class FfmpegToolsPanel:
             "sozinho entre os encoders de hardware disponíveis — e usar a CPU quando a GPU não tiver "
             "o codec pedido ou quando o trecho a reencodar for curto demais para a inicialização do "
             "hardware compensar. Escolher um encoder específico força aquela placa; se ela não "
-            "estiver disponível, o app cai na CPU avisando no log.",
+            "estiver disponível, o app cai na CPU avisando no log."
         )
 
     def _log_encoder_choice(self, message: str) -> None:
@@ -3071,9 +3068,8 @@ class FfmpegToolsPanel:
             rotulo.pack(side=RIGHT, padx=(12, 4), pady=(4, 0))
 
     @staticmethod
-    def _show_video_speed_help(self) -> None:
-        messagebox.showinfo(
-            "Velocidade",
+    def _video_speed_help_text() -> str:
+        return (
             "Velocidade e qualidade são eixos separados: a Qualidade manda no CRF "
             "(quanto de detalhe se preserva), a Velocidade manda no esforço que o encoder "
             "faz para chegar lá.\n\n"
@@ -3082,19 +3078,18 @@ class FfmpegToolsPanel:
             "encoders de CPU (x264/x265).\n\n"
             "Máxima qualidade: arquivos menores para o mesmo CRF, processando mais lento.\n\n"
             "Nos encoders por hardware (NVENC/QSV/AMF) a velocidade não se aplica: eles têm "
-            "os próprios presets.",
+            "os próprios presets."
         )
 
     @staticmethod
-    def _show_video_quality_help() -> None:
-        messagebox.showinfo(
-            "Qualidade do vídeo",
+    def _video_quality_help_text() -> str:
+        return (
             "Máxima prioriza a imagem e tende a gerar arquivos maiores e processar mais lentamente.\n\n"
             "Muito alta mantém excelente qualidade com menor uso de espaço.\n\n"
             "Alta (Recomendado) equilibra imagem, tamanho e velocidade; nos encoders por hardware usa o bitrate do original como referência.\n\n"
             "Média reduz espaço com perda visual moderada.\n\n"
             "Econômica prioriza arquivos menores.\n\n"
-            "A saída normalmente usa H.264/MP4. Se a instalação não oferecer libx264, o fallback CPU pode usar MPEG-4 Part 2; o status e o log mostram o encoder efetivo.",
+            "A saída normalmente usa H.264/MP4. Se a instalação não oferecer libx264, o fallback CPU pode usar MPEG-4 Part 2; o status e o log mostram o encoder efetivo."
         )
 
     def _set_extract_preset(self, preset: str) -> None:

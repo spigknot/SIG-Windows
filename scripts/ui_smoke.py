@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from app_env import physical_cpu_count  # noqa: E402  (nucleos FISICOS da maquina)
+import ui_widgets  # noqa: E402
 from providers import (  # noqa: E402  (catalogo: quem tem o controle "- t = +")
     ALIBABA_API_NAME,
     ASSEMBLYAI_API_NAME,
@@ -114,42 +115,40 @@ def _check_transcription_models_menu(app) -> None:
         raise RuntimeError(f"selecao padrao do menu Modelos inesperada: {checked}")
 
 
-def _check_one_model_checkbox(app) -> None:
-    """Checkbox "Um modelo por vez" da aba Transcricao (regra do usuario, 13/09).
-
-    Vacina da UI: fica ENTRE o botao "Modelos" e o seletor de Idioma, com o
-    rotulo exato e DESMARCADA por padrao (a marcacao e do lote — nao e
-    persistida no settings.json).
-    """
-    checkbox = getattr(app, "files_one_model_check", None)
-    if checkbox is None:
-        raise RuntimeError("checkbox 'Um modelo por vez' ausente na aba Transcricao")
-    if checkbox.winfo_manager() != "pack":
-        raise RuntimeError("checkbox 'Um modelo por vez' nao esta visivel")
-    models_button = getattr(app, "files_models_button", None)
-    language_button = getattr(app, "files_language_button", None)
-    if models_button is None or language_button is None:
-        raise RuntimeError("botoes da linha de controles da Transcricao ausentes")
-    barra = models_button.master
-    if checkbox.master is not barra or language_button.master is not barra:
-        raise RuntimeError("checkbox nao esta na mesma barra dos botoes Modelos/Idioma")
-    # A ordem que o usuario VÊ é a ordem de `pack` (pack_slaves), não a de
-    # criação dos widgets: mover o pack() da checkbox muda a posição na tela
-    # sem mudar winfo_children().
-    ordem = list(barra.pack_slaves())
-    for widget, nome in ((models_button, "botao Modelos"), (checkbox, "checkbox"), (language_button, "seletor de Idioma")):
-        if widget not in ordem:
-            raise RuntimeError(f"{nome} nao esta empacotado na barra da Transcricao")
-    if not ordem.index(models_button) < ordem.index(checkbox) < ordem.index(language_button):
-        raise RuntimeError("checkbox nao esta entre o botao Modelos e o seletor de Idioma")
-    if str(checkbox.cget("text")) != "Um modelo por vez":
-        raise RuntimeError(f"rotulo inesperado na checkbox: {checkbox.cget('text')!r}")
-    if str(checkbox.cget("variable")) != str(app.files_one_model_var):
-        raise RuntimeError("checkbox nao usa a variavel da aba (files_one_model_var)")
-    if checkbox.pack_info().get("side") != "left":
-        raise RuntimeError("checkbox fora do alinhamento padrao (side=left)")
+def _check_one_model_option(app) -> None:
+    """Opção "Um por vez" no fim do menu de modelos, desmarcada por padrão."""
+    menu = getattr(app, "files_models_menu", None)
+    if menu is None:
+        raise RuntimeError("menu Modelos da aba Transcricao ausente")
+    end = menu.index("end")
+    if end is None or end < 2:
+        raise RuntimeError("menu Modelos incompleto")
+    if menu.type(end) != "checkbutton" or menu.entrycget(end, "label") != "Um por vez":
+        raise RuntimeError("opcao 'Um por vez' nao e o ultimo item do menu Modelos")
+    if menu.type(end - 1) != "separator":
+        raise RuntimeError("opcao 'Um por vez' precisa ficar separada dos modelos")
+    if str(menu.entrycget(end, "variable")) != str(app.files_one_model_var):
+        raise RuntimeError("opcao 'Um por vez' nao usa a variavel da aba")
     if app.files_one_model_var.get():
-        raise RuntimeError("checkbox 'Um modelo por vez' precisa nascer desmarcada")
+        raise RuntimeError("opcao 'Um por vez' precisa nascer desmarcada")
+
+
+def _check_transcription_send_mode(app) -> None:
+    """Dropdown de formato de envio: rótulo fixo e Pronto como padrão."""
+    prefix = getattr(app, "files_send_mode_prefix_label", None)
+    button = getattr(app, "files_send_mode_button", None)
+    menu = getattr(app, "files_send_mode_menu", None)
+    if prefix is None or button is None or menu is None:
+        raise RuntimeError("seletor de formato de envio ausente na aba Transcricao")
+    if prefix.cget("text") != "Enviar:":
+        raise RuntimeError("rotulo fixo do formato de envio inesperado")
+    if button.winfo_manager() != "pack":
+        raise RuntimeError("seletor de formato de envio nao esta visivel")
+    labels = [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)]
+    if labels != ["Pronto", "Compacto", "Como está"]:
+        raise RuntimeError(f"opcoes do formato de envio inesperadas: {labels}")
+    if app.mode_var.get() != "ready" or app.files_send_mode_label_var.get() != "Pronto":
+        raise RuntimeError("formato de envio precisa iniciar como Pronto")
 
 
 def _expected_conversion_values(nucleos: int) -> list[int]:
@@ -1290,11 +1289,13 @@ def _check_ffmpeg_encoder_selector(app, root) -> None:
         panel._on_encoder_path_changed()
         root.update()
         # o "?" abre a explicacao dos dois caminhos
-        with patch("ffmpeg_tools_panel.messagebox.showinfo") as aviso:
+        with patch.object(ui_widgets, "show_info_popup") as aviso:
             panel.encoder_help_button.invoke()
         if not aviso.called:
             raise RuntimeError("o '?' do encoder nao abriu a explicacao")
-        texto = aviso.call_args[0][1]
+        texto = aviso.call_args.args[2]
+        if callable(texto):
+            texto = texto()
         for trecho in ("GPU", "CPU", "Avançado"):
             if trecho not in texto:
                 raise RuntimeError(f"a explicacao do encoder nao fala de {trecho!r}")
@@ -1331,11 +1332,13 @@ def _check_ffmpeg_cut_modes(app, root) -> None:
             raise RuntimeError("o botão '?' dos modos de corte não está visível")
         if ajuda.winfo_rootx() < combo.winfo_rootx():
             raise RuntimeError("o '?' ficou à esquerda do seletor de corte")
-        with patch("ffmpeg_tools_panel.messagebox.showinfo") as aviso:
+        with patch.object(ui_widgets, "show_info_popup") as aviso:
             ajuda.invoke()
         if not aviso.called:
             raise RuntimeError("o '?' não abriu a explicação dos modos")
-        texto = aviso.call_args[0][1] if len(aviso.call_args[0]) > 1 else ""
+        texto = aviso.call_args.args[2] if len(aviso.call_args.args) > 2 else ""
+        if callable(texto):
+            texto = texto()
         if texto != CUT_MODE_HELP:
             raise RuntimeError("a explicação dos modos não é a esperada")
         for trecho in ("SmartCut", "EXPERIMENTAL", "Reencode Completo", "Sem Reencode"):
@@ -2282,9 +2285,8 @@ def run(*, quiet: bool = False) -> int:
             _check_transcription_language_selector(app)
             _check_transcription_models_menu(app)
             _check_transcription_workspace(app, root)
-            # Vacina do pedido de 13/09: a checkbox "Um modelo por vez" fica
-            # entre o botao "Modelos" e o seletor de Idioma, desmarcada.
-            _check_one_model_checkbox(app)
+            _check_one_model_option(app)
+            _check_transcription_send_mode(app)
             _check_live_local_server_controls(app, root)
             # Vacina do pedido de 12/09: os botoes da linha de controles da aba
             # Ocorrencia usam os PNGs de assets/ (microfones vermelho/branco e

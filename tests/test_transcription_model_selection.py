@@ -1,23 +1,11 @@
-"""Modelos selecionáveis na aba Transcrição (vacina permanente).
-
-Pedido do usuário (10/09):
-
-1. O Meta Muse Voice NÃO aparece para seleção na aba Transcrição — ele é
-   apenas de WebSocket (quem o usa é a aba Ocorrência). O ElevenLabs Scribe
-   realtime já estava fora pelo mesmo motivo.
-2. O modelo selecionado por padrão na aba Transcrição é apenas o
-   `servidor` (Granite NAR local).
-
-O `transcription_server` é COMPARTILHADO com a aba Ocorrência, então a
-Transcrição precisa se proteger sozinha: nem o menu nem o fallback podem
-escolher um modelo exclusivo de WebSocket.
-"""
+"""Seleção REST: Muse e Scribe v2 disponíveis, padrão local preservado."""
 from __future__ import annotations
 
 import ast
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -56,10 +44,10 @@ class _FakeApp:
         self.settings = settings
 
 
-class ModelosSoWebsocketTest(unittest.TestCase):
-    def test_muse_e_elevenlabs_sao_so_websocket(self):
-        self.assertTrue(is_realtime_only_transcription_server(META_MUSE_API_NAME))
-        self.assertTrue(is_realtime_only_transcription_server(ELEVENLABS_API_NAME))
+class ModelosRestTest(unittest.TestCase):
+    def test_muse_e_elevenlabs_aceitam_arquivos_por_rest(self):
+        self.assertFalse(is_realtime_only_transcription_server(META_MUSE_API_NAME))
+        self.assertFalse(is_realtime_only_transcription_server(ELEVENLABS_API_NAME))
 
     def test_demais_modelos_podem_transcrever_arquivos(self):
         for nome in ("servidor", "taguai-speech", GROK_API_NAME, DEEPGRAM_API_NAME,
@@ -67,43 +55,36 @@ class ModelosSoWebsocketTest(unittest.TestCase):
             with self.subTest(modelo=nome):
                 self.assertFalse(is_realtime_only_transcription_server(nome))
 
-    def test_lista_de_proibidos_e_a_fonte_da_verdade(self):
-        # Os nomes ficam num único lugar (providers.py) — menu, settings e
-        # fallback consultam a mesma lista.
-        self.assertIn("REALTIME_ONLY_TRANSCRIPTION_SERVERS", PROVIDERS_FONTE)
-        bloco = PROVIDERS_FONTE.split("REALTIME_ONLY_TRANSCRIPTION_SERVERS")[1][:200]
-        self.assertIn("ELEVENLABS_API_NAME", bloco)
-        self.assertIn("META_MUSE_API_NAME", bloco)
+    def test_menu_libera_rest_somente_com_chave_e_usa_nome_scribe_v2(self):
+        app = _FakeApp({})
+        for key in ("metamuse_api_key", "elevenlabs_api_key"):
+            for filled in (False, True):
+                with self.subTest(key=key, filled=filled), \
+                     patch("sig_app.load_settings", return_value={key: "fixture" if filled else ""}), \
+                     patch("sig_app.hostname_online", return_value=False):
+                    available = SigApp._available_multi_transcription_models(app)
+                name = META_MUSE_API_NAME if key == "metamuse_api_key" else ELEVENLABS_API_NAME
+                self.assertEqual(filled, name in available.values())
+                if filled and key == "elevenlabs_api_key":
+                    self.assertEqual(ELEVENLABS_API_NAME, available["ElevenLabs Scribe v2"])
 
-    def test_menu_de_modelos_filtra_os_so_websocket(self):
-        fonte = _metodo_fonte("_available_multi_transcription_models")
-        self.assertIn("is_realtime_only_transcription_server(name)", fonte)
-        self.assertNotIn("META_MUSE_API_NAME", fonte)
-        self.assertNotIn("metamuse_api_key", fonte)
-
-    def test_normalize_remove_modelo_so_websocket_salvo(self):
-        # Usuário que já tinha o Muse salvo na lista não pode voltar a usá-lo
-        # na Transcrição via settings antigo. A chave presente garante que a
-        # remoção vem do filtro de só-websocket (e não do fallback de chave).
+    def test_normalize_preserva_muse_salvo(self):
         cleaned = normalize_settings({
             **DEFAULT_SETTINGS,
             "metamuse_api_key": "chave-teste",
             "multi_transcription_models": [META_MUSE_API_NAME, "servidor"],
         })
-        self.assertEqual(["servidor"], cleaned["multi_transcription_models"])
+        self.assertEqual([META_MUSE_API_NAME, "servidor"], cleaned["multi_transcription_models"])
 
-    def test_normalize_remove_elevenlabs_salvo(self):
+    def test_normalize_preserva_elevenlabs_salvo(self):
         cleaned = normalize_settings({
             **DEFAULT_SETTINGS,
             "elevenlabs_api_key": "chave-teste",
             "multi_transcription_models": [ELEVENLABS_API_NAME],
         })
-        self.assertEqual([], cleaned["multi_transcription_models"])
+        self.assertEqual([ELEVENLABS_API_NAME], cleaned["multi_transcription_models"])
 
-    def test_normalize_nunca_deixa_modelo_so_websocket_na_lista(self):
-        # Sem chave preenchida o fallback existente troca o modelo pelo
-        # servidor local; com chave o filtro remove. Nos dois casos o modelo
-        # só-websocket não sobra na lista.
+    def test_normalize_exige_chave_para_manter_o_provedor_na_lista(self):
         for nome, chave in (
             (META_MUSE_API_NAME, "metamuse_api_key"),
             (ELEVENLABS_API_NAME, "elevenlabs_api_key"),
@@ -115,7 +96,7 @@ class ModelosSoWebsocketTest(unittest.TestCase):
                         **chaves,
                         "multi_transcription_models": [nome],
                     })
-                    self.assertNotIn(nome, cleaned["multi_transcription_models"])
+                    self.assertEqual(bool(chaves), nome in cleaned["multi_transcription_models"])
 
     def test_normalize_mantem_selecao_permitida(self):
         cleaned = normalize_settings({
@@ -155,19 +136,19 @@ class ModeloPadraoTest(unittest.TestCase):
         })
         self.assertEqual("servidor", SigApp._default_transcription_model_name(app))
 
-    def test_fallback_ignora_muse_salvo_na_lista(self):
+    def test_fallback_respeita_muse_salvo_na_lista(self):
         app = _FakeApp({
             "transcription_server": META_MUSE_API_NAME,
             "multi_transcription_models": [META_MUSE_API_NAME, DEEPGRAM_API_NAME],
         })
-        self.assertEqual(DEEPGRAM_API_NAME, SigApp._default_transcription_model_name(app))
+        self.assertEqual(META_MUSE_API_NAME, SigApp._default_transcription_model_name(app))
 
-    def test_fallback_final_e_o_servidor(self):
+    def test_fallback_respeita_modelo_rest_salvo(self):
         app = _FakeApp({
             "transcription_server": ELEVENLABS_API_NAME,
             "multi_transcription_models": [META_MUSE_API_NAME],
         })
-        self.assertEqual(DEFAULT_SETTINGS["transcription_server"], SigApp._default_transcription_model_name(app))
+        self.assertEqual(META_MUSE_API_NAME, SigApp._default_transcription_model_name(app))
 
     def test_start_run_usa_o_fallback_protegido(self):
         fonte = _metodo_fonte("start_run")

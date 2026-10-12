@@ -30,12 +30,14 @@ class GraniteUploader:
         extra_headers: dict[str, str] | None = None,
         file_field: str = "files",
         raw_body: bool = False,
+        json_fields: set[str] | None = None,
     ):
         self.cancel_event = cancel_event
         self.form_fields = dict(form_fields or {})
         self.extra_headers = dict(extra_headers or {})
         self.file_field = file_field
         self.raw_body = bool(raw_body)
+        self.json_fields = set(json_fields or ())
         self._lock = threading.Lock()
         self._connections: set[http.client.HTTPConnection] = set()
 
@@ -133,10 +135,12 @@ class GraniteUploader:
                     if item is None:
                         continue
                     clean_value = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+                    field_type = "Content-Type: application/json\r\n" if key in self.json_fields else ""
                     parts.append(
                         (
                             f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                            f'Content-Disposition: form-data; name="{key}"\r\n'
+                            f"{field_type}\r\n"
                             f"{clean_value}\r\n"
                         ).encode("utf-8")
                     )
