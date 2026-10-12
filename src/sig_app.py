@@ -3962,7 +3962,7 @@ class SigApp:
         options2.pack(fill=X, pady=(0, 12))
         ttk.Checkbutton(
             options2,
-            text="Transcrever logo após converter",
+            text="Enviar após converter",
             variable=self.transcribe_after_convert_var,
         ).pack(side=LEFT)
         self.zip_check = ttk.Checkbutton(

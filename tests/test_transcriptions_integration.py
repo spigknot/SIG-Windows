@@ -464,9 +464,10 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
         panel.preview_tree.selection_set("0")
         self.pump()
         self.assertEqual(f"Transcrições do arquivo {record.rows[0]['file']}", panel.detail_title.cget("text"))
-        expected = "======\n" + "\n\n------------------------------\n".join(
-            f'{model}:\n\n"{text}"' for model, text in zip(record.models, texts)) + "\n======"
+        expected = "\n\n------------------------------\n".join(
+            f'{model}:\n\n"{text}"' for model, text in zip(record.models, texts))
         self.assertEqual(expected, panel.detail_text.get("1.0", "end-1c"))
+        self.assertIn("bold", str(panel.detail_text.tag_cget("model", "font")))
         self.assertEqual(["Todos", *record.models], [b.cget("text") for b in panel.detail_model_buttons])
         self.assertFalse(panel.detail_filter_scroll.winfo_ismapped())
         # Ordem visual: modelos na ordem da sessão, Todos por último encostado à direita.

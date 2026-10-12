@@ -259,7 +259,7 @@ class TranscriptionsPanel:
         self.detail_text.configure(yscrollcommand=detail_scroll.set)
         detail_scroll.pack(side=RIGHT, fill=Y)
         self.detail_text.pack(fill=BOTH, expand=True)
-        self.detail_text.tag_configure("model", font=("Segoe UI Semibold", 10), foreground="#216b4a")
+        self.detail_text.tag_configure("model", font=("Segoe UI", 10, "bold"), foreground="#216b4a")
         self.detail_text.tag_configure("muted", foreground="#96a39a")
         self.detail_text.configure(state="disabled")
 
@@ -585,11 +585,8 @@ class TranscriptionsPanel:
                 text = history.cell_display((row.get("cells") or {}).get(model))
                 if index:
                     self.detail_text.insert(END, "\n\n------------------------------\n")
-                else:
-                    self.detail_text.insert(END, "======\n")
                 self.detail_text.insert(END, f"{model}:\n\n", "model")
                 self.detail_text.insert(END, f'"{text}"' if text else "(vazio)", () if text else ("muted",))
-            self.detail_text.insert(END, "\n======")
         else:
             try:
                 model = record.models[int(mode[1:])]
