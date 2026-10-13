@@ -551,7 +551,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261012_001"
+APP_VERSION = "20261013_001"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -5934,7 +5934,7 @@ class SigApp:
             return
 
         suggested_path = diarias_mapa.next_available_diarias_mapa_path(
-            Path.home() / "Desktop", values.data_ida
+            Path.home() / "Desktop", values.data_ida, values.menos_de_12_horas
         )
         file_type_var = StringVar(master=self.root)
         destination_file = filedialog.asksaveasfilename(

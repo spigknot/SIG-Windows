@@ -89,6 +89,22 @@ class DiariasMapaProfileTest(unittest.TestCase):
         self.assertFalse(prepare(horario_volta="20:30").menos_de_12_horas)
         self.assertFalse(prepare(horario_volta="20:31").menos_de_12_horas)
 
+    def test_nome_do_mapa_usa_duracao_completa_e_numera_duplicatas(self):
+        for changes, kind in (({"horario_volta": "20:29"}, "meia"),
+                              ({"horario_volta": "20:30"}, "inteira"),
+                              ({"horario_volta": "20:31"}, "inteira"),
+                              ({"data_volta": "01/01/2027", "horario_volta": "01:00"}, "inteira")):
+            values = prepare(**changes)
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                stem = f"mapa_{kind}_31-12-2026"
+                self.assertEqual(diarias_mapa.diarias_mapa_filename_stem(values.data_ida, values.menos_de_12_horas), stem)
+                first = diarias_mapa.next_available_diarias_mapa_path(directory, values.data_ida, values.menos_de_12_horas)
+                self.assertEqual(first.name, stem + ".xlsx")
+                first.touch()
+                (directory / (stem + "_2.xlsx")).touch()
+                self.assertEqual(diarias_mapa.next_available_diarias_mapa_path(directory, values.data_ida, values.menos_de_12_horas).name, stem + "_3.xlsx")
+
 
 class Cell:
     def __init__(self):

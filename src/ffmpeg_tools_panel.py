@@ -1582,7 +1582,6 @@ class FfmpegToolsPanel:
 
         self._build(parent)
         self.recovery_job = None
-        self.root.after(600, self._offer_ffmpeg_recovery)
         self.preview_poll_after_id = self.root.after(PREVIEW_FRAME_INTERVAL_MS, self._poll_preview_frames)
         threading.Thread(target=self._load_available_accelerations, daemon=True).start()
 
@@ -5400,7 +5399,7 @@ class FfmpegToolsPanel:
                 quality = getattr(self, "selected_video_quality", None) or self.video_quality_var.get()
                 self._set_status(f"Encoder selecionado: {self.acceleration.label}; qualidade: {quality}", 0)
             else:
-                self._set_status("Encoder de vídeo: não aplicável", 0)
+                self._set_status("Preparando processamento.", 0)
             worker()
             if not self.cancel_event.is_set():
                 if getattr(self, "recovery_job", None): self.recovery_job.finish("complete")
@@ -6888,8 +6887,23 @@ class FfmpegToolsPanel:
         duration = 0.0
         if duration_match:
             duration = int(duration_match.group(1)) * 3600 + int(duration_match.group(2)) * 60 + float(duration_match.group(3))
-        video_line = next((line for line in text.splitlines() if "Video:" in line and "attached pic" not in line), "")
-        audio_line = next((line for line in text.splitlines() if "Audio:" in line), "")
+        stream_lines = [line for line in text.splitlines() if re.match(r"\s*Stream #\d+:\d+", line)]
+        video_line = next((line for line in stream_lines if "Video:" in line and "attached pic" not in line), "")
+        audio_line = next((line for line in stream_lines if "Audio:" in line), "")
+        # `ffmpeg -i` normalmente sai com código 1 mesmo após ler uma mídia
+        # válida. A presença de streams distingue isso de uma entrada ilegível.
+        if not video_line and not audio_line:
+            if "moov atom not found" in text.lower():
+                raise RuntimeError(
+                    f"Não foi possível ler '{source.name}': o índice do MP4 está ausente "
+                    "(moov atom not found). O arquivo pode estar incompleto ou corrompido; "
+                    "copie-o novamente da origem."
+                )
+            diagnostic = "\n".join(text.strip().splitlines()[-4:])
+            raise RuntimeError(
+                f"Não foi possível ler áudio ou vídeo de '{source.name}'."
+                + (f"\nFFmpeg: {diagnostic}" if diagnostic else " O FFmpeg não informou detalhes.")
+            )
         video_match = re.search(r"(\d{2,5})x(\d{2,5}).*?(\d+(?:\.\d+)?) fps", video_line)
         if video_match:
             width = int(video_match.group(1))
@@ -6952,7 +6966,6 @@ class FfmpegToolsPanel:
         sar_match = re.search(r"SAR\s+(\d+[:/]\d+)", video_line, re.IGNORECASE)
         sar = sar_match.group(1).replace("/", ":") if sar_match else ""
 
-        stream_lines = [line for line in text.splitlines() if re.search(r"Stream #\d+:\d+", line)]
         audio_streams = sum("Audio:" in line for line in stream_lines)
         subtitle_streams = sum("Subtitle:" in line for line in stream_lines)
         data_streams = sum("Data:" in line or "Attachment:" in line for line in stream_lines)

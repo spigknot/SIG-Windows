@@ -35,6 +35,20 @@ def write_fake(*args):
 
 
 class DiariasWorkflowTest(unittest.TestCase):
+    def test_nomes_dos_mapas_em_lote_para_meia_e_inteira_em_pdf_e_xlsx(self):
+        for hour, kind in (("19:59", "meia"), ("20:00", "inteira"), ("20:01", "inteira")):
+            for pdf in (False, True):
+                with self.subTest(hour=hour, pdf=pdf), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                    for name in ("generate_diarias_requerimento", "generate_diarias_requerimento_pdf"):
+                        stack.enter_context(patch.object(workflow.documents, name, side_effect=write_fake))
+                    stack.enter_context(patch.object(workflow.diarias_mapa, "generate_diarias_mapa", side_effect=write_fake))
+                    values = bundle(False, {**FIELDS, "fechamento_hora": hour})
+                    result = workflow.generate_bundle(Path(temporary), values, pdf=pdf)
+                    repeated = workflow.generate_bundle(Path(temporary), values, pdf=pdf)
+                    extension = ".pdf" if pdf else ".xlsx"
+                    self.assertEqual(result["mapa"].name, f"mapa_{kind}_31-12-2026{extension}")
+                    self.assertEqual(repeated["mapa"].name, f"mapa_{kind}_31-12-2026_2{extension}")
+
     def test_todos_os_nove_campos_sao_obrigatorios_e_mes_divergente_nao_bloqueia(self):
         for key, _ in workflow.REQUIRED_FIELDS:
             with self.subTest(key=key), self.assertRaisesRegex(workflow.MissingDiariasFields, "Há campos sem preencher"):
@@ -63,7 +77,7 @@ class DiariasWorkflowTest(unittest.TestCase):
                     second = workflow.generate_bundle(directory, bundle(meios), pdf=pdf)
                     self.assertEqual(set(first), {"requerimento", "mapa", "declaracao"} if meios else {"requerimento", "mapa"})
                     self.assertEqual(first["requerimento"].name, "requerimento_inteira_31-12-2026" + (".pdf" if pdf else ".docx"))
-                    self.assertEqual(first["mapa"].name, "mapa_diaria_31-12-2026" + (".pdf" if pdf else ".xlsx"))
+                    self.assertEqual(first["mapa"].name, "mapa_inteira_31-12-2026" + (".pdf" if pdf else ".xlsx"))
                     for key in first:
                         self.assertTrue(first[key].is_file())
                         self.assertEqual(second[key].stem, first[key].stem + "_2")

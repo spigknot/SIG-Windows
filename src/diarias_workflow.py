@@ -102,7 +102,7 @@ def generate_bundle(directory: Path, bundle: DiariasBundle, *, pdf: bool,
     date_ida = bundle.mapa.data_ida.strftime("%d-%m-%Y")
     jobs = [
         ("requerimento", "Gerando requerimento", f"requerimento_{bundle.template_kind}_{date_ida}", ".pdf" if pdf else ".docx"),
-        ("mapa", "Gerando mapa", f"mapa_diaria_{date_ida}", ".pdf" if pdf else ".xlsx"),
+        ("mapa", "Gerando mapa", diarias_mapa.diarias_mapa_filename_stem(bundle.mapa.data_ida, bundle.mapa.menos_de_12_horas), ".pdf" if pdf else ".xlsx"),
     ]
     if bundle.meios_proprios:
         jobs.append(("declaracao", "Gerando declaração de meios próprios", f"declaracao_meios_proprios_{date_ida}", ".pdf" if pdf else ".docx"))

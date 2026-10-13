@@ -15,6 +15,45 @@ from video_encoders import EncoderOption  # noqa: E402
 
 
 class FfmpegToolsLogicTests(unittest.TestCase):
+    def test_probe_media_reports_missing_mp4_index_instead_of_empty_profile(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
+        fake_output = (
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 000001] moov atom not found\n"
+            "Error opening input file 1.mp4.\n"
+            "Error opening input files: Invalid data found when processing input\n"
+        )
+        with patch("subprocess.run", return_value=MagicMock(stdout="", stderr=fake_output, returncode=1)):
+            with self.assertRaisesRegex(RuntimeError, r"1\.mp4.*moov atom not found") as error:
+                panel._probe_media(Path("1.mp4"))
+        self.assertIn("copie-o novamente", str(error.exception))
+        self.assertNotIn("Junte somente", str(error.exception))
+
+    def test_probe_media_preserves_read_failure_and_ignores_codec_words_in_filename(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
+        fake_output = "Error opening input file Video: Audio: clip.mp4.\nInvalid data found when processing input\n"
+        with patch("subprocess.run", return_value=MagicMock(stdout="", stderr=fake_output, returncode=1)):
+            with self.assertRaisesRegex(RuntimeError, "Invalid data found"):
+                panel._probe_media(Path("clip.mp4"))
+
+    def test_probe_media_accepts_streams_despite_ffmpeg_probe_exit_code(self):
+        panel = object.__new__(FfmpegToolsPanel)
+        panel._ffmpeg = lambda: Path("ffmpeg.exe")
+        panel._record_ffmpeg_command = lambda _cmd, **_kwargs: None
+        fake_output = (
+            "Input #0, mov,mp4, from 'clip.mp4':\n"
+            "  Duration: 00:00:10.00, start: 0.000000, bitrate: 6000 kb/s\n"
+            "  Stream #0:0: Video: h264 (High), yuv420p, 1920x1080, 30 fps, 30 tbr\n"
+            "At least one output file must be specified\n"
+        )
+        with patch("subprocess.run", return_value=MagicMock(stdout="", stderr=fake_output, returncode=1)):
+            profile = panel._probe_media(Path("clip.mp4"))
+        self.assertTrue(profile.has_video)
+        self.assertEqual(profile.duration, 10.0)
+
     def test_probe_media_ignores_attached_pic_cover_art(self):
         fake_output = (
             "Input #0, mp3, from 'album.mp3':\n"
@@ -894,7 +933,7 @@ class FfmpegToolsLogicTests(unittest.TestCase):
             panel.active_tool_var.get.return_value = tool
             self.assertFalse(panel._current_tool_uses_video_encoder(), tool)
 
-    def test_worker_wrapper_logs_not_applicable_for_audio_only(self):
+    def test_worker_wrapper_prepares_audio_without_video_encoder_warning(self):
         panel = object.__new__(FfmpegToolsPanel)
         panel.active_tool_var = MagicMock(); panel.active_tool_var.get.return_value = "Limpar áudio"
         panel._current_tool_uses_video_encoder = lambda: False
@@ -910,7 +949,8 @@ class FfmpegToolsLogicTests(unittest.TestCase):
         panel._set_running_ui = MagicMock()
         panel._worker_wrapper(lambda: None)
         status_args = [c.args[0] for c in panel._set_status.call_args_list]
-        self.assertTrue(any("não aplicável" in s for s in status_args), status_args)
+        self.assertIn("Preparando processamento.", status_args)
+        self.assertFalse(any("não aplicável" in s for s in status_args), status_args)
         panel.task_tracker.success.assert_called_once()
         self.assertIn("não aplicável", panel.task_tracker.success.call_args[0][0])
 

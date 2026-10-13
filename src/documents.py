@@ -488,6 +488,22 @@ def _replace_word_paragraph_markers(
     for marker_match, replacement in reversed(values):
         joined = "".join(text_values)
         start, end = marker_match.span()
+        if (marker_match.group(1) or marker_match.group(2)) == "total_vencimentos":
+            currency = re.search(r"([ \t]*)R\$([ \t]*)$", joined[:start])
+            if currency:
+                # Remove apenas o preenchimento em torno do cifrão; cada run
+                # continua com as mesmas propriedades de fonte do modelo.
+                removed = set(range(currency.start(2), currency.end(2)))
+                if len(currency.group(1)) > 1:
+                    removed.update(range(currency.start(1), currency.end(1)))
+                cursor = 0
+                for index, node_text in enumerate(text_values):
+                    text_values[index] = "".join(char for offset, char in enumerate(node_text)
+                                                 if cursor + offset not in removed)
+                    cursor += len(node_text)
+                start -= len(removed)
+                end -= len(removed)
+                joined = "".join(text_values)
         spans = []
         cursor = 0
         for node_text in text_values:
@@ -787,6 +803,9 @@ def prepare_diarias_profile_replacements(perfil: Mapping[str, str]) -> dict[str,
         "padrao": classe_padrao(replacements["classe"]),
         "pai": f"{pai} e de " if pai else "",
     })
+    classe = replacements["classe"]
+    replacements["classe"] = "Classe Especial" if classe == "Especial" else f"{classe}ª Classe"
+    replacements["padrao"] = f"Padrão {replacements['padrao']}"
     # O novo modelo tem as duas grafias; ambas representam o mesmo padrão.
     replacements["padrão"] = replacements["padrao"]
     return replacements
@@ -912,10 +931,6 @@ def prepare_declaracao_meios_proprios(
     if perfil is not None:
         replacements.update(prepare_diarias_profile_replacements(perfil))
         replacements["endereco"] = replacements["endereço"]
-        classe = replacements["classe"]
-        replacements["classe"] = "Classe Especial" if classe == "Especial" else f"{classe}ª Classe"
-        replacements["padrao"] = f"Padrão {replacements['padrao']}"
-        replacements["padrão"] = replacements["padrao"]
     return replacements
 
 

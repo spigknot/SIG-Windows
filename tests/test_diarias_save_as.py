@@ -172,7 +172,7 @@ class DiariasSaveAsUiTest(unittest.TestCase):
             mapa="215627/2026",
             meios_proprios=False,
         )
-        values = SimpleNamespace(data_ida=date(2026, 12, 31))
+        values = SimpleNamespace(data_ida=date(2026, 12, 31), menos_de_12_horas=True)
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "mapa_escolhido.xlsx"
             with patch.object(
@@ -192,7 +192,7 @@ class DiariasSaveAsUiTest(unittest.TestCase):
 
         self.assertEqual(
             diarias_mapa.next_available_diarias_mapa_path(
-                Path.home() / "Desktop", date(2026, 12, 31)
+                Path.home() / "Desktop", date(2026, 12, 31), True
             ).name,
             ask.call_args.kwargs["initialfile"],
         )
@@ -217,7 +217,7 @@ class DiariasSaveAsUiTest(unittest.TestCase):
             mapa="215627/2026",
             meios_proprios=False,
         )
-        values = SimpleNamespace(data_ida=date(2026, 12, 31))
+        values = SimpleNamespace(data_ida=date(2026, 12, 31), menos_de_12_horas=True)
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "mapa_escolhido.xlsx"
 

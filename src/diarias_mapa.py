@@ -316,10 +316,16 @@ def _replace_shape_markers(sheet, replacements: dict[str, str]) -> dict[str, int
     return counts
 
 
-def next_available_diarias_mapa_path(directory: Path, data_ida: date) -> Path:
-    """Retorna `mapa_diaria_DD-MM-AAAA.xlsx`, numerando duplicatas."""
+def diarias_mapa_filename_stem(data_ida: date, menos_de_12_horas: bool) -> str:
+    """Nome comum ao mapa individual, à geração conjunta e aos PDFs."""
+    kind = "meia" if menos_de_12_horas else "inteira"
+    return f"mapa_{kind}_{data_ida:%d-%m-%Y}"
+
+
+def next_available_diarias_mapa_path(directory: Path, data_ida: date, menos_de_12_horas: bool) -> Path:
+    """Retorna o nome do mapa conforme sua duração, numerando duplicatas."""
     directory = Path(directory)
-    stem = f"mapa_diaria_{data_ida:%d-%m-%Y}"
+    stem = diarias_mapa_filename_stem(data_ida, menos_de_12_horas)
     candidate = directory / f"{stem}.xlsx"
     suffix = 2
     while candidate.exists():

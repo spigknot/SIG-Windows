@@ -61,8 +61,9 @@ class DiariasProfileDocumentsTests(unittest.TestCase):
         self.assertEqual("", replacements({**PROFILE, "pai": ""})["pai"])
         for classe, expected in (("1", "III"), ("2", "II"), ("3", "I"), ("Especial", "IV")):
             values = replacements({**PROFILE, "classe": classe})
-            self.assertEqual(expected, values["padrao"])
-            self.assertEqual(expected, values["padrão"])
+            self.assertEqual(f"Padrão {expected}", values["padrao"])
+            self.assertEqual(f"Padrão {expected}", values["padrão"])
+            self.assertEqual("Classe Especial" if classe == "Especial" else f"{classe}ª Classe", values["classe"])
         with self.assertRaises(ValueError):
             replacements({**PROFILE, "classe": "4"})
 
@@ -79,6 +80,11 @@ class DiariasProfileDocumentsTests(unittest.TestCase):
                     source_xml, output_xml = read_xml(template), read_xml(output)
                     self.assertEqual(rpr_xml(source_xml), rpr_xml(output_xml))
                     self.assertNotIn("{{", text_of(output_xml))
+                    self.assertIn("R$7.581,47", text_of(output_xml))
+                    self.assertNotIn("      R$", text_of(output_xml))
+                    self.assertNotIn("R$ ", text_of(output_xml))
+                    self.assertEqual(2, text_of(output_xml).count("1ª Classe"))
+                    self.assertEqual(2, text_of(output_xml).count("Padrão III"))
                     self.assertNotIn("ns0:", output_xml)
                     with zipfile.ZipFile(template) as original, zipfile.ZipFile(output) as filled:
                         for name in original.namelist():
