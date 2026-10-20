@@ -466,6 +466,21 @@ def _replace_word_paragraph_markers(
         for marker, replacement in replacements.items()
     }
     joined = "".join(text_values)
+    currency_tab_removed = False
+    if "total_vencimentos" in replacement_by_marker and any(
+        (marker.group(1) or marker.group(2)) == "total_vencimentos"
+        for marker in WORD_MARKER_RE.finditer(joined)
+    ):
+        # A tabulação do modelo fica antes do run com R$. Sua largura visual
+        # depende do comprimento dos dados do perfil; use espaço comum.
+        paragraph_xml, tabs_removed = re.subn(
+            r"<w:tab\s*/>(?=\s*<w:t(?:\s[^>]*)?>R\$)", "", paragraph_xml
+        )
+        currency_tab_removed = bool(tabs_removed)
+        if currency_tab_removed:
+            matches = list(WORD_TEXT_RE.finditer(paragraph_xml))
+            text_values = [html.unescape(match.group(2)) for match in matches]
+            joined = "".join(text_values)
     candidates = [
         match
         for match in WORD_MARKER_RE.finditer(joined)
@@ -490,19 +505,20 @@ def _replace_word_paragraph_markers(
         start, end = marker_match.span()
         if (marker_match.group(1) or marker_match.group(2)) == "total_vencimentos":
             currency = re.search(r"([ \t]*)R\$([ \t]*)$", joined[:start])
-            if currency:
-                # Remove apenas o preenchimento em torno do cifrão; cada run
-                # continua com as mesmas propriedades de fonte do modelo.
-                removed = set(range(currency.start(2), currency.end(2)))
-                if len(currency.group(1)) > 1:
-                    removed.update(range(currency.start(1), currency.end(1)))
+            if currency and (currency_tab_removed or "\t" in currency.group(1)):
+                # Preserve o espaço entre R$ e a tag. Só a separação que
+                # continha uma tabulação é normalizada para um espaço comum.
+                removed = set(range(currency.start(1), currency.end(1)))
                 cursor = 0
                 for index, node_text in enumerate(text_values):
-                    text_values[index] = "".join(char for offset, char in enumerate(node_text)
-                                                 if cursor + offset not in removed)
+                    text_values[index] = "".join(
+                        (" " if cursor + offset == currency.end(1) else "") + char
+                        for offset, char in enumerate(node_text)
+                        if cursor + offset not in removed
+                    )
                     cursor += len(node_text)
-                start -= len(removed)
-                end -= len(removed)
+                start -= len(removed) - 1
+                end -= len(removed) - 1
                 joined = "".join(text_values)
         spans = []
         cursor = 0

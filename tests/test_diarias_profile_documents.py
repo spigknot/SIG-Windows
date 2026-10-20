@@ -80,9 +80,8 @@ class DiariasProfileDocumentsTests(unittest.TestCase):
                     source_xml, output_xml = read_xml(template), read_xml(output)
                     self.assertEqual(rpr_xml(source_xml), rpr_xml(output_xml))
                     self.assertNotIn("{{", text_of(output_xml))
-                    self.assertIn("R$7.581,47", text_of(output_xml))
+                    self.assertIn("com vencimento bruto de R$ 7.581,47;", text_of(output_xml))
                     self.assertNotIn("      R$", text_of(output_xml))
-                    self.assertNotIn("R$ ", text_of(output_xml))
                     self.assertEqual(2, text_of(output_xml).count("1ª Classe"))
                     self.assertEqual(2, text_of(output_xml).count("Padrão III"))
                     self.assertNotIn("ns0:", output_xml)
@@ -113,6 +112,32 @@ class DiariasProfileDocumentsTests(unittest.TestCase):
         self.assertEqual(1, count)
         self.assertEqual(rpr_xml(paragraph), rpr_xml(result))
         self.assertEqual("Antes " + PROFILE["delegacia"].upper() + " depois.", text_of(result))
+
+    def test_vencimentos_preservam_espacos_do_modelo_sem_tab(self):
+        for space in (" ", "  ", "\u00a0"):
+            paragraph = '<w:p><w:r><w:t xml:space="preserve">bruto de R$' + space + '{{{total_vencimentos}}};</w:t></w:r></w:p>'
+            with self.subTest(space=repr(space)):
+                result, count = documents._replace_word_paragraph_markers(paragraph, {"total_vencimentos": "7.653,92"})
+                self.assertEqual(count, 1)
+                self.assertEqual(text_of(result), 'bruto de R$' + space + '7.653,92;')
+
+    def test_tab_antes_do_cifrao_vira_espaco_sem_mudar_fontes_ou_outros_tabs(self):
+        rpr = '<w:rPr><w:rFonts w:ascii="Arial Narrow"/><w:sz w:val="22"/><w:b/><w:i/><w:u w:val="single"/></w:rPr>'
+        for cargo in ("Agente Policial", "Investigador de Polícia", "Cargo bastante longo do perfil"):
+            for classe in ("1ª Classe", "Classe Especial"):
+                paragraph = ('<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="3686"/></w:tabs></w:pPr>'
+                             '<w:r>' + rpr + '<w:tab/><w:t>{{{cargo}}} de {{{classe}}}, bruto de      </w:t></w:r>'
+                             '<w:r>' + rpr + '<w:tab/><w:t>R$</w:t></w:r>'
+                             '<w:r>' + rpr + '<w:t xml:space="preserve"> </w:t></w:r>'
+                             '<w:r>' + rpr + '<w:t>{{{total_</w:t></w:r>'
+                             '<w:r>' + rpr + '<w:t>vencimentos}}};</w:t></w:r></w:p>')
+                with self.subTest(cargo=cargo, classe=classe):
+                    result, _ = documents._replace_word_paragraph_markers(paragraph, {
+                        "cargo": cargo, "classe": classe, "total_vencimentos": "7.653,92"})
+                    self.assertEqual(text_of(result), f"{cargo} de {classe}, bruto de R$ 7.653,92;")
+                    self.assertEqual(rpr_xml(result), rpr_xml(paragraph))
+                    self.assertEqual(result.count('<w:tab/>'), 1)
+                    self.assertIn('<w:tab w:val="left" w:pos="3686"/>', result)
 
 
 if __name__ == "__main__":
