@@ -21,7 +21,7 @@ from sig_app import (  # noqa: E402
     DEEPSEEK_TEXT_NAME,
     GROK_TEXT_NAME,
     IA_PROXY_NAME,
-    SERVER_GEMMA_MODEL,
+    local_text_model_id,
     TextModelClient,
     assistant_request_model_label,
     selected_text_model,
@@ -80,9 +80,9 @@ class AssistantPromptTests(unittest.TestCase):
         )
         self.assertEqual(
             assistant_request_model_label(
-                {"request_model": SERVER_GEMMA_MODEL, "provider": "servidor"}
+                {"request_model": local_text_model_id(), "provider": "servidor"}
             ),
-            "servidor",
+            "servidor (local)",
         )
 
     def test_request_log_label_for_ia_proxy_includes_final_model(self):

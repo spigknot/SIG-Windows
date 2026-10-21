@@ -1,17 +1,4 @@
-"""Vacina dos renomes de modelo de texto (regra do usuário, 23/09).
-
-1. Grok: TODAS as requisições e TODAS as referências do antigo `grok-4.6`
-   passam a usar o alias genérico `grok-latest`. O non-reasoning
-   `grok-4.20-0309-non-reasoning` permanece igual.
-2. Servidor de oitiva (gemma): exibição `servidor (gemma4)`; requisição
-   inalterada (`model=gemma4`).
-3. Servidor de oitiva (qwen): exibição `servidor (qwen2.5)`; requisição
-   `model=qwen2.5-7b` (endereço 8402 e demais parâmetros inalterados).
-4. settings.json gravadas com os nomes ANTIGOS migram sozinhas: sem a
-   migração, o valor velho não casa com o catálogo e a seleção cai
-   silenciosamente no text_model geral — mesma família do bug do
-   deepseek-v4-flash.
-"""
+"""Renomes, migração de seleções e retirada das rotas locais antigas."""
 import ast
 import json
 import sys
@@ -30,11 +17,9 @@ from providers import (  # noqa: E402
     GROK_NON_REASONING_TEXT_NAME,
     GROK_TEXT_NAME,
     IA_PROXY_NAME,
-    SERVER_GEMMA_MODEL,
-    SERVER_GEMMA_NAME,
-    SERVER_QWEN_MODEL,
-    SERVER_QWEN_NAME,
-    SERVER_QWEN_URL,
+    local_text_model_id,
+    LOCAL_TEXT_SERVER_NAME,
+    LOCAL_TEXT_SERVER_URL,
     TEXT_TASK_KEYS,
     read_text_models,
     text_model_label,
@@ -51,7 +36,7 @@ XAI_KEY = "xai-" + "a" * 80
 OLD_GROK = "grok-4.6"
 OLD_GEMMA = "servidor (gemma-4-26B-A4B-abliterated)"
 OLD_QWEN = "servidor (qwen-2.5-3B-Instruct-Abliterated)"
-OLD_NAMES = (OLD_GROK, OLD_GEMMA, OLD_QWEN)
+OLD_NAMES = (OLD_GROK, OLD_GEMMA, OLD_QWEN, "servidor (qwen2.5)", "qwen2.5-7b", "servidor (gemma4)", "gemma4")
 
 TASK_KEYS = (
     "text_model",
@@ -74,7 +59,14 @@ def settings_with(name: str) -> dict:
     return fixture
 
 
-class RequisicaoTest(unittest.TestCase):
+class LocalModelTestCase(unittest.TestCase):
+    def setUp(self):
+        previous = providers.local_text_model_id()
+        providers.set_local_text_model_id("/models/Modelo-Teste.gguf")
+        self.addCleanup(providers.set_local_text_model_id, previous)
+
+
+class RequisicaoTest(LocalModelTestCase):
     """1/2/3: o `model` que sai na requisição."""
 
     def test_grok_usa_o_alias_generico(self):
@@ -100,47 +92,31 @@ class RequisicaoTest(unittest.TestCase):
         self.assertEqual(assistant_request_model_label(config), "IA-Proxy/grok-latest")
 
     def test_servidor_gemma_mantem_a_requisicao(self):
-        self.assertEqual(SERVER_GEMMA_NAME, "servidor (gemma4)")
-        self.assertEqual(SERVER_GEMMA_MODEL, "gemma4")
-        config = selected_text_model({"text_model": SERVER_GEMMA_NAME})
-        self.assertEqual(config["parameters"]["model"], "gemma4")
-        self.assertEqual(config["request_model"], "gemma4")
-        self.assertEqual(config["url"], "http://servidor:8400/v1/chat/completions")
+        self.assertEqual(LOCAL_TEXT_SERVER_NAME, "servidor (local)")
+        self.assertEqual(local_text_model_id(), "/models/Modelo-Teste.gguf")
+        config = selected_text_model({"text_model": LOCAL_TEXT_SERVER_NAME})
+        self.assertEqual(config["parameters"]["model"], local_text_model_id())
+        self.assertEqual(config["request_model"], local_text_model_id())
+        self.assertEqual(config["url"], "http://servidor:8402/v1/chat/completions")
 
-    def test_servidor_qwen_envia_qwen25_7b(self):
-        self.assertEqual(SERVER_QWEN_NAME, "servidor (qwen2.5)")
-        self.assertEqual(SERVER_QWEN_MODEL, "qwen2.5-7b")
-        config = selected_text_model({"text_model": SERVER_QWEN_NAME})
-        self.assertEqual(config["parameters"]["model"], "qwen2.5-7b")
-        self.assertEqual(config["request_model"], "qwen2.5-7b")
-        # sem teto fixo (retirado em 23/09): mede no /tokenize x1.5, igual gemma
-        self.assertNotIn("max_tokens", config["parameters"])
-        self.assertEqual(config["url"], SERVER_QWEN_URL)
-        self.assertEqual(SERVER_QWEN_URL, "http://servidor:8402/v1/chat/completions")
 
     def test_tarefas_de_oitiva_usam_o_mesmo_payload(self):
         for task, keys in TEXT_TASK_KEYS.items():
             with self.subTest(task=task):
-                config = selected_text_model_for({keys[0]: SERVER_QWEN_NAME}, task)
-                self.assertEqual(config["parameters"]["model"], "qwen2.5-7b")
-                self.assertEqual(config["url"], SERVER_QWEN_URL)
+                config = selected_text_model_for({keys[0]: LOCAL_TEXT_SERVER_NAME}, task)
+                self.assertEqual(config["parameters"]["model"], local_text_model_id())
+                self.assertEqual(config["url"], LOCAL_TEXT_SERVER_URL)
 
 
-class ExibicaoTest(unittest.TestCase):
+class ExibicaoTest(LocalModelTestCase):
     """2/3: rótulos exibidos nos menus (Configurações/Status)."""
 
     def test_servidores_locais_com_apelido_curto(self):
         self.assertEqual(
             text_model_label(
-                {"name": SERVER_GEMMA_NAME, "parameters": {"model": SERVER_GEMMA_MODEL}}
+                {"name": LOCAL_TEXT_SERVER_NAME, "parameters": {"model": local_text_model_id()}}
             ),
-            "servidor (gemma4)",
-        )
-        self.assertEqual(
-            text_model_label(
-                {"name": SERVER_QWEN_NAME, "parameters": {"model": SERVER_QWEN_MODEL}}
-            ),
-            "servidor (qwen2.5)",
+            "servidor (Modelo-Teste)",
         )
 
     def test_demais_modelos_sao_apenas_o_nome(self):
@@ -159,8 +135,7 @@ class ExibicaoTest(unittest.TestCase):
     def test_catalogo_sem_nomes_antigos_e_sem_rotulo_duplicado(self):
         names = {model["name"] for model in read_text_models()}
         self.assertIn(GROK_TEXT_NAME, names)
-        self.assertIn(SERVER_GEMMA_NAME, names)
-        self.assertIn(SERVER_QWEN_NAME, names)
+        self.assertIn(LOCAL_TEXT_SERVER_NAME, names)
         for old in OLD_NAMES:
             self.assertNotIn(old, names)
         for model in read_text_models():
@@ -172,7 +147,7 @@ class ExibicaoTest(unittest.TestCase):
         self.assertNotIn("servidor (qwen2.5) (qwen2.5-7b)", labels)
 
 
-class MigracaoTest(unittest.TestCase):
+class MigracaoTest(LocalModelTestCase):
     """4: settings gravadas com os nomes antigos migram sozinhas."""
 
     def test_grok_antigo_vira_grok_latest(self):
@@ -185,14 +160,14 @@ class MigracaoTest(unittest.TestCase):
         clean = normalize_settings(settings_with(OLD_GEMMA))
         for key in TASK_KEYS:
             with self.subTest(key=key):
-                self.assertEqual(clean[key], SERVER_GEMMA_NAME)
+                self.assertEqual(clean[key], LOCAL_TEXT_SERVER_NAME)
         self.assertEqual(clean["ia_proxy_model"], GROK_TEXT_NAME)
 
     def test_qwen_antigo_vira_nome_curto(self):
         clean = normalize_settings(settings_with(OLD_QWEN))
         for key in TASK_KEYS:
             with self.subTest(key=key):
-                self.assertEqual(clean[key], SERVER_QWEN_NAME)
+                self.assertEqual(clean[key], LOCAL_TEXT_SERVER_NAME)
         self.assertEqual(clean["ia_proxy_model"], GROK_TEXT_NAME)
 
     def test_nenhum_nome_antigo_sobrevive(self):
@@ -211,7 +186,7 @@ class MigracaoTest(unittest.TestCase):
                 self.assertNotIn(value, OLD_NAMES)
 
 
-class VarreduraTest(unittest.TestCase):
+class VarreduraTest(LocalModelTestCase):
     """Os literais antigos só podem existir no mapa de migração do providers."""
 
     LEGACY_ONLY = {name.casefold() for name in OLD_NAMES}
@@ -237,7 +212,7 @@ class VarreduraTest(unittest.TestCase):
         self.assertEqual(set(providers.TEXT_MODEL_LEGACY_NAMES), self.LEGACY_ONLY)
 
 
-class PayloadIaProxyTest(unittest.TestCase):
+class PayloadIaProxyTest(LocalModelTestCase):
     """O IA-Proxy recebe `model=grok-latest` e NENHUMA API key vinda do app.
 
     Regra do usuário (23/09): com `grok-latest` selecionado, a requisição ao
@@ -304,10 +279,9 @@ class PayloadIaProxyTest(unittest.TestCase):
         )
         self.assertNotIn("Authorization", headers)
 
-    def test_gemma_e_qwen_nao_passam_pelo_proxy(self):
+    def test_servidor_local_nao_passa_pelo_proxy(self):
         for name, model in (
-            (SERVER_GEMMA_NAME, "gemma4"),
-            (SERVER_QWEN_NAME, "qwen2.5-7b"),
+            (LOCAL_TEXT_SERVER_NAME, local_text_model_id()),
         ):
             with self.subTest(name=name):
                 config = selected_text_model({"text_model": name})

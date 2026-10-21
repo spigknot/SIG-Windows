@@ -89,6 +89,53 @@ def parse_qualification_json(
     return normalized
 
 
+def parse_partial_qualification_json(
+    raw_text: str,
+    allowed_ids: list[str],
+    field_order: tuple[tuple[str, str], ...],
+) -> dict[str, str]:
+    """Prévia dos campos recebidos; não substitui a validação do JSON final."""
+    start = raw_text.find("{")
+    if start < 0:
+        return {}
+    remaining = raw_text[start + 1:].lstrip()
+    decoder = json.JSONDecoder()
+    fields = {}
+    while remaining and not remaining.startswith("}"):
+        try:
+            key, end = decoder.raw_decode(remaining)
+            if not isinstance(key, str):
+                break
+            remaining = remaining[end:].lstrip()
+            if not remaining.startswith(":"):
+                break
+            remaining = remaining[1:].lstrip()
+            try:
+                value, end = decoder.raw_decode(remaining)
+            except ValueError:
+                # Fecha somente a string final em construção. Escapes ainda
+                # incompletos (barra ou \uXXXX) aguardam o próximo trecho.
+                if remaining.startswith('"'):
+                    for trim in range(min(6, len(remaining))):
+                        try:
+                            value = json.loads(remaining[:len(remaining) - trim] + '"')
+                        except ValueError:
+                            continue
+                        if value and 0xD800 <= ord(value[-1]) <= 0xDBFF:
+                            value = value[:-1]
+                        fields[key] = value
+                        break
+                break
+            fields[key] = value
+            remaining = remaining[end:].lstrip()
+            if not remaining.startswith(","):
+                break
+            remaining = remaining[1:].lstrip()
+        except ValueError:
+            break
+    return parse_qualification_json(json.dumps(fields), allowed_ids, field_order)
+
+
 def _qualification_age_in_years(value: str, today: date | None = None) -> int | None:
     """Calcula a idade completa a partir das datas mais comuns devolvidas pela IA."""
     raw = str(value or "").strip()

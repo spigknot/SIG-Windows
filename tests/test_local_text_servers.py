@@ -1,12 +1,4 @@
-"""Vacina do segundo servidor de texto local (servidor (qwen2.5)).
-
-Regra do usuário (23/09): o servidor de histórico/oitiva/qualificação usa os
-MESMOS parâmetros do servidor de gemma4, com url `servidor/v1/chat/completions`
-e `model` = qwen2.5-7b; max_tokens medido no /tokenize x1.5 (igual ao gemma4).
-
-Cobre os três pontos obrigatórios de um modelo novo (catálogo, montagem dos
-parâmetros e payload do TextModelClient) + a preservação no normalize_settings.
-"""
+"""Catálogo único do servidor local e orçamento de tokens medido por requisição."""
 import json
 import sys
 import threading
@@ -18,11 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import sig_app  # noqa: E402
+import providers
 from providers import (  # noqa: E402
-    SERVER_GEMMA_MODEL,
-    SERVER_GEMMA_NAME,
-    SERVER_QWEN_MODEL,
-    SERVER_QWEN_NAME,
+    local_text_model_id,
+    LOCAL_TEXT_SERVER_NAME,
     TEXT_TASK_KEYS,
     read_text_models,
 )
@@ -35,6 +26,13 @@ from text_models import (  # noqa: E402
 
 def _catalogo(nome):
     return next(model for model in read_text_models() if model["name"] == nome)
+
+
+class LocalModelTestCase(unittest.TestCase):
+    def setUp(self):
+        previous = providers.local_text_model_id()
+        providers.set_local_text_model_id("/models/Modelo-Teste.gguf")
+        self.addCleanup(providers.set_local_text_model_id, previous)
 
 
 class _FakeResponse:
@@ -67,11 +65,11 @@ class _FakeConnection:
         pass
 
 
-class CatalogoQwenTest(unittest.TestCase):
+class CatalogoLocalTest(LocalModelTestCase):
     def test_entrada_no_catalogo_com_url_e_modelo_pedidos(self):
-        model = _catalogo(SERVER_QWEN_NAME)
+        model = _catalogo(LOCAL_TEXT_SERVER_NAME)
         self.assertEqual(model["url"], "http://servidor:8402/v1/chat/completions")
-        self.assertEqual(model["parameters"]["model"], SERVER_QWEN_MODEL)
+        self.assertEqual(model["parameters"]["model"], local_text_model_id())
         self.assertNotIn("max_tokens", model["parameters"])
         self.assertEqual(model["provider"], "servidor")
         self.assertFalse(model["is_grok_api"])
@@ -79,71 +77,51 @@ class CatalogoQwenTest(unittest.TestCase):
         self.assertFalse(model["is_xai_proxy"])
         self.assertFalse(model["selected"])
 
-    def test_parametros_sao_identicos_ao_gemma_fora_o_model(self):
-        gemma = dict(_catalogo(SERVER_GEMMA_NAME)["parameters"])
-        qwen = dict(_catalogo(SERVER_QWEN_NAME)["parameters"])
-        # Nenhum dos dois declara max_tokens: o TextModelClient mede no
-        # /tokenize (x1.5) a cada requisicao — regra do usuario de 23/09.
-        self.assertNotIn("max_tokens", gemma)
-        self.assertNotIn("max_tokens", qwen)
-        self.assertEqual(gemma["model"], SERVER_GEMMA_MODEL)
-        self.assertEqual(qwen["model"], SERVER_QWEN_MODEL)
-        qwen.pop("model")
-        gemma.pop("model")
-        self.assertEqual(qwen, gemma)
 
-    def test_label_do_gemma_nao_mudou(self):
-        self.assertEqual(
-            assistant_request_model_label(
-                {"request_model": SERVER_GEMMA_MODEL, "provider": "servidor"}
-            ),
-            "servidor",
-        )
-        self.assertEqual(
-            assistant_request_model_label(
-                {"request_model": SERVER_QWEN_MODEL, "provider": "servidor"}
-            ),
-            "servidor",
-        )
+    def test_rotulo_do_servidor_local(self):
+        self.assertEqual(assistant_request_model_label(
+            {"request_model": local_text_model_id(), "provider": "servidor"}), "servidor (Modelo-Teste)")
+
+    def test_so_existe_uma_rota_local(self):
+        local = [m for m in read_text_models() if m["provider"] == "servidor"]
+        self.assertEqual(len(local), 1)
+        self.assertEqual(local[0]["name"], LOCAL_TEXT_SERVER_NAME)
+        self.assertEqual(local[0]["url"], "http://servidor:8402/v1/chat/completions")
 
 
-class SelecaoPorTarefaTest(unittest.TestCase):
-    def test_as_tres_tarefas_resolvem_para_o_qwen(self):
+
+class SelecaoPorTarefaTest(LocalModelTestCase):
+    def test_as_tres_tarefas_resolvem_para_o_servidor_local(self):
         for task, keys in TEXT_TASK_KEYS.items():
             model_key = keys[0]
             with self.subTest(task=task):
                 selected = selected_text_model_for(
-                    {model_key: SERVER_QWEN_NAME}, task
+                    {model_key: LOCAL_TEXT_SERVER_NAME}, task
                 )
                 self.assertEqual(selected["provider"], "servidor")
-                self.assertEqual(selected["request_model"], SERVER_QWEN_MODEL)
+                self.assertEqual(selected["request_model"], local_text_model_id())
                 self.assertEqual(
                     selected["url"], "http://servidor:8402/v1/chat/completions"
                 )
-                self.assertEqual(selected["parameters"]["model"], SERVER_QWEN_MODEL)
+                self.assertEqual(selected["parameters"]["model"], local_text_model_id())
                 self.assertNotIn("max_tokens", selected["parameters"])
 
     def test_text_model_geral_tambem_aceita_o_nome_exibido(self):
-        selected = selected_text_model({"text_model": SERVER_QWEN_NAME})
+        selected = selected_text_model({"text_model": LOCAL_TEXT_SERVER_NAME})
         self.assertEqual(selected["provider"], "servidor")
-        self.assertEqual(selected["request_model"], SERVER_QWEN_MODEL)
-
-    def test_gemma_continua_resolvendo_para_gemma4(self):
-        selected = selected_text_model({"text_model": SERVER_GEMMA_NAME})
-        self.assertEqual(selected["provider"], "servidor")
-        self.assertEqual(selected["request_model"], SERVER_GEMMA_MODEL)
-        self.assertNotIn("max_tokens", selected["parameters"])
+        self.assertEqual(selected["request_model"], local_text_model_id())
 
 
-class NormalizeSettingsTest(unittest.TestCase):
-    def test_settings_do_qwen_sao_preservadas(self):
+
+class NormalizeSettingsTest(LocalModelTestCase):
+    def test_settings_do_servidor_local_sao_preservadas(self):
         cleaned = sig_app.normalize_settings(
             {
-                "text_model": SERVER_QWEN_NAME,
-                "history_model": SERVER_QWEN_NAME,
-                "statement_model": SERVER_QWEN_NAME,
-                "qualification_model": SERVER_QWEN_NAME,
-                "parts_model": SERVER_QWEN_NAME,
+                "text_model": LOCAL_TEXT_SERVER_NAME,
+                "history_model": LOCAL_TEXT_SERVER_NAME,
+                "statement_model": LOCAL_TEXT_SERVER_NAME,
+                "qualification_model": LOCAL_TEXT_SERVER_NAME,
+                "parts_model": LOCAL_TEXT_SERVER_NAME,
             }
         )
         for key in (
@@ -154,10 +132,10 @@ class NormalizeSettingsTest(unittest.TestCase):
             "parts_model",
         ):
             with self.subTest(key=key):
-                self.assertEqual(cleaned[key], SERVER_QWEN_NAME)
+                self.assertEqual(cleaned[key], LOCAL_TEXT_SERVER_NAME)
 
 
-class PayloadTest(unittest.TestCase):
+class PayloadTest(LocalModelTestCase):
     def _post(self, config, *, count_tokens=None):
         """Executa um post real (conexão falsa).
 
@@ -173,15 +151,17 @@ class PayloadTest(unittest.TestCase):
             ),
         )
         with tokenizer as mocked:
-            with patch("sig_app.http.client.HTTPConnection", _FakeConnection):
+            with patch("sig_app.http.client.HTTPConnection", _FakeConnection), patch.object(
+                sig_app.TextModelClient, "refresh_local_model", return_value=local_text_model_id()
+            ):
                 output = sig_app.TextModelClient(threading.Event()).post(
                     config, "Sistema.", "Usuário."
                 )
         return output, _FakeConnection.requests[0], mocked
 
-    def test_payload_qwen_mede_os_tokens_no_tokenize(self):
+    def test_payload_local_mede_os_tokens_no_tokenize(self):
         config = selected_text_model_for(
-            {"history_model": SERVER_QWEN_NAME}, "history"
+            {"history_model": LOCAL_TEXT_SERVER_NAME}, "history"
         )
         output, payload, mocked = self._post(
             config, count_tokens=patch.object(
@@ -189,7 +169,7 @@ class PayloadTest(unittest.TestCase):
             )
         )
         self.assertEqual(output, "RESPOSTA")
-        self.assertEqual(payload["model"], SERVER_QWEN_MODEL)
+        self.assertEqual(payload["model"], local_text_model_id())
         # sem teto fixo: o max_tokens vem MEDIDO no /tokenize (x1.5)
         self.assertEqual(payload["max_tokens"], 555)
         self.assertEqual(payload["temperature"], 0.0)
@@ -202,40 +182,16 @@ class PayloadTest(unittest.TestCase):
         mocked.assert_called_once()
 
     def test_payload_gemma_continua_medindo_no_tokenize(self):
-        config = selected_text_model({"text_model": SERVER_GEMMA_NAME})
+        config = selected_text_model({"text_model": LOCAL_TEXT_SERVER_NAME})
         output, payload, _mocked = self._post(
             config, count_tokens=patch.object(
                 sig_app.TextModelClient, "_count_input_tokens", return_value=777
             )
         )
         self.assertEqual(output, "RESPOSTA")
-        self.assertEqual(payload["model"], SERVER_GEMMA_MODEL)
+        self.assertEqual(payload["model"], local_text_model_id())
         self.assertEqual(payload["max_tokens"], 777)
 
-    def test_payload_qwen_e_identico_ao_gemma_fora_o_model(self):
-        qwen_config = selected_text_model_for(
-            {"qualification_model": SERVER_QWEN_NAME}, "qualification"
-        )
-        gemma_config = selected_text_model({"text_model": SERVER_GEMMA_NAME})
-        _out, qwen_payload, _m = self._post(
-            qwen_config, count_tokens=patch.object(
-                sig_app.TextModelClient, "_count_input_tokens", return_value=777
-            )
-        )
-        _out, gemma_payload, _m = self._post(
-            gemma_config, count_tokens=patch.object(
-                sig_app.TextModelClient, "_count_input_tokens", return_value=777
-            )
-        )
-        qwen = dict(qwen_payload)
-        gemma = dict(gemma_payload)
-        self.assertNotEqual(qwen["model"], gemma["model"])
-        # max_tokens agora medido NOS DOIS -> com o mesmo /tokenize os payloads
-        # ficam identicos, restando so o `model` como diferenca.
-        self.assertEqual(qwen["max_tokens"], gemma["max_tokens"])
-        qwen.pop("model")
-        gemma.pop("model")
-        self.assertEqual(qwen, gemma)
 
 
 if __name__ == "__main__":

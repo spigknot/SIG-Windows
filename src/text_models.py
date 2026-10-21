@@ -3,6 +3,7 @@
 NAO confundir com domain_models.py (AudioJob) nem com transcricao STT.
 Depende de providers.py para o catalogo; sem rede, sem Tkinter."""
 
+import codecs
 import json
 from providers import (
     DEEPSEEK_TEXT_NAME,
@@ -10,10 +11,11 @@ from providers import (
     GROK_NON_REASONING_TEXT_NAME,
     GROK_TEXT_NAME,
     IA_PROXY_NAME,
-    LOCAL_SERVER_MODEL_BY_NAME,
     LOCAL_SERVER_NAMES,
     TEXT_TASK_KEYS,
     local_server_parameters,
+    local_text_model_id,
+    local_text_model_label,
     selected_text_model_config,
 )
 
@@ -38,8 +40,8 @@ def selected_text_model(
     if request_model not in {GROK_TEXT_NAME, GROK_NON_REASONING_TEXT_NAME, DEEPSEEK_TEXT_NAME} | LOCAL_SERVER_NAMES:
         request_model = GROK_TEXT_NAME
     provider = "deepseek" if request_model == DEEPSEEK_TEXT_NAME else "xai"
-    if request_model in LOCAL_SERVER_NAMES:
-        request_model = LOCAL_SERVER_MODEL_BY_NAME.get(request_model, request_model)
+    if config.get("provider") == "servidor":
+        request_model = local_text_model_id()
         provider = "servidor"
     reasoning = str(settings.get(reasoning_key) or settings.get(reasoning_fallback) or "").casefold()
     if is_proxy:
@@ -115,7 +117,8 @@ def assistant_request_model_label(model_config: dict) -> str:
     provider = str(model_config.get("provider") or "").casefold()
 
     if provider == "servidor" or request_model in LOCAL_SERVER_NAMES:
-        destination = "servidor"
+        destination = local_text_model_label(str(model_config.get("request_model")
+            or (model_config.get("parameters") or {}).get("model") or ""))
     else:
         destination = {
             GROK_TEXT_NAME: "grok-latest",
@@ -165,6 +168,14 @@ def extract_text_model_output(raw: bytes) -> str:
                 content = extract_content_text(item.get("content"))
                 if content:
                     return content
+    # Versões do IA-Proxy que acumulam SSE devolvem o corpo upstream dentro
+    # de raw_content. Mantém a resposta utilizável enquanto esse servidor
+    # ainda não repassa o stream diretamente ao cliente.
+    raw_content = root.get("raw_content")
+    if isinstance(raw_content, str) and raw_content.lstrip().startswith(("data:", "event:", ":")):
+        stream = TextModelStream("text/event-stream")
+        stream.feed(raw_content.encode("utf-8"))
+        return stream.finish()[0]
     raise RuntimeError("A resposta não contém output/content/text.")
 
 
@@ -181,3 +192,113 @@ def extract_content_text(content) -> str:
         if isinstance(text, str) and text.strip():
             return text.strip()
     return ""
+
+
+class TextModelStream:
+    """Decodifica SSE/NDJSON incrementalmente e aceita JSON sem streaming.
+
+    Só publica texto da resposta: eventos de raciocínio e metadados não
+    entram no editor. Um stream interrompido não vira uma resposta concluída.
+    """
+
+    def __init__(self, content_type: str = ""):
+        self.mode = (
+            "sse" if "text/event-stream" in content_type
+            else "ndjson" if "ndjson" in content_type else ""
+        )
+        self.decoder = codecs.getincrementaldecoder("utf-8-sig")()
+        self.buffer = ""
+        self.event_data: list[str] = []
+        self.parts: list[str] = []
+        self.completed = False
+
+    def feed(self, chunk: bytes) -> list[str]:
+        self.buffer += self.decoder.decode(chunk)
+        if not self.mode:
+            prefix = self.buffer.lstrip()
+            if prefix.startswith(("data:", "event:", ":")):
+                self.mode = "sse"
+            elif "\n" in prefix and prefix.startswith("{"):
+                try:
+                    first = json.loads(prefix.split("\n", 1)[0])
+                except ValueError:
+                    pass
+                else:
+                    if isinstance(first, dict) and "done" in first:
+                        self.mode = "ndjson"
+        deltas = []
+        if self.mode:
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                delta = self._line(line.rstrip("\r"))
+                if delta:
+                    deltas.append(delta)
+        return deltas
+
+    def _line(self, line: str) -> str:
+        if self.mode == "ndjson":
+            return self._event(line) if line.strip() else ""
+        if line.startswith("data:"):
+            self.event_data.append(line[5:].removeprefix(" "))
+        elif not line and self.event_data:
+            data = "\n".join(self.event_data)
+            self.event_data.clear()
+            return self._event(data)
+        return ""
+
+    def _event(self, data: str) -> str:
+        if data.strip() == "[DONE]":
+            self.completed = True
+            return ""
+        try:
+            event = json.loads(data)
+        except ValueError as exc:
+            raise RuntimeError("O servidor enviou um evento de texto inválido.") from exc
+        if not isinstance(event, dict):
+            raise RuntimeError("O servidor enviou um evento de texto inválido.")
+        event_type = event.get("type", "")
+        if event.get("error") or event_type in ("error", "response.failed", "response.incomplete"):
+            error = event.get("error") or (event.get("response") or {}).get("error") or event
+            detail = error.get("message", event_type) if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"Falha no streaming: {detail}")
+        delta = ""
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta", "")
+        elif event_type == "response.completed":
+            self.completed = True
+            if not self.parts:
+                delta = extract_text_model_output(json.dumps(event.get("response", {})).encode("utf-8"))
+        elif "choices" in event:
+            for choice in event["choices"]:
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = (choice.get("delta") or {}).get("content") or ""
+                if choice.get("finish_reason") is not None:
+                    self.completed = True
+                break
+        elif "done" in event:
+            delta = event.get("response", "")
+            self.completed = bool(event.get("done"))
+        if isinstance(delta, str) and delta:
+            self.parts.append(delta)
+            return delta
+        return ""
+
+    def finish(self) -> tuple[str, list[str]]:
+        self.buffer += self.decoder.decode(b"", final=True)
+        if not self.mode:
+            output = extract_text_model_output(self.buffer.encode("utf-8"))
+            return output, [output]
+        deltas = []
+        if self.buffer:
+            delta = self._line(self.buffer.rstrip("\r"))
+            if delta:
+                deltas.append(delta)
+            self.buffer = ""
+        if self.event_data:
+            delta = self._line("")
+            if delta:
+                deltas.append(delta)
+        if not self.completed:
+            raise RuntimeError("A resposta foi interrompida antes de concluir o texto.")
+        return "".join(self.parts).strip(), deltas

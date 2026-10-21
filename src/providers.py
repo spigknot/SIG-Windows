@@ -223,9 +223,8 @@ def migrate_text_model_name(value: str) -> str:
     Necessário antes de comparar com o catálogo (`read_text_models`): sem isto,
     um `history_model` antigo deixaria de casar com o catálogo e cairia
     silenciosamente no `text_model` geral (IA-Proxy) — trocando o provedor que
-    o usuário tinha escolhido. Cobre o DeepSeek aposentado e os renomes de
-    23/09 (`grok-4.6` → `grok-latest`; nomes longos dos servidores locais →
-    `servidor (gemma4)` / `servidor (qwen2.5)`), guardados em
+    o usuário tinha escolhido. Cobre o DeepSeek aposentado e os nomes
+    anteriores do servidor local, guardados em
     `TEXT_MODEL_LEGACY_NAMES` — definido mais abaixo, junto das constantes.
     """
     candidate = str(value or "").strip()
@@ -241,52 +240,44 @@ IA_PROXY_NAME = "IA-Proxy"
 IA_PROXY_PRIMARY_URL = "http://servidor:8500"
 
 
-# Servidor de texto LOCAL (llama.cpp na porta 8400). O mesmo host serve vários
-# modelos carregados; o que muda por entrada é o `model` (e o teto de saída).
-LOCAL_SERVER_BASE_URL = "http://servidor:8400"
+# Servidor de texto local ativo.
+LOCAL_SERVER_BASE_URL = "http://servidor:8402"
 
 
 LOCAL_SERVER_CHAT_URL = f"{LOCAL_SERVER_BASE_URL}/v1/chat/completions"
 
 
-# Nomes EXIBIDOS dos servidores locais (regra do usuário, 23/09): curtos, só o
-# apelido do modelo — as requisições continuam usando SERVER_*_MODEL abaixo.
-SERVER_GEMMA_NAME = "servidor (gemma4)"
+# Nome exibido e identificador enviado ao servidor local.
+LOCAL_TEXT_SERVER_NAME = "servidor (local)"
 
 
-SERVER_GEMMA_MODEL = "gemma4"
+_local_text_model_id = ""
 
 
-SERVER_GEMMA_URL = LOCAL_SERVER_CHAT_URL
+def local_text_model_id() -> str:
+    return _local_text_model_id
 
 
-SERVER_GEMMA_NAMES = {SERVER_GEMMA_NAME, SERVER_GEMMA_MODEL}
+def set_local_text_model_id(model_id: str) -> None:
+    global _local_text_model_id
+    _local_text_model_id = str(model_id or "").strip()
 
 
-# Segundo modelo do servidor local, numa INSTÂNCIA PRÓPRIA (porta 8402): o
-# llama.cpp da 8400 ignora o `model` do pedido e responde com o modelo
-# carregado ali (gemma4) — medido em teste real.
-SERVER_QWEN_NAME = "servidor (qwen2.5)"
+def local_text_model_label(model_id: str = "") -> str:
+    name = str(model_id or local_text_model_id()).replace("\\", "/").rsplit("/", 1)[-1]
+    if name.lower().endswith(".gguf"):
+        name = name[:-5]
+    return f"servidor ({name})" if name else LOCAL_TEXT_SERVER_NAME
 
 
-SERVER_QWEN_MODEL = "qwen2.5-7b"
+LOCAL_TEXT_SERVER_URL = LOCAL_SERVER_CHAT_URL
 
 
-SERVER_QWEN_URL = "http://servidor:8402/v1/chat/completions"
+LOCAL_TEXT_SERVER_NAMES = {LOCAL_TEXT_SERVER_NAME}
 
 
-SERVER_QWEN_NAMES = {SERVER_QWEN_NAME, SERVER_QWEN_MODEL}
-
-
-# Nomes aceitos para QUALQUER modelo do servidor local (nome exibido ou id).
-LOCAL_SERVER_NAMES = SERVER_GEMMA_NAMES | SERVER_QWEN_NAMES
-
-
-# Nome exibido -> `model` enviado na requisição.
-LOCAL_SERVER_MODEL_BY_NAME = {
-    SERVER_GEMMA_NAME: SERVER_GEMMA_MODEL,
-    SERVER_QWEN_NAME: SERVER_QWEN_MODEL,
-}
+# Nomes aceitos do servidor local (nome exibido ou id).
+LOCAL_SERVER_NAMES = LOCAL_TEXT_SERVER_NAMES
 
 
 # Nomes ANTIGOS que ainda existem em settings.json gravadas. Sem migrar, o
@@ -295,17 +286,19 @@ LOCAL_SERVER_MODEL_BY_NAME = {
 # casefold, porque `migrate_text_model_name` compara assim.
 TEXT_MODEL_LEGACY_NAMES = {
     "grok-4.6": GROK_TEXT_NAME,
-    "servidor (gemma-4-26b-a4b-abliterated)": SERVER_GEMMA_NAME,
-    "servidor (qwen-2.5-3b-instruct-abliterated)": SERVER_QWEN_NAME,
+    "servidor (gemma-4-26b-a4b-abliterated)": LOCAL_TEXT_SERVER_NAME,
+    "servidor (qwen-2.5-3b-instruct-abliterated)": LOCAL_TEXT_SERVER_NAME,
+    "servidor (qwen2.5)": LOCAL_TEXT_SERVER_NAME,
+    "qwen2.5-7b": LOCAL_TEXT_SERVER_NAME,
+    "servidor (gemma4)": LOCAL_TEXT_SERVER_NAME,
+    "gemma4": LOCAL_TEXT_SERVER_NAME,
 }
 
 
 def local_server_parameters(model: str, max_tokens: int | None = None) -> dict:
     """Parâmetros de texto do servidor local — fonte única dos modelos.
 
-    Regra do usuário: os parâmetros do Qwen são IDÊNTICOS aos do Gemma; só o
-    `model` muda. NENHUM dos dois declara `max_tokens` no catálogo (o teto
-    fixo de 16384 foi retirado em 23/09): o TextModelClient mede em cada
+    O catálogo não declara `max_tokens`: o TextModelClient mede em cada
     chamada no `/tokenize` × 1.5. Ter uma fonte única evita que os dois dicts
     (catálogo e `selected_text_model`) divirjam.
     """
@@ -438,19 +431,9 @@ def read_text_models() -> list[dict]:
             "is_xai_proxy": True,
         },
         {
-            "name": SERVER_GEMMA_NAME,
-            "url": SERVER_GEMMA_URL,
-            "parameters": local_server_parameters(SERVER_GEMMA_MODEL),
-            "selected": False,
-            "provider": "servidor",
-            "is_grok_api": False,
-            "is_deepseek_api": False,
-            "is_xai_proxy": False,
-        },
-        {
-            "name": SERVER_QWEN_NAME,
-            "url": SERVER_QWEN_URL,
-            "parameters": local_server_parameters(SERVER_QWEN_MODEL),
+            "name": LOCAL_TEXT_SERVER_NAME,
+            "url": LOCAL_TEXT_SERVER_URL,
+            "parameters": local_server_parameters(local_text_model_id()),
             "selected": False,
             "provider": "servidor",
             "is_grok_api": False,
@@ -507,7 +490,7 @@ def read_text_models() -> list[dict]:
 
 def selected_text_model_config(settings: dict, name_key: str = "text_model") -> dict:
     models = read_text_models()
-    name = settings.get(name_key) or settings.get("text_model")
+    name = migrate_text_model_name(str(settings.get(name_key) or settings.get("text_model") or ""))
     return (
         next((model for model in models if model["name"] == name), None)
         or next((model for model in models if model["selected"]), None)
@@ -518,13 +501,14 @@ def selected_text_model_config(settings: dict, name_key: str = "text_model") -> 
 def text_model_label(model: dict) -> str:
     """Rótulo EXIBIDO de um modelo de texto nos menus (Configurações/Status).
 
-    Regra do usuário (23/09): os servidores locais aparecem só com o apelido
-    (`servidor (gemma4)`, `servidor (qwen2.5)`), sem repetir o `model` entre
-    parênteses. Modelos cujo nome Já é o identificador da requisição
+    O servidor local mostra o modelo anunciado em /v1/models.
+    Modelos cujo nome já é o identificador da requisição
     (IA-Proxy, Grok, DeepSeek) também saem limpos; o resto mantém o formato
     `nome (model)`. FONTE ÚNICA: os menus montam o rótulo por aqui.
     """
     name = str(model.get("name") or "")
+    if name == LOCAL_TEXT_SERVER_NAME or model.get("provider") == "servidor":
+        return local_text_model_label(str((model.get("parameters") or {}).get("model") or ""))
     if (
         name == IA_PROXY_NAME
         or name in GROK_TEXT_API_NAMES
@@ -593,12 +577,12 @@ def fallback_text_model_for_missing_api_key(
     grok_api_key: str,
     deepseek_api_key: str,
 ) -> str:
-    """Retorna o Gemma quando um modelo de texto direto perdeu sua chave."""
+    """Retorna o servidor local quando um modelo de texto direto perdeu sua chave."""
     candidate = str(model_name or "").strip()
     if candidate in GROK_TEXT_API_NAMES and not str(grok_api_key or "").strip():
-        return SERVER_GEMMA_NAME
+        return LOCAL_TEXT_SERVER_NAME
     if candidate in DEEPSEEK_API_NAMES and not str(deepseek_api_key or "").strip():
-        return SERVER_GEMMA_NAME
+        return LOCAL_TEXT_SERVER_NAME
     return candidate
 
 

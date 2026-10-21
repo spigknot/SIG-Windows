@@ -265,6 +265,7 @@ from qualification import (  # noqa: F401
     LIVE_QUALIFICATION_FIELD_IDS,
     LIVE_QUALIFICATION_DEFAULT_SELECTED,
     parse_qualification_json,
+    parse_partial_qualification_json,
     _qualification_age_in_years,
     format_occurrence_qualification,
     format_qualification_fields,
@@ -445,14 +446,9 @@ from providers import (  # noqa: F401
     DEEPSEEK_TEXT_NAME,
     IA_PROXY_NAME,
     IA_PROXY_PRIMARY_URL,
-    SERVER_GEMMA_NAME,
-    SERVER_GEMMA_MODEL,
-    SERVER_GEMMA_URL,
-    SERVER_GEMMA_NAMES,
-    SERVER_QWEN_NAME,
-    SERVER_QWEN_MODEL,
-    SERVER_QWEN_URL,
-    SERVER_QWEN_NAMES,
+    LOCAL_TEXT_SERVER_NAME,
+    LOCAL_TEXT_SERVER_URL,
+    LOCAL_TEXT_SERVER_NAMES,
     LOCAL_SERVER_NAMES,
     TEXT_MODEL_LEGACY_NAMES,
     GROK_TEXT_API_NAMES,
@@ -466,6 +462,7 @@ from providers import (  # noqa: F401
     read_text_models,
     selected_text_model_config,
     text_model_label,
+    local_text_model_id,
     selected_transcription_server,
     transcription_server_label,
     parse_api_keys_text,
@@ -1470,6 +1467,7 @@ class SigApp:
         self._refresh_server_label()
         self.root.after(100, self._poll_ui_queue)
         self.root.after(100, self._refresh_assistant_progress_clock)
+        self.root.after(0, self._refresh_local_text_model)
         self.root.after(0, self._refresh_microphone_availability)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -4954,6 +4952,9 @@ class SigApp:
                 selected_text_model_for(settings, "qualification"),
                 self._prompt_ativo("qualificacao_system", DEFAULT_QUALIFICATION_SYSTEM_PROMPT),
                 self._prompt_qualificacao_ativo(field_ids, raw_text),
+                on_text=self._assistant_stream_callback(
+                    generation, "qualification", "qualification", allowed_ids=field_ids,
+                ),
             )
             self._queue(
                 "qualification_result",
@@ -7545,6 +7546,75 @@ class SigApp:
             selected_name = self.assistant_part_var.get().strip()
         return "" if selected_name == "Partes" else selected_name
 
+    def _refresh_local_text_model(self):
+        if getattr(self, "_app_closing", False):
+            return
+        if not getattr(self, "_local_text_model_refreshing", False):
+            self._local_text_model_refreshing = True
+
+            def refresh():
+                try:
+                    TextModelClient.refresh_local_model()
+                    self._queue("local_text_model_changed")
+                except Exception:
+                    pass
+                finally:
+                    self._local_text_model_refreshing = False
+
+            threading.Thread(target=refresh, daemon=True).start()
+        self.root.after(30000, self._refresh_local_text_model)
+
+    def _assistant_stream_callback(
+        self, generation: int, target: str, task: str, index: int = 1,
+        *, allowed_ids: list[str] | None = None,
+    ):
+        """Publica prévias pela fila; os workers nunca acessam widgets Tk."""
+        parts: list[str] = []
+        last_update = None
+
+        def on_text(delta: str):
+            nonlocal last_update
+            parts.append(delta)
+            now = time.monotonic()
+            # A fila da UI roda a cada 100ms. Agrupa tokens rápidos para
+            # manter a edição fluida mesmo quando dois modelos respondem.
+            if last_update is None or now - last_update >= .05:
+                self._queue(
+                    "assistant_text_partial", generation, target, task,
+                    index, "".join(parts), allowed_ids,
+                )
+                last_update = now
+
+        return on_text
+
+    def _apply_assistant_text_partial(
+        self, generation: int, target: str, task: str, index: int,
+        text: str, allowed_ids: list[str] | None,
+    ) -> None:
+        if generation != self.assistant_generation or not self.assistant_busy:
+            return
+        if task == "qualification":
+            fields = parse_partial_qualification_json(
+                text, allowed_ids or list(LIVE_QUALIFICATION_FIELD_IDS), self.qualification_fields,
+            )
+            if not fields:
+                return
+            if target == "live":
+                formatted = format_occurrence_qualification(
+                    json.dumps(fields, ensure_ascii=False), self.qualification_fields,
+                    self._live_qualification_selected_ids(),
+                )
+                self._set_live_editor("qualification", formatted, qualification_organized=False)
+            else:
+                self._set_qualification_output(format_qualification_fields(
+                    fields, self.qualification_output_fields,
+                    set(self._selected_qualification_field_ids()),
+                ))
+        elif target == "live":
+            self._set_live_editor(task if index == 1 else f"{task}2", text)
+        else:
+            self._set_assistant_text(text)
+
     def _begin_assistant_request(self, phase: str, target: str) -> tuple[int, dict]:
         self.assistant_generation += 1
         generation = self.assistant_generation
@@ -7654,6 +7724,7 @@ class SigApp:
                     model_config,
                     self._prompt_ativo("historico_system", DEFAULT_HISTORY_SYSTEM_PROMPT),
                     history_request,
+                    on_text=self._assistant_stream_callback(generation, target, "history"),
                 )
                 history_elapsed = time.monotonic() - history_started
                 self._queue("assistant_text_result", generation, target, "history", history, history_elapsed)
@@ -7683,6 +7754,7 @@ class SigApp:
                         model,
                         self._prompt_ativo("historico_system", DEFAULT_HISTORY_SYSTEM_PROMPT),
                         history_request,
+                        on_text=self._assistant_stream_callback(generation, "live", "history", index),
                     ): index
                     for index, model in enumerate(models, start=1)
                 }
@@ -7806,6 +7878,7 @@ class SigApp:
                 selected_text_model_for(settings, "statement"),
                 self._prompt_ativo("oitiva_system", DEFAULT_STATEMENT_TEMPLATE),
                 self._prompt_oitiva_user_ativo(selected_name, material),
+                on_text=self._assistant_stream_callback(generation, target, "statement"),
             )
             self._queue(
                 "assistant_text_result",
@@ -7852,6 +7925,7 @@ class SigApp:
                         model,
                         self._prompt_ativo("oitiva_system", DEFAULT_STATEMENT_TEMPLATE),
                         self._prompt_oitiva_user_ativo(selected_name, material),
+                        on_text=self._assistant_stream_callback(generation, "live", "statement", index),
                     ): index
                     for index, model in enumerate(models, start=1)
                 }
@@ -8982,6 +9056,7 @@ try {
                 selected_text_model_for(settings, "qualification"),
                 self._prompt_ativo("qualificacao_system", DEFAULT_QUALIFICATION_SYSTEM_PROMPT),
                 self._prompt_qualificacao_ativo(list(LIVE_QUALIFICATION_FIELD_IDS), raw_text),
+                on_text=self._assistant_stream_callback(generation, "live", "qualification"),
             )
             self._queue(
                 "live_qualification_result",
@@ -11587,6 +11662,7 @@ try {
             reasoning_button.pack(side=LEFT)
 
             def refresh(preferred_name: str | None = None):
+                current_name = model_labels_holder.get(model_var.get(), "")
                 available_models = [
                     model for model in read_text_models()
                     if (
@@ -11598,9 +11674,7 @@ try {
                     )
                 ]
                 model_labels_holder.clear()
-                # Rótulo vem de providers.text_model_label (fonte única): os
-                # servidores locais aparecem como "servidor (gemma4)" e
-                # "servidor (qwen2.5)", sem repetir o `model` entre parênteses.
+                # O rótulo vem do modelo anunciado pelo servidor local.
                 model_labels_holder.update({
                     text_model_label(model): model["name"]
                     for model in available_models
@@ -11608,7 +11682,7 @@ try {
                 model_combo.configure(values=list(model_labels_holder))
                 target = (
                     preferred_name
-                    or model_labels_holder.get(model_var.get(), "")
+                    or current_name
                     or str(self.settings.get(settings_model_key) or "")
                 )
                 target = fallback_text_model_for_missing_api_key(
@@ -11618,8 +11692,8 @@ try {
                 )
                 if target not in model_labels_holder.values():
                     target = (
-                        SERVER_GEMMA_NAME
-                        if SERVER_GEMMA_NAME in model_labels_holder.values()
+                        LOCAL_TEXT_SERVER_NAME
+                        if LOCAL_TEXT_SERVER_NAME in model_labels_holder.values()
                         else IA_PROXY_NAME
                     )
                 label = next(
@@ -11739,11 +11813,12 @@ try {
             reasoning_button.pack(side=LEFT)
 
             def refresh():
+                current_name = model_labels_holder.get(model_var.get(), "")
                 model_labels_holder.clear()
                 model_labels_holder.update(history_ui["labels"])
                 model_combo.configure(values=list(model_labels_holder))
                 current = (
-                    model_labels_holder.get(model_var.get(), "")
+                    current_name
                     or str(self.settings.get(settings_model_key) or IA_PROXY_NAME)
                 )
                 target = fallback_text_model_for_missing_api_key(
@@ -11753,8 +11828,8 @@ try {
                 )
                 if target not in model_labels_holder.values():
                     target = (
-                        SERVER_GEMMA_NAME
-                        if SERVER_GEMMA_NAME in model_labels_holder.values()
+                        LOCAL_TEXT_SERVER_NAME
+                        if LOCAL_TEXT_SERVER_NAME in model_labels_holder.values()
                         else IA_PROXY_NAME
                     )
                 target_label = next(
@@ -11868,6 +11943,15 @@ try {
             statement_ui["refresh"]()
             refresh_extraction_visibility()
             qualification_ui["refresh"]()
+
+        def refresh_discovered_model_labels():
+            if win.winfo_exists():
+                history_ui["refresh"]()
+                statement_ui["refresh"]()
+                extraction_ui["refresh"]()
+                qualification_ui["refresh"]()
+
+        self._refresh_local_text_model_labels = refresh_discovered_model_labels
 
         for api_key_variable in (
             grok_api_key_var,
@@ -18074,6 +18158,12 @@ try {
                 elif kind == "live_error":
                     self.cancel_live_mic()
                     self.status_var.set(message[1])
+                elif kind == "local_text_model_changed":
+                    refresh = getattr(self, "_refresh_local_text_model_labels", None)
+                    if refresh:
+                        refresh()
+                elif kind == "assistant_text_partial":
+                    self._apply_assistant_text_partial(*message[1:])
                 elif kind == "assistant_text_result":
                     generation, target, task, text, elapsed = message[1:]
                     if generation == self.assistant_generation:

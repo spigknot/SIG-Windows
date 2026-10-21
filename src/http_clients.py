@@ -10,10 +10,14 @@ import socket
 import threading
 import urllib.request
 import uuid
+from collections.abc import Callable
 from domain_models import Cancelled
 from pathlib import Path
-from providers import GROK_NON_REASONING_TEXT_NAME, GROK_TEXT_NAME, SERVER_GEMMA_MODEL
-from text_models import extract_text_model_output
+from providers import (
+    GROK_NON_REASONING_TEXT_NAME, GROK_TEXT_NAME,
+    LOCAL_TEXT_SERVER_URL, local_text_model_id, set_local_text_model_id,
+)
+from text_models import TextModelStream, extract_text_model_output
 from transcription_parsing import (
     ParsedTranscription,
     extract_text_from_response,
@@ -264,6 +268,27 @@ def granite_sessions(base_url: str, *, timeout: float = 5.0) -> tuple[str, dict 
 
 class TextModelClient:
 
+    @staticmethod
+    def refresh_local_model(url: str = LOCAL_TEXT_SERVER_URL) -> str:
+        """Consulta o identificador anunciado sem enviar prompts ou credenciais."""
+        models_url = url.rsplit("/v1/chat/completions", 1)[0].rstrip("/") + "/v1/models"
+        try:
+            request = urllib.request.Request(models_url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                root = json.loads(response.read().decode("utf-8"))
+            if not isinstance(root, dict) or not isinstance(root.get("data"), list):
+                raise RuntimeError("A lista de modelos do servidor local é inválida.")
+            model_id = next((item["id"].strip() for item in root.get("data", [])
+                             if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()), "")
+            if not model_id:
+                raise RuntimeError("O servidor local não anunciou nenhum modelo em /v1/models.")
+            set_local_text_model_id(model_id)
+            return model_id
+        except (OSError, ValueError, RuntimeError):
+            if local_text_model_id():
+                return local_text_model_id()
+            raise RuntimeError("Não foi possível identificar o modelo do servidor local em /v1/models.")
+
     def _count_input_tokens(self, url: str, fallback_url: str, model: str, system_prompt: str, material: str) -> int:
         """max_tokens = tokens do input com a margem do template do chat.
 
@@ -306,17 +331,24 @@ class TextModelClient:
         self.cancel_event = cancel_event
         self._lock = threading.Lock()
         self._connections: set[http.client.HTTPConnection] = set()
+        self._sockets: set[socket.socket] = set()
 
     def cancel(self):
         with self._lock:
             connections = list(self._connections)
+            sockets = list(self._sockets)
+        for sock in sockets:
+            GraniteUploader._force_close(sock)
         for conn in connections:
             try:
                 conn.close()
             except Exception:
                 pass
 
-    def post(self, model_config: dict, system_prompt: str, material: str) -> str:
+    def post(
+        self, model_config: dict, system_prompt: str, material: str,
+        *, on_text: Callable[[str], None] | None = None,
+    ) -> str:
         system_prompt = str(system_prompt or "").strip()
         material = str(material or "").strip()
         if not system_prompt:
@@ -374,13 +406,14 @@ class TextModelClient:
             ]
             payload.pop("input", None)
         elif provider == "servidor":
+            payload["model"] = self.refresh_local_model(url)
             payload["messages"] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": material},
             ]
             payload.pop("input", None)
             # Teto declarado no catálogo (quando houver) prevalece;
-            # sem teto (hoje: gemma4 E qwen2.5) o limite é MEDIDO no
+            # sem teto o limite é MEDIDO no
             # /tokenize x1.5 a cada chamada.
             declared_max_tokens = payload.get("max_tokens")
             payload["max_tokens"] = (
@@ -389,7 +422,7 @@ class TextModelClient:
                 else self._count_input_tokens(
                     str(model_config.get("url") or ""),
                     str(model_config.get("fallback_url") or ""),
-                    str(payload.get("model") or SERVER_GEMMA_MODEL),
+                    str(payload.get("model") or local_text_model_id()),
                     system_prompt,
                     material,
                 )
@@ -403,12 +436,23 @@ class TextModelClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": material},
             ]
+        if on_text is not None:
+            payload["stream"] = True
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         urls = [url]
         fallback_url = str(model_config.get("fallback_url") or "").strip()
         if fallback_url and fallback_url != url:
             urls.append(fallback_url)
         last_error = None
+        emitted = False
+
+        def publish(delta: str) -> None:
+            nonlocal emitted
+            if self.cancel_event.is_set():
+                raise Cancelled()
+            emitted = True
+            on_text(delta)
+
         for attempt_url in urls:
             attempt_parsed = urlparse(attempt_url)
             if attempt_parsed.scheme not in ("http", "https"):
@@ -421,18 +465,43 @@ class TextModelClient:
             conn = connection_cls(attempt_parsed.netloc, timeout=60 * 60)
             with self._lock:
                 self._connections.add(conn)
+            active_socket = None
             try:
                 if self.cancel_event.is_set():
                     raise Cancelled()
                 headers = {
-                    "accept": "application/json",
+                    "accept": "text/event-stream, application/x-ndjson, application/json" if on_text else "application/json",
                     "Content-Type": "application/json; charset=utf-8",
                     "Content-Length": str(len(body)),
                 }
                 if is_grok_api or is_deepseek_api:
                     headers["Authorization"] = f"Bearer {api_key}"
                 conn.request("POST", path, body=body, headers=headers)
+                active_socket = getattr(conn, "sock", None)
+                with self._lock:
+                    if active_socket is not None:
+                        self._sockets.add(active_socket)
+                if self.cancel_event.is_set():
+                    raise Cancelled()
                 response = conn.getresponse()
+                if on_text is not None and 200 <= response.status < 300:
+                    stream = TextModelStream(response.getheader("Content-Type", ""))
+                    while True:
+                        if self.cancel_event.is_set():
+                            raise Cancelled()
+                        # read(n) pode esperar n bytes e esconder os primeiros
+                        # tokens; read1 devolve o que já chegou pelo socket.
+                        chunk = response.read1(16 * 1024)
+                        if not chunk:
+                            break
+                        for delta in stream.feed(chunk):
+                            publish(delta)
+                    output, tail = stream.finish()
+                    for delta in tail:
+                        publish(delta)
+                    if not output:
+                        raise RuntimeError("O servidor devolveu um texto vazio.")
+                    return output
                 chunks = []
                 while True:
                     if self.cancel_event.is_set():
@@ -454,6 +523,9 @@ class TextModelClient:
             except (OSError, socket.timeout, RuntimeError) as exc:
                 if self.cancel_event.is_set():
                     raise Cancelled() from exc
+                if emitted:
+                    # Não misturar o início já exibido com outra geração.
+                    raise
                 last_error = exc
             finally:
                 try:
@@ -462,4 +534,5 @@ class TextModelClient:
                     pass
                 with self._lock:
                     self._connections.discard(conn)
+                    self._sockets.discard(active_socket)
         raise last_error or RuntimeError("Não foi possível consultar o modelo de texto.")

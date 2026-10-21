@@ -20,7 +20,7 @@ Por isso ele e manual -- ver `docs/agents/README.md`.
 USO
 ---
     python scripts/check_qualification_prompt.py
-    python scripts/check_qualification_prompt.py --model "servidor (qwen2.5)" --runs 3
+    python scripts/check_qualification_prompt.py --model "servidor (local)" --runs 3
     python scripts/check_qualification_prompt.py --url http://servidor:8401/v1/chat/completions
 
 Saida: `PASS` / `FAIL` por documento, e o detalhe de cada regra violada.
@@ -202,7 +202,7 @@ def violacoes(campos: dict[str, str]) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Vacina do prompt de qualificacao (chama o modelo real).")
-    ap.add_argument("--model", default="servidor (qwen2.5)", help="Nome exato em 'read_text_models'.")
+    ap.add_argument("--model", default="servidor (local)", help="Nome exato em 'read_text_models'.")
     ap.add_argument("--url", default=None, help="Sobrescreve a URL do modelo (ex.: :8401).")
     ap.add_argument("--runs", type=int, default=1, help="Vezes por documento (o modelo nao e deterministico).")
     ap.add_argument("--documentos", default="br3", help="IDs dos documentos a testar, separados por virgula.")

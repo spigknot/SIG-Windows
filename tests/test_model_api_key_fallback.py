@@ -19,7 +19,7 @@ class ModelApiKeyFallbackTests(unittest.TestCase):
             with self.subTest(model_name=model_name):
                 self.assertEqual(
                     sig_app.fallback_text_model_for_missing_api_key(model_name, "", ""),
-                    sig_app.SERVER_GEMMA_NAME,
+                    sig_app.LOCAL_TEXT_SERVER_NAME,
                 )
 
     def test_text_models_with_key_keep_direct_selection(self):
@@ -76,20 +76,20 @@ class ModelApiKeyFallbackTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(cleaned["text_model"], sig_app.SERVER_GEMMA_NAME)
-        self.assertEqual(cleaned["history_model"], sig_app.SERVER_GEMMA_NAME)
-        self.assertEqual(cleaned["statement_model"], sig_app.SERVER_GEMMA_NAME)
-        self.assertEqual(cleaned["qualification_model"], sig_app.SERVER_GEMMA_NAME)
-        self.assertEqual(cleaned["parts_model"], sig_app.SERVER_GEMMA_NAME)
+        self.assertEqual(cleaned["text_model"], sig_app.LOCAL_TEXT_SERVER_NAME)
+        self.assertEqual(cleaned["history_model"], sig_app.LOCAL_TEXT_SERVER_NAME)
+        self.assertEqual(cleaned["statement_model"], sig_app.LOCAL_TEXT_SERVER_NAME)
+        self.assertEqual(cleaned["qualification_model"], sig_app.LOCAL_TEXT_SERVER_NAME)
+        self.assertEqual(cleaned["parts_model"], sig_app.LOCAL_TEXT_SERVER_NAME)
         self.assertEqual(cleaned["transcription_server"], "servidor")
         self.assertEqual(cleaned["multi_transcription_models"], ["servidor"])
 
-    def test_server_text_fallback_resolves_to_gemma4(self):
+    def test_server_text_fallback_resolves_to_local_server(self):
         selected = sig_app.selected_text_model(
-            {"text_model": sig_app.SERVER_GEMMA_NAME}
+            {"text_model": sig_app.LOCAL_TEXT_SERVER_NAME}
         )
         self.assertEqual(selected["provider"], "servidor")
-        self.assertEqual(selected["request_model"], sig_app.SERVER_GEMMA_MODEL)
+        self.assertEqual(selected["request_model"], sig_app.local_text_model_id())
 
 
 if __name__ == "__main__":

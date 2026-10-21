@@ -18,8 +18,7 @@ from providers import (
     GROK_TEXT_NAME,
     IA_PROXY_NAME,
     PARTS_EXTRACTION_LABELS,
-    SERVER_GEMMA_NAME,
-    SERVER_QWEN_NAME,
+    LOCAL_TEXT_SERVER_NAME,
     TEXT_TASK_KEYS,
     fallback_transcription_server_for_missing_api_key,
     is_realtime_only_transcription_server,
@@ -230,8 +229,7 @@ def normalize_settings(data: dict) -> dict:
         parts_model
         if parts_model in {
             IA_PROXY_NAME,
-            SERVER_GEMMA_NAME,
-            SERVER_QWEN_NAME,
+            LOCAL_TEXT_SERVER_NAME,
             GROK_NON_REASONING_TEXT_NAME,
             GROK_TEXT_NAME,
             DEEPSEEK_TEXT_NAME,
@@ -266,13 +264,13 @@ def normalize_settings(data: dict) -> dict:
     clean["police_delegate"] = str(data.get("police_delegate") or "").strip()
     clean["police_city"] = str(data.get("police_city") or "").strip()
     if clean["text_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
-        clean["text_model"] = SERVER_GEMMA_NAME
+        clean["text_model"] = LOCAL_TEXT_SERVER_NAME
     if clean["text_model"] in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
-        clean["text_model"] = SERVER_GEMMA_NAME
+        clean["text_model"] = LOCAL_TEXT_SERVER_NAME
     if clean["parts_model"] in GROK_TEXT_API_NAMES and not plausible_xai_api_key(clean["grok_api_key"]):
-        clean["parts_model"] = SERVER_GEMMA_NAME
+        clean["parts_model"] = LOCAL_TEXT_SERVER_NAME
     if clean["parts_model"] == DEEPSEEK_TEXT_NAME and not plausible_deepseek_api_key(clean["deepseek_api_key"]):
-        clean["parts_model"] = SERVER_GEMMA_NAME
+        clean["parts_model"] = LOCAL_TEXT_SERVER_NAME
     # Modelos por tarefa (histórico, oitiva e qualificação) e raciocínio das
     # partes: preservados com fallback para as chaves gerais de texto.
     task_preserved: dict[str, object] = {}
@@ -281,9 +279,9 @@ def normalize_settings(data: dict) -> dict:
         raw_model = migrate_text_model_name(str(data.get(model_key) or ""))
         model_value = raw_model if raw_model in text_model_names else clean["text_model"]
         if model_value in GROK_TEXT_API_NAMES and not plausible_xai_api_key(grok_api_key):
-            model_value = SERVER_GEMMA_NAME
+            model_value = LOCAL_TEXT_SERVER_NAME
         elif model_value in DEEPSEEK_API_NAMES and not plausible_deepseek_api_key(deepseek_api_key):
-            model_value = SERVER_GEMMA_NAME
+            model_value = LOCAL_TEXT_SERVER_NAME
         task_preserved[model_key] = model_value
         task_preserved[proxy_key] = proxy_model(data.get(proxy_key), "grok")
         effective_model = task_preserved[proxy_key] if model_value == IA_PROXY_NAME else model_value

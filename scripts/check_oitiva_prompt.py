@@ -21,7 +21,7 @@ quebrar porque o servidor estava offline. Por isso ele e manual.
 USO
 ---
     python scripts/check_oitiva_prompt.py
-    python scripts/check_oitiva_prompt.py --model "servidor (qwen2.5)" --runs 3
+    python scripts/check_oitiva_prompt.py --model "servidor (local)" --runs 3
     python scripts/check_oitiva_prompt.py --model IA-Proxy --proxy-model deepseek-flash --runs 3
     python scripts/check_oitiva_prompt.py --url http://servidor:8401/v1/chat/completions
     python scripts/check_oitiva_prompt.py --outdir "%LOCALAPPDATA%/Temp/oitiva"
@@ -185,7 +185,7 @@ def violacoes(texto: str) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Vacina do prompt da oitiva (chama o modelo real).")
-    ap.add_argument("--model", default="servidor (qwen2.5)", help="Nome exato em 'read_text_models'.")
+    ap.add_argument("--model", default="servidor (local)", help="Nome exato em 'read_text_models'.")
     ap.add_argument(
         "--proxy-model",
         default=None,
