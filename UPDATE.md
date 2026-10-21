@@ -258,6 +258,7 @@ a fonte da verdade e deve evoluir com a prática.
 
 | Sintoma | Causa | Resolução |
 |---|---|---|
+| Teste do balão de célula falha com `preview_tooltip.label` igual a `None` após um `<Motion>` simulado | o evento sintético não moveu o cursor real; um `<Leave>` nativo atrasado cancelou o timer de abertura | no teste de integração, gerar o movimento com `warp=True` e aguardar a existência do label com prazo limitado; manter as verificações de texto completo, rolagem, reordenação e fechamento ao atualizar/trocar de aba |
 | `FFprobe não foi encontrado; não é possível validar o SmartJoin` após atualização automática | instalações antigas não recebem o componente `ffprobe.exe` da raiz pelo sync | gerar a release com a cópia `_internal/tools/ffprobe.exe` feita por `copy_runtime_assets()`; conferir que esse caminho entra no snapshot sync e que o SmartJoin o encontra sem o binário na raiz; manter a validação de emendas e a cópia parcial de vídeo |
 | `componente desconhecido no manifesto: <v>_full.zip` | o `--package` apontou para a raiz (subiu o full.zip no manifesto) | usar `--package .../package`; re-publicar o sync |
 | `o manifesto de sincronização não cobre componentes obrigatórios: modelos/<modelo>.docx` | o código passou a exigir um modelo, mas o manifesto publicado no R2 ainda representa uma versão anterior sem esse arquivo | incluir o modelo em `modelos/`, gerar a nova versão pelo fluxo canônico e sincronizar o pacote gerado para o R2; validar o manifesto publicado antes de encerrar |

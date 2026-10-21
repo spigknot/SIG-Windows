@@ -270,12 +270,22 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
         panel.refresh(select_id=record.id)
         self.pump()
         tree = panel.preview_tree
+
+        def hover(x, y, *, wait=True):
+            # Motion sintético sem warp deixa o cursor real fora da célula;
+            # um Leave nativo atrasado pode cancelar a abertura do balão.
+            tree.event_generate("<Motion>", x=x, y=y, warp=True)
+            self.pump()
+            if wait:
+                deadline = time.monotonic() + 3
+                while panel.preview_tooltip.label is None and time.monotonic() < deadline:
+                    self.pump()
+                    time.sleep(0.01)
+                self.assertIsNotNone(panel.preview_tooltip.label, "O balão da célula não abriu")
+
         for column, expected in (("arquivo", record.rows[0]["file"]), ("m0", full_text)):
             x, y, w, h = tree.bbox("0", column)
-            tree.event_generate("<Motion>", x=x + min(w // 2, 15), y=y + h // 2)
-            self.pump()
-            self.root.after(720, self.root.quit)
-            self.root.mainloop()
+            hover(x + min(w // 2, 15), y + h // 2)
             balloon = panel.preview_tooltip
             self.assertTrue(balloon.window.winfo_exists())
             self.assertEqual(expected, balloon.label.cget("text"))
@@ -290,30 +300,21 @@ class TranscriptionsIntegrationTests(unittest.TestCase):
         tree.xview_moveto(1.0)
         self.pump()
         x, y, w, h = tree.bbox("0", "m0")
-        tree.event_generate("<Motion>", x=max(5, x + 10), y=y + h // 2)
-        self.pump()
-        self.root.after(720, self.root.quit)
-        self.root.mainloop()
+        hover(max(5, x + 10), y + h // 2)
         self.assertEqual(full_text, panel.preview_tooltip.label.cget("text"))
         tree.configure(displaycolumns=("m0", "arquivo"))
         tree.xview_moveto(0.0)
         self.pump()
         x, y, w, h = tree.bbox("0", "m0")
-        tree.event_generate("<Motion>", x=x + 10, y=y + h // 2)
-        self.pump()
-        self.root.after(720, self.root.quit)
-        self.root.mainloop()
+        hover(x + 10, y + h // 2)
         self.assertEqual(full_text, panel.preview_tooltip.label.cget("text"))
-        tree.event_generate("<Motion>", x=5, y=2)
-        self.pump()
+        hover(5, 2, wait=False)
         self.assertIsNone(panel.preview_tooltip.window)
-        tree.event_generate("<Motion>", x=x + 10, y=y + h // 2)
-        self.pump()
+        hover(x + 10, y + h // 2, wait=False)
         panel.refresh()
         self.pump()
         self.assertIsNone(panel.preview_tooltip.window)
-        tree.event_generate("<Motion>", x=x + 10, y=y + h // 2)
-        self.pump()
+        hover(x + 10, y + h // 2, wait=False)
         self.app.select_main_tab("live")
         self.pump()
         self.assertIsNone(panel.preview_tooltip.window)
