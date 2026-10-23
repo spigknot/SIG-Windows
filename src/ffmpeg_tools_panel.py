@@ -1597,6 +1597,10 @@ class FfmpegToolsPanel:
         outer.pack(fill=BOTH, expand=True)
         style = ttk.Style(self.root)
         style.configure("Ffmpeg.Sidebar.TButton", font=("Segoe UI", 9), padding=(6, -1))
+        style.configure(
+            "Ffmpeg.TimeBadge.TLabel", font=("Consolas", 10),
+            background="#e4efeb", foreground="#286c60", padding=(8, 4),
+        )
         frame = ttk.Frame(outer)
         frame.pack(fill=BOTH, expand=True)
         frame.pack_propagate(False)
@@ -2422,6 +2426,54 @@ class FfmpegToolsPanel:
     def _add_preview_time_label(parent, current_var: StringVar) -> None:
         ttk.Label(parent, textvariable=current_var, style="Muted.TLabel").pack(anchor="center", pady=(0, 8))
 
+    @staticmethod
+    def _range_time_hint(value: str, duration: float) -> str:
+        """Equivalente legível, sem alterar os segundos nem a precisão do campo."""
+        try:
+            seconds = FfmpegToolsPanel._seconds(value, "Tempo", allow_empty=True)
+        except RuntimeError:
+            return "—"
+        if seconds is None:
+            return "—"
+        total = int(seconds)
+        hours, remainder = divmod(total, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if duration >= 3600 or hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _add_range_time_fields(self, parent, start_var: StringVar, end_var: StringVar,
+                               timeline: RangeTimeline, on_commit) -> None:
+        """Campos em segundos com indicadores de tempo que acompanham a edição."""
+        hints = []
+        for column, (title, variable) in enumerate((("Início (s):", start_var), ("Fim (s):", end_var))):
+            field = ttk.Frame(parent)
+            field.grid(row=0, column=column, padx=(0, 20 if column == 0 else 0), sticky="n")
+            ttk.Label(field, text=title, style="Muted.TLabel").grid(
+                row=0, column=0, sticky="w", pady=(0, 4),
+            )
+            entry = ttk.Entry(field, textvariable=variable, width=10)
+            entry.grid(row=1, column=0, sticky="ew")
+            entry.bind("<FocusOut>", lambda _event: on_commit())
+            hint = ttk.Label(field, style="Ffmpeg.TimeBadge.TLabel", width=8, anchor="center")
+            hint.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+            create_tooltip(hint, "Tempo em minutos:segundos ou horas:minutos:segundos. O campo usa segundos.")
+            hints.append((variable, hint))
+
+        def refresh_hints(*_args):
+            for variable, hint in hints:
+                hint.configure(text=self._range_time_hint(variable.get(), timeline.duration))
+
+        traces = [(variable, variable.trace_add("write", refresh_hints)) for variable, _hint in hints]
+
+        def remove_traces(event):
+            if event.widget is parent:
+                for variable, trace in traces:
+                    variable.trace_remove("write", trace)
+
+        parent.bind("<Destroy>", remove_traces, add="+")
+        refresh_hints()
+
     def _change_preview_speed(self, direction: int) -> None:
         values = PREVIEW_SPEED_VALUES
         index = min(range(len(values)), key=lambda item: abs(values[item] - self.preview_speed))
@@ -2441,14 +2493,8 @@ class FfmpegToolsPanel:
         self._add_preview_time_label(workspace, self.cut_current_var)
         values = ttk.Frame(workspace)
         values.pack(anchor="center", pady=(2, 0))
-        ttk.Label(values, text="Início (s):").grid(row=0, column=0, sticky="w")
-        cut_start_entry = ttk.Entry(values, textvariable=self.cut_start_var, width=10)
-        cut_start_entry.grid(row=0, column=1, padx=(6, 14))
-        ttk.Label(values, text="Fim (s):").grid(row=0, column=2, sticky="w")
-        cut_end_entry = ttk.Entry(values, textvariable=self.cut_end_var, width=10)
-        cut_end_entry.grid(row=0, column=3, padx=(6, 0))
-        cut_start_entry.bind("<FocusOut>", lambda _event: self._sync_cut_range_from_entries())
-        cut_end_entry.bind("<FocusOut>", lambda _event: self._sync_cut_range_from_entries())
+        self._add_range_time_fields(values, self.cut_start_var, self.cut_end_var,
+                                    self.cut_timeline, self._sync_cut_range_from_entries)
         mode = self._option_row(sidebar, "Modo de corte")
         mode_controls = ttk.Frame(mode)
         mode_controls.pack(fill=X)
@@ -2491,14 +2537,8 @@ class FfmpegToolsPanel:
         self._add_preview_time_label(workspace, self.extract_current_var)
         trim = ttk.Frame(workspace)
         trim.pack(anchor="center", pady=(2, 0))
-        ttk.Label(trim, text="Início (s):").grid(row=0, column=0, sticky="w")
-        extract_start_entry = ttk.Entry(trim, textvariable=self.extract_start_var, width=10)
-        extract_start_entry.grid(row=0, column=1, padx=(6, 14))
-        ttk.Label(trim, text="Fim (s):").grid(row=0, column=2, sticky="w")
-        extract_end_entry = ttk.Entry(trim, textvariable=self.extract_end_var, width=10)
-        extract_end_entry.grid(row=0, column=3, padx=(6, 0))
-        extract_start_entry.bind("<FocusOut>", lambda _event: self._sync_extract_range_from_entries())
-        extract_end_entry.bind("<FocusOut>", lambda _event: self._sync_extract_range_from_entries())
+        self._add_range_time_fields(trim, self.extract_start_var, self.extract_end_var,
+                                    self.extract_timeline, self._sync_extract_range_from_entries)
         presets = ttk.Frame(sidebar)
         presets.pack(fill=X, pady=(0, 12))
         ttk.Checkbutton(
@@ -2539,14 +2579,8 @@ class FfmpegToolsPanel:
         self._add_preview_time_label(workspace, self.rotate_current_var)
         trim = ttk.Frame(workspace)
         trim.pack(anchor="center", pady=(2, 0))
-        ttk.Label(trim, text="Início (s):").grid(row=0, column=0, sticky="w")
-        rotate_start_entry = ttk.Entry(trim, textvariable=self.rotate_start_var, width=10)
-        rotate_start_entry.grid(row=0, column=1, padx=(6, 14))
-        ttk.Label(trim, text="Fim (s):").grid(row=0, column=2, sticky="w")
-        rotate_end_entry = ttk.Entry(trim, textvariable=self.rotate_end_var, width=10)
-        rotate_end_entry.grid(row=0, column=3, padx=(6, 0))
-        rotate_start_entry.bind("<FocusOut>", lambda _event: self._sync_rotate_range_from_entries())
-        rotate_end_entry.bind("<FocusOut>", lambda _event: self._sync_rotate_range_from_entries())
+        self._add_range_time_fields(trim, self.rotate_start_var, self.rotate_end_var,
+                                    self.rotate_timeline, self._sync_rotate_range_from_entries)
         row = self._option_row(sidebar, "Giro (graus)")
         rotate_combo = ttk.Combobox(row, textvariable=self.rotate_degrees_var,
                                     values=("-90", "0", "90", "180"), state="readonly", width=20)
