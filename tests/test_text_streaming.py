@@ -5,6 +5,7 @@ import json
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ from http_clients import TextModelClient
 from qualification import parse_partial_qualification_json
 from sig_app import SigApp
 from text_models import TextModelStream
+from ui_widgets import update_text_snapshot
 
 
 def sse(event):
@@ -214,9 +216,9 @@ class StreamingUiTests(unittest.TestCase):
     def test_routes_editors_and_discards_cancelled_generations(self):
         for target, task, index in [("live", "history", 1), ("live", "statement", 2), ("assistant", "history", 1)]:
             self.app._apply_assistant_text_partial(7, target, task, index, "prévia", None)
-        self.app._set_live_editor.assert_any_call("history", "prévia")
-        self.app._set_live_editor.assert_any_call("statement2", "prévia")
-        self.app._set_assistant_text.assert_called_once_with("prévia")
+        self.app._set_live_editor.assert_any_call("history", "prévia", incremental=True)
+        self.app._set_live_editor.assert_any_call("statement2", "prévia", incremental=True)
+        self.app._set_assistant_text.assert_called_once_with("prévia", incremental=True)
         self.app._set_live_editor.reset_mock()
         self.app._apply_assistant_text_partial(6, "live", "history", 1, "antigo", None)
         self.app.assistant_busy = False
@@ -229,20 +231,20 @@ class StreamingUiTests(unittest.TestCase):
         self.app._apply_assistant_text_partial(7, "live", "qualification", 1, '{"nome":"João', None)
         self.app._set_live_editor.assert_called_once_with(
             "qualification", "JOÃO, de nacionalidade Brasileira.", qualification_organized=False,
+            incremental=True,
         )
 
     def test_callback_queues_without_touching_widgets_and_keeps_streams_separate(self):
         self.app._queue = Mock()
         first = self.app._assistant_stream_callback(7, "live", "history", 1)
         second = self.app._assistant_stream_callback(7, "live", "history", 2)
-        with patch("sig_app.time.monotonic", side_effect=[0, .01, .1, .11]):
-            first("um")
-            first(" dois")
-            first(" três")
-            second("outro")
+        first("um")
+        first(" dois")
+        first(" três")
+        second("outro")
         previews = [call.args for call in self.app._queue.call_args_list]
-        self.assertEqual([p[5] for p in previews], ["um", "um dois três", "outro"])
-        self.assertEqual([p[4] for p in previews], [1, 1, 2])
+        self.assertEqual([p[5] for p in previews], ["um", "um dois", "um dois três", "outro"])
+        self.assertEqual([p[4] for p in previews], [1, 1, 1, 2])
         self.app._set_live_editor.assert_not_called()
 
     def test_real_tk_editor_updates_while_request_is_running(self):
@@ -269,10 +271,124 @@ class StreamingUiTests(unittest.TestCase):
         self.app._append_activity_log = Mock()
         self.app._queue("assistant_text_partial", 7, "live", "history", 1, "prévia", None)
         self.app._poll_ui_queue()
-        self.app._set_live_editor.assert_called_once_with("history", "prévia")
+        self.app._set_live_editor.assert_called_once_with("history", "prévia", incremental=True)
         self.assertEqual(self.app.assistant_task_states["history"], "running")
         self.assertEqual(self.app.last_live_history_text, "último resultado completo")
         self.app._append_activity_log.assert_not_called()
+
+    def test_poll_uses_frame_interval_only_while_generating(self):
+        self.app.ui_queue = queue.Queue()
+        self.app.root = Mock()
+        self.app._poll_ui_queue()
+        self.app.root.after.assert_called_once_with(16, self.app._poll_ui_queue)
+        self.app.root.reset_mock()
+        self.app.assistant_busy = False
+        self.app._poll_ui_queue()
+        self.app.root.after.assert_called_once_with(100, self.app._poll_ui_queue)
+
+    def test_new_request_wakes_idle_poll_without_leaving_a_second_timer(self):
+        self.app.root = Mock()
+        self.app.root.after.return_value = "fast-poll"
+        self.app._ui_queue_after = "idle-poll"
+        self.app.multi_text_secondary = ""
+        self.app._set_assistant_buttons_state = Mock()
+        self.app._refresh_live_editors_state = Mock()
+        self.app._refresh_qualification_editors_state = Mock()
+        with patch("sig_app.load_settings", return_value={}):
+            generation, _ = self.app._begin_assistant_request("history", "assistant")
+        self.assertEqual(generation, 8)
+        self.app.root.after_cancel.assert_called_once_with("idle-poll")
+        self.app.root.after.assert_called_once_with(0, self.app._poll_ui_queue)
+        self.assertEqual(self.app._ui_queue_after, "fast-poll")
+
+    def test_streaming_appends_suffix_preserving_spaces_unicode_and_selection(self):
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            editor = tk.Text(root)
+            editor.insert("1.0", "João")
+            editor.tag_add("sel", "1.0", "1.2")
+            with patch.object(editor, "delete", wraps=editor.delete) as delete, \
+                    patch.object(editor, "insert", wraps=editor.insert) as insert:
+                update_text_snapshot(editor, "João ")
+                update_text_snapshot(editor, "João da Silva 😊")
+                delete.assert_not_called()
+                self.assertEqual(insert.call_args_list[0].args, ("end-1c", " "))
+                self.assertEqual(insert.call_args_list[1].args, ("end-1c", "da Silva 😊"))
+            self.assertEqual(editor.get("1.0", "end-1c"), "João da Silva 😊")
+            self.assertEqual(tuple(map(str, editor.tag_ranges("sel"))), ("1.0", "1.2"))
+            update_text_snapshot(editor, "Novo resultado")
+            self.assertEqual(editor.get("1.0", "end-1c"), "Novo resultado")
+        finally:
+            root.destroy()
+
+    def test_each_piece_reaches_editor_before_server_produces_next(self):
+        pieces = ["J", "o", "ã", "o", " ", "😊"]
+        acknowledgements = [threading.Event() for _ in pieces]
+        release = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for piece, acknowledged in zip(pieces, acknowledgements):
+                    self.wfile.write(sse(chat(piece)))
+                    self.wfile.flush()
+                    if not acknowledged.wait(4):
+                        break
+                release.wait(4)
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        root = tk.Tk()
+        root.withdraw()
+        self.app.root = root
+        self.app.ui_queue = queue.Queue()
+        editor = tk.Text(root)
+        self.app.live_state = "idle"
+        self.app._live_editor = lambda _kind: editor
+        self.app._set_live_editor = SigApp._set_live_editor.__get__(self.app)
+        self.app._poll_ui_queue()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(
+                    TextModelClient(threading.Event()).post,
+                    {"url": f"http://127.0.0.1:{server.server_port}", "parameters": {}},
+                    "Sistema", "Usuário",
+                    on_text=self.app._assistant_stream_callback(7, "live", "history"),
+                )
+                try:
+                    expected = ""
+                    for piece, acknowledged in zip(pieces, acknowledgements):
+                        expected += piece
+                        deadline = time.monotonic() + 3
+                        while editor.get("1.0", "end-1c") != expected and time.monotonic() < deadline:
+                            root.update()
+                            time.sleep(.002)
+                        self.assertEqual(editor.get("1.0", "end-1c"), expected)
+                        self.assertFalse(result.done())
+                        acknowledged.set()
+                finally:
+                    release.set()
+                    for acknowledged in acknowledgements:
+                        acknowledged.set()
+                self.assertEqual(result.result(timeout=3), "".join(pieces))
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            serving.join(2)
+            for timer in root.tk.call("after", "info"):
+                root.after_cancel(timer)
+            root.destroy()
 
     def test_all_workers_send_preview_before_final_result(self):
         def post(_config, _system, _user, *, on_text):

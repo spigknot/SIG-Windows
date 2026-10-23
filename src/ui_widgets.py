@@ -613,6 +613,18 @@ def show_info_popup(widget, title, message, *, refresh_ms=None):
     return window
 
 
+def update_text_snapshot(widget, text: str) -> None:
+    """Acrescenta o trecho novo de uma prévia, substituindo só se o prefixo mudou."""
+    current = widget.get("1.0", "end-1c")
+    if text.startswith(current):
+        suffix = text[len(current):]
+        if suffix:
+            widget.insert("end-1c", suffix)
+    else:
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+
+
 class TreeviewCellTooltip:
     """Balão com o mesmo estilo dos tooltips, lendo o valor completo da célula."""
 

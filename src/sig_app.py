@@ -106,7 +106,7 @@ from transcriptions_panel import TranscriptionsPanel
 from transcription_history import record_from_jobs, save_record
 from diarias_profiles_panel import DiariasProfilesPanel
 from diarias_profiles import validate_diarias_profile
-from ui_widgets import diarias_action_icon_image, tool_action_icon_image
+from ui_widgets import diarias_action_icon_image, tool_action_icon_image, update_text_snapshot
 from prompt_store import PROMPT_CONSTANTE_POR_SLOT as _PROMPT_CONSTANTE_POR_SLOT
 from stt_provider_rules import (
     alibaba_language_hints,
@@ -1465,7 +1465,7 @@ class SigApp:
         self._reload_prompts()
         self.status_var.trace_add("write", lambda *_args: self._on_status_var_changed())
         self._refresh_server_label()
-        self.root.after(100, self._poll_ui_queue)
+        self._schedule_ui_queue_poll(100)
         self.root.after(100, self._refresh_assistant_progress_clock)
         self.root.after(0, self._refresh_local_text_model)
         self.root.after(0, self._refresh_microphone_availability)
@@ -6578,9 +6578,12 @@ class SigApp:
     def _assistant_text_value(self) -> str:
         return self.assistant_text.get("1.0", END).strip()
 
-    def _set_assistant_text(self, text: str):
-        self.assistant_text.delete("1.0", END)
-        self.assistant_text.insert("1.0", text.strip())
+    def _set_assistant_text(self, text: str, *, incremental: bool = False):
+        if incremental:
+            update_text_snapshot(self.assistant_text, text)
+        else:
+            self.assistant_text.delete("1.0", END)
+            self.assistant_text.insert("1.0", text.strip())
 
     def _live_text_value(self) -> str:
         return self.live_text.get("1.0", END).strip()
@@ -7570,20 +7573,13 @@ class SigApp:
     ):
         """Publica prévias pela fila; os workers nunca acessam widgets Tk."""
         parts: list[str] = []
-        last_update = None
 
         def on_text(delta: str):
-            nonlocal last_update
             parts.append(delta)
-            now = time.monotonic()
-            # A fila da UI roda a cada 100ms. Agrupa tokens rápidos para
-            # manter a edição fluida mesmo quando dois modelos respondem.
-            if last_update is None or now - last_update >= .05:
-                self._queue(
-                    "assistant_text_partial", generation, target, task,
-                    index, "".join(parts), allowed_ids,
-                )
-                last_update = now
+            self._queue(
+                "assistant_text_partial", generation, target, task,
+                index, "".join(parts), allowed_ids,
+            )
 
         return on_text
 
@@ -7604,16 +7600,16 @@ class SigApp:
                     json.dumps(fields, ensure_ascii=False), self.qualification_fields,
                     self._live_qualification_selected_ids(),
                 )
-                self._set_live_editor("qualification", formatted, qualification_organized=False)
+                self._set_live_editor("qualification", formatted, qualification_organized=False, incremental=True)
             else:
                 self._set_qualification_output(format_qualification_fields(
                     fields, self.qualification_output_fields,
                     set(self._selected_qualification_field_ids()),
                 ))
         elif target == "live":
-            self._set_live_editor(task if index == 1 else f"{task}2", text)
+            self._set_live_editor(task if index == 1 else f"{task}2", text, incremental=True)
         else:
-            self._set_assistant_text(text)
+            self._set_assistant_text(text, incremental=True)
 
     def _begin_assistant_request(self, phase: str, target: str) -> tuple[int, dict]:
         self.assistant_generation += 1
@@ -7641,6 +7637,7 @@ class SigApp:
             )
         else:
             self.assistant_multi_model_labels = ("Modelo 1", "Modelo 2")
+        self._schedule_ui_queue_poll(0)
         return generation, self.settings.copy()
 
     def request_assistant_history(self):
@@ -8307,17 +8304,22 @@ class SigApp:
             return ""
         return widget.get("1.0", END).strip()
 
-    def _set_live_editor(self, kind: str, text: str, *, qualification_organized: bool | None = None):
+    def _set_live_editor(self, kind: str, text: str, *, qualification_organized: bool | None = None,
+                         incremental: bool = False):
         widget = self._live_editor(kind)
         at_end = widget.yview()[1] >= .98
         top = widget.yview()[0]
         widget.configure(state="normal")
-        widget.delete("1.0", END)
         if text:
-            widget.insert("1.0", text.strip())
+            if incremental:
+                update_text_snapshot(widget, text)
+            else:
+                widget.delete("1.0", END)
+                widget.insert("1.0", text.strip())
             widget.configure(foreground="#10201f")
             widget._placeholder_active = False
         else:
+            widget.delete("1.0", END)
             self._restore_live_placeholder(widget)
         try:
             widget.edit_modified(False)
@@ -18029,6 +18031,12 @@ try {
     def _queue(self, *items):
         self.ui_queue.put(items)
 
+    def _schedule_ui_queue_poll(self, delay: int):
+        pending = getattr(self, "_ui_queue_after", None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+        self._ui_queue_after = self.root.after(delay, self._poll_ui_queue)
+
     def _poll_ui_queue(self):
         try:
             while True:
@@ -18658,7 +18666,10 @@ try {
                 pass
         finally:
             try:
-                self.root.after(100, self._poll_ui_queue)
+                # Durante a geração, entrega os trechos a cada quadro (~60 Hz).
+                # Fora dela, preserva o polling econômico das demais tarefas.
+                delay = 16 if getattr(self, "assistant_busy", False) else 100
+                self._schedule_ui_queue_poll(delay)
             except Exception:
                 pass
 
