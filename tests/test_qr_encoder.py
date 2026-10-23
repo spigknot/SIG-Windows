@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
@@ -541,6 +542,12 @@ class QrRoundTripTests(unittest.TestCase):
 @unittest.skipUnless(TK_AVAILABLE, "tkinter indisponivel")
 class QrCodeTabTests(unittest.TestCase):
     def setUp(self):
+        self.history_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.history_dir.cleanup)
+        self.history_path = Path(self.history_dir.name) / "qrcode_history.jsonl"
+        self.history_patch = patch("qrcode_history.qrcode_history_path", return_value=self.history_path)
+        self.history_patch.start()
+        self.addCleanup(self.history_patch.stop)
         self.messages = _MessageboxStub()
         self._original_messagebox = sig_app.messagebox
         sig_app.messagebox = self.messages
@@ -575,6 +582,9 @@ class QrCodeTabTests(unittest.TestCase):
         app.qrcode_generate_button = _ButtonStub()
         app.qrcode_shorten_busy = False
         app.qrcode_shorten_started = 0.0
+        app.qrcode_revision = 0
+        app.qrcode_shorten_request = None
+        app.qrcode_history_panel = None
         app.qrcode_canvas = _CanvasStub()
         app.qrcode_copy_button = _ButtonStub()
         app.qrcode_link_entry = tk.Entry(_root)
@@ -867,6 +877,91 @@ class QrCodeTabTests(unittest.TestCase):
         app.clear_qrcode()
         self.assertEqual(app.qrcode_shortened_var.get(), "")
         self.assertEqual(app.qrcode_alias_var.get(), "")
+
+    def test_generating_saves_only_successful_codes(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.generate_qrcode()
+        app.qrcode_link_var.set("a" * 5000)
+        app.generate_qrcode()
+        records = sig_app.qrcode_history.read_qrcode_history_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["original_url"], "https://sig.local")
+        self.assertEqual(records[0]["shortened_url"], "")
+
+    def test_selecting_history_generates_immediately_without_shortening_or_saving(self):
+        app = self._make_app()
+        app.qrcode_shorten_var.set(True)
+        for short in ("https://tinyurl.com/abc", ""):
+            with self.subTest(short=short), patch.object(app, "_start_shorten_flow") as shorten:
+                app.select_qrcode_history({
+                    "original_url": "https://sig.local", "shortened_url": short, "alias": "abc",
+                })
+                target = short or "https://sig.local"
+                self.assertEqual(app.qrcode_link_var.get(), target)
+                self.assertEqual(app.qrcode.get_matrix(), qr_encoder.QrCode.encode_text(target, "M").get_matrix())
+                self.assertEqual(app.qrcode_shortened_var.get(), short)
+                self.assertEqual(app.qrcode_copy_button.state, "normal")
+                shorten.assert_not_called()
+        self.assertFalse(self.history_path.exists())
+
+    def test_shortening_saves_original_and_alias_captured_at_request_time(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.qrcode_alias_var.set("abc")
+        app.qrcode_shorten_var.set(True)
+        with patch("sig_app.threading.Thread"):
+            app.generate_qrcode()
+        app.qrcode_alias_var.set("outro")
+        app._complete_qrcode_shorten("https://tinyurl.com/abc")
+        records = sig_app.qrcode_history.read_qrcode_history_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["original_url"], "https://sig.local")
+        self.assertEqual(records[0]["shortened_url"], "https://tinyurl.com/abc")
+        self.assertEqual(records[0]["alias"], "abc")
+        self.assertEqual(app.qrcode_link_var.get(), "https://tinyurl.com/abc")
+        # Gerar novamente o resultado não deve encurtar outra vez nem perder a origem.
+        with patch.object(app, "_start_shorten_flow") as shorten:
+            app.generate_qrcode()
+            shorten.assert_not_called()
+        self.assertEqual(len(sig_app.qrcode_history.read_qrcode_history_records()), 1)
+
+    def test_pending_shortening_does_not_replace_a_history_selection(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.qrcode_shorten_var.set(True)
+        with patch("sig_app.threading.Thread"):
+            app.generate_qrcode()
+        app.select_qrcode_history({"original_url": "https://selecionado.local"})
+        selected_code = app.qrcode
+        app._complete_qrcode_shorten("https://tinyurl.com/abc")
+        self.assertEqual(app.qrcode_link_var.get(), "https://selecionado.local")
+        self.assertIs(app.qrcode, selected_code)
+        self.assertFalse(app.qrcode_shorten_busy)
+        self.assertEqual(app.qrcode_generate_button.state, "normal")
+        self.assertEqual(sig_app.qrcode_history.read_qrcode_history_records()[0]["original_url"], "https://sig.local")
+
+    def test_clear_current_preserves_history_and_clear_history_requires_confirmation(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        app.generate_qrcode()
+        app.clear_qrcode()
+        self.assertEqual(len(sig_app.qrcode_history.read_qrcode_history_records()), 1)
+        self.messages.answer = False
+        app.clear_qrcode_history()
+        self.assertEqual(len(sig_app.qrcode_history.read_qrcode_history_records()), 1)
+        self.messages.answer = True
+        app.clear_qrcode_history()
+        self.assertEqual(sig_app.qrcode_history.read_qrcode_history_records(), [])
+
+    def test_history_write_failure_keeps_the_generated_code_and_logs_warning(self):
+        app = self._make_app()
+        app.qrcode_link_var.set("https://sig.local")
+        with patch("qrcode_history.append_qrcode_history", side_effect=OSError("sem permissão")):
+            app.generate_qrcode()
+        self.assertIsNotNone(app.qrcode)
+        self.assertEqual(app.activity_log.lines[-1][1], "warning")
+        self.assertIn("histórico", app.activity_log.lines[-1][0])
 
 
 if __name__ == "__main__":

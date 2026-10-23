@@ -56,6 +56,8 @@ Ambiente ...... app_env.py
 | `audio_io.py` | Conversao PCM <-> WAV da captura ao vivo | Captura/rede |
 | `concatenated_audio.py` | WAV com silêncio PCM, agrupamento de arquivos inteiros sob limites de API e atribuição dos timestamps por arquivo | UI, chamadas HTTP e tempos estimados |
 | `imei_lookup.py` | Consulta e historico de IMEI (JSON local) | UI |
+| `qrcode_history.py` | Histórico local de QR Codes e encurtamentos em `%APPDATA%\sig\qrcode_history.jsonl` | UI |
+| `qrcode_history_panel.py` | Lista visual, seleção e navegação do histórico de QR Codes | Persistência, rede e geração de QR Codes |
 | `name_database.py` | Base de nomes: extracao, normalizacao, chave fonetica | UI |
 | `qualification.py` | Qualificacao de ocorrencias: parsing de JSON, labels, status | UI |
 | `diarias_protocolo.py` | Extracao dos campos dos PDFs de protocolo, talão, holerite e mês/ano do cabeçalho da escala | UI, persistencia |

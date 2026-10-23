@@ -92,6 +92,7 @@ import diarias_workflow
 import pdf_printing
 import prompt_store
 import qr_encoder
+import qrcode_history
 import smart_join_planner
 import stt_provider_rules
 from gemini_stt_client import (
@@ -102,6 +103,7 @@ from gemini_stt_client import (
     gemini_setup_payload,
 )
 from prompts_panel import PromptsPanel
+from qrcode_history_panel import QrCodeHistoryPanel
 from transcriptions_panel import TranscriptionsPanel
 from transcription_history import record_from_jobs, save_record
 from diarias_profiles_panel import DiariasProfilesPanel
@@ -1376,6 +1378,9 @@ class SigApp:
         self.qrcode_shorten_var = BooleanVar(value=False)
         self.qrcode_alias_var = StringVar()
         self.qrcode_shortened_var = StringVar()
+        self.qrcode_history_panel = None
+        self.qrcode_revision = 0
+        self.qrcode_shorten_request = None
         self.diarias_holerite_path, holerite_filename = (
             diarias_store.load_holerite_pdf()
         )
@@ -4475,40 +4480,37 @@ class SigApp:
         cards.columnconfigure(1, weight=1, uniform="qrcode")
         form = ttk.Frame(cards, style="Tool.Card.TFrame", padding=18)
         form.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        ttk.Label(form, text="Link de destino", style="Tool.Section.TLabel").pack(anchor="w", pady=(0, 12))
+        ttk.Label(form, text="Link de destino", style="Tool.Section.TLabel").pack(anchor="w", pady=(0, 8))
         self.qrcode_link_entry = ttk.Entry(form, textvariable=self.qrcode_link_var, font=("Segoe UI", 11),
                                            width=1, style="Tool.TEntry")
         self.qrcode_link_entry.pack(fill=X)
         self.qrcode_link_entry.bind("<Return>", lambda _event: self.generate_qrcode())
         link_actions = ttk.Frame(form, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
-        link_actions.pack(fill=X, pady=(10, 20))
+        link_actions.pack(fill=X, pady=(10, 12))
         self.qrcode_paste_button = ttk.Button(link_actions, text="Colar", image=self._tool_icon_photo("paste", 22),
                                              compound=LEFT, style="Compact.Tool.Secondary.TButton", command=self.paste_qrcode_link)
         self.qrcode_paste_button.pack(side=LEFT, fill=X, expand=True, padx=(0, 6))
         self.qrcode_clear_button = ttk.Button(link_actions, text="Limpar", image=self._tool_icon_photo("clear", 22),
                                              compound=LEFT, style="Compact.Tool.Secondary.TButton", command=self.clear_qrcode)
         self.qrcode_clear_button.pack(side=LEFT, fill=X, expand=True)
-        ttk.Separator(form).pack(fill=X, pady=(0, 18))
+        ttk.Separator(form).pack(fill=X, pady=(0, 12))
         self.qrcode_shorten_check = ttk.Checkbutton(form, text="Encurtar link", variable=self.qrcode_shorten_var,
                                                    style="Tool.TCheckbutton", command=self._qrcode_shorten_toggled)
-        self.qrcode_shorten_check.pack(anchor="w", pady=(0, 12))
+        self.qrcode_shorten_check.pack(anchor="w", pady=(0, 8))
         ttk.Label(form, text="Alias (opcional)", style="Tool.Field.TLabel").pack(anchor="w", pady=(0, 6))
         self.qrcode_alias_entry = ttk.Entry(form, textvariable=self.qrcode_alias_var, font=("Segoe UI", 10),
                                             width=1, style="Tool.TEntry", state="disabled")
         self.qrcode_alias_entry.pack(fill=X)
         self.qrcode_alias_entry.bind("<Return>", lambda _event: self.generate_qrcode())
         self.qrcode_form_actions = footer = ttk.Frame(form, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
-        footer.pack(side=BOTTOM, fill=X, pady=(24, 0))
+        footer.pack(fill=X, pady=(12, 0))
         self.qrcode_generate_button = ttk.Button(footer, text="Gerar QR Code",
                                                  image=self._tool_icon_photo("qrcode", 24, foreground="#ffffff"), compound=LEFT,
                                                  style="Tool.Primary.TButton", command=self.generate_qrcode)
         self.qrcode_generate_button.pack(fill=X)
-        status = ttk.Label(footer, textvariable=self.qrcode_status_var, style="Tool.Field.TLabel",
-                           wraplength=260, justify="left")
-        status.pack(fill=X, pady=(10, 0))
-        form.bind("<Configure>", lambda event: status.configure(wraplength=max(120, event.width - 38)))
-
-        self.qrcode_shortened_row = ttk.Frame(form, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
+        self.qrcode_content = self.qrcode_preview_card = preview = ttk.Frame(cards, style="Tool.Card.TFrame", padding=18)
+        preview.grid(row=0, column=1, sticky="nsew")
+        self.qrcode_shortened_row = ttk.Frame(preview, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
         ttk.Label(self.qrcode_shortened_row, text="Link encurtado", style="Tool.Field.TLabel").pack(anchor="w", pady=(0, 6))
         shortened = ttk.Frame(self.qrcode_shortened_row, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
         shortened.pack(fill=X)
@@ -4521,8 +4523,14 @@ class SigApp:
         self.qrcode_shortened_copy_button.pack(side=LEFT, padx=(6, 0))
         create_tooltip(self.qrcode_shortened_copy_button, "Copiar link encurtado")
 
-        self.qrcode_content = self.qrcode_preview_card = preview = ttk.Frame(cards, style="Tool.Card.TFrame", padding=18)
-        preview.grid(row=0, column=1, sticky="nsew")
+        self.qrcode_history_panel = QrCodeHistoryPanel(
+            form, on_select=self.select_qrcode_history, on_clear=self.clear_qrcode_history,
+            history_icon=self._tool_icon_photo("history", 20),
+            clear_icon=self._tool_icon_photo("clear", 18),
+        )
+        self.qrcode_history_panel.pack(fill=BOTH, expand=True, pady=(16, 0))
+        self.refresh_qrcode_history()
+
         self.qrcode_preview_heading = ttk.Label(preview, text="Prévia", style="Tool.Section.TLabel")
         self.qrcode_preview_heading.pack(anchor="w")
         self.qrcode_actions_frame = ttk.Frame(preview, style="Tool.Card.TFrame", relief="flat", borderwidth=0)
@@ -4542,7 +4550,9 @@ class SigApp:
         card = self.qrcode_preview_card
         if not card.winfo_ismapped():
             return
-        size = max(180, min(420, card.winfo_width() - 40, card.winfo_height() - 132))
+        short_height = (self.qrcode_shortened_row.winfo_reqheight() + 12
+                        if self.qrcode_shortened_row.winfo_ismapped() else 0)
+        size = max(180, min(420, card.winfo_width() - 40, card.winfo_height() - 132 - short_height))
         if int(self.qrcode_canvas["width"]) != size:
             self.qrcode_canvas.configure(width=size, height=size)
             self._render_qrcode()
@@ -4591,12 +4601,19 @@ class SigApp:
             )
             self.qrcode_link_entry.focus_set()
             return
-        if self.qrcode_shorten_var.get():
+        if self.qrcode_shorten_busy:
+            self._set_activity_status("Encurtamento em andamento...", log=False)
+            return
+        self.qrcode_revision = getattr(self, "qrcode_revision", 0) + 1
+        if self.qrcode_shorten_var.get() and link != self.qrcode_shortened_var.get().strip():
             self._start_shorten_flow(link)
             return
-        self._generate_qrcode_now(link)
+        if self._generate_qrcode_now(link):
+            if link != self.qrcode_shortened_var.get().strip():
+                self._show_qrcode_shortened_link("")
+                self._remember_qrcode(link)
 
-    def _generate_qrcode_now(self, link: str) -> None:
+    def _generate_qrcode_now(self, link: str) -> bool:
         try:
             code = qr_encoder.QrCode.encode_text(link, "M")
         except qr_encoder.QrCapacityError as exc:
@@ -4605,7 +4622,7 @@ class SigApp:
                 "QR Code não gerado: conteúdo longo demais.", "activity_step_error"
             )
             messagebox.showerror("QR Code", str(exc), parent=self.root)
-            return
+            return False
         except Exception as exc:
             self._set_activity_status(f"QR Code ERRO: {exc}", log=False)
             self._append_activity_log(f"QR Code não gerado: {exc}", "activity_step_error")
@@ -4614,7 +4631,7 @@ class SigApp:
                 f"Não consegui gerar o QR Code.\n\nDetalhe: {exc}",
                 parent=self.root,
             )
-            return
+            return False
         self.qrcode = code
         self._render_qrcode()
         self.qrcode_copy_button.configure(state="normal")
@@ -4622,6 +4639,75 @@ class SigApp:
         self.qrcode_status_var.set("")
         self._set_activity_status("QR Code solicitado.", log=False)
         self._append_activity_log("QR Code solicitado", "activity_step_done")
+        return True
+
+    def _remember_qrcode(self, original: str, shortened: str = "", alias: str = "") -> None:
+        try:
+            qrcode_history.append_qrcode_history(original, shortened, alias)
+        except OSError as exc:
+            self._append_activity_log(f"Não foi possível salvar o histórico de QR Code: {exc}", "warning")
+            return
+        self.refresh_qrcode_history()
+
+    def refresh_qrcode_history(self) -> None:
+        panel = getattr(self, "qrcode_history_panel", None)
+        if panel is None:
+            return
+        try:
+            records = qrcode_history.read_qrcode_history_records()
+        except OSError as exc:
+            self._append_activity_log(f"Não foi possível ler o histórico de QR Code: {exc}", "warning")
+            return
+        panel.set_records(reversed(records))
+
+    def clear_qrcode_history(self) -> None:
+        if not messagebox.askyesno("sig", "Deseja limpar o histórico de QR Codes e links?", parent=self.root):
+            return
+        try:
+            qrcode_history.clear_qrcode_history()
+        except OSError as exc:
+            messagebox.showerror("Histórico de QR Code", f"Não consegui limpar o histórico.\n\n{exc}", parent=self.root)
+            return
+        self.refresh_qrcode_history()
+
+    def _show_qrcode_shortened_link(self, short: str) -> None:
+        self.qrcode_shortened_var.set(short)
+        if self.qrcode_shortened_row is None:
+            return
+        self.qrcode_shortened_copy_button.configure(state="normal" if short else "disabled")
+        if short:
+            self.qrcode_shortened_row.pack(
+                side=BOTTOM, fill=X, pady=(0, 12), after=self.qrcode_actions_frame,
+            )
+        else:
+            self.qrcode_shortened_row.pack_forget()
+        self.root.after_idle(self._fit_qrcode_preview)
+
+    def select_qrcode_history(self, record: dict) -> None:
+        short = record.get("shortened_url") or ""
+        link = short or record["original_url"]
+        self.qrcode_revision = getattr(self, "qrcode_revision", 0) + 1
+        self.qrcode_link_var.set(link)
+        self.qrcode_alias_var.set(record.get("alias") or "")
+        self.qrcode_shorten_var.set(False)
+        self._qrcode_shorten_toggled()
+        self._show_qrcode_shortened_link(short)
+        # Reutilizar não gera outro encurtamento nem duplica o histórico.
+        self._generate_qrcode_now(link)
+        self.qrcode_link_entry.icursor(END)
+
+    def _complete_qrcode_shorten(self, short: str) -> None:
+        original, alias, revision = self.qrcode_shorten_request
+        self.qrcode_shorten_request = None
+        self.qrcode_shorten_busy = False
+        self.qrcode_generate_button.configure(state="normal")
+        self._remember_qrcode(original, short, alias)
+        # Uma resposta atrasada não substitui um item escolhido no histórico.
+        if revision != self.qrcode_revision or self.qrcode_link_var.get().strip() != original:
+            return
+        self._show_qrcode_shortened_link(short)
+        self.qrcode_link_var.set(short)
+        self._generate_qrcode_now(short)
 
     def copy_qrcode_image(self) -> None:
         if self.qrcode is None:
@@ -4670,6 +4756,7 @@ class SigApp:
         ):
             return
         self.qrcode_link_var.set("")
+        self.qrcode_revision = getattr(self, "qrcode_revision", 0) + 1
         self.qrcode_alias_var.set("")
         self.qrcode_shortened_var.set("")
         self.qrcode = None
@@ -4679,6 +4766,8 @@ class SigApp:
         if self.qrcode_shortened_copy_button is not None:
             self.qrcode_shortened_copy_button.configure(state="disabled")
             self.qrcode_shortened_row.pack_forget()
+            if getattr(self, "qrcode_preview_card", None) is not None:
+                self.root.after_idle(self._fit_qrcode_preview)
         self.qrcode_status_var.set("Cole um link e gere o QR Code.")
         self._set_activity_status("QR Code limpo.", log=False)
 
@@ -4724,6 +4813,7 @@ class SigApp:
             self._set_activity_status("Encurtamento em andamento...", log=False)
             return
         alias = self.qrcode_alias_var.get().strip()
+        self.qrcode_shorten_request = (link, alias, getattr(self, "qrcode_revision", 0))
         self.qrcode_shorten_busy = True
         self.qrcode_generate_button.configure(state="disabled")
         self._begin_activity_step("qrcode:shorten", "Encurtando link")
@@ -18555,15 +18645,7 @@ try {
                         time.perf_counter()
                         - getattr(self, "qrcode_shorten_started", time.perf_counter()),
                     )
-                    self.qrcode_shorten_busy = False
-                    self.qrcode_generate_button.configure(state="normal")
-                    self.qrcode_shortened_var.set(short)
-                    self.qrcode_shortened_row.pack(
-                        fill=X, pady=(16, 0), before=getattr(self, "qrcode_form_actions", None)
-                    )
-                    self.qrcode_shortened_copy_button.configure(state="normal")
-                    self.qrcode_link_var.set(short)
-                    self._generate_qrcode_now(short)
+                    self._complete_qrcode_shorten(short)
                 elif kind == "qrcode_shorten_error":
                     detail = str(message[1])
                     self._finish_activity_step(
@@ -18573,6 +18655,7 @@ try {
                         error=detail,
                     )
                     self.qrcode_shorten_busy = False
+                    self.qrcode_shorten_request = None
                     self.qrcode_generate_button.configure(state="normal")
                 elif kind == "update_available_sync":
                     state = dict(message[1])

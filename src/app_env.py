@@ -16,6 +16,7 @@ APP_NAME = "sig"
 
 
 IMEI_HISTORY_FILE = "imei_history.txt"
+QRCODE_HISTORY_FILE = "qrcode_history.jsonl"
 
 
 def resource_path(relative: str) -> Path:
@@ -62,6 +63,10 @@ def hostname_online(hostname: str) -> bool:
 
 def imei_history_path() -> Path:
     return settings_path().parent / IMEI_HISTORY_FILE
+
+
+def qrcode_history_path() -> Path:
+    return settings_path().parent / QRCODE_HISTORY_FILE
 
 
 def physical_cpu_count() -> int:
