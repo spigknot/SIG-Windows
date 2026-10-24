@@ -550,7 +550,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261021_001"
+APP_VERSION = "20261024_001"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -5196,13 +5196,20 @@ class SigApp:
         self.diarias_field_entries = {}
         self.diarias_field_alerts = {}
         self.diarias_attachment_alerts = {}
+        self.diarias_manual_fields = {
+            "holerite": ("holerite_total", "holerite_mes"),
+            "escala": ("escala_mes",),
+            "protocolo": ("req", "mapa", "data"),
+        }
+        self.diarias_manual_vars = {}
+        self.diarias_manual_checkboxes = {}
         self.diarias_alert_icon = ImageTk.PhotoImage(diarias_action_icon_image("warning", 16), master=self.root)
         self.diarias_fields_warned = False
         self.diarias_attachment_buttons = []
         heading = ttk.Frame(self.diarias_tab)
         heading.pack(fill=X, pady=(0, 10))
         ttk.Label(heading, text="Diárias", style="Diarias.Title.TLabel").pack(anchor="w")
-        ttk.Label(heading, text="Selecione o perfil, anexe os PDFs e confira os dados.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(heading, text="Selecione o perfil e preencha os dados por PDF ou manualmente.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
         profile_row = ttk.Frame(heading)
         profile_row.pack(fill=X, pady=(10, 0))
         ttk.Label(profile_row, text="Perfil").pack(side=LEFT, padx=(0, 8))
@@ -5331,12 +5338,21 @@ class SigApp:
             self.diarias_field_entries[key] = entry
             variable.trace_add("write", self._update_diarias_required_fields)
 
+        def manual_fields(parent, kind, columns):
+            variable = BooleanVar(master=self.root, value=False)
+            self.diarias_manual_vars[kind] = variable
+            checkbox = ttk.Checkbutton(parent, text="Preenchimento manual", variable=variable, style="Diarias.TCheckbutton")
+            checkbox.grid(row=2, column=0, columnspan=columns, sticky="w", pady=(8, 0))
+            self.diarias_manual_checkboxes[kind] = checkbox
+            variable.trace_add("write", self._update_diarias_manual_fields)
+
         holerite = section("Holerite", "holerite", self.diarias_holerite_file_var)
         field(holerite, 0, "Total (R$)", "holerite_total", 18)
         field(holerite, 1, "Mês/ano", "holerite_mes", 10)
+        manual_fields(holerite, "holerite", 2)
         self.diarias_month_warning_var = StringVar(master=self.root)
         self.diarias_month_warning_label = ttk.Label(holerite, textvariable=self.diarias_month_warning_var, style="Diarias.Field.TLabel", foreground="#b42318", wraplength=380)
-        self.diarias_month_warning_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.diarias_month_warning_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
         for variable in (self.diarias_holerite_mes_var, self.diarias_abertura_data_var):
             variable.trace_add("write", self._update_diarias_month_warning)
         self._update_diarias_month_warning()
@@ -5351,15 +5367,18 @@ class SigApp:
         field(protocolo, 0, "Requerimento", "req")
         field(protocolo, 1, "Mapa", "mapa")
         field(protocolo, 2, "Data", "data")
+        manual_fields(protocolo, "protocolo", 3)
         escala = section("Escala", "escala", self.diarias_escala_file_var)
         field(escala, 0, "Mês/ano", "escala_mes", 10)
+        manual_fields(escala, "escala", 1)
         self.diarias_escala_month_warning_var = StringVar(master=self.root)
         self.diarias_escala_month_warning_label = ttk.Label(escala, textvariable=self.diarias_escala_month_warning_var,
             style="Diarias.Field.TLabel", foreground="#b42318", wraplength=380)
-        self.diarias_escala_month_warning_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.diarias_escala_month_warning_label.grid(row=3, column=0, sticky="w", pady=(8, 0))
         for variable in (self.diarias_escala_mes_var, self.diarias_abertura_data_var):
             variable.trace_add("write", self._update_diarias_escala_month_warning)
         self._update_diarias_escala_month_warning()
+        self._update_diarias_manual_fields()
         self._schedule_diarias_card_size()
         def scroll(event):
             if body.winfo_height() > canvas.winfo_height():
@@ -5424,8 +5443,20 @@ class SigApp:
                     alert.pack_forget()
         self.diarias_validation_var.set(diarias_workflow.MISSING_FIELDS_MESSAGE if missing else "")
 
+    def _update_diarias_manual_fields(self, *_trace_args):
+        for kind, variable in self.diarias_manual_vars.items():
+            state = "disabled" if self.diarias_busy else "normal" if variable.get() else "readonly"
+            for key in self.diarias_manual_fields[kind]:
+                self.diarias_field_entries[key].configure(state=state)
+
+    def _reset_diarias_manual_fields(self, kind=None):
+        for current, variable in self.diarias_manual_vars.items():
+            if kind is None or kind == current:
+                variable.set(False)
+
     def _require_diarias_fields(self):
         fields = {key: getattr(self, f"diarias_{key}_var").get() for key, _label in diarias_workflow.REQUIRED_FIELDS}
+        fields["escala_mes"] = self.diarias_escala_mes_var.get()
         try:
             return diarias_workflow.validate_fields(fields)
         except ValueError:
@@ -5456,10 +5487,12 @@ class SigApp:
         self.diarias_busy = busy
         controls = (self.diarias_batch_buttons + self.diarias_attachment_buttons
                     + list(self.diarias_field_entries.values())
+                    + list(self.diarias_manual_checkboxes.values())
                     + [self.diarias_meios_proprios_checkbox, self.diarias_configure_button, self.diarias_generate_menu_button])
         for control in controls:
             control.configure(state="disabled" if busy else "normal")
         self.diarias_profile_selector.configure(state="disabled" if busy else "readonly")
+        self._update_diarias_manual_fields()
 
     def _new_diarias_task(self, mode, bundle, directory, temporary=None):
         task_id = uuid.uuid4().hex
@@ -5527,17 +5560,9 @@ class SigApp:
         if bundle is None:
             return
         attachments = {kind: getattr(self, f"diarias_{kind}_path", "") for kind in ("protocolo", "escala", "holerite", "talao")}
-        try:
-            diarias_workflow.validate_print_attachments(attachments, meios_proprios=bundle.meios_proprios)
-        except diarias_workflow.MissingDiariasFields as exc:
-            for field in exc.fields:
-                kind = field.split(":", 1)[1]
-                self.diarias_attachment_alerts[kind].pack(side=LEFT, padx=(4, 0))
-            self.diarias_validation_var.set(str(exc))
-            self._append_activity_log(str(exc), "activity_step_warning")
-            return
         for kind in attachments:
             self._clear_diarias_attachment_alert(kind)
+        attachments = diarias_workflow.validate_print_attachments(attachments, meios_proprios=bundle.meios_proprios)
         temporary = tempfile.TemporaryDirectory(prefix="sig_diaria_print_")
         task = self._new_diarias_task("print", bundle, temporary.name, temporary)
         task["attachments"] = attachments
@@ -5575,19 +5600,25 @@ class SigApp:
         task["copy_vars"], task["copy_entries"], task["copy_alerts"] = {}, {}, {}
         task["copies_warned"] = False
         task["copies_error"] = ""
-        rows = diarias_workflow.print_document_rows(meios_proprios=task["bundle"].meios_proprios,
-            talao_anexo=bool(task["attachments"].get("talao")))
+        task["attachment_notices"] = {}
+        rows = diarias_workflow.print_document_rows(meios_proprios=task["bundle"].meios_proprios)
         for index, (key, label, default) in enumerate(rows, 1):
-            ttk.Label(quantities, text=label).grid(row=index, column=0, sticky="w", padx=(0, 20), pady=3)
-            variable = StringVar(master=win, value=str(default))
+            unavailable = key in diarias_workflow.PRINT_ATTACHMENT_KEYS and key not in task["attachments"]
+            ttk.Label(quantities, text=label, style="Muted.TLabel" if unavailable else "TLabel").grid(row=index, column=0, sticky="w", padx=(0, 20), pady=3)
+            variable = StringVar(master=win, value="0" if unavailable else str(default))
             task["copy_vars"][key] = variable
-            entry = ttk.Spinbox(quantities, from_=1, to=99, width=5, textvariable=variable)
+            entry = ttk.Spinbox(quantities, from_=0, to=99, width=5, textvariable=variable,
+                                state="disabled" if unavailable else "normal")
             entry.grid(row=index, column=1, sticky="w", pady=3)
             task["copy_entries"][key] = entry
+            if unavailable:
+                notice = ttk.Label(quantities, text="PDF não anexado", style="Muted.TLabel")
+                notice.grid(row=index, column=2, sticky="w", padx=(8, 0), pady=3)
+                task["attachment_notices"][key] = notice
             alert = ttk.Label(quantities, image=self.diarias_alert_icon)
-            alert.grid(row=index, column=2, padx=(5, 0))
+            alert.grid(row=index, column=3, padx=(5, 0))
             alert.grid_remove()
-            create_tooltip(alert, "Informe a quantidade de vias.")
+            create_tooltip(alert, "Informe de 0 a 99 vias.")
             task["copy_alerts"][key] = alert
             variable.trace_add("write", lambda *_args, current=task: self._update_diarias_print_copies(current))
 
@@ -5612,8 +5643,10 @@ class SigApp:
         if not task["copies_warned"]:
             return
         for key, variable in task["copy_vars"].items():
+            if key in task["attachment_notices"]:
+                continue
             value = variable.get().strip()
-            valid = value.isascii() and value.isdigit() and 1 <= int(value) <= 99
+            valid = value.isascii() and value.isdigit() and 0 <= int(value) <= 99
             task["copy_entries"][key].configure(style="TSpinbox" if valid else "Diarias.Invalid.TSpinbox")
             if valid:
                 task["copy_alerts"][key].grid_remove()
@@ -5621,7 +5654,7 @@ class SigApp:
                 task["copy_alerts"][key].grid()
         try:
             diarias_workflow.validate_print_copies({key: var.get() for key, var in task["copy_vars"].items()},
-                meios_proprios=task["bundle"].meios_proprios, talao_anexo=bool(task["attachments"].get("talao")))
+                meios_proprios=task["bundle"].meios_proprios, attachments=task["attachments"])
         except ValueError as exc:
             task["copies_error"] = str(exc)
             task["dialog_status"].set(str(exc))
@@ -5636,10 +5669,13 @@ class SigApp:
         try:
             copies = diarias_workflow.validate_print_copies(
                 {key: variable.get() for key, variable in task["copy_vars"].items()},
-                meios_proprios=task["bundle"].meios_proprios, talao_anexo=bool(task["attachments"].get("talao")))
+                meios_proprios=task["bundle"].meios_proprios, attachments=task["attachments"])
+            if not any(copies.values()):
+                raise ValueError("Escolha ao menos um documento com mais de zero vias.")
         except ValueError as exc:
             task["copies_warned"] = True
             self._update_diarias_print_copies(task)
+            task["copies_error"] = str(exc)
             task["dialog_status"].set(str(exc))
             return
         task["printer"], task["accepted"], task["copies"] = selected, True, copies
@@ -6216,6 +6252,7 @@ class SigApp:
             self.diarias_validation_var.set(f"Não foi possível ler ou guardar a escala: {exc}")
             return
         self.diarias_escala_path = stored_path
+        self._reset_diarias_manual_fields("escala")
         self.diarias_escala_file_var.set(display_name)
         self.diarias_escala_mes_var.set(month)
         self._clear_diarias_attachment_alert("escala")
@@ -6283,6 +6320,7 @@ class SigApp:
             return
 
         self.diarias_holerite_path = stored_path
+        self._reset_diarias_manual_fields("holerite")
         SigApp._clear_diarias_attachment_alert(self, "holerite")
         self.diarias_holerite_file_var.set(display_name)
         self.diarias_holerite_total_var.set(total)
@@ -6295,6 +6333,7 @@ class SigApp:
 
     def _reload_all_diarias_pdfs(self):
         """Relê todos os anexos disponíveis; arquivos ausentes são registrados no log."""
+        self._reset_diarias_manual_fields()
         button = self.diarias_reload_all_button
         button.configure(state="disabled")
         try:
@@ -6311,6 +6350,7 @@ class SigApp:
 
     def _reload_diarias_pdf(self, kind):
         """Reextrai do PDF e preenche os campos imediatamente."""
+        self._reset_diarias_manual_fields(kind)
         titles = {
             "holerite": "holerite",
             "talao": "talão",

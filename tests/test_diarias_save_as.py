@@ -35,7 +35,7 @@ class _Var:
 
 def _app(**values):
     app = SimpleNamespace(root=object(), settings={"police_station": "DEL.POL.TAGUAI"})
-    defaults = dict(holerite_total="10.817,23", holerite_mes="12/2026", abertura_data="31/12/2026",
+    defaults = dict(holerite_total="10.817,23", holerite_mes="12/2026", escala_mes="12/2026", abertura_data="31/12/2026",
                     abertura_hora="08:00", fechamento_data="31/12/2026", fechamento_hora="21:00",
                     req="215626/2026", mapa="215627/2026", data="31/12/2026")
     defaults.update(values)

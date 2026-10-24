@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping
+import re
 import threading
 
 import diarias_mapa
@@ -20,12 +21,13 @@ REQUIRED_FIELDS = (
 
 MISSING_FIELDS_MESSAGE = "Há campos sem preencher."
 PRINT_DOCUMENTS = (
-    ("mapa", "Mapa", 2), ("protocolo", "Protocolo", 2),
+    ("holerite", "Holerite", 1), ("escala", "Escala (somente a 1ª página)", 1),
+    ("talao", "Talão", 1), ("protocolo", "Protocolo", 2),
     ("requerimento", "Requerimento", 1),
     ("declaracao", "Declaração de meios próprios", 1),
-    ("talao", "Talão", 1),
-    ("escala", "Escala (somente a 1ª página)", 1), ("holerite", "Holerite", 1),
+    ("mapa", "Mapa", 2),
 )
+PRINT_ATTACHMENT_KEYS = ("holerite", "escala", "talao", "protocolo")
 
 
 class MissingDiariasFields(ValueError):
@@ -43,10 +45,28 @@ def validate_fields(fields: Mapping[str, str]) -> dict[str, str]:
     missing = [key for key, _label in REQUIRED_FIELDS if not values[key]]
     if missing:
         raise MissingDiariasFields(missing)
-    try:
-        datetime.strptime(values["holerite_mes"], "%m/%Y")
-    except ValueError:
-        raise ValueError("Confira o mês/ano do holerite (MM/AAAA).") from None
+    labels = dict(REQUIRED_FIELDS, escala_mes="Mês/ano da escala")
+    if str(fields.get("escala_mes") or "").strip():
+        values["escala_mes"] = str(fields["escala_mes"]).strip()
+    for keys, pattern, date_format, expected in (
+        (("holerite_mes", "escala_mes"), r"[0-9]{2}/[0-9]{4}", "%m/%Y", "MM/AAAA"),
+        (("abertura_data", "fechamento_data", "data"), r"[0-9]{2}/[0-9]{2}/[0-9]{4}", "%d/%m/%Y", "DD/MM/AAAA"),
+        (("abertura_hora", "fechamento_hora"), r"[0-9]{2}:[0-9]{2}", "%H:%M", "HH:MM"),
+    ):
+        for key in keys:
+            if key not in values:
+                continue
+            try:
+                if not re.fullmatch(pattern, values[key]):
+                    raise ValueError()
+                datetime.strptime(values[key], date_format)
+            except ValueError:
+                raise ValueError(f"Confira {labels[key].lower()} no formato {expected}.") from None
+    if not re.fullmatch(r"(?:[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]+),[0-9]{2}", values["holerite_total"]):
+        raise ValueError("Confira o total de vencimentos no formato 1.234,56.")
+    for key in ("req", "mapa"):
+        if not re.fullmatch(r"[0-9]+/[0-9]{4}", values[key]):
+            raise ValueError(f"Confira o protocolo de {labels[key].lower()} no formato número/AAAA.")
     return values
 
 
@@ -144,55 +164,58 @@ class PrintItem:
     duplex_short_edge: bool = False
 
 
-def print_document_rows(*, meios_proprios: bool, talao_anexo: bool = False):
+def print_document_rows(*, meios_proprios: bool):
     """A lista de vias e o plano usam a mesma regra para declaração e talão."""
     return tuple(row for row in PRINT_DOCUMENTS
                  if (row[0] != "declaracao" or meios_proprios)
-                 and (row[0] != "talao" or (talao_anexo and not meios_proprios)))
+                 and (row[0] != "talao" or not meios_proprios))
 
 
-def validate_print_attachments(attachments: Mapping[str, str], *, meios_proprios: bool = False) -> dict[str, Path]:
-    result, missing = {}, []
-    keys = ["protocolo", "escala", "holerite"]
-    if not meios_proprios and attachments.get("talao"):
-        keys.append("talao")
-    for key in keys:
+def validate_print_attachments(attachments: Mapping[str, str | Path], *, meios_proprios: bool = False) -> dict[str, Path]:
+    """Retorna somente PDFs disponíveis; anexos ausentes não impedem a impressão."""
+    result = {}
+    for key in PRINT_ATTACHMENT_KEYS:
+        if key == "talao" and meios_proprios:
+            continue
         path = Path(attachments.get(key) or "")
-        if path.suffix.casefold() != ".pdf" or not path.is_file():
-            missing.append("attachment:" + key)
-        result[key] = path
-    if missing:
-        raise MissingDiariasFields(missing)
+        if path.suffix.casefold() == ".pdf" and path.is_file():
+            result[key] = path
     return result
 
 
-def validate_print_copies(copies: Mapping[str, object] | None, *, meios_proprios: bool, talao_anexo: bool = False) -> dict[str, int]:
-    rows = print_document_rows(meios_proprios=meios_proprios, talao_anexo=talao_anexo)
-    values = {key: str(default if copies is None else copies.get(key, "")).strip() for key, _label, default in rows}
+def validate_print_copies(copies: Mapping[str, object] | None, *, meios_proprios: bool,
+                         attachments: Mapping[str, str | Path] | None = None) -> dict[str, int]:
+    rows = print_document_rows(meios_proprios=meios_proprios)
+    available = None if attachments is None else validate_print_attachments(attachments, meios_proprios=meios_proprios)
+    values = {key: "0" if available is not None and key in PRINT_ATTACHMENT_KEYS and key not in available
+              else str(default if copies is None else copies.get(key, "")).strip()
+              for key, _label, default in rows}
     missing = ["copies:" + key for key, value in values.items() if not value]
     if missing:
         raise MissingDiariasFields(missing)
     result = {}
     for key, label, _default in rows:
         value = values[key]
-        if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= 99:
-            raise ValueError(f"Informe de 1 a 99 vias para {label.lower()}.")
+        if not value.isascii() or not value.isdigit() or not 0 <= int(value) <= 99:
+            raise ValueError(f"Informe de 0 a 99 vias para {label.lower()}.")
         result[key] = int(value)
     return result
 
 
-def build_print_plan(generated: Mapping[str, Path], attachments: Mapping[str, str],
+def build_print_plan(generated: Mapping[str, Path], attachments: Mapping[str, str | Path],
                      *, copies: Mapping[str, object] | None = None) -> list[PrintItem]:
     meios_proprios = "declaracao" in generated
     attached = validate_print_attachments(attachments, meios_proprios=meios_proprios)
-    counts = validate_print_copies(copies, meios_proprios=meios_proprios, talao_anexo="talao" in attached)
+    counts = validate_print_copies(copies, meios_proprios=meios_proprios, attachments=attached)
     plan = [PrintItem(generated["mapa"], "Mapa", counts["mapa"], duplex_short_edge=True),
-            PrintItem(attached["protocolo"], "Protocolo", counts["protocolo"]),
             PrintItem(generated["requerimento"], "Requerimento", counts["requerimento"])]
+    if "protocolo" in attached:
+        plan.insert(1, PrintItem(attached["protocolo"], "Protocolo", counts["protocolo"]))
     if "declaracao" in generated:
         plan.append(PrintItem(generated["declaracao"], "Declaração de meios próprios", counts["declaracao"]))
     if "talao" in attached:
         plan.append(PrintItem(attached["talao"], "Talão", counts["talao"]))
-    plan.extend((PrintItem(attached["escala"], "Escala", counts["escala"], first_page_only=True),
-                 PrintItem(attached["holerite"], "Holerite", counts["holerite"])))
-    return plan
+    for key, label in (("escala", "Escala"), ("holerite", "Holerite")):
+        if key in attached:
+            plan.append(PrintItem(attached[key], label, counts[key], first_page_only=key == "escala"))
+    return [item for item in plan if item.copies > 0]

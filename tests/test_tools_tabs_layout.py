@@ -193,7 +193,13 @@ class ToolsTabsLayoutTests(unittest.TestCase):
         self.show("qrcode")
         self.app.qrcode_shorten_check.invoke()
         self.assertFalse(self.app.qrcode_alias_entry.instate(["disabled"]))
+        original = "https://example.invalid/original"
+        self.app.qrcode_link_var.set(original)
+        self.app.qrcode_revision = 0
         self.app.qrcode_shorten_busy = True
+        self.app.qrcode_shorten_request = (original, "", 0)
+        self.app.qrcode_generate_button.configure(state="disabled")
+        self.app._remember_qrcode = Mock()
         self.app.ui_queue.put(("qrcode_shortened", "https://example.invalid/abc"))
         self.app._poll_ui_queue()
         self.pump()

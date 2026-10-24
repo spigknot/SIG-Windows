@@ -83,6 +83,45 @@ class DiariasLayoutTest(unittest.TestCase):
         expected.add(str(self.app.diarias_profile_var))
         self.assertEqual({str(w["textvariable"]) for w in entries}, expected)
 
+    def test_preenchimento_manual_libera_somente_os_campos_da_secao_marcada(self):
+        self.assertEqual(set(self.app.diarias_manual_checkboxes), {"holerite", "escala", "protocolo"})
+        for kind, keys in self.app.diarias_manual_fields.items():
+            checkbox = self.app.diarias_manual_checkboxes[kind]
+            self.assertEqual(checkbox.cget("text"), "Preenchimento manual")
+            self.assertFalse(self.app.diarias_manual_vars[kind].get())
+            for key in keys:
+                entry = self.app.diarias_field_entries[key]
+                entry.insert(0, "bloqueado")
+                self.assertEqual(entry.get(), "")
+                self.assertTrue(entry.instate(["readonly"]))
+            checkbox.invoke()
+            for key in keys:
+                entry = self.app.diarias_field_entries[key]
+                entry.insert(0, "manual")
+                self.assertEqual(entry.get(), "manual")
+                self.assertTrue(entry.instate(["!readonly", "!disabled"]))
+            for other, other_keys in self.app.diarias_manual_fields.items():
+                if other != kind:
+                    self.assertTrue(all(self.app.diarias_field_entries[key].instate(["readonly"]) for key in other_keys))
+            checkbox.invoke()
+            for key in keys:
+                entry = self.app.diarias_field_entries[key]
+                entry.delete(0, "end")
+                self.assertEqual(entry.get(), "manual")
+                self.assertTrue(entry.instate(["readonly"]))
+        self.assertTrue(all(self.app.diarias_field_entries[key].instate(["!readonly", "!disabled"])
+                            for key in ("abertura_data", "abertura_hora", "fechamento_data", "fechamento_hora")))
+
+    def test_acoes_em_lote_restauram_o_bloqueio_e_o_preenchimento_manual(self):
+        self.app.diarias_manual_checkboxes["holerite"].invoke()
+        self.app._set_diarias_busy(True)
+        self.assertTrue(all(checkbox.instate(["disabled"]) for checkbox in self.app.diarias_manual_checkboxes.values()))
+        self.assertTrue(all(entry.instate(["disabled"]) for entry in self.app.diarias_field_entries.values()))
+        self.app._set_diarias_busy(False)
+        self.assertTrue(all(not checkbox.instate(["disabled"]) for checkbox in self.app.diarias_manual_checkboxes.values()))
+        self.assertFalse(self.app.diarias_field_entries["holerite_total"].instate(["readonly"]))
+        self.assertTrue(self.app.diarias_field_entries["escala_mes"].instate(["readonly"]))
+        self.assertTrue(self.app.diarias_field_entries["req"].instate(["readonly"]))
 
     def test_aviso_de_mes_e_vermelho_atualiza_e_nao_abre_popup(self):
         with patch("sig_app.messagebox.showwarning") as warning, patch("sig_app.messagebox.showerror") as error, patch("sig_app.messagebox.showinfo") as info:
@@ -116,7 +155,12 @@ class DiariasLayoutTest(unittest.TestCase):
             buttons[0].invoke()
             self.app._select_diarias_pdf.assert_called_with(kind)
             setattr(self.app, f"diarias_{kind}_path", f"{kind}.pdf")
+        for checkbox in self.app.diarias_manual_checkboxes.values():
+            checkbox.invoke()
         self.app.diarias_reload_all_button.invoke()
+        self.assertFalse(any(variable.get() for variable in self.app.diarias_manual_vars.values()))
+        self.assertTrue(all(self.app.diarias_field_entries[key].instate(["readonly"])
+                            for keys in self.app.diarias_manual_fields.values() for key in keys))
         self.assertEqual(self.app._reload_diarias_pdf.call_args_list,
                          [call("holerite"), call("escala"), call("talao"), call("protocolo")])
         self.assertEqual(len(self.app.diarias_attachment_buttons), 5)

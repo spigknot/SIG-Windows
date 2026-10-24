@@ -1011,11 +1011,14 @@ def _check_ffmpeg_output_rows(app, root) -> None:
         # Início/Fim do Cortar alinhados com o botão PLAY (centro horizontal).
         panel._select_ffmpeg_tool("Cortar")
         root.update()
-        rotulos_inicio = por_texto(panel.cut_tab, ("Início (s):",), ttk.Label)
-        if not rotulos_inicio:
-            raise RuntimeError("o rótulo 'Início (s):' do Cortar sumiu")
-        inicio = rotulos_inicio[0]
-        linha = inicio.master
+        rotulos_tempo = por_texto(panel.cut_tab, ("Início (s):", "Fim (s):"), ttk.Label)
+        if len(rotulos_tempo) != 2:
+            raise RuntimeError("os rótulos Início/Fim do Cortar sumiram")
+        inicio = next(label for label in rotulos_tempo if label.cget("text") == "Início (s):")
+        fim = next(label for label in rotulos_tempo if label.cget("text") == "Fim (s):")
+        linha = inicio.master.master
+        if fim.master.master is not linha:
+            raise RuntimeError("os campos Início/Fim não compartilham a linha centralizada")
         centro_linha = linha.winfo_rootx() + linha.winfo_width() / 2
         play = panel.cut_play_button
         centro_play = play.winfo_rootx() + play.winfo_width() / 2
