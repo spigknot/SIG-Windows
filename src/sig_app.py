@@ -452,6 +452,7 @@ from providers import (  # noqa: F401
     LOCAL_TEXT_SERVER_URL,
     LOCAL_TEXT_SERVER_NAMES,
     LOCAL_SERVER_NAMES,
+    LOCAL_GRANITE_SERVER_URL,
     TEXT_MODEL_LEGACY_NAMES,
     GROK_TEXT_API_NAMES,
     DEEPSEEK_API_NAMES,
@@ -550,7 +551,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261024_001"
+APP_VERSION = "20261030_001"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -1473,6 +1474,7 @@ class SigApp:
         self._schedule_ui_queue_poll(100)
         self.root.after(100, self._refresh_assistant_progress_clock)
         self.root.after(0, self._refresh_local_text_model)
+        self.root.after(0, self._refresh_local_granite_model)
         self.root.after(0, self._refresh_microphone_availability)
         self.root.after(1200, self._start_update_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -7697,6 +7699,24 @@ class SigApp:
             threading.Thread(target=refresh, daemon=True).start()
         self.root.after(30000, self._refresh_local_text_model)
 
+    def _refresh_local_granite_model(self):
+        if getattr(self, "_app_closing", False):
+            return
+        if not getattr(self, "_local_granite_model_refreshing", False):
+            self._local_granite_model_refreshing = True
+
+            def refresh():
+                try:
+                    GraniteUploader.refresh_local_granite_model(LOCAL_GRANITE_SERVER_URL)
+                    self._queue("local_granite_model_changed")
+                except Exception:
+                    pass
+                finally:
+                    self._local_granite_model_refreshing = False
+
+            threading.Thread(target=refresh, daemon=True).start()
+        self.root.after(30000, self._refresh_local_granite_model)
+
     def _assistant_stream_callback(
         self, generation: int, target: str, task: str, index: int = 1,
         *, allowed_ids: list[str] | None = None,
@@ -12078,12 +12098,14 @@ try {
 
         def refresh_discovered_model_labels():
             if win.winfo_exists():
+                refresh_transcription_servers()
                 history_ui["refresh"]()
                 statement_ui["refresh"]()
                 extraction_ui["refresh"]()
                 qualification_ui["refresh"]()
 
         self._refresh_local_text_model_labels = refresh_discovered_model_labels
+        self._refresh_local_granite_model_labels = refresh_discovered_model_labels
 
         for api_key_variable in (
             grok_api_key_var,
@@ -18298,6 +18320,10 @@ try {
                     self.status_var.set(message[1])
                 elif kind == "local_text_model_changed":
                     refresh = getattr(self, "_refresh_local_text_model_labels", None)
+                    if refresh:
+                        refresh()
+                elif kind == "local_granite_model_changed":
+                    refresh = getattr(self, "_refresh_local_granite_model_labels", None)
                     if refresh:
                         refresh()
                 elif kind == "assistant_text_partial":

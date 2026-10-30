@@ -1,4 +1,4 @@
-"""Clientes HTTP do aplicativo (uploads e modelos de texto).
+"""Clientes HTTP do aplicativo (uploads e descoberta/modelos de texto).
 
 GraniteUploader = upload multipart/streaming para STT + WebSocket de resultados.
 TextModelClient = chamadas REST aos modelos de texto (IA) com streaming SSE.
@@ -15,7 +15,9 @@ from domain_models import Cancelled
 from pathlib import Path
 from providers import (
     GROK_NON_REASONING_TEXT_NAME, GROK_TEXT_NAME,
+    LOCAL_GRANITE_SERVER_URL, local_granite_model_id,
     LOCAL_TEXT_SERVER_URL, local_text_model_id, set_local_text_model_id,
+    set_local_granite_model_id,
 )
 from text_models import TextModelStream, extract_text_model_output
 from transcription_parsing import (
@@ -27,6 +29,24 @@ from urllib.parse import urlparse
 
 
 class GraniteUploader:
+    @staticmethod
+    def refresh_local_granite_model(url: str = LOCAL_GRANITE_SERVER_URL) -> str:
+        """Consulta o modelo anunciado pelo servidor Granite NAR em `/health`."""
+        health_url = url.rstrip("/") + "/health"
+        try:
+            request = urllib.request.Request(health_url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                root = json.loads(response.read().decode("utf-8", errors="replace"))
+            model_id = str(root.get("model") or "").strip() if isinstance(root, dict) else ""
+            if not model_id:
+                raise RuntimeError("O servidor Granite NAR não anunciou nenhum modelo em /health.")
+            set_local_granite_model_id(model_id)
+            return model_id
+        except (OSError, ValueError, RuntimeError):
+            if local_granite_model_id():
+                return local_granite_model_id()
+            raise RuntimeError("Não foi possível identificar o modelo Granite NAR em /health.")
+
     def __init__(
         self,
         cancel_event: threading.Event,

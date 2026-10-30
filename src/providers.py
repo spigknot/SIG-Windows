@@ -335,14 +335,29 @@ PARTS_EXTRACTION_LABELS = {
 LOCAL_GRANITE_SERVER_NAME = "servidor"
 
 
+LOCAL_GRANITE_SERVER_URL = "http://servidor:8100"
+
+
 LOCAL_GRANITE_STT_MODEL = "granite-speech-4.1-2b-nar"
+
+
+_local_granite_model_id = ""
+
+
+def local_granite_model_id() -> str:
+    return _local_granite_model_id
+
+
+def set_local_granite_model_id(model_id: str) -> None:
+    global _local_granite_model_id
+    _local_granite_model_id = str(model_id or "").strip()
 
 
 def read_transcription_servers() -> list[dict]:
     servers = [
         {
             "name": LOCAL_GRANITE_SERVER_NAME,
-            "url": "http://servidor:8100",
+            "url": LOCAL_GRANITE_SERVER_URL,
             "parameters": {"model": LOCAL_GRANITE_STT_MODEL},
             "selected": True,
         }
@@ -533,7 +548,10 @@ def selected_transcription_server(settings: dict) -> dict:
 def transcription_server_label(server: dict) -> str:
     if server["name"] in {GROK_API_NAME, GEMINI_API_NAME}:
         return server["name"]
-    return f"{server['name']} ({server['parameters'].get('model', 'modelo não informado')})"
+    model = server["parameters"].get("model", "modelo não informado")
+    if server["name"] == LOCAL_GRANITE_SERVER_NAME:
+        model = local_granite_model_id() or model
+    return f"{server['name']} ({model})"
 
 
 def parse_api_keys_text(text: str) -> dict[str, str]:
