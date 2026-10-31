@@ -27,6 +27,10 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 
+from providers import (  # noqa: E402
+    LOCAL_GRANITE_STT_MODEL,
+    set_local_granite_model_id,
+)
 from sig_app import (  # noqa: E402
     ALIBABA_API_NAME,
     ALIBABA_WS_MODEL,
@@ -209,9 +213,14 @@ class ParametroPorProvedorTest(unittest.TestCase):
         self.assertEqual(vocab, ws["vocabulary"])
 
     def test_servidor_local_nao_recebe_nada(self):
+        # O servidor local não tem parâmetro de keywords — e também não recebe
+        # `model`: quem escolhe o motor é o painel do servidor. Com o Granite
+        # anunciado (padrão), a requisição leva SÓ as partes de arquivo.
+        set_local_granite_model_id(LOCAL_GRANITE_STT_MODEL)
         servidor = settings_for_transcription_server(_settings(), "servidor")
         campos = transcription_form_fields(servidor)
-        self.assertEqual({"model": "granite-speech-4.1-2b-nar"}, campos)
+        self.assertEqual({}, campos)
+        self.assertNotIn("model", campos)
 
     def test_provedores_nao_vazam_parametro_entre_si(self):
         # Grok não conhece `keyterms_prompt`; Deepgram não manda campo nenhum.

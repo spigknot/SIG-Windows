@@ -7,7 +7,9 @@ Regras que estes testes protegem:
    CADA provedor na hora da requisição (nunca um valor único para todos).
 3. "pt" vira "pt-BR" no Deepgram e "pt" nos demais; "auto" vira o "multi"
    interno (detecção nativa) de cada provedor.
-4. O servidor local (Granite NAR) não tem idioma: nenhum parâmetro é criado.
+4. Servidor local: o motor vem do /health. Granite não tem idioma (nenhum
+   parâmetro é criado); Nemotron recebe `language=<código>` na Transcrição e,
+   na Ocorrência, usa `/v1/audio/transcriptions` com os campos das caixas.
 5. A opção é persistida em settings.json (normalize_settings) e não contamina
    as preferências de idioma da aba Ocorrência.
 """
@@ -34,9 +36,11 @@ from sig_app import (  # noqa: E402
     deepgram_query_string,
     normalize_settings,
     settings_for_transcription_server,
+    transcribe_url,
     transcription_form_fields,
 )
 from providers import (  # noqa: E402
+    set_local_granite_model_id,
     transcription_provider_for_server,
     transcription_providers_for_servers,
 )
@@ -203,14 +207,51 @@ class LoteMultiModeloTest(unittest.TestCase):
         self.assertNotIn("language_code", campos_grok)
         self.assertEqual({}, transcription_form_fields(deepgram))
 
-    def test_servidor_local_nao_recebe_idioma(self):
+    def test_servidor_local_granite_nao_recebe_campo_nenhum(self):
+        # Sem Nemotron anunciado em /health, o motor é Granite: a requisição
+        # leva SÓ as partes de arquivo — nem `model` (quem escolhe o motor é o
+        # painel do servidor) nem qualquer campo avançado.
+        set_local_granite_model_id("")
         self.assertIsNone(transcription_provider_for_server("servidor"))
         self.assertIsNone(transcription_provider_for_server("taguai-speech"))
         batch = _batch(_settings(), ["servidor", GROK_API_NAME], "pt")
         local = settings_for_transcription_server(batch, "servidor")
-        campos = transcription_form_fields(local)
-        self.assertEqual({"model": "granite-speech-4.1-2b-nar"}, campos)
-        self.assertNotIn("language", campos)
+        self.assertEqual({}, transcription_form_fields(local))
+        self.assertEqual("http://servidor:8100/transcribe", transcribe_url(local))
+        self.assertEqual("http://servidor:8100/transcribe", transcribe_url(local, live=True))
+
+    def test_servidor_local_nemotron_idioma_e_rota_por_aba(self):
+        # Motor Nemotron anunciado: a Transcrição manda `language` em
+        # /transcribe; a Ocorrência usa /v1/audio/transcriptions e só envia
+        # os campos das caixas marcadas (verbose_json é obrigatório).
+        set_local_granite_model_id("Nemotron 3.5 Transcribe · 30B A4B · Q2_0_M")
+        try:
+            self.assertEqual("nemotron", transcription_provider_for_server("servidor"))
+            batch = _batch(_settings(), ["servidor"], "pt")
+            local = settings_for_transcription_server(batch, "servidor")
+            self.assertEqual({"language": "pt"}, transcription_form_fields(local))
+            self.assertEqual("http://servidor:8100/transcribe", transcribe_url(local))
+            self.assertEqual(
+                "http://servidor:8100/v1/audio/transcriptions", transcribe_url(local, live=True)
+            )
+            self.assertEqual(
+                {
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": "word",
+                    "language": "pt",
+                },
+                transcription_form_fields({**local, "_request_timestamps": True}, live=True),
+            )
+            self.assertEqual(
+                {"response_format": "verbose_json", "diarization": "true", "language": "pt"},
+                transcription_form_fields({**local, "diarize": True}, live=True),
+            )
+            # Detecção automática: o campo `language` é OMITIDO.
+            self.assertEqual(
+                {}, transcription_form_fields({**local, "nemotron_language_mode": "multi"})
+            )
+        finally:
+            set_local_granite_model_id("")
 
     def test_provedores_do_lote_sem_repeticao(self):
         nomes = ["servidor", GROK_API_NAME, "taguai-speech", DEEPGRAM_API_NAME, GROK_API_NAME]

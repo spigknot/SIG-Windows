@@ -97,6 +97,87 @@ def _format_transcription_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
+def format_local_server_transcript(payload: dict, *, diarize: bool, timestamps: bool) -> str:
+    """Resposta do Nemotron na Ocorrência, formatada pelas CAIXAS marcadas.
+
+    O servidor devolve `words` (com `word`, `start`, `end` e `speaker`) sempre
+    que recebe `response_format=verbose_json` — inclusive quando só a
+    diarização foi pedida. Então o que aparece depende só da caixa:
+      - diarização: turnos "Interlocutor N:" (N como o servidor rotula, a
+        partir de 1);
+      - tempos por palavra: "[início -> fim] frase";
+      - as duas: "[início -> fim] Interlocutor N: fala";
+      - nenhuma: o `text` da resposta, sem olhar `words`.
+    Sem `words` (ou JSON inesperado) cai no `text`; nunca inventa conteúdo.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    plain = str(payload.get("text") or "").strip()
+    if not (diarize or timestamps):
+        return plain
+    words = payload.get("words")
+    if not isinstance(words, list) or not words:
+        return plain
+
+    turns: list[dict] = []
+    buffer = ""
+    start = 0.0
+    end = 0.0
+    speaker: int | None = None
+    for item in words:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("word") or item.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            word_start = float(item.get("start"))
+        except (TypeError, ValueError):
+            word_start = None
+        try:
+            word_end = float(item.get("end"))
+        except (TypeError, ValueError):
+            word_end = None
+        raw_speaker = item.get("speaker")
+        try:
+            word_speaker = int(raw_speaker) if raw_speaker is not None else None
+        except (TypeError, ValueError):
+            word_speaker = None
+        new_turn = bool(buffer) and (
+            (diarize and word_speaker != speaker)
+            or (timestamps and buffer[-1] in ".!?")
+        )
+        if new_turn:
+            turns.append({"text": buffer.strip(), "start": start, "end": end, "speaker": speaker})
+            buffer = ""
+        if not buffer:
+            start = word_start if word_start is not None else end
+            speaker = word_speaker
+        elif text not in {",", ".", ";", ":", "!", "?"}:
+            buffer += " "
+        buffer += text
+        end = word_end if word_end is not None else start
+    if buffer:
+        turns.append({"text": buffer.strip(), "start": start, "end": end, "speaker": speaker})
+
+    lines = []
+    for turn in turns:
+        if not turn["text"]:
+            continue
+        prefix = ""
+        if timestamps:
+            prefix += (
+                f"[{_format_transcription_timestamp(turn['start'])} -> "
+                f"{_format_transcription_timestamp(turn['end'])}] "
+            )
+        if diarize:
+            # O Nemotron rotula os falantes a partir de 1; sem rótulo = 1.
+            label = turn["speaker"] if isinstance(turn["speaker"], int) and turn["speaker"] >= 1 else 1
+            prefix += f"Interlocutor {label}: "
+        lines.append(prefix + turn["text"])
+    return "\n".join(lines) if lines else plain
+
+
 def _timed_entry(value) -> tuple[str, float, float] | None:
     if not isinstance(value, dict):
         return None

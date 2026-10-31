@@ -95,6 +95,15 @@ ALIBABA_CODES = {
     "cs", "hu", "ro", "bg", "hr", "sk",
 }
 
+# Nemotron 3.5 Transcribe (servidor STT local): códigos aceitos em `language=`.
+# `fil`/`tl` e `nb`/`nn`/`no` são sinônimos; o valor vai SEMPRE em minúsculas.
+NEMOTRON_CODES = {
+    "ar", "bg", "bn", "cs", "da", "de", "el", "en", "es", "et", "fi", "fil",
+    "tl", "fr", "he", "hi", "hr", "hu", "hy", "id", "it", "ja", "ko", "lt",
+    "lv", "mt", "nb", "nn", "no", "nl", "pl", "pt", "ro", "ru", "sk", "sl",
+    "sv", "ta", "th", "tr", "uk", "vi", "zh",
+}
+
 # Locales Gemini 3.5 Transcribe (REST e Live). Auto omite o campo.
 GEMINI_CODES = {
     "af-ZA", "ja-JP", "am-ET", "jv-ID", "ar-EG", "kea-CV", "hy-AM", "kn-IN",
@@ -120,6 +129,7 @@ KEY_LANGUAGE_MODE = {
     "grok": "grok_language_mode",
     "metamuse": "metamuse_language_mode",
     "alibaba": "alibaba_language_mode",
+    "nemotron": "nemotron_language_mode",
 }
 KEY_LANGUAGE_CUSTOM = {
     "gemini": "gemini_language_custom",
@@ -129,6 +139,7 @@ KEY_LANGUAGE_CUSTOM = {
     "grok": "grok_language_custom",
     "metamuse": "metamuse_language_custom",
     "alibaba": "alibaba_language_custom",
+    "nemotron": "nemotron_language_custom",
 }
 DEFAULT_MODE = {
     "gemini": "pt-BR",
@@ -138,6 +149,7 @@ DEFAULT_MODE = {
     "grok": "pt",
     "metamuse": "pt",
     "alibaba": "pt",
+    "nemotron": "pt",
 }
 MENU_OPTIONS = {
     "gemini": ["multi", "pt", "en", "es", "custom"],
@@ -147,6 +159,7 @@ MENU_OPTIONS = {
     "grok": ["multi", "pt", "en", "es", "custom"],
     "metamuse": ["multi", "pt", "en", "es", "custom"],
     "alibaba": ["multi", "pt", "en", "es", "custom"],
+    "nemotron": ["multi", "pt", "es", "en", "custom"],
 }
 
 # Labels de exibição (SOMENTE cosmético): o que o usuário vê nos menus e
@@ -182,6 +195,8 @@ TRANSCRIPTION_OPTION_MODES = {
     "grok": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
     "metamuse": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
     "alibaba": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
+    # Nemotron (servidor local): `language=<código>`; auto = omitir o campo.
+    "nemotron": {"auto": "multi", "pt": "pt", "en": "en", "es": "es"},
 }
 
 
@@ -256,6 +271,8 @@ def is_valid_code(provider: str, code: str) -> bool:
         return code in METAMUSE_CODES
     if provider == "alibaba":
         return code in ALIBABA_CODES
+    if provider == "nemotron":
+        return code in NEMOTRON_CODES
     return False
 
 
@@ -276,6 +293,8 @@ def codes_for_help(provider: str) -> str:
         return ", ".join(sorted(METAMUSE_CODES))
     if provider == "alibaba":
         return ", ".join(sorted(ALIBABA_CODES))
+    if provider == "nemotron":
+        return ", ".join(sorted(NEMOTRON_CODES))
     # ElevenLabs: a tela "?" mostra apenas os códigos de 2 letras.
     return ", ".join(sorted(ELEVENLABS_CODES_2))
 
@@ -388,11 +407,32 @@ def alibaba_language_hints(settings: dict) -> list[str] | None:
     return hints or None
 
 
+def nemotron_language_param(settings: dict) -> str:
+    """`language=<código>` do servidor local; "" = detecção automática.
+
+    Um único código por requisição: em "custom" vale o primeiro código aceito.
+    Código fora da lista do Nemotron é OMITIDO (nunca inventado), e nesse caso
+    o servidor detecta o idioma sozinho.
+    """
+    mode = language_mode(settings, "nemotron")
+    if mode == "multi":
+        return ""
+    codes = parse_codes(language_custom(settings, "nemotron")) if mode == "custom" else [mode]
+    for code in codes:
+        normalized = str(code or "").strip().casefold()
+        if normalized in NEMOTRON_CODES:
+            return normalized
+    return ""
+
+
 # ---------------- Diarização: parâmetros por provedor ----------------
 
 def supports_diarize(provider: str, is_live: bool) -> bool:
     if provider == "gemini":
         return not is_live
+    # Nemotron: diarização existe na rota REST da Ocorrência (fatias ao vivo).
+    if provider == "nemotron":
+        return is_live
     return provider in ("deepgram", "assemblyai", "elevenlabs", "grok", "metamuse")
 
 

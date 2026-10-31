@@ -25,6 +25,8 @@ from providers import (
     ALIBABA_WS_MODEL,
     META_MUSE_MODEL,
     META_MUSE_STT_URL,
+    is_local_granite_transcription_server,
+    local_stt_engine,
     selected_transcription_server,
 )
 from stt_provider_rules import alibaba_language_hints, metamuse_language_bias, metamuse_mode
@@ -33,8 +35,21 @@ from urllib.parse import urlparse
 import stt_provider_rules
 
 
-def transcribe_url(settings: dict) -> str:
-    url = selected_transcription_server(settings)["url"]
+def transcribe_url(settings: dict, *, live: bool = False) -> str:
+    """URL da requisição de transcrição.
+
+    No servidor STT LOCAL a rota depende do MOTOR anunciado em `/health` e da
+    ABA: Granite usa `/transcribe` (campo `files`) em qualquer aba; Nemotron
+    usa `/transcribe` na Transcrição (arquivos) e `/v1/audio/transcriptions`
+    (campo `file`) na Ocorrência — cujas fatias chamam com [live]=True.
+    """
+    server = selected_transcription_server(settings)
+    url = server["url"]
+    if is_local_granite_transcription_server(server.get("name")):
+        base = str(url or "").rstrip("/")
+        if live and local_stt_engine() == "nemotron":
+            return f"{base}/v1/audio/transcriptions"
+        return f"{base}/transcribe"
     if is_assemblyai_transcription(settings) and settings.get("_request_timestamps"):
         return "https://sync.assemblyai.com/v1/transcribe"
     if is_deepgram_transcription(settings):
@@ -121,7 +136,7 @@ def is_gemini_transcription(settings: dict) -> bool:
     return selected_transcription_server(settings).get("is_gemini_api", False)
 
 
-def transcription_form_fields(settings: dict) -> dict:
+def transcription_form_fields(settings: dict, *, live: bool = False) -> dict:
     diarize_checked = bool(settings.get("diarize") or settings.get("grok_diarize"))
     if is_grok_transcription(settings):
         fields = {"format": "true", "filler_words": "false"}
@@ -189,10 +204,46 @@ def transcription_form_fields(settings: dict) -> dict:
     if is_gemini_transcription(settings):
         # Files/Interactions utiliza um corpo JSON próprio.
         return {}
-    return selected_transcription_server(settings)["parameters"].copy()
+    server = selected_transcription_server(settings)
+    if is_local_granite_transcription_server(server.get("name")):
+        return _local_server_form_fields(settings, live=live, diarize=diarize_checked)
+    return server["parameters"].copy()
 
 
-def create_transcription_uploader(cancel_event: threading.Event, settings: dict) -> "GraniteUploader":
+def _local_server_form_fields(settings: dict, *, live: bool, diarize: bool) -> dict:
+    """Campos do servidor STT LOCAL (o `model` NUNCA entra na requisição).
+
+    Quem escolhe o motor é o painel do servidor; o app só envia o que o motor
+    ATIVO entende:
+    - Granite: nenhum campo — só as partes de arquivo (`files`);
+    - Nemotron na Transcrição (arquivos, `/transcribe`): `language`;
+    - Nemotron na Ocorrência (`/v1/audio/transcriptions`, `file`): `language`
+      e, quando a caixa está marcada, `response_format=verbose_json` +
+      `diarization=true` / `timestamp_granularities[]=word`. O servidor exige
+      `verbose_json` para devolver `words` (400 sem ele) e insere sozinho o
+      prompt interno da diarização — o app não envia `prompt`.
+    """
+    if local_stt_engine() != "nemotron":
+        return {}
+    language = stt_provider_rules.nemotron_language_param(settings)
+    if not live:
+        return {"language": language} if language else {}
+    timestamps = bool(settings.get("_request_timestamps"))
+    fields: dict = {}
+    if diarize or timestamps:
+        fields["response_format"] = "verbose_json"
+    if diarize:
+        fields["diarization"] = "true"
+    if timestamps:
+        fields["timestamp_granularities[]"] = "word"
+    if language:
+        fields["language"] = language
+    return fields
+
+
+def create_transcription_uploader(
+    cancel_event: threading.Event, settings: dict, *, live: bool = False
+) -> "GraniteUploader":
     if is_gemini_transcription(settings):
         from gemini_stt_client import GeminiTranscriptionUploader
         return GeminiTranscriptionUploader(cancel_event, settings)
@@ -263,6 +314,18 @@ def create_transcription_uploader(cancel_event: threading.Event, settings: dict)
         # O REST do Alibaba usa JSON DashScope dedicado (ver
         # alibaba_rest_transcribe); este uploader só valida a chave.
         return GraniteUploader(cancel_event, {}, {}, "file")
+    server = selected_transcription_server(settings)
+    if is_local_granite_transcription_server(server.get("name")):
+        # Servidor local: o campo de arquivo é `files` em /transcribe e `file`
+        # (singular) em /v1/audio/transcriptions, usado pelo Nemotron na
+        # Ocorrência.
+        nemotron_live = live and local_stt_engine() == "nemotron"
+        return GraniteUploader(
+            cancel_event,
+            transcription_form_fields(settings, live=live),
+            {},
+            "file" if nemotron_live else "files",
+        )
     return GraniteUploader(cancel_event, transcription_form_fields(settings))
 
 

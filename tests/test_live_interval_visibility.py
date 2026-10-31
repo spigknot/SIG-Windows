@@ -8,7 +8,9 @@ Pedido do usuário (11/09):
    (Granite NAR);
 2. com o Granite NAR, o resto da linha (Timestamps, Diarização, os dois "?",
    Idioma e Keywords) some junto: a linha fica só com o intervalo, e o que
-   sobra fica encostado à esquerda;
+   sobra fica encostado à esquerda. Com o NEMOTRON (mesmo servidor, outro
+   motor anunciado em /health) o intervalo continua e o Timestamps APARECE:
+   ali a caixa é parâmetro da requisição da fatia (`verbose_json`);
 3. os controles dos MICROFONES nunca se movem.
 
 Este arquivo trava:
@@ -51,6 +53,7 @@ from providers import (  # noqa: E402
     META_MUSE_API_NAME,
     is_local_granite_transcription_server,
     read_transcription_servers,
+    set_local_granite_model_id,
 )
 from sig_app import DEFAULT_SETTINGS, SigApp  # noqa: E402
 
@@ -102,11 +105,12 @@ def _masters_do_build_ui() -> dict[str, str]:
 
 
 class _WidgetFalso:
-    """Widget de mentira: registra pack/pack_forget e finge estar gerenciado."""
+    """Widget de mentira: registra pack/pack_forget/configure e finge estar gerenciado."""
 
     def __init__(self, gerenciado: bool = True):
         self.gerenciado = "pack" if gerenciado else ""
         self.chamadas: list[tuple[str, dict]] = []
+        self.estado = "disabled"
 
     def pack(self, **kwargs):
         self.chamadas.append(("pack", kwargs))
@@ -115,6 +119,11 @@ class _WidgetFalso:
     def pack_forget(self):
         self.chamadas.append(("pack_forget", {}))
         self.gerenciado = ""
+
+    def configure(self, **kwargs):
+        self.chamadas.append(("configure", kwargs))
+        if "state" in kwargs:
+            self.estado = kwargs["state"]
 
     def winfo_manager(self):
         return self.gerenciado
@@ -134,18 +143,48 @@ class _VarFalsa:
         return self.valor
 
 
+class _MenuFalso:
+    """Menu de mentira: aceita delete/add_command sem Tk."""
+
+    def delete(self, *args):
+        pass
+
+    def add_command(self, **kwargs):
+        pass
+
+
 class _AppFalsa:
     """Objeto mínimo para chamar o refresh sem construir a interface."""
 
     def __init__(self, servidor: str, grok_visivel: bool = True):
         self.settings = {"transcription_server": servidor}
+        self.live_state = "idle"
         self.live_interval_controls = _WidgetFalso(gerenciado=False)
+        self.live_interval_entry = _WidgetFalso()
+        self.live_interval_minus = _WidgetFalso()
+        self.live_interval_plus = _WidgetFalso()
         self.live_timestamps_check = _WidgetFalso(gerenciado=not grok_visivel)
         self.live_timestamps_var = _VarFalsa(True)
         self.live_grok_controls = _WidgetFalso(gerenciado=grok_visivel)
+        self.live_diarize_check = _WidgetFalso()
+        self.live_diarize_var = _VarFalsa(False)
+        self.live_language_menu = _MenuFalso()
+        self.live_language_button = _WidgetFalso()
+        self.live_language_label_var = _VarFalsa("")
+        self.live_keywords_button = _WidgetFalso()
+        self.live_keywords_menu = _MenuFalso()
+        self.live_keywords_help = _WidgetFalso()
+        self.live_keywords_label_var = _VarFalsa("")
+        self.files_keywords_label_var = _VarFalsa("")
 
     def aplicar(self):
-        SigApp._refresh_live_local_server_controls(self)
+        # O funil real é `_refresh_live_grok_controls`; os helpers usados por
+        # ele que só leem `self.settings`/widgets são vinculados aqui.
+        self._current_stt_provider = lambda: SigApp._current_stt_provider(self)
+        self._rebuild_live_language_menu = lambda: SigApp._rebuild_live_language_menu(self)
+        self._rebuild_keywords_menus = lambda: SigApp._rebuild_keywords_menus(self)
+        self._refresh_live_local_server_controls = lambda: SigApp._refresh_live_local_server_controls(self)
+        SigApp._refresh_live_grok_controls(self)
         return self
 
 
@@ -187,6 +226,14 @@ class RegraDoServidorLocalTest(unittest.TestCase):
 class ComportamentoDoRefreshTest(unittest.TestCase):
     """O que o refresh faz com o grupo do intervalo e com o Timestamps."""
 
+    def setUp(self):
+        # O comportamento depende do MOTOR anunciado em /health. Cada teste
+        # começa em Granite; o caso Nemotron troca explicitamente.
+        set_local_granite_model_id(LOCAL_GRANITE_STT_MODEL)
+
+    def tearDown(self):
+        set_local_granite_model_id("")
+
     def test_servidor_local_mostra_o_intervalo(self):
         app = _AppFalsa(LOCAL_GRANITE_SERVER_NAME).aplicar()
         self.assertEqual(["pack"], app.live_interval_controls.nomes())
@@ -212,6 +259,32 @@ class ComportamentoDoRefreshTest(unittest.TestCase):
                 self.assertEqual(["pack"], app.live_timestamps_check.nomes())
                 self.assertEqual("pack", app.live_timestamps_check.gerenciado)
 
+    def test_servidor_local_nemotron_mostra_o_timestamps_habilitado(self):
+        """Nemotron: o intervalo continua (é do servidor local) e o Timestamps
+        APARECE habilitado — nele a caixa é parâmetro da requisição da fatia."""
+        set_local_granite_model_id("Nemotron 3.5 Transcribe · 30B A4B · Q2_0_M")
+        app = _AppFalsa(LOCAL_GRANITE_SERVER_NAME).aplicar()
+
+        self.assertEqual("pack", app.live_interval_controls.gerenciado)
+        self.assertEqual("pack", app.live_timestamps_check.gerenciado)
+        self.assertIn(("configure", {"state": "normal"}), app.live_timestamps_check.chamadas)
+        # Diferente do Granite, a preferência NÃO é desligada à força.
+        self.assertTrue(app.live_timestamps_var.get())
+
+    def test_servidor_local_esconde_keywords_e_ajuda_em_qualquer_motor(self):
+        """Botão Keywords e "?" somem para modelo do SERVIDOR (Granite ou
+        Nemotron — a regra é pela identidade do servidor, não pelo motor) e
+        voltam para provedor de API."""
+        for motor in (LOCAL_GRANITE_STT_MODEL, "Nemotron 3.5 Transcribe · 30B A4B · Q2_0_M"):
+            with self.subTest(motor=motor):
+                set_local_granite_model_id(motor)
+                app = _AppFalsa(LOCAL_GRANITE_SERVER_NAME).aplicar()
+                self.assertEqual("", app.live_keywords_button.gerenciado)
+                self.assertEqual("", app.live_keywords_help.gerenciado)
+        app = _AppFalsa(GROK_API_NAME).aplicar()
+        self.assertEqual("pack", app.live_keywords_button.gerenciado)
+        self.assertEqual("pack", app.live_keywords_help.gerenciado)
+
     def test_o_timestamps_volta_antes_do_bloco_de_idioma_e_keywords(self):
         """Sem o `before`, o pack acrescenta no fim e a ordem da linha inverte."""
         app = _AppFalsa(GROK_API_NAME).aplicar()
@@ -220,8 +293,12 @@ class ComportamentoDoRefreshTest(unittest.TestCase):
         self.assertEqual(kwargs.get("side"), "left")
 
     def test_o_timestamps_volta_sem_before_quando_o_bloco_de_api_esta_oculto(self):
-        """`before` apontando para irmão NÃO empacotado levanta TclError."""
-        app = _AppFalsa(GROK_API_NAME, grok_visivel=False).aplicar()
+        """`before` apontando para irmão NÃO empacotado levanta TclError.
+
+        Cenário alcançável: nome desconhecido (sem provedor e sem ser o
+        servidor local) — o funil esquece o frame e o Timestamps tem de voltar
+        sem `before`."""
+        app = _AppFalsa("taguai-speech").aplicar()
         _nome, kwargs = app.live_timestamps_check.chamadas[0]
         self.assertNotIn("before", kwargs)
 

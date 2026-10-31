@@ -396,6 +396,7 @@ from text_tools import (  # noqa: F401
 # Implementacao real em src/transcription_parsing.py (codigo movido verbatim).
 from transcription_parsing import (  # noqa: F401
     ParsedTranscription,
+    format_local_server_transcript,
     _format_transcription_timestamp,
     _timed_entry,
     _timed_word_entries,
@@ -473,6 +474,8 @@ from providers import (  # noqa: F401
     fallback_transcription_server_for_missing_api_key,
     is_realtime_only_transcription_server,
     is_local_granite_transcription_server,
+    is_local_nemotron_transcription_server,
+    local_stt_engine,
     plausible_elevenlabs_api_key,
     plausible_assemblyai_api_key,
     plausible_xai_api_key,
@@ -9416,6 +9419,10 @@ try {
             return "alibaba"
         if is_grok_transcription(self.settings):
             return "grok"
+        # Servidor STT local: só o Nemotron tem idioma/diarização/tempos por
+        # palavra; no Granite continua None (controles ocultos).
+        if is_local_nemotron_transcription_server():
+            return "nemotron"
         return None
 
     def _rebuild_live_language_menu(self):
@@ -9539,10 +9546,40 @@ try {
                     self.live_diarize_check.configure(state="disabled")
         self._rebuild_live_language_menu()
         self._rebuild_keywords_menus()
+        # Keywords (botão + "?") nunca aparecem para um modelo do SERVIDOR
+        # local — qualquer motor, atual ou futuro: ele não tem parâmetro de
+        # reforço. Vale para Granite e Nemotron; outros modelos não mudam.
+        if is_local_granite_transcription_server(
+            selected_transcription_server(self.settings).get("name")
+        ):
+            self.live_keywords_button.pack_forget()
+            self.live_keywords_help.pack_forget()
+        else:
+            # pack() num widget já empacotado só o move para o fim: como os
+            # dois são os últimos do frame, a ordem original é mantida.
+            self.live_keywords_button.pack(side=LEFT, padx=(10, 0))
+            self.live_keywords_help.pack(side=LEFT, padx=(4, 0))
         self._refresh_live_local_server_controls()
         interval_state = "disabled" if self.live_state != "idle" else "readonly"
         for widget in (self.live_interval_entry, self.live_interval_minus, self.live_interval_plus):
             widget.configure(state=interval_state)
+
+    def _live_session_settings(self) -> dict:
+        """Cópia de settings que a sessão ao vivo usa (uploader + fatias).
+
+        No servidor local com Nemotron, Diarização e Timestamps são PARÂMETROS
+        da requisição (`verbose_json`), então o estado das caixas entra na
+        cópia: o uploader e a rota são definidos no início da sessão, como nos
+        demais provedores. No Granite nada é acrescentado.
+        """
+        session = self.settings.copy()
+        if (
+            is_local_granite_transcription_server(session.get("transcription_server"))
+            and local_stt_engine() == "nemotron"
+        ):
+            session["diarize"] = bool(self.live_diarize_var.get())
+            session["_request_timestamps"] = bool(self.live_timestamps_var.get())
+        return session
 
     def _refresh_live_local_server_controls(self):
         """Visibilidade dos controles que só existem no servidor STT LOCAL.
@@ -9563,18 +9600,26 @@ try {
         """
         server = selected_transcription_server(self.settings)
         local = is_local_granite_transcription_server(server.get("name"))
+        local_nemotron = local and local_stt_engine() == "nemotron"
         # 1) esconde o que não vale para o modelo escolhido (antes de mostrar o
         #    resto, para a ordem final não depender da ordem das chamadas);
         # 2) mostra o que vale. No container, `pack` sem `before` acrescenta no
         #    FIM: o "Timestamps" tem de voltar ANTES do bloco Diarização/Idioma/
         #    Keywords quando ele estiver visível (o `before` só é usado com um
         #    irmão EMPACOTADO — apontar para um oculto levanta TclError).
+        # O intervalo "- t = +" é do servidor local (fatias REST), nos dois
+        # motores. O "Timestamps" só existe no Nemotron: no Granite o servidor
+        # não devolve marcação por palavra.
         if local:
+            self.live_interval_controls.pack(side=LEFT)
+        else:
+            self.live_interval_controls.pack_forget()
+        if local and not local_nemotron:
             self.live_timestamps_var.set(False)
             self.live_timestamps_check.pack_forget()
-            self.live_interval_controls.pack(side=LEFT)
             return
-        self.live_interval_controls.pack_forget()
+        if local_nemotron:
+            self.live_timestamps_check.configure(state="normal")
         if self.live_grok_controls.winfo_manager():
             self.live_timestamps_check.pack(
                 side=LEFT, padx=(0, 10), before=self.live_grok_controls
@@ -12907,7 +12952,9 @@ try {
             or self.live_uses_metamuse_websocket
             or self.live_uses_alibaba_websocket
         )
-        self.live_uploader = None if streaming_websocket else create_transcription_uploader(self.live_abort_event, self.settings)
+        self.live_uploader = None if streaming_websocket else create_transcription_uploader(
+            self.live_abort_event, self._live_session_settings(), live=True
+        )
         temp_live = app_base_dir() / "temp" / "live"
         temp_live.mkdir(parents=True, exist_ok=True)
         self._clear_live_integral_audio()
@@ -12996,7 +13043,7 @@ try {
             target = self._grok_live_capture_loop
         else:
             target = self._live_capture_loop
-        self.live_thread = threading.Thread(target=target, args=(self.settings.copy(),), daemon=True)
+        self.live_thread = threading.Thread(target=target, args=(self._live_session_settings(),), daemon=True)
         self.live_thread.start()
         self._tick_live_timer()
 
@@ -13521,10 +13568,13 @@ try {
                     self.live_abort_event, settings, wav_path, raw_path
                 )
             else:
-                uploader = create_transcription_uploader(self.live_abort_event, settings)
-                status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
+                uploader = create_transcription_uploader(self.live_abort_event, settings, live=True)
+                status, transcript = uploader.post_file(
+                    transcribe_url(settings, live=True), wav_path, "audio/wav", raw_path
+                )
                 if status != 200:
                     raise RuntimeError(f"HTTP {status}")
+                transcript = self._local_server_live_text(settings, raw_path, transcript)
             self._update_secondary_transcript(transcript, is_final, generation)
         except Cancelled:
             pass
@@ -13559,10 +13609,13 @@ try {
                 if not transcript.strip():
                     raise RuntimeError("resposta vazia")
             else:
-                uploader = create_transcription_uploader(self.live_abort_event, settings)
-                status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
+                uploader = create_transcription_uploader(self.live_abort_event, settings, live=True)
+                status, transcript = uploader.post_file(
+                    transcribe_url(settings, live=True), wav_path, "audio/wav", raw_path
+                )
                 if status != 200 or not transcript.strip():
                     raise RuntimeError(f"HTTP {status}" if status != 200 else "resposta vazia")
+                transcript = self._local_server_live_text(settings, raw_path, transcript)
             self._set_secondary_definitive(transcript)
         except Cancelled:
             pass
@@ -15516,11 +15569,16 @@ try {
         raw_path = raw_dir / f"{wav_path.stem}.json"
         try:
             write_wav_from_pcm_bytes(wav_path, pcm)
-            uploader = self.live_uploader or create_transcription_uploader(self.live_abort_event, settings)
-            status, transcript = uploader.post_file(transcribe_url(settings), wav_path, "audio/wav", raw_path)
+            uploader = self.live_uploader or create_transcription_uploader(
+                self.live_abort_event, settings, live=True
+            )
+            status, transcript = uploader.post_file(
+                transcribe_url(settings, live=True), wav_path, "audio/wav", raw_path
+            )
             if status != 200:
                 raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
                 raise RuntimeError(f"HTTP {status}\n{raw}")
+            transcript = self._local_server_live_text(settings, raw_path, transcript)
             self._update_live_transcript_window(transcript, is_final, generation)
         except Cancelled:
             pass
@@ -15535,6 +15593,31 @@ try {
                 wav_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+    def _local_server_live_text(self, settings: dict, raw_path: Path, fallback: str) -> str:
+        """Texto de uma fatia do servidor LOCAL conforme as caixas marcadas.
+
+        No Nemotron a resposta chega em `verbose_json` (`text` + `words[]` com
+        `word`, `start`, `end` e `speaker`). Exibir tempos/rótulos depende SÓ
+        da caixa marcada — o servidor devolve `words` mesmo quando apenas a
+        diarização foi pedida. Granite e provedores de API seguem com o texto
+        como veio.
+        """
+        server = selected_transcription_server(settings)
+        if not is_local_granite_transcription_server(server.get("name")):
+            return fallback
+        if local_stt_engine() != "nemotron":
+            return fallback
+        diarize = bool(settings.get("diarize") or settings.get("grok_diarize"))
+        timestamps = bool(settings.get("_request_timestamps"))
+        if not (diarize or timestamps):
+            return fallback
+        try:
+            payload = json.loads(raw_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return fallback
+        formatted = format_local_server_transcript(payload, diarize=diarize, timestamps=timestamps)
+        return formatted or fallback
 
     def _update_live_transcript_window(self, text: str, is_final: bool, generation: int):
         clean = (text or "").strip()

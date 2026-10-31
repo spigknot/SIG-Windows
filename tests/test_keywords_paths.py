@@ -32,7 +32,9 @@ from providers import (  # noqa: E402
     DEEPGRAM_API_NAME,
     ELEVENLABS_API_NAME,
     GROK_API_NAME,
+    LOCAL_GRANITE_STT_MODEL,
     META_MUSE_API_NAME,
+    set_local_granite_model_id,
 )
 from stt_clients import (  # noqa: E402
     alibaba_rest_body,
@@ -172,8 +174,13 @@ class LigadoEnviaOParametroCertoTest(unittest.TestCase):
         self.assertEqual(set(TERMOS), set(ws["vocabulary"]))
 
     def test_servidor_local_nunca_recebe_parametro(self):
+        # Keywords nunca vão para o servidor local; `model` também não (o motor
+        # é escolhido no painel do servidor, não no multipart). O motor é
+        # fixado em Granite para o teste não depender do /health ambiente.
+        set_local_granite_model_id(LOCAL_GRANITE_STT_MODEL)
         campos = transcription_form_fields(settings_ligado("servidor"))
-        self.assertEqual({"model": "granite-speech-4.1-2b-nar"}, campos)
+        self.assertEqual({}, campos)
+        self.assertNotIn("model", campos)
 
     def test_todos_os_builders_de_query_respeitam_o_perfil(self):
         esperado = {

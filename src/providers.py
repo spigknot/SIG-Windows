@@ -353,6 +353,27 @@ def set_local_granite_model_id(model_id: str) -> None:
     _local_granite_model_id = str(model_id or "").strip()
 
 
+# O MESMO endpoint local roda Granite ou Nemotron, escolhido no painel do
+# servidor. A descoberta é sempre o `/health` (campo `model`, ver
+# GraniteUploader.refresh_local_granite_model): aqui só classificamos o
+# identificador já lido. Nome desconhecido/sem detecção = "granite", que é o
+# contrato histórico do app (só `files`, sem idioma/diarização/tempos).
+LOCAL_NEMOTRON_MARKER = "nemotron"
+
+
+def local_stt_engine(model_id: str | None = None) -> str:
+    """Motor do servidor STT local: "granite" ou "nemotron"."""
+    candidate = str(
+        model_id if model_id is not None else (local_granite_model_id() or LOCAL_GRANITE_STT_MODEL)
+    ).strip().casefold()
+    return "nemotron" if LOCAL_NEMOTRON_MARKER in candidate else "granite"
+
+
+def is_local_nemotron_transcription_server() -> bool:
+    """True quando o servidor STT local está anunciando o Nemotron."""
+    return local_stt_engine() == "nemotron"
+
+
 def read_transcription_servers() -> list[dict]:
     servers = [
         {
@@ -709,7 +730,9 @@ def transcription_provider_for_server(server_name: str) -> str | None:
         for provider, flag in STT_PROVIDER_FLAGS:
             if server.get(flag):
                 return provider
-        return None
+        # Servidor local: só o Nemotron tem `language`; o Granite não tem
+        # parâmetro de idioma e por isso continua devolvendo None.
+        return "nemotron" if is_local_nemotron_transcription_server() else None
     return None
 
 
