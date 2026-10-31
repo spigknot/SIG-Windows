@@ -554,7 +554,7 @@ from log_formatting import (  # noqa: F401
 )
 
 
-APP_VERSION = "20261030_001"
+APP_VERSION = "20261030_002"
 
 
 def _diarias_selected_output_path(filename, file_type, default_extension: str) -> Path:
@@ -9608,10 +9608,26 @@ try {
         #    Keywords quando ele estiver visível (o `before` só é usado com um
         #    irmão EMPACOTADO — apontar para um oculto levanta TclError).
         # O intervalo "- t = +" é do servidor local (fatias REST), nos dois
-        # motores. O "Timestamps" só existe no Nemotron: no Granite o servidor
-        # não devolve marcação por palavra.
+        # motores. Ele é o PRIMEIRO da linha: pack() num widget já empacotado
+        # o move para o FIM — com o Nemotron (que mostra Timestamps e o bloco
+        # Diarização/Idioma) isso jogaria o intervalo para a direita; `before=`
+        # o mantém à esquerda. O "Timestamps" só existe no Nemotron: no Granite
+        # o servidor não devolve marcação por palavra.
         if local:
-            self.live_interval_controls.pack(side=LEFT)
+            primeiro = next(
+                (
+                    widget
+                    for widget in (self.live_timestamps_check, self.live_grok_controls)
+                    if widget.winfo_manager()
+                ),
+                None,
+            )
+            if primeiro is None:
+                self.live_interval_controls.pack(side=LEFT)
+            else:
+                # `before` exige irmão EMPACOTADO — `primeiro` só existe quando
+                # gerenciado (o `next` acima já filtra).
+                self.live_interval_controls.pack(side=LEFT, before=primeiro)
         else:
             self.live_interval_controls.pack_forget()
         if local and not local_nemotron:

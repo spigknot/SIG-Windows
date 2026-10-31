@@ -691,11 +691,17 @@ def _check_api_key_field_layout(app, settings_window) -> None:
 
 
 def _check_live_local_server_controls(app, root) -> None:
-    """Controles exclusivos do servidor local (Granite NAR) na tela de Ocorrencia.
+    """Controles exclusivos do servidor local na tela de Ocorrencia.
 
-    Vacina do pedido de 11/09. Com o servidor local aparecem SO o grupo
-    "- t = +" (TEMPO) e nada mais da linha: Timestamps, Diarizacao, Idioma e
-    Keywords ficam ocultos e o grupo do intervalo fica encostado a ESQUERDA.
+    Vacina do pedido de 11/09. O comportamento depende do MOTOR anunciado em
+    /health (o smoke roda contra o servidor real, que pode estar com Granite
+    ou Nemotron):
+    - Granite: aparecem SO o grupo "- t = +" (TEMPO), encostado a ESQUERDA, e
+      nada mais da linha: Timestamps, Diarizacao, Idioma e Keywords ficam
+      ocultos;
+    - Nemotron: o intervalo continua primeiro a esquerda, e Timestamps,
+      Diarizacao e Idioma APARECEM (sao parametros da fatia); Keywords (botao
+      + "?") continuam ocultos — o servidor local nao tem reforco.
     Com qualquer provedor de API e o inverso: o intervalo some, o Timestamps
     volta encostado a esquerda e o bloco de idioma/keywords reaparece.
 
@@ -715,6 +721,8 @@ def _check_live_local_server_controls(app, root) -> None:
             "timestamps_gerenciado": app.live_timestamps_check.winfo_manager(),
             "timestamps_x": app.live_timestamps_check.winfo_x(),
             "idioma_gerenciado": app.live_grok_controls.winfo_manager(),
+            "keywords_gerenciado": app.live_keywords_button.winfo_manager(),
+            "keywords_help_gerenciado": app.live_keywords_help.winfo_manager(),
             "mics": {nome: getattr(app, nome).winfo_x() for nome in COLUNAS_DE_MICROFONE},
         }
 
@@ -735,19 +743,33 @@ def _check_live_local_server_controls(app, root) -> None:
 
     if local["intervalo_gerenciado"] != "pack":
         raise RuntimeError(
-            "grupo '- t = +' nao esta visivel com o servidor local (Granite NAR) selecionado"
+            "grupo '- t = +' nao esta visivel com o servidor local selecionado"
         )
     if local["intervalo_x"] != 0:
         raise RuntimeError(
             f"o grupo '- t = +' nao esta encostado a esquerda: x={local['intervalo_x']}px"
         )
-    for campo in ("timestamps", "idioma"):
-        if local[f"{campo}_gerenciado"]:
-            raise RuntimeError(
-                f"'{campo}' continua visivel com o servidor local (Granite NAR) selecionado"
-            )
-    if app.live_timestamps_var.get():
-        raise RuntimeError("o checkbox de Timestamps ficou marcado com o servidor local")
+    if sig_app.local_stt_engine() == "nemotron":
+        # Nemotron: Timestamps/Diarizacao/Idioma sao parametros da fatia e
+        # aparecem; Keywords (botao + "?") nunca — sem reforco no servidor.
+        if local["timestamps_gerenciado"] != "pack":
+            raise RuntimeError("'Timestamps' nao apareceu com o Nemotron selecionado")
+        if local["keywords_gerenciado"]:
+            raise RuntimeError("'Keywords' continua visivel com o servidor local (Nemotron)")
+        if local["keywords_help_gerenciado"]:
+            raise RuntimeError("'?' de Keywords continua visivel com o servidor local (Nemotron)")
+    else:
+        for campo in ("timestamps", "idioma"):
+            if local[f"{campo}_gerenciado"]:
+                raise RuntimeError(
+                    f"'{campo}' continua visivel com o servidor local (Granite) selecionado"
+                )
+        if local["keywords_gerenciado"]:
+            raise RuntimeError("'Keywords' continua visivel com o servidor local (Granite)")
+        if local["keywords_help_gerenciado"]:
+            raise RuntimeError("'?' de Keywords continua visivel com o servidor local (Granite)")
+        if app.live_timestamps_var.get():
+            raise RuntimeError("o checkbox de Timestamps ficou marcado com o servidor local")
 
     for nome, dados in provedores.items():
         if dados["intervalo_gerenciado"]:
